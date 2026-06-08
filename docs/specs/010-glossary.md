@@ -2,7 +2,7 @@
 
 | Term | Meaning |
 | --- | --- |
-| **Namespace** | The unit of ordered metadata history. Each namespace has its own head, WAL segments, checkpoints, and retention policy. |
+| **Namespace** | The unit of ordered metadata history. Each namespace has its own head, WAL segments, manifests, checkpoints, and retention policy. |
 | **Head** | A small mutable object that names the current visible sequence number (`seq`), the next inode id, and replay hints such as the latest checkpoint, the retention floor, and the visible WAL tip. |
 | **Seq** | The namespace-local number that gives the visible order of committed metadata changes. |
 | **Commit** | One accepted client commit request that records one ordered set of metadata changes and is assigned a seq. |
@@ -12,7 +12,9 @@
 | **Direntry** | A directory binding that places one inode under one parent directory and one name. |
 | **Path** | A human-friendly name built by walking visible directory bindings. Paths can change; inode identity does not. |
 | **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
-| **Checkpoint** | A verified materialization of namespace metadata at one chosen `seq`. It lets readers avoid replaying the entire WAL history. |
+| **Namespace manifest** | The immutable object that describes one durable namespace file set: metadata SSTs, manifest sequence, head summary, fork references, and checkpoint records. |
+| **Checkpoint** | A durable pinned reference to one manifest version and namespace sequence. It lets readers and retention logic rely on that manifest without replaying the entire WAL history. |
+| **Snapshot** | An in-process read view. It may be stable for one operation or session, but it is not a durable checkpoint unless explicitly recorded as one. |
 | **Content object** | One immutable object containing file bytes. In v0, each file revision stores the whole file as one object. |
 | **Content ref** | The metadata pointer for a file revision. In v0 it has `kind: "whole_file_v0"`, a `sha256:<hex>` digest, and `size_bytes`. |
 | **NamePolicy** | The versioned rule that decides how sibling names are compared for collisions. |

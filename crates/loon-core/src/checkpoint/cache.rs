@@ -1,4 +1,4 @@
-use loon_api::wire::checkpoint::{CheckpointRow, CheckpointSegmentKey, CheckpointTableFamily};
+use loon_api::wire::manifest::{MetadataRow, MetadataSegmentKey, MetadataTableFamily};
 use loon_api::ChangeSeq;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -44,11 +44,11 @@ pub(super) struct MetadataTableCacheKey {
 
 #[derive(Debug, Clone)]
 pub(super) struct DecodedMetadataTableBlock {
-    pub(super) rows: Vec<CheckpointRow>,
+    pub(super) rows: Vec<MetadataRow>,
     pub(super) segment_seq: ChangeSeq,
-    pub(super) family: CheckpointTableFamily,
+    pub(super) family: MetadataTableFamily,
     pub(super) segment_index: u32,
-    pub(super) segment_key: CheckpointSegmentKey,
+    pub(super) segment_key: MetadataSegmentKey,
     pub(super) row_count: u64,
     pub(super) min_key: String,
     pub(super) max_key: String,

@@ -23,8 +23,8 @@ use loon_api::wire::control::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
     ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FileRevision,
-    FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse, MutationResult,
-    NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo,
+    FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse, ManifestId,
+    MutationResult, NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo,
 };
 pub use loon_core::cache::MetadataTableCacheConfig;
 use loon_core::cache::{
@@ -918,9 +918,11 @@ pub struct NamespaceStatus {
     pub namespace_id: NamespaceId,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
-    /// Checkpoint currently hinted by the head.
-    pub checkpoint_hint_seq: Option<ChangeSeq>,
-    /// Number of visible WAL segments after the checkpoint basis.
+    /// Current manifest pointer recorded by the head.
+    pub current_manifest_id: Option<ManifestId>,
+    /// Latest checkpoint recorded by the head.
+    pub latest_checkpoint_id: Option<String>,
+    /// Number of visible WAL segments after the manifest basis.
     pub wal_tail_segments: u64,
     /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,
@@ -951,7 +953,7 @@ pub enum MaintenanceTickOutcome {
     /// Another checkpoint already covered the attempted sequence.
     CheckpointSuperseded {
         attempted_seq: ChangeSeq,
-        checkpoint_hint_seq: ChangeSeq,
+        current_manifest_id: ManifestId,
     },
     /// A concurrent head update won the race.
     CheckpointPublishRaceLost { observed_head_seq: ChangeSeq },
@@ -1191,7 +1193,8 @@ impl Fs {
         Ok(NamespaceStatus {
             namespace_id: summary.namespace_id,
             head_seq: summary.head_seq,
-            checkpoint_hint_seq: summary.checkpoint_hint_seq,
+            current_manifest_id: summary.current_manifest_id,
+            latest_checkpoint_id: summary.latest_checkpoint_id,
             wal_tail_segments: summary.wal_tail_segments,
             retention_floor_seq: summary.retention_floor_seq,
         })
@@ -1245,19 +1248,19 @@ impl Fs {
             Err(error) => return Err(error),
         };
 
-        let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
+        let outcome = if checkpoint.current_manifest_id == Some(checkpoint.manifest_id) {
             MaintenanceTickOutcome::CheckpointPublished {
                 checkpoint_seq: checkpoint.checkpoint_seq,
             }
         } else {
-            let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
+            let Some(current_manifest_id) = checkpoint.current_manifest_id else {
                 return Err(RuntimeError::Core(CoreError::Store(
-                    "checkpoint hint publication returned no checkpoint hint".to_owned(),
+                    "checkpoint publication returned no current manifest id".to_owned(),
                 )));
             };
             MaintenanceTickOutcome::CheckpointSuperseded {
                 attempted_seq: checkpoint.checkpoint_seq,
-                checkpoint_hint_seq,
+                current_manifest_id,
             }
         };
 
@@ -1289,7 +1292,7 @@ impl Fs {
         self.record_trace_context(&span);
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
-        if head.state.checkpoint_hint_seq.is_some() {
+        if head.state.current_manifest_id.is_some() {
             let entry = engine.resolve_path(
                 absolute_path,
                 loon_core::ReadOptions::materialized_tables_at_head(
@@ -1322,7 +1325,7 @@ impl Fs {
     ) -> Result<Vec<AuthoritativePathEntry>> {
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
-        if head.state.checkpoint_hint_seq.is_some() {
+        if head.state.current_manifest_id.is_some() {
             let entries = engine.list_path(
                 absolute_path,
                 loon_core::ReadOptions::materialized_tables_at_head(

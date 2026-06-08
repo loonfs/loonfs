@@ -4,13 +4,13 @@
 
 | Part | Role |
 | --- | --- |
-| **Object store** | Holds every durable object: content-store blobs, namespace WAL segments, checkpoints, descriptors, and small control objects. |
+| **Object store** | Holds every durable object: content-store blobs, namespace WAL segments, namespace manifests, descriptors, checkpoint records, and small control objects. |
 | **Authoritative runtime** | Resolves paths, validates mutations, writes logical commits into WAL segments, advances heads, serves reads, and issues capabilities for upload or download. |
 | **Clients** | Use either direct filesystem operations or the lower-level upload, commit, and change-feed model. |
 | **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative runtime in a simple deployment. |
-| **Background workers** | Build checkpoints, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
+| **Background workers** | Publish namespace manifests, create checkpoint records, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
 
-Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent metadata history and no durable parent/child relationship.
+Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent future metadata history. Fork provenance and GC pins may record source-owned immutable files needed by the fork.
 
 ## 2. Data plane, metadata plane, and control plane
 
@@ -19,7 +19,7 @@ This spec uses three terms.
 | Plane | Purpose | Examples | Namespace-visible history? |
 | --- | --- | --- | --- |
 | **Data plane** | Stores and serves file bytes. | Whole-file content objects and download streams. | No, by itself. |
-| **Metadata plane** | Defines the filesystem's durable truth. | WAL segments, namespace head, checkpoints, inode and direntry state. | Yes. |
+| **Metadata plane** | Defines the filesystem's durable truth. | WAL segments, namespace head, manifests, checkpoints, inode and direntry state. | Yes. |
 | **Control plane** | Coordinates multi-request work and authorization. | Upload handles, put intents, ACLs, shares, leases. | No. |
 
 Two rules follow from this split:

@@ -6,13 +6,13 @@ Background work reduces read cost, supports safe retention, and cleans up durabl
 
 ## 2. Required job classes
 
-### 2.1 Checkpoint build and verification
+### 2.1 Manifest publication and checkpoint verification
 
-A checkpoint summarizes namespace metadata at one chosen `seq`.
+A namespace manifest summarizes namespace files at one chosen manifest id. It records metadata SSTs, fork references, head summary, and checkpoint records.
 
-A checkpoint is useful only after it is verified. Readers must prefer verified checkpoints plus the visible WAL segment chain over unverified or partial checkpoints.
+A checkpoint is a durable record that pins one manifest version. A checkpoint is useful only after both the checkpoint record and its referenced manifest are verified. Readers must prefer the current verified manifest plus the visible WAL segment chain over unverified or partial manifest artifacts.
 
-The checkpoint manifest is the durable materialization descriptor. It may reference one or more immutable metadata runs. Runs are not a second source of truth; they are rebuildable metadata rows used to keep normal basis reconstruction from replaying an unbounded WAL tail.
+The namespace manifest may reference one or more immutable metadata runs. Runs are not a second source of truth; they are rebuildable metadata rows used to keep normal basis reconstruction from replaying an unbounded WAL tail.
 
 ### 2.2 Retention management
 

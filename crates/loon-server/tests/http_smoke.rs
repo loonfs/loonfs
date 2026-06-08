@@ -6,12 +6,13 @@ use loon_api::{
         CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
+    validate_checkpoint_id,
     wire::control::{ControlObjectKind, LeaseStateEnvelope},
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
-    InodeId, InodeKind, RevisionNo,
+    InodeId, InodeKind, ManifestId, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loon_objectstore::keys::{checkpoint_manifest, namespace_lease};
+use loon_objectstore::keys::{namespace_lease, namespace_manifest};
 use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loon_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -945,9 +946,14 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .expect("write file");
 
         let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
+        assert!(validate_checkpoint_id(&first.checkpoint_id).is_ok());
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
-        assert_eq!(first.checkpoint_hint_seq, Some(ChangeSeq(1)));
-        assert!(first.checkpoint_hint_points_at_checkpoint);
+        assert_eq!(first.manifest_id, ManifestId(1));
+        assert_eq!(first.current_manifest_id, Some(first.manifest_id));
+        assert_eq!(
+            first.latest_checkpoint_id,
+            Some(first.checkpoint_id.clone())
+        );
 
         let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
         assert_eq!(repeated, first);
@@ -1009,7 +1015,7 @@ async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
+async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -1037,7 +1043,10 @@ async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
         store
-            .put_overwrite(&checkpoint_manifest(namespace, 1), br#"{"bad":"json"}"#)
+            .put_overwrite(
+                &namespace_manifest(namespace, ManifestId(1)),
+                br#"{"bad":"json"}"#,
+            )
             .expect("corrupt manifest");
 
         match client.stat_path(&target) {

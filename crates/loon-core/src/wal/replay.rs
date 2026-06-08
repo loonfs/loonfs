@@ -25,6 +25,7 @@ pub(crate) fn replay_validated_wal_tail_with_metadata(
         )?;
         for record in wal_segment.records() {
             current_head.seq = record.seq;
+            current_head.head_commit_id = record.commit_id.clone();
             current_head.next_inode_id =
                 replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
             let apply_invariants = current_metadata_state
@@ -57,8 +58,6 @@ pub(super) fn validate_decoded_replayed_wal(
         .map_err(|err| WalReplayError::Codec(err.to_string()))?;
     let expected_object_key = wal_segment(
         envelope.payload.namespace_id.as_str(),
-        envelope.payload.start_seq.0,
-        envelope.payload.end_seq.0,
         &envelope.payload.segment_id,
     );
 

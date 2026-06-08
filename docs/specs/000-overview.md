@@ -8,7 +8,7 @@ The durable state consists of:
 
 - immutable content objects referenced by `content_ref`
 - immutable metadata commits recorded in a write-ahead log (WAL)
-- immutable checkpoints
+- immutable namespace manifests and checkpoint records
 - small mutable control objects such as the namespace head and leases
 
 All other state is cache, coordination, or other rebuildable state.
@@ -27,7 +27,7 @@ The design goals are:
 
 | Goal | Meaning |
 | --- | --- |
-| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content refs, logical commits, WAL segments, and checkpoints. |
+| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content refs, logical commits, WAL segments, manifests, and checkpoints. |
 | **Portable** | The only required durable dependency is object storage with a small set of well-defined guarantees. |
 | **Safe** | Writes are never partially visible. Metadata never points to content that is not already durable. |
 | **Readable** | A reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
@@ -44,7 +44,7 @@ The design goals are:
 | Content publication | File content becomes visible only after the object named by its `content_ref` is already durable. |
 | Commit visibility | A logical commit becomes visible only when the namespace head advances successfully to a `seq` at or beyond that commit. |
 | Delete | Delete is logical first and creates tombstones. Physical reclamation is background garbage collection. |
-| Recovery | Readers reconstruct state from a verified checkpoint plus the visible WAL segment chain after that checkpoint. |
+| Recovery | Readers reconstruct state from a verified manifest, pinned by a checkpoint when available, plus the visible WAL segment chain after that boundary. |
 | Writes | A path-oriented filesystem API and an explicit upload/commit/change-feed API are both part of the core model. |
 | Access control | ACLs and shares are a separate control plane keyed by namespace or subtree identity, not by path text. |
 | Long-running operations | Resumable uploads may use control-plane objects. |
@@ -63,7 +63,8 @@ The design goals are:
            v                      v                   v
   object-storage content   metadata history      control objects,
   content ref objects      WAL segments, head,    shares, leases
-                           checkpoints           
+                           manifests,
+                           checkpoints
 ```
 
 ## 5. What this spec leaves to implementations

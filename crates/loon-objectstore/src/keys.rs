@@ -1,8 +1,9 @@
 use crate::layout::{self, ObjectLayout};
 use crate::ObjectStoreError;
+use loon_api::ManifestId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckpointTableFamily {
+pub enum MetadataTableFamily {
     Inodes,
     DirentryBinds,
     DirentryChildBinds,
@@ -12,7 +13,7 @@ pub enum CheckpointTableFamily {
     CommitReceipts,
 }
 
-impl CheckpointTableFamily {
+impl MetadataTableFamily {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inodes => "inodes",
@@ -28,13 +29,13 @@ impl CheckpointTableFamily {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivedWorkClass {
-    CheckpointBuilder,
+    ManifestBuilder,
 }
 
 impl DerivedWorkClass {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::CheckpointBuilder => "checkpoint-builder",
+            Self::ManifestBuilder => "manifest-builder",
         }
     }
 }
@@ -59,9 +60,9 @@ pub fn namespace_fork_state(namespace: &str) -> String {
         .into_string()
 }
 
-pub fn wal_segment(namespace: &str, start_seq: u64, end_seq: u64, segment_id: &str) -> String {
+pub fn wal_segment(namespace: &str, segment_id: &str) -> String {
     ObjectLayout::new()
-        .wal_segment(namespace, start_seq, end_seq, segment_id)
+        .wal_segment(namespace, segment_id)
         .into_string()
 }
 
@@ -97,21 +98,33 @@ pub fn upload_session_prefix(namespace: &str) -> String {
     ObjectLayout::new().upload_session_prefix(namespace)
 }
 
-pub fn checkpoint_manifest(namespace: &str, seq: u64) -> String {
+pub fn namespace_manifest(namespace: &str, manifest_id: ManifestId) -> String {
     ObjectLayout::new()
-        .checkpoint_manifest(namespace, seq)
+        .namespace_manifest(namespace, manifest_id)
         .into_string()
 }
 
-pub fn checkpoint_run_table(
-    namespace: &str,
-    run_seq: u64,
-    run_id: &str,
-    family: CheckpointTableFamily,
-    segment_index: u32,
-) -> String {
+pub fn metadata_sst(namespace: &str, table_id: &str) -> String {
     ObjectLayout::new()
-        .checkpoint_run_table(namespace, run_seq, run_id, family, segment_index)
+        .metadata_sst(namespace, table_id)
+        .into_string()
+}
+
+pub fn compacted_index_sst(namespace: &str, family: &str, table_id: &str) -> String {
+    ObjectLayout::new()
+        .compacted_index_sst(namespace, family, "default", table_id)
+        .into_string()
+}
+
+pub fn index_manifest(namespace: &str, family: &str, manifest_id: ManifestId) -> String {
+    ObjectLayout::new()
+        .index_manifest(namespace, family, "default", manifest_id)
+        .into_string()
+}
+
+pub fn gc_pin(source_namespace: &str, pin_id: &str) -> String {
+    ObjectLayout::new()
+        .gc_pin(source_namespace, pin_id)
         .into_string()
 }
 
@@ -132,12 +145,12 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_manifest, checkpoint_run_table, conflict_artifact, conflict_artifact_prefix,
-        content_blob, content_store_descriptor, derived_progress, namespace_descriptor,
-        namespace_fork_state, namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest,
-        upload_session, upload_session_prefix, wal_segment, CheckpointTableFamily,
-        DerivedWorkClass,
+        conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
+        derived_progress, metadata_sst, namespace_descriptor, namespace_fork_state, namespace_head,
+        namespace_lease, namespace_manifest, queue_shard, sha256_hex_from_digest, upload_session,
+        upload_session_prefix, wal_segment, DerivedWorkClass,
     };
+    use loon_api::ManifestId;
 
     #[test]
     fn key_builders_match_spec_examples() {
@@ -159,26 +172,20 @@ mod tests {
             "content-stores/cs_00000000000000000000000000000001/descriptor.json"
         );
         assert_eq!(
-            wal_segment("ns-1", 420, 425, "seg_00000000000000000000000000000001"),
-            "namespaces/ns-1/wal/00000000000000000420-00000000000000000425-seg_00000000000000000000000000000001.cbor.zst"
+            wal_segment("ns-1", "seg_00000000000000000000000000000001"),
+            "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
         );
         assert_eq!(
-            checkpoint_manifest("ns-1", 400),
-            "namespaces/ns-1/compacted/checkpoints/00000000000000000400/manifest.json"
+            namespace_manifest("ns-1", ManifestId(400)),
+            "namespaces/ns-1/manifest/00000000000000000400.manifest"
         );
         assert_eq!(
-            checkpoint_run_table(
-                "ns-1",
-                400,
-                "run_00000000000000000000000000000001",
-                CheckpointTableFamily::DirentryBinds,
-                7
-            ),
-            "namespaces/ns-1/compacted/checkpoints/00000000000000000400/runs/run_00000000000000000000000000000001/tables/direntry-binds/00007.sst.zst"
+            metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
+            "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
         );
         assert_eq!(
-            derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),
-            "namespaces/ns-1/derived/checkpoint-builder/progress.json"
+            derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
+            "namespaces/ns-1/derived/manifest-builder/progress.json"
         );
         assert_eq!(queue_shard(17), "queue/shards/00017.json");
         assert_eq!(

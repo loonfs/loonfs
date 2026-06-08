@@ -10,10 +10,12 @@ use loon_api::{
     wire::control::{
         ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState, LeaseState,
         NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkStateEnvelope,
+        NamespaceGcPinStateEnvelope,
     },
+    wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, FenceToken, InodeId, InodeKind,
-    NameKey, NamespaceId, RevisionNo,
+    ManifestId, NameKey, NamespaceId, RevisionNo,
 };
 use loon_core::cache::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use loon_core::commit::{
@@ -33,8 +35,8 @@ use loon_core::{
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    content_blob, content_store_descriptor, namespace_descriptor, namespace_fork_state,
-    namespace_head, namespace_lease, upload_session_prefix,
+    content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_fork_state,
+    namespace_head, namespace_lease, namespace_manifest, upload_session_prefix,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
@@ -443,7 +445,7 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .map_err(BasisLoadError::LoadHead)?
         .state;
-    if head.checkpoint_hint_seq.is_some() {
+    if head.current_manifest_id.is_some() {
         let value = engine.resolve_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
@@ -469,7 +471,7 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .map_err(BasisLoadError::LoadHead)?
         .state;
-    if head.checkpoint_hint_seq.is_some() {
+    if head.current_manifest_id.is_some() {
         let value = engine.list_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
@@ -1183,7 +1185,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 }
 
 #[test]
-fn begin_upload_does_not_read_checkpoint_or_wal_replay_objects() {
+fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1430,7 +1432,7 @@ fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
 }
 
 #[test]
-fn query_driven_reads_fallback_without_checkpoint() {
+fn query_driven_reads_fallback_without_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1526,7 +1528,7 @@ fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
         Some("delete-dead"),
     )
     .expect("delete dead");
-    create_checkpoint(&store, &namespace_id, &context).expect("l0 run checkpoint");
+    create_checkpoint(&store, &namespace_id, &context).expect("l0 checkpoint");
 
     put_file_bytes(
         &store,
@@ -1805,7 +1807,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     }
     store
         .put_if_absent(
-            "namespaces/demo/wal/00000000000000000999-00000000000000000999-orphan.cbor.zst",
+            "namespaces/demo/wal/seg_99999999999999999999999999999999.wal.zst",
             &wal_bytes,
         )
         .expect("write unreachable orphan");
@@ -1844,7 +1846,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[test]
-fn change_feed_validates_wal_chain_before_checkpoint_hint() {
+fn change_feed_validates_wal_chain_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2556,7 +2558,8 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
     assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
     assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
-    assert_eq!(fork_state.state.source_checkpoint_seq, ChangeSeq(1));
+    assert!(fork_state.state.source_checkpoint_id.starts_with("chk_"));
+    assert_eq!(fork_state.state.source_manifest_id, ManifestId(1));
     assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
     assert!(fork_state.state.created_at_ms > 0);
     assert!(fork_state.has_valid_payload_checksum().expect("checksum"));
@@ -2573,8 +2576,85 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         load_verified_namespace_basis(&store, &clone_namespace_id).expect("clone basis");
     assert_eq!(clone_basis.content_store_id, content_store_id);
     assert_eq!(clone_basis.head.seq, ChangeSeq(1));
-    assert_eq!(clone_basis.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(clone_basis.head.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
+
+    let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), ManifestId(1));
+    let target_manifest_bytes = store
+        .get(&target_manifest_key, None)
+        .expect("read target manifest")
+        .expect("target manifest exists");
+    let target_manifest =
+        decode_namespace_manifest_json(&target_manifest_bytes).expect("decode target manifest");
+    assert!(target_manifest.payload.fork.is_some());
+    assert_eq!(target_manifest.payload.checkpoints.len(), 1);
+    assert_eq!(
+        target_manifest.payload.checkpoints[0].head_seq,
+        ChangeSeq(1)
+    );
+    assert_eq!(
+        target_manifest.payload.checkpoints[0].manifest_id,
+        ManifestId(1)
+    );
+    assert!(
+        target_manifest
+            .payload
+            .metadata_files
+            .iter()
+            .all(|metadata_file| metadata_file.owner_namespace_id == source_namespace_id),
+        "fork target manifest should reference source-owned metadata SSTs"
+    );
+    assert!(
+        store
+            .list_prefix(&format!(
+                "namespaces/{}/compacted/metadata/",
+                clone_namespace_id.as_str()
+            ))
+            .expect("list target metadata SSTs")
+            .is_empty(),
+        "COW fork should not copy metadata SSTs into the target namespace"
+    );
+
+    let pin_keys = store
+        .list_prefix(&format!(
+            "namespaces/{}/gc/pins/",
+            source_namespace_id.as_str()
+        ))
+        .expect("list source pins");
+    assert_eq!(
+        pin_keys.len(),
+        1,
+        "fork should write one source-local GC pin"
+    );
+    let pin_bytes = store
+        .get(&pin_keys[0], None)
+        .expect("read source pin")
+        .expect("source pin exists");
+    let pin: NamespaceGcPinStateEnvelope =
+        serde_json::from_slice(&pin_bytes).expect("decode source pin");
+    assert_eq!(pin.kind, ControlObjectKind::NamespaceGcPinState);
+    assert_eq!(pin.state.source_namespace_id, source_namespace_id);
+    assert_eq!(pin.state.target_namespace_id, clone_namespace_id);
+    assert_eq!(
+        pin.state.source_checkpoint_id,
+        fork_state.state.source_checkpoint_id
+    );
+    assert_eq!(pin.state.source_manifest_id, ManifestId(1));
+    assert_eq!(pin.state.source_head_seq, ChangeSeq(1));
+    let referenced_metadata_files_debug = target_manifest
+        .payload
+        .metadata_files
+        .iter()
+        .map(|metadata_file| metadata_file.object_key.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pin.state.referenced_metadata_files_debug,
+        referenced_metadata_files_debug
+    );
+    assert!(store
+        .head(&gc_pin(source_namespace_id.as_str(), &pin.state.pin_id))
+        .expect("head source pin")
+        .is_some());
 
     let duplicate_error =
         fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
@@ -2660,13 +2740,17 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_changes.changes.len(), 1);
     assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
 
-    for key in store
-        .list_prefix(&format!("namespaces/{}/", source_namespace_id.as_str()))
-        .expect("list source namespace keys")
-    {
-        store
-            .delete(&key)
-            .expect("delete source namespace metadata");
+    for prefix in [
+        format!("namespaces/{}/control/", source_namespace_id.as_str()),
+        format!("namespaces/{}/wal/", source_namespace_id.as_str()),
+        format!("namespaces/{}/manifest/", source_namespace_id.as_str()),
+    ] {
+        for key in store
+            .list_prefix(&prefix)
+            .expect("list source mutable keys")
+        {
+            store.delete(&key).expect("delete source mutable key");
+        }
     }
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
@@ -2674,10 +2758,21 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .bytes,
         b"clone-after-fork"
     );
+
+    let referenced_sst = referenced_metadata_files_debug
+        .first()
+        .expect("fork should reference source metadata SST")
+        .clone();
+    store
+        .delete(&referenced_sst)
+        .expect("delete referenced source metadata SST");
+    let corrupt_target = read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+        .expect_err("target should fail when referenced source SST is missing");
+    assert_eq!(corrupt_target.code(), ErrorCode::NamespaceCorrupt);
 }
 
 #[test]
-fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
+fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2696,45 +2791,14 @@ fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
         .expect_err("target head precondition should re-check partial namespace");
     assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
-        store
+        !store
             .list_prefix(&format!(
-                "namespaces/{}/compacted/checkpoints/",
+                "namespaces/{}/manifest/",
                 clone_namespace_id.as_str()
             ))
-            .expect("list target snapshots")
+            .expect("list target manifests")
             .is_empty(),
-        "target checkpoint artifacts must not be written before target head reservation"
-    );
-    assert_namespace_partial(&store, &clone_namespace_id, &context);
-}
-
-#[test]
-fn fork_failure_after_target_head_reserves_partial_namespace() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix(format!(
-            "namespaces/{}/compacted/checkpoints/",
-            clone_namespace_id.as_str()
-        )),
-        InjectedCreateFailure::Transport {
-            message: "injected target checkpoint failure",
-        },
-    );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
-
-    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .expect_err("target checkpoint write should fail");
-    assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(
-        store
-            .head(&namespace_head(clone_namespace_id.as_str()))
-            .expect("head target head")
-            .is_some(),
-        "target head should reserve namespace before target checkpoint writes"
+        "target manifest should be written before target head reservation"
     );
     assert!(
         store
@@ -2747,7 +2811,117 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
 }
 
 #[test]
-fn fork_failure_after_target_checkpoint_before_fork_state_remains_partial() {
+fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Prefix(format!(
+            "namespaces/{}/gc/pins/",
+            source_namespace_id.as_str()
+        )),
+        InjectedCreateFailure::Transport {
+            message: "injected source gc pin failure",
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("source GC pin failure should abort fork before target publication");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(
+        store
+            .head(&namespace_head(clone_namespace_id.as_str()))
+            .expect("head target head")
+            .is_none(),
+        "target head must not be reserved before source retention is pinned"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "target descriptor must remain unpublished"
+    );
+    assert!(
+        store
+            .list_prefix(&format!(
+                "namespaces/{}/manifest/",
+                clone_namespace_id.as_str()
+            ))
+            .expect("list target manifests")
+            .is_empty(),
+        "target manifest must not be written before source retention is pinned"
+    );
+    assert_eq!(
+        list_namespaces(&store)
+            .expect("list namespaces")
+            .into_iter()
+            .map(|summary| summary.namespace_id)
+            .collect::<Vec<_>>(),
+        vec![source_namespace_id]
+    );
+}
+
+#[test]
+fn fork_target_manifest_failure_leaves_target_namespace_absent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Prefix(format!(
+            "namespaces/{}/manifest/",
+            clone_namespace_id.as_str()
+        )),
+        InjectedCreateFailure::Transport {
+            message: "injected target manifest failure",
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("target manifest write should fail");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(
+        store
+            .head(&namespace_head(clone_namespace_id.as_str()))
+            .expect("head target head")
+            .is_none(),
+        "target head must not be reserved before target manifest exists"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "descriptor must remain unpublished"
+    );
+    assert!(
+        store
+            .list_prefix(&format!(
+                "namespaces/{}/manifest/",
+                clone_namespace_id.as_str()
+            ))
+            .expect("list target manifests")
+            .is_empty(),
+        "target manifest should not exist after injected manifest write failure"
+    );
+    assert_eq!(
+        list_namespaces(&store)
+            .expect("list namespaces")
+            .into_iter()
+            .map(|summary| summary.namespace_id)
+            .collect::<Vec<_>>(),
+        vec![source_namespace_id]
+    );
+}
+
+#[test]
+fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2778,15 +2952,15 @@ fn fork_failure_after_target_checkpoint_before_fork_state_remains_partial() {
             .is_none(),
         "descriptor must remain unpublished"
     );
-    let target_snapshot_keys = store
+    let target_manifest_keys = store
         .list_prefix(&format!(
-            "namespaces/{}/compacted/checkpoints/",
+            "namespaces/{}/manifest/",
             clone_namespace_id.as_str()
         ))
-        .expect("list target snapshots");
+        .expect("list target manifests");
     assert!(
-        !target_snapshot_keys.is_empty(),
-        "target checkpoint artifacts should have been written before fork-state failure"
+        !target_manifest_keys.is_empty(),
+        "target manifest should have been written before fork-state failure"
     );
     assert!(
         store
@@ -2799,7 +2973,7 @@ fn fork_failure_after_target_checkpoint_before_fork_state_remains_partial() {
 }
 
 #[test]
-fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
+fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2830,15 +3004,15 @@ fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
             .is_none(),
         "descriptor must remain unpublished"
     );
-    let target_snapshot_keys = store
+    let target_manifest_keys = store
         .list_prefix(&format!(
-            "namespaces/{}/compacted/checkpoints/",
+            "namespaces/{}/manifest/",
             clone_namespace_id.as_str()
         ))
-        .expect("list target snapshots");
+        .expect("list target manifests");
     assert!(
-        !target_snapshot_keys.is_empty(),
-        "target checkpoint artifacts should have been written before lease failure"
+        !target_manifest_keys.is_empty(),
+        "target manifest should have been written before lease failure"
     );
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
@@ -3812,10 +3986,12 @@ fn validation_context(
     let head = HeadState {
         namespace_id: namespace_id.clone(),
         seq,
+        head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         active_fence_token: FenceToken(1),
         next_inode_id,
         name_policy: loon_api::NamePolicy::default(),
-        checkpoint_hint_seq: Some(ChangeSeq(0)),
+        current_manifest_id: Some(ManifestId(0)),
+        latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
     };
@@ -3867,7 +4043,7 @@ impl ReplayReadGuardStore {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
             guarded_prefixes: vec![
                 format!("namespaces/{namespace}/wal/"),
-                format!("namespaces/{namespace}/compacted/checkpoints/"),
+                format!("namespaces/{namespace}/manifest/"),
             ],
             guarded_gets: AtomicUsize::new(0),
         }

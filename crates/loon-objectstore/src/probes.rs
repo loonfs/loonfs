@@ -134,7 +134,7 @@ fn probe_visibility_after_write<S: ObjectStore + ?Sized>(
 ) -> Result<(), ContractProbeError> {
     let key = derived_progress(
         &probe_namespace(run_id, "visibility"),
-        DerivedWorkClass::CheckpointBuilder,
+        DerivedWorkClass::ManifestBuilder,
     );
     let _ = store.delete(&key);
 
@@ -163,7 +163,7 @@ fn probe_visibility_after_delete<S: ObjectStore + ?Sized>(
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "delete");
-    let key = derived_progress(&namespace, DerivedWorkClass::CheckpointBuilder);
+    let key = derived_progress(&namespace, DerivedWorkClass::ManifestBuilder);
     let _ = store.delete(&key);
 
     store
@@ -191,7 +191,7 @@ fn probe_sorted_listing<S: ObjectStore + ?Sized>(
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "sorted");
     let keys = vec![
-        derived_progress(&namespace, DerivedWorkClass::CheckpointBuilder),
+        derived_progress(&namespace, DerivedWorkClass::ManifestBuilder),
         namespace_head(&namespace),
         namespace_lease(&namespace),
     ];

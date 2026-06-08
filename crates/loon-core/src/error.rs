@@ -352,9 +352,9 @@ fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
         BasisLoadError::WalReplay(_) | BasisLoadError::ReconstructedHeadMismatch { .. } => {
             ErrorCode::NamespaceCorrupt
         }
-        BasisLoadError::CheckpointLoad(error) => match error.kind() {
-            crate::checkpoint::CheckpointLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
-            crate::checkpoint::CheckpointLoadErrorKind::Store => ErrorCode::ServerError,
+        BasisLoadError::ManifestLoad(error) => match error.kind() {
+            crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
+            crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
         },
         BasisLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
     }

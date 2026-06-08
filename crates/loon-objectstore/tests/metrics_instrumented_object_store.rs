@@ -1,7 +1,7 @@
+use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    checkpoint_manifest, checkpoint_run_table, namespace_head, namespace_lease, wal_segment,
-    CheckpointTableFamily,
+    metadata_sst, namespace_head, namespace_lease, namespace_manifest, wal_segment,
 };
 use loon_objectstore::layout::{NamespaceGcBoundaryKind, ObjectLayout};
 use loon_objectstore::metrics::{
@@ -119,7 +119,7 @@ fn records_not_found_without_key_leak() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = "namespaces/ns-1/wal/secret-segment.cbor.zst";
+    let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     assert!(store.get(raw_key, None).expect("get missing").is_none());
 
@@ -175,37 +175,31 @@ fn records_list_count() {
 }
 
 #[test]
-fn classifies_wal_and_checkpoint_key_families() {
+fn classifies_wal_and_manifest_key_families() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
         .put_overwrite(
-            &wal_segment("ns-1", 1, 2, "seg_00000000000000000000000000000001"),
+            &wal_segment("ns-1", "seg_00000000000000000000000000000001"),
             b"wal",
         )
         .expect("put wal");
     store
-        .put_overwrite(&checkpoint_manifest("ns-1", 2), b"manifest")
+        .put_overwrite(&namespace_manifest("ns-1", ManifestId(2)), b"manifest")
         .expect("put manifest");
     store
         .put_overwrite(
-            &checkpoint_run_table(
-                "ns-1",
-                2,
-                "run_00000000000000000000000000000001",
-                CheckpointTableFamily::DirentryBinds,
-                0,
-            ),
+            &metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
             b"table",
         )
         .expect("put table");
 
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::WalSegment);
-    assert_eq!(samples[1].key_class, KeyClass::CheckpointManifest);
-    assert_eq!(samples[2].key_class, KeyClass::CheckpointTable);
+    assert_eq!(samples[1].key_class, KeyClass::NamespaceManifest);
+    assert_eq!(samples[2].key_class, KeyClass::MetadataSst);
 }
 
 #[test]
@@ -217,7 +211,9 @@ fn classifies_reserved_namespace_layout_families() {
 
     store
         .put_overwrite(
-            &layout.namespace_manifest("ns-1", 1).into_string(),
+            &layout
+                .namespace_manifest("ns-1", ManifestId(1))
+                .into_string(),
             b"manifest",
         )
         .expect("put namespace manifest");
@@ -251,7 +247,7 @@ fn classifies_reserved_namespace_layout_families() {
     store
         .put_overwrite(
             &layout
-                .index_manifest("ns-1", "grep", "default", 1)
+                .index_manifest("ns-1", "grep", "default", ManifestId(1))
                 .into_string(),
             b"index manifest",
         )
@@ -259,7 +255,7 @@ fn classifies_reserved_namespace_layout_families() {
     store
         .put_overwrite(
             &layout
-                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Wal)
+                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Manifest)
                 .into_string(),
             b"boundary",
         )
@@ -268,7 +264,7 @@ fn classifies_reserved_namespace_layout_families() {
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::NamespaceManifest);
     assert_eq!(samples[1].key_class, KeyClass::NamespaceCompactions);
-    assert_eq!(samples[2].key_class, KeyClass::CompactedMetadata);
+    assert_eq!(samples[2].key_class, KeyClass::MetadataSst);
     assert_eq!(samples[3].key_class, KeyClass::CompactedIndex);
     assert_eq!(samples[4].key_class, KeyClass::IndexManifest);
     assert_eq!(samples[5].key_class, KeyClass::GcControl);
@@ -281,7 +277,7 @@ fn jsonl_recorder_writes_privacy_safe_samples() {
     let recorder =
         Arc::new(JsonlObjectStoreMetricsRecorder::create(&metrics_path).expect("recorder"));
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = "namespaces/ns-1/wal/secret-segment.cbor.zst";
+    let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     store
         .put_overwrite(&namespace_head("ns-1"), b"head")

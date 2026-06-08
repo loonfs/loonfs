@@ -4,9 +4,8 @@ mod row;
 use self::cache::{DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCacheKey};
 pub use self::cache::{MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats};
 use self::row::{
-    checkpoint_row_commit_seq, checkpoint_row_kind, checkpoint_row_matches_family,
-    checkpoint_rows_for_family, checkpoint_rows_for_family_after_seq, checkpoint_table_family,
-    metadata_states_equivalent,
+    manifest_row_commit_seq, manifest_row_kind, manifest_row_matches_family,
+    manifest_rows_for_family, manifest_rows_for_family_after_seq, metadata_states_equivalent,
 };
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
@@ -18,23 +17,24 @@ use crate::metadata::{
 use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::control::read_head_object;
 use crate::storage::content::write_immutable_object;
-use loon_api::wire::checkpoint::{
-    checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
-    decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
-    encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
-    CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
-    CheckpointRunManifest, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-    CheckpointSegmentKey, CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest,
-};
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
 };
+use loon_api::wire::manifest::{
+    decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
+    encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json,
+    metadata_page_checksum_sha256, metadata_sst_payload_checksum_sha256, MetadataFileRef,
+    MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
+    MetadataTableFamily, NamespaceCheckpointRecord, NamespaceManifestEnvelope,
+    NamespaceManifestPayload,
+};
 use loon_api::{
-    generate_checkpoint_run_id, validate_checkpoint_run_id, AdvanceRetentionResponse, ChangeSeq,
-    CreateCheckpointResponse, FenceToken, InodeId, NamespaceId,
+    generate_checkpoint_id, generate_metadata_table_id, validate_checkpoint_id,
+    validate_metadata_table_id, AdvanceRetentionResponse, ChangeSeq, CreateCheckpointResponse,
+    InodeId, ManifestId, NamespaceId,
 };
 use loon_objectstore::keys::{
-    checkpoint_manifest, checkpoint_run_table, derived_progress, DerivedWorkClass,
+    derived_progress, metadata_sst, namespace_manifest, DerivedWorkClass,
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,16 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
-const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
+// Manifest id allocation can race with other manifest publishers. Exhausting
+// this loop means the candidate id range was already occupied.
+const MANIFEST_ALLOCATION_RETRY_LIMIT: usize = 8;
+// Checkpoint publication can race with another manifest update. Retrying here
+// preserves one checkpoint id while rebasing its checkpoint record onto the
+// newest current manifest.
+const CHECKPOINT_PUBLICATION_RETRY_LIMIT: usize = 8;
+// Mutable head CAS retries are about writer concurrency, not manifest id
+// allocation. Keep this separate so errors describe the failed phase.
+const HEAD_CAS_RETRY_LIMIT: usize = 8;
 // V1 does not require any derived work classes to be caught up before the
 // retention floor advances. This hook stays in place so future retention gates
 // can add progress requirements without restructuring the flow.
@@ -54,15 +63,28 @@ const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
 const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
 const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
-const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 7] = [
-    CheckpointTableFamily::Inodes,
-    CheckpointTableFamily::DirentryBinds,
-    CheckpointTableFamily::DirentryChildBinds,
-    CheckpointTableFamily::DirentryUnbinds,
-    CheckpointTableFamily::Revisions,
-    CheckpointTableFamily::Tombstones,
-    CheckpointTableFamily::CommitReceipts,
+const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 7] = [
+    MetadataTableFamily::Inodes,
+    MetadataTableFamily::DirentryBinds,
+    MetadataTableFamily::DirentryChildBinds,
+    MetadataTableFamily::DirentryUnbinds,
+    MetadataTableFamily::Revisions,
+    MetadataTableFamily::Tombstones,
+    MetadataTableFamily::CommitReceipts,
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataTableManifest {
+    family: MetadataTableFamily,
+    segments: Vec<MetadataFileRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataRunManifest {
+    run_seq: ChangeSeq,
+    level: u32,
+    tables: Vec<MetadataTableManifest>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataLsmPolicy {
@@ -79,63 +101,90 @@ impl Default for MetadataLsmPolicy {
     }
 }
 
-fn l0_run_count(payload: &CheckpointManifestPayload) -> usize {
-    payload
-        .runs
-        .iter()
+fn l0_run_count(payload: &NamespaceManifestPayload) -> usize {
+    runs_from_metadata_files(payload)
+        .into_iter()
         .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
         .count()
 }
 
-fn runs_in_scan_order(payload: &CheckpointManifestPayload) -> Vec<&CheckpointRunManifest> {
-    let mut runs = payload.runs.iter().collect::<Vec<_>>();
+fn runs_in_scan_order(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
+    let mut runs = runs_from_metadata_files(payload);
     runs.sort_by(|left, right| {
         left.level
             .cmp(&right.level)
             .then(right.run_seq.cmp(&left.run_seq))
-            .then(left.run_id.cmp(&right.run_id))
     });
     runs
 }
 
-fn runs_in_materialization_order(
-    payload: &CheckpointManifestPayload,
-) -> Vec<&CheckpointRunManifest> {
-    let mut runs = payload.runs.iter().collect::<Vec<_>>();
+fn runs_in_materialization_order(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
+    let mut runs = runs_from_metadata_files(payload);
     runs.sort_by(|left, right| {
         left.run_seq
             .cmp(&right.run_seq)
             .then(right.level.cmp(&left.level))
-            .then(left.run_id.cmp(&right.run_id))
     });
     runs
 }
 
+fn runs_from_metadata_files(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
+    let mut runs: BTreeMap<(ChangeSeq, u32), BTreeMap<MetadataTableFamily, Vec<MetadataFileRef>>> =
+        BTreeMap::new();
+    for metadata_file in &payload.metadata_files {
+        runs.entry((metadata_file.run_seq, metadata_file.level))
+            .or_default()
+            .entry(metadata_file.family)
+            .or_default()
+            .push(metadata_file.clone());
+    }
+    runs.into_iter()
+        .map(|((run_seq, level), tables_by_family)| MetadataRunManifest {
+            run_seq,
+            level,
+            tables: CHECKPOINT_TABLE_FAMILIES
+                .into_iter()
+                .map(|family| {
+                    let mut segments = tables_by_family.get(&family).cloned().unwrap_or_default();
+                    segments.sort_by_key(|segment| segment.segment_index);
+                    MetadataTableManifest { family, segments }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn flatten_manifest_tables(tables: Vec<MetadataTableManifest>) -> Vec<MetadataFileRef> {
+    tables
+        .into_iter()
+        .flat_map(|table| table.segments)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LoadedCheckpointMaterialization {
-    pub(crate) manifest: CheckpointManifestEnvelope,
+pub(crate) struct LoadedManifestMaterialization {
+    pub(crate) manifest: NamespaceManifestEnvelope,
     pub(crate) metadata_state: MetadataState,
 }
 
-pub(crate) struct VerifiedCheckpointTables<'a, S: ObjectStore + ?Sized> {
+pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
-    namespace_id: NamespaceId,
     manifest_object_key: String,
-    manifest: CheckpointManifestEnvelope,
-    segment_cache: RefCell<HashMap<String, Vec<CheckpointRow>>>,
+    manifest: NamespaceManifestEnvelope,
+    segment_cache: RefCell<HashMap<String, Vec<MetadataRow>>>,
 }
 
-impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
-    pub(crate) fn manifest(&self) -> &CheckpointManifestEnvelope {
+impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
+    pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
         &self.manifest
     }
 
     pub(crate) fn get(
         &self,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
         key: &str,
-    ) -> Result<Option<CheckpointRow>, CheckpointLoadError> {
+    ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         Ok(self
             .scan_prefix_with_cache_mode(family, key, MetadataTableCacheMode::Populate)?
             .into_iter()
@@ -144,9 +193,9 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
 
     pub(crate) fn scan_prefix(
         &self,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
         prefix: &str,
-    ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let matching_segment_count = self.matching_segment_count(family, prefix)?;
         let cache_mode = if matching_segment_count <= SMALL_SCAN_CACHE_SEGMENT_LIMIT {
             MetadataTableCacheMode::Populate
@@ -158,32 +207,23 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
 
     fn scan_prefix_with_cache_mode(
         &self,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
         prefix: &str,
         cache_mode: MetadataTableCacheMode,
-    ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let mut rows = Vec::new();
         for run in runs_in_scan_order(&self.manifest.payload) {
             self.scan_manifest_tables(
                 family,
                 prefix,
-                CheckpointTableLoadContext {
+                MetadataTableLoadContext {
                     manifest_object_key: &self.manifest_object_key,
-                    segment_seq_expectation: CheckpointSegmentSeqExpectation::Descriptor,
+                    segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
                     row_seq_min: None,
                     row_seq_max: run.run_seq,
                 },
                 &run.tables,
-                |family, segment_seq, segment_index| {
-                    checkpoint_run_table(
-                        self.namespace_id.as_str(),
-                        segment_seq.0,
-                        &run.run_id,
-                        checkpoint_table_family(family),
-                        segment_index,
-                    )
-                },
-                CheckpointTableScanOutput {
+                MetadataTableScanOutput {
                     rows: &mut rows,
                     cache_mode,
                 },
@@ -194,36 +234,31 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
 
     fn matching_segment_count(
         &self,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
         prefix: &str,
-    ) -> Result<usize, CheckpointLoadError> {
+    ) -> Result<usize, ManifestLoadError> {
         let mut count = 0;
-        for run in &self.manifest.payload.runs {
+        for run in runs_in_scan_order(&self.manifest.payload) {
             count +=
                 count_matching_segments(&self.manifest_object_key, &run.tables, family, prefix)?;
         }
         Ok(count)
     }
 
-    fn scan_manifest_tables<ExpectedObjectKey>(
+    fn scan_manifest_tables(
         &self,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
         prefix: &str,
-        context: CheckpointTableLoadContext<'_>,
-        tables: &[CheckpointTableManifest],
-        mut expected_object_key: ExpectedObjectKey,
-        output: CheckpointTableScanOutput<'_>,
-    ) -> Result<(), CheckpointLoadError>
-    where
-        ExpectedObjectKey: FnMut(CheckpointTableFamily, ChangeSeq, u32) -> String,
-    {
-        let table = checkpoint_table_for_family(context.manifest_object_key, tables, family)?;
+        context: MetadataTableLoadContext<'_>,
+        tables: &[MetadataTableManifest],
+        output: MetadataTableScanOutput<'_>,
+    ) -> Result<(), ManifestLoadError> {
+        let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
         for descriptor in &table.segments {
-            let expected_segment_seq = context.expected_segment_seq(descriptor)?;
-            let expected_key =
-                expected_object_key(family, expected_segment_seq, descriptor.segment_index);
+            context.expected_segment_seq(descriptor)?;
+            let expected_key = metadata_file_object_key(descriptor);
             if descriptor.object_key != expected_key {
-                return Err(CheckpointLoadError::SegmentObjectKeyMismatch {
+                return Err(ManifestLoadError::SegmentObjectKeyMismatch {
                     object_key: descriptor.object_key.clone(),
                     expected: expected_key,
                 });
@@ -243,18 +278,17 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
 
     fn segment_rows(
         &self,
-        context: CheckpointTableLoadContext<'_>,
-        family: CheckpointTableFamily,
-        descriptor: &CheckpointSegmentDescriptor,
+        context: MetadataTableLoadContext<'_>,
+        family: MetadataTableFamily,
+        descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
-    ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         if let Some(rows) = self.segment_cache.borrow().get(&descriptor.object_key) {
             return Ok(rows.clone());
         }
-        let rows = load_checkpoint_segment_rows_with_cache(
+        let rows = load_manifest_segment_rows_with_cache(
             self.store,
             self.table_cache,
-            &self.namespace_id,
             context,
             family,
             descriptor,
@@ -267,27 +301,34 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
     }
 }
 
-struct CheckpointTableScanOutput<'a> {
-    rows: &'a mut Vec<CheckpointRow>,
+struct MetadataTableScanOutput<'a> {
+    rows: &'a mut Vec<MetadataRow>,
     cache_mode: MetadataTableCacheMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManifestPublicationOutcome {
+    Published(HeadState),
+    CurrentManifestMissingCheckpoint { current_manifest_id: ManifestId },
+    HeadCasRaceLost,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CheckpointLoadErrorKind {
+pub enum ManifestLoadErrorKind {
     Corrupt,
     Store,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum CheckpointLoadError {
-    #[error("missing checkpoint manifest `{object_key}`")]
+pub enum ManifestLoadError {
+    #[error("missing namespace manifest `{object_key}`")]
     MissingManifest { object_key: String },
-    #[error("failed to read checkpoint manifest `{object_key}`: {message}")]
+    #[error("failed to read namespace manifest `{object_key}`: {message}")]
     ReadManifest { object_key: String, message: String },
-    #[error("checkpoint manifest codec error for `{object_key}`: {message}")]
+    #[error("namespace manifest codec error for `{object_key}`: {message}")]
     ManifestCodec { object_key: String, message: String },
     #[error(
-        "checkpoint manifest namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+        "namespace manifest namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     ManifestNamespaceMismatch {
         object_key: String,
@@ -295,35 +336,44 @@ pub enum CheckpointLoadError {
         actual: NamespaceId,
     },
     #[error(
-        "checkpoint manifest seq mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+        "namespace manifest id mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
     )]
-    ManifestSeqMismatch {
+    ManifestIdMismatch {
         object_key: String,
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+        expected: ManifestId,
+        actual: ManifestId,
     },
-    #[error("checkpoint manifest `{object_key}` is not verified")]
+    #[error(
+        "namespace manifest conflict for `{object_key}` manifest `{manifest_id:?}`: expected payload checksum `{expected_payload_checksum_sha256}`, actual `{actual_payload_checksum_sha256}`"
+    )]
+    ManifestConflict {
+        object_key: String,
+        manifest_id: ManifestId,
+        expected_payload_checksum_sha256: String,
+        actual_payload_checksum_sha256: String,
+    },
+    #[error("namespace manifest `{object_key}` is not verified")]
     ManifestNotVerified { object_key: String },
-    #[error("checkpoint manifest `{object_key}` is missing table family `{family:?}`")]
+    #[error("namespace manifest `{object_key}` is missing table family `{family:?}`")]
     MissingTableFamily {
         object_key: String,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
     },
-    #[error("checkpoint manifest `{object_key}` repeats table family `{family:?}`")]
+    #[error("namespace manifest `{object_key}` repeats table family `{family:?}`")]
     DuplicateTableFamily {
         object_key: String,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
     },
-    #[error("checkpoint manifest `{object_key}` has invalid runs: {message}")]
+    #[error("namespace manifest `{object_key}` has invalid runs: {message}")]
     RunManifestMismatch { object_key: String, message: String },
-    #[error("missing checkpoint segment `{object_key}`")]
+    #[error("missing metadata SST `{object_key}`")]
     MissingSegment { object_key: String },
-    #[error("failed to read checkpoint segment `{object_key}`: {message}")]
+    #[error("failed to read metadata SST `{object_key}`: {message}")]
     ReadSegment { object_key: String, message: String },
-    #[error("checkpoint segment codec error for `{object_key}`: {message}")]
+    #[error("metadata SST codec error for `{object_key}`: {message}")]
     SegmentCodec { object_key: String, message: String },
     #[error(
-        "checkpoint segment namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+        "metadata SST namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     SegmentNamespaceMismatch {
         object_key: String,
@@ -331,7 +381,7 @@ pub enum CheckpointLoadError {
         actual: NamespaceId,
     },
     #[error(
-        "checkpoint segment seq mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+        "metadata SST seq mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
     )]
     SegmentSeqMismatch {
         object_key: String,
@@ -339,15 +389,15 @@ pub enum CheckpointLoadError {
         actual: ChangeSeq,
     },
     #[error(
-        "checkpoint segment family mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+        "metadata SST family mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
     )]
     SegmentFamilyMismatch {
         object_key: String,
-        expected: CheckpointTableFamily,
-        actual: CheckpointTableFamily,
+        expected: MetadataTableFamily,
+        actual: MetadataTableFamily,
     },
     #[error(
-        "checkpoint segment index mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+        "metadata SST index mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     SegmentIndexMismatch {
         object_key: String,
@@ -355,28 +405,28 @@ pub enum CheckpointLoadError {
         actual: u32,
     },
     #[error(
-        "checkpoint segment key mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+        "metadata SST key mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
     )]
     SegmentKeyMismatch {
         object_key: String,
-        expected: CheckpointSegmentKey,
-        actual: CheckpointSegmentKey,
+        expected: MetadataSegmentKey,
+        actual: MetadataSegmentKey,
     },
-    #[error("checkpoint segment key mismatch for `{object_key}`: expected `{expected}`")]
+    #[error("metadata SST key mismatch for `{object_key}`: expected `{expected}`")]
     SegmentObjectKeyMismatch {
         object_key: String,
         expected: String,
     },
-    #[error("checkpoint segment descriptor mismatch for `{object_key}`: {message}")]
+    #[error("metadata SST descriptor mismatch for `{object_key}`: {message}")]
     SegmentDescriptorMismatch { object_key: String, message: String },
-    #[error("checkpoint page shape mismatch for `{object_key}` page {page_index}: {message}")]
+    #[error("manifest page shape mismatch for `{object_key}` page {page_index}: {message}")]
     PageShapeMismatch {
         object_key: String,
         page_index: u32,
         message: String,
     },
     #[error(
-        "checkpoint page checksum mismatch for `{object_key}` page {page_index}: expected `{expected}`, actual `{actual}`"
+        "manifest page checksum mismatch for `{object_key}` page {page_index}: expected `{expected}`, actual `{actual}`"
     )]
     PageChecksumMismatch {
         object_key: String,
@@ -385,7 +435,7 @@ pub enum CheckpointLoadError {
         actual: String,
     },
     #[error(
-        "checkpoint row key mismatch for `{object_key}` page {page_index} row {row_index}: expected `{expected}`, actual `{actual}`"
+        "metadata row key mismatch for `{object_key}` page {page_index} row {row_index}: expected `{expected}`, actual `{actual}`"
     )]
     RowKeyMismatch {
         object_key: String,
@@ -395,22 +445,24 @@ pub enum CheckpointLoadError {
         actual: String,
     },
     #[error(
-        "checkpoint row kind mismatch for `{object_key}` family `{family:?}`: found `{row_kind}`"
+        "metadata row kind mismatch for `{object_key}` family `{family:?}`: found `{row_kind}`"
     )]
     TableRowKindMismatch {
         object_key: String,
-        family: CheckpointTableFamily,
+        family: MetadataTableFamily,
         row_kind: String,
     },
-    #[error("checkpoint rows do not reproduce authoritative metadata")]
+    #[error("metadata rows do not reproduce authoritative metadata")]
     MetadataMismatch,
 }
 
-impl CheckpointLoadError {
-    pub fn kind(&self) -> CheckpointLoadErrorKind {
+impl ManifestLoadError {
+    pub fn kind(&self) -> ManifestLoadErrorKind {
         match self {
-            Self::ReadManifest { .. } | Self::ReadSegment { .. } => CheckpointLoadErrorKind::Store,
-            _ => CheckpointLoadErrorKind::Corrupt,
+            Self::ReadManifest { .. }
+            | Self::ReadSegment { .. }
+            | Self::ManifestConflict { .. } => ManifestLoadErrorKind::Store,
+            _ => ManifestLoadErrorKind::Corrupt,
         }
     }
 }
@@ -429,114 +481,176 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<CreateCheckpointResponse, CoreError> {
-    let basis = {
-        let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
-        load_verified_namespace_basis(store, namespace_id)
-    }?;
-    let checkpoint_seq = basis.head.seq;
-
-    match load_verified_checkpoint_materialization_if_present(store, namespace_id, checkpoint_seq) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let manifest = build_checkpoint_manifest_for_basis(
-                store,
-                namespace_id,
-                &basis,
-                &context.writer_version,
-                policy,
-            )?;
-            let materialized = load_checkpoint_materialization_from_manifest(
-                store,
-                namespace_id,
-                &checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0),
-                &manifest,
-            )
-            .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
-            if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
-                return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
-                    CheckpointLoadError::MetadataMismatch,
-                )));
+    // Checkpoint creation pins a manifest version. If the current head does not
+    // yet have a manifest, this first publishes a manifest for the current
+    // durable namespace file set, then records the checkpoint in manifest state.
+    //
+    // This is distinct from metadata compaction: creating a checkpoint should
+    // not rewrite SSTs unless a manifest must be materialized for an otherwise
+    // unmanifested head or the L0 run policy requires a full materialization.
+    let checkpoint_id = generate_checkpoint_id();
+    let mut saw_head_cas_race = false;
+    for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
+        let basis = {
+            let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
+            load_verified_namespace_basis(store, namespace_id)
+        }?;
+        let head_seq = basis.head.seq;
+        if let Some(current_manifest_id) = basis.head.current_manifest_id {
+            let materialized =
+                load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+            if materialized.manifest.payload.head_seq == head_seq {
+                if let Some(checkpoint) = checkpoint_record_for_manifest(&materialized.manifest) {
+                    return Ok(CreateCheckpointResponse {
+                        namespace_id: namespace_id.clone(),
+                        checkpoint_id: checkpoint.checkpoint_id.clone(),
+                        checkpoint_seq: checkpoint.head_seq,
+                        manifest_id: checkpoint.manifest_id,
+                        current_manifest_id: basis.head.current_manifest_id,
+                        latest_checkpoint_id: basis.head.latest_checkpoint_id.clone(),
+                    });
+                }
             }
-
-            // `write_checkpoint_manifest` owns the idempotent "manifest already
-            // exists" path. Any checkpoint load error it returns must surface.
-            write_checkpoint_manifest(store, &manifest).map_err(CoreError::Basis)?;
         }
-        Err(error) => return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(error))),
+
+        let mut manifest_id = next_manifest_id(&basis.head)?;
+        let mut manifest_ready = false;
+        for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
+            let checkpoint_record = NamespaceCheckpointRecord {
+                checkpoint_id: checkpoint_id.clone(),
+                manifest_id,
+                head_seq,
+                head_commit_id: basis.head.head_commit_id.clone(),
+                created_at_ms: context.now_ms,
+                expires_at_ms: None,
+                name: None,
+            };
+
+            match load_verified_manifest_materialization_if_present(
+                store,
+                namespace_id,
+                manifest_id,
+            ) {
+                Ok(Some(materialized)) => {
+                    if checkpoint_record_by_id(&materialized.manifest, &checkpoint_id).is_some() {
+                        manifest_ready = true;
+                        break;
+                    }
+                    manifest_id = next_manifest_id_after(manifest_id)?;
+                    continue;
+                }
+                Ok(None) => {
+                    let manifest = build_namespace_manifest_for_basis(
+                        store,
+                        namespace_id,
+                        &basis,
+                        &context.writer_version,
+                        policy,
+                        manifest_id,
+                        Some(checkpoint_record),
+                    )?;
+                    let materialized = load_manifest_materialization_from_manifest(
+                        store,
+                        namespace_id,
+                        &namespace_manifest(namespace_id.as_str(), manifest_id),
+                        &manifest,
+                    )
+                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+                    if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
+                        return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
+                            ManifestLoadError::MetadataMismatch,
+                        )));
+                    }
+
+                    // `write_namespace_manifest` owns the idempotent "manifest
+                    // already exists" path. It accepts a conflict only when the
+                    // existing manifest has the same payload checksum. A
+                    // same-id/different-payload conflict means another writer
+                    // won this allocation slot, so try the next manifest id.
+                    match write_namespace_manifest(store, &manifest) {
+                        Ok(()) => {}
+                        Err(BasisLoadError::ManifestLoad(
+                            ManifestLoadError::ManifestConflict { .. },
+                        )) => {
+                            manifest_id = next_manifest_id_after(manifest_id)?;
+                            continue;
+                        }
+                        Err(error) => return Err(CoreError::Basis(error)),
+                    }
+                    manifest_ready = true;
+                    break;
+                }
+                Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
+            }
+        }
+        if !manifest_ready {
+            return Err(CoreError::Store(
+                "manifest id allocation retry exhausted".to_owned(),
+            ));
+        }
+
+        let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
+            .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+        let checkpoint = checkpoint_record_by_id(&materialized.manifest, &checkpoint_id)
+            .ok_or_else(|| {
+                CoreError::CheckpointUnavailable(format!(
+                    "namespace `{}` manifest {:?} has no checkpoint record `{checkpoint_id}`",
+                    namespace_id.as_str(),
+                    manifest_id
+                ))
+            })?;
+        match publish_current_manifest_id(
+            store,
+            namespace_id,
+            manifest_id,
+            &checkpoint.checkpoint_id,
+            &context.writer_version,
+        )? {
+            ManifestPublicationOutcome::Published(resulting_head) => {
+                return Ok(CreateCheckpointResponse {
+                    namespace_id: namespace_id.clone(),
+                    checkpoint_id: checkpoint.checkpoint_id.clone(),
+                    checkpoint_seq: checkpoint.head_seq,
+                    manifest_id: checkpoint.manifest_id,
+                    current_manifest_id: resulting_head.current_manifest_id,
+                    latest_checkpoint_id: resulting_head.latest_checkpoint_id,
+                });
+            }
+            ManifestPublicationOutcome::CurrentManifestMissingCheckpoint { .. } => {
+                // Another manifest publisher won first. Rebuild the checkpoint
+                // record on top of the new current manifest using the same
+                // checkpoint id so the operation remains idempotent.
+                continue;
+            }
+            ManifestPublicationOutcome::HeadCasRaceLost => {
+                saw_head_cas_race = true;
+                continue;
+            }
+        }
     }
 
-    let resulting_head =
-        publish_checkpoint_hint_seq(store, namespace_id, checkpoint_seq, &context.writer_version)?;
-
-    Ok(CreateCheckpointResponse {
-        namespace_id: namespace_id.clone(),
-        checkpoint_seq,
-        checkpoint_hint_seq: resulting_head.checkpoint_hint_seq,
-        checkpoint_hint_points_at_checkpoint: resulting_head.checkpoint_hint_seq
-            == Some(checkpoint_seq),
-    })
-}
-
-pub(crate) struct CheckpointMetadataWriteRequest<'a> {
-    pub(crate) namespace_id: &'a NamespaceId,
-    pub(crate) checkpoint_seq: ChangeSeq,
-    pub(crate) active_fence_token: FenceToken,
-    pub(crate) next_inode_id: InodeId,
-    pub(crate) retention_floor_seq: ChangeSeq,
-    pub(crate) metadata_state: &'a MetadataState,
-    pub(crate) writer_version: &'a str,
-}
-
-pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
-    store: &S,
-    request: CheckpointMetadataWriteRequest<'_>,
-) -> Result<CheckpointManifestEnvelope, CoreError> {
-    let run_id = generate_checkpoint_run_id();
-    let tables = build_checkpoint_tables(
-        store,
-        request.namespace_id,
-        &run_id,
-        request.checkpoint_seq,
-        request.metadata_state,
-        request.writer_version,
-        MetadataLsmPolicy::default().max_rows_per_segment,
-    )?;
-    let materialized = load_checkpoint_materialization_from_tables(
-        store,
-        request.namespace_id,
-        &checkpoint_manifest(request.namespace_id.as_str(), request.checkpoint_seq.0),
-        &run_id,
-        request.checkpoint_seq,
-        &tables,
-    )
-    .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
-    if !metadata_states_equivalent(request.metadata_state, &materialized) {
-        return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
-            CheckpointLoadError::MetadataMismatch,
-        )));
+    if saw_head_cas_race {
+        Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+    } else {
+        Err(CoreError::CheckpointUnavailable(
+            "checkpoint publication retry exhausted".to_owned(),
+        ))
     }
+}
 
-    let manifest = CheckpointManifestEnvelope::from_payload(
-        request.writer_version,
-        CheckpointManifestPayload {
-            namespace_id: request.namespace_id.clone(),
-            checkpoint_seq: request.checkpoint_seq,
-            base_seq: request.checkpoint_seq,
-            active_fence_token: request.active_fence_token,
-            next_inode_id: request.next_inode_id,
-            retention_floor_seq: request.retention_floor_seq,
-            verified: true,
-            runs: vec![CheckpointRunManifest {
-                run_id,
-                run_seq: request.checkpoint_seq,
-                level: CHECKPOINT_BASE_RUN_LEVEL,
-                tables,
-            }],
-        },
-    )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
-    write_checkpoint_manifest(store, &manifest).map_err(CoreError::Basis)?;
-    Ok(manifest)
+fn next_manifest_id(head: &HeadState) -> Result<ManifestId, CoreError> {
+    head.current_manifest_id
+        .map(next_manifest_id_after)
+        .unwrap_or_else(|| Ok(ManifestId(head.seq.0)))
+}
+
+fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId, CoreError> {
+    current
+        .0
+        .checked_add(1)
+        .map(ManifestId)
+        .ok_or_else(|| CoreError::Store("manifest id overflow".to_owned()))
 }
 
 #[tracing::instrument(
@@ -544,103 +658,116 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "project_checkpoint")
+    fields(phase = "project_manifest")
 )]
-fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
+fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     basis: &crate::namespace::basis::VerifiedNamespaceBasis,
     writer_version: &str,
     policy: MetadataLsmPolicy,
-) -> Result<CheckpointManifestEnvelope, CoreError> {
-    let checkpoint_seq = basis.head.seq;
-    let previous_checkpoint = match basis.head.checkpoint_hint_seq {
-        Some(previous_seq) if previous_seq < checkpoint_seq => Some(
-            load_verified_checkpoint_materialization(store, namespace_id, previous_seq)
-                .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?,
+    manifest_id: ManifestId,
+    checkpoint_to_add: Option<NamespaceCheckpointRecord>,
+) -> Result<NamespaceManifestEnvelope, CoreError> {
+    let head_seq = basis.head.seq;
+    let previous_manifest = match basis.head.current_manifest_id {
+        Some(previous_id) => Some(
+            load_verified_manifest_materialization(store, namespace_id, previous_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?,
         ),
         _ => None,
     };
 
-    let (base_seq, runs) = match previous_checkpoint {
+    let mut checkpoints = previous_manifest
+        .as_ref()
+        .map(|previous| previous.manifest.payload.checkpoints.clone())
+        .unwrap_or_default();
+    if let Some(checkpoint) = checkpoint_to_add {
+        checkpoints.push(checkpoint);
+    }
+
+    let (base_seq, metadata_files) = match previous_manifest {
         Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
-            let run_id = generate_checkpoint_run_id();
-            let mut runs = previous.manifest.payload.runs.clone();
-            runs.push(CheckpointRunManifest {
-                run_id: run_id.clone(),
-                run_seq: checkpoint_seq,
-                level: CHECKPOINT_L0_RUN_LEVEL,
-                tables: build_checkpoint_l0_run_tables(
+            let mut metadata_files = previous.manifest.payload.metadata_files.clone();
+            if previous.manifest.payload.head_seq < head_seq {
+                metadata_files.extend(flatten_manifest_tables(build_manifest_l0_run_tables(
                     store,
                     namespace_id,
-                    checkpoint_seq,
-                    &run_id,
-                    previous.manifest.payload.checkpoint_seq,
+                    head_seq,
+                    previous.manifest.payload.head_seq,
                     &basis.metadata_state,
                     writer_version,
-                )?,
-            });
-            (previous.manifest.payload.base_seq, runs)
+                )?));
+            }
+            (previous.manifest.payload.base_seq, metadata_files)
         }
         Some(_) => {
-            let run_id = generate_checkpoint_run_id();
-            let run_tables = build_checkpoint_tables(
+            let run_tables = build_manifest_tables(
                 store,
                 namespace_id,
-                &run_id,
-                checkpoint_seq,
+                head_seq,
+                CHECKPOINT_BASE_RUN_LEVEL,
                 &basis.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )?;
-            debug_assert_checkpoint_table_segments_do_not_overlap(&run_tables);
-            (
-                checkpoint_seq,
-                vec![CheckpointRunManifest {
-                    run_id,
-                    run_seq: checkpoint_seq,
-                    level: CHECKPOINT_BASE_RUN_LEVEL,
-                    tables: run_tables,
-                }],
-            )
+            debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
+            (head_seq, flatten_manifest_tables(run_tables))
         }
         _ => {
-            let run_id = generate_checkpoint_run_id();
-            let run_tables = build_checkpoint_tables(
+            let run_tables = build_manifest_tables(
                 store,
                 namespace_id,
-                &run_id,
-                checkpoint_seq,
+                head_seq,
+                CHECKPOINT_BASE_RUN_LEVEL,
                 &basis.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )?;
-            (
-                checkpoint_seq,
-                vec![CheckpointRunManifest {
-                    run_id,
-                    run_seq: checkpoint_seq,
-                    level: CHECKPOINT_BASE_RUN_LEVEL,
-                    tables: run_tables,
-                }],
-            )
+            (head_seq, flatten_manifest_tables(run_tables))
         }
     };
 
-    CheckpointManifestEnvelope::from_payload(
+    NamespaceManifestEnvelope::from_payload(
         writer_version,
-        CheckpointManifestPayload {
+        NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
-            checkpoint_seq,
+            manifest_id,
+            head_seq,
+            head_commit_id: basis.head.head_commit_id.clone(),
             base_seq,
             active_fence_token: basis.head.active_fence_token,
             next_inode_id: basis.head.next_inode_id,
+            name_policy: basis.head.name_policy,
             retention_floor_seq: basis.head.retention_floor_seq,
+            initialized: true,
             verified: true,
-            runs,
+            fork: None,
+            checkpoints,
+            metadata_files,
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))
+}
+
+fn checkpoint_record_for_manifest(
+    manifest: &NamespaceManifestEnvelope,
+) -> Option<&NamespaceCheckpointRecord> {
+    manifest.payload.checkpoints.iter().find(|checkpoint| {
+        checkpoint.head_seq == manifest.payload.head_seq
+            && checkpoint.manifest_id == manifest.payload.manifest_id
+    })
+}
+
+fn checkpoint_record_by_id<'a>(
+    manifest: &'a NamespaceManifestEnvelope,
+    checkpoint_id: &str,
+) -> Option<&'a NamespaceCheckpointRecord> {
+    manifest
+        .payload
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
 }
 
 pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
@@ -648,18 +775,20 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse, CoreError> {
-    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
+    for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let head = loaded_head.envelope.state;
-        let Some(target_floor) = head.checkpoint_hint_seq else {
+        let Some(current_manifest_id) = head.current_manifest_id else {
             return Err(CoreError::CheckpointUnavailable(format!(
-                "namespace `{}` has no published checkpoint",
+                "namespace `{}` has no published manifest",
                 namespace_id.as_str()
             )));
         };
-        let _ = load_verified_checkpoint_materialization(store, namespace_id, target_floor)
-            .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
+        let manifest =
+            load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+        let target_floor = manifest.manifest.payload.head_seq;
         ensure_required_retention_progress(store, namespace_id, target_floor)?;
 
         if head.retention_floor_seq >= target_floor {
@@ -672,10 +801,12 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let next_head = HeadState {
             namespace_id: head.namespace_id.clone(),
             seq: head.seq,
+            head_commit_id: head.head_commit_id.clone(),
             active_fence_token: head.active_fence_token,
             next_inode_id: head.next_inode_id,
             name_policy: head.name_policy,
-            checkpoint_hint_seq: head.checkpoint_hint_seq,
+            current_manifest_id: head.current_manifest_id,
+            latest_checkpoint_id: head.latest_checkpoint_id.clone(),
             retention_floor_seq: target_floor,
             visible_wal_tip: head.visible_wal_tip.clone(),
         };
@@ -702,64 +833,56 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub(crate) fn load_verified_checkpoint_materialization<S: ObjectStore + ?Sized>(
+pub(crate) fn load_verified_manifest_materialization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-) -> Result<LoadedCheckpointMaterialization, CheckpointLoadError> {
-    load_verified_checkpoint_materialization_if_present(store, namespace_id, checkpoint_seq)?
-        .ok_or_else(|| CheckpointLoadError::MissingManifest {
-            object_key: checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0),
-        })
+    manifest_id: ManifestId,
+) -> Result<LoadedManifestMaterialization, ManifestLoadError> {
+    load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id)?.ok_or_else(
+        || ManifestLoadError::MissingManifest {
+            object_key: namespace_manifest(namespace_id.as_str(), manifest_id),
+        },
+    )
 }
 
-pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?Sized>(
+pub(crate) fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-) -> Result<VerifiedCheckpointTables<'a, S>, CheckpointLoadError> {
-    let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
+    manifest_id: ManifestId,
+) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
+    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = {
         let _span = tracing::info_span!(
             "loon.phase",
-            phase = "load_checkpoint_manifest",
-            key_class = "checkpoint_table"
+            phase = "load_namespace_manifest",
+            key_class = "manifest_table"
         )
         .entered();
         let Some(manifest_bytes) =
             store
                 .get(&manifest_key, None)
-                .map_err(|err| CheckpointLoadError::ReadManifest {
+                .map_err(|err| ManifestLoadError::ReadManifest {
                     object_key: manifest_key.clone(),
                     message: err.to_string(),
                 })?
         else {
-            return Err(CheckpointLoadError::MissingManifest {
+            return Err(ManifestLoadError::MissingManifest {
                 object_key: manifest_key.clone(),
             });
         };
-        decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-            CheckpointLoadError::ManifestCodec {
+        decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
+            ManifestLoadError::ManifestCodec {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
             }
         })
     }?;
-    validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
-    validate_checkpoint_materialization_ranges(&manifest_key, &manifest.payload)?;
-    for run in &manifest.payload.runs {
-        validate_checkpoint_run_id(&run.run_id).map_err(|error| {
-            CheckpointLoadError::RunManifestMismatch {
-                object_key: manifest_key.clone(),
-                message: error.to_string(),
-            }
-        })?;
-    }
-    let tables = VerifiedCheckpointTables {
+    validate_namespace_manifest(namespace_id, manifest_id, &manifest_key, &manifest)?;
+    validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
+    let tables = VerifiedMetadataTables {
         store,
         table_cache,
-        namespace_id: namespace_id.clone(),
         manifest_object_key: manifest_key,
         manifest,
         segment_cache: RefCell::new(HashMap::new()),
@@ -767,102 +890,104 @@ pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?S
     Ok(tables)
 }
 
-pub(crate) fn checkpoint_basis_head(
+pub(crate) fn manifest_basis_head(
     current_head: &HeadState,
-    manifest: &CheckpointManifestEnvelope,
+    manifest: &NamespaceManifestEnvelope,
 ) -> HeadState {
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
-        seq: manifest.payload.checkpoint_seq,
-        // The manifest records the checkpoint-time fence token. That may lag the
+        seq: manifest.payload.head_seq,
+        head_commit_id: manifest.payload.head_commit_id.clone(),
+        // The manifest records the manifest-time fence token. That may lag the
         // live head if lease takeover advanced the fence without any WAL replay.
         active_fence_token: manifest.payload.active_fence_token,
         next_inode_id: manifest.payload.next_inode_id,
-        name_policy: current_head.name_policy,
-        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
+        name_policy: manifest.payload.name_policy,
+        current_manifest_id: current_head.current_manifest_id,
+        latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: None,
     }
 }
 
-fn load_verified_checkpoint_materialization_if_present<S: ObjectStore + ?Sized>(
+fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-) -> Result<Option<LoadedCheckpointMaterialization>, CheckpointLoadError> {
-    let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let manifest = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "load_checkpoint_manifest",
-            key_class = "checkpoint_table"
-        )
-        .entered();
-        let Some(manifest_bytes) =
-            store
-                .get(&manifest_key, None)
-                .map_err(|err| CheckpointLoadError::ReadManifest {
-                    object_key: manifest_key.clone(),
-                    message: err.to_string(),
-                })?
-        else {
-            return Ok(None);
-        };
-        let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-            CheckpointLoadError::ManifestCodec {
-                object_key: manifest_key.clone(),
-                message: err.to_string(),
-            }
-        })?;
-        Ok(Some(manifest))
-    }?;
+    manifest_id: ManifestId,
+) -> Result<Option<LoadedManifestMaterialization>, ManifestLoadError> {
+    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+    let manifest = load_namespace_manifest_envelope_if_present(
+        store,
+        namespace_id,
+        manifest_id,
+        &manifest_key,
+    )?;
     let Some(manifest) = manifest else {
         return Ok(None);
     };
-    validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
-    let metadata_state = load_checkpoint_materialization_from_manifest(
-        store,
-        namespace_id,
-        &manifest_key,
-        &manifest,
-    )?;
-    Ok(Some(LoadedCheckpointMaterialization {
+    let metadata_state =
+        load_manifest_materialization_from_manifest(store, namespace_id, &manifest_key, &manifest)?;
+    Ok(Some(LoadedManifestMaterialization {
         manifest,
         metadata_state,
     }))
 }
 
-fn build_checkpoint_tables<S: ObjectStore + ?Sized>(
+fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    run_id: &str,
-    checkpoint_seq: ChangeSeq,
+    manifest_id: ManifestId,
+    manifest_key: &str,
+) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
+    let _span = tracing::info_span!(
+        "loon.phase",
+        phase = "load_namespace_manifest",
+        key_class = "manifest_table"
+    )
+    .entered();
+    let Some(manifest_bytes) =
+        store
+            .get(manifest_key, None)
+            .map_err(|err| ManifestLoadError::ReadManifest {
+                object_key: manifest_key.to_owned(),
+                message: err.to_string(),
+            })?
+    else {
+        return Ok(None);
+    };
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
+        ManifestLoadError::ManifestCodec {
+            object_key: manifest_key.to_owned(),
+            message: err.to_string(),
+        }
+    })?;
+    validate_namespace_manifest(namespace_id, manifest_id, manifest_key, &manifest)?;
+    Ok(Some(manifest))
+}
+
+fn build_manifest_tables<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    run_seq: ChangeSeq,
+    level: u32,
     metadata_state: &MetadataState,
     writer_version: &str,
     max_rows_per_segment: usize,
-) -> Result<Vec<CheckpointTableManifest>, CoreError> {
-    build_checkpoint_tables_from_rows(
+) -> Result<Vec<MetadataTableManifest>, CoreError> {
+    build_manifest_tables_from_rows(
         store,
         namespace_id,
-        checkpoint_seq,
+        run_seq,
+        level,
         writer_version,
-        |family| checkpoint_rows_for_family(metadata_state, family),
-        CheckpointTableSegmentation::Base {
+        |family| manifest_rows_for_family(metadata_state, family),
+        MetadataTableSegmentation::Base {
             max_rows_per_segment,
-        },
-        |family, segment_index| {
-            checkpoint_run_table(
-                namespace_id.as_str(),
-                checkpoint_seq.0,
-                run_id,
-                checkpoint_table_family(family),
-                segment_index,
-            )
         },
     )
 }
 
-fn debug_assert_checkpoint_table_segments_do_not_overlap(tables: &[CheckpointTableManifest]) {
+fn debug_assert_manifest_table_segments_do_not_overlap(tables: &[MetadataTableManifest]) {
     #[cfg(debug_assertions)]
     for table in tables {
         let mut previous_max_key: Option<&str> = None;
@@ -870,7 +995,7 @@ fn debug_assert_checkpoint_table_segments_do_not_overlap(tables: &[CheckpointTab
             if let Some(previous) = previous_max_key {
                 debug_assert!(
                     previous < descriptor.min_key.as_str(),
-                    "overlapping checkpoint segment ranges for `{:?}`",
+                    "overlapping metadata SST ranges for `{:?}`",
                     table.family
                 );
             }
@@ -879,43 +1004,34 @@ fn debug_assert_checkpoint_table_segments_do_not_overlap(tables: &[CheckpointTab
     }
 }
 
-fn build_checkpoint_l0_run_tables<S: ObjectStore + ?Sized>(
+fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-    run_id: &str,
+    run_seq: ChangeSeq,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
     writer_version: &str,
-) -> Result<Vec<CheckpointTableManifest>, CoreError> {
-    build_checkpoint_tables_from_rows(
+) -> Result<Vec<MetadataTableManifest>, CoreError> {
+    build_manifest_tables_from_rows(
         store,
         namespace_id,
-        checkpoint_seq,
+        run_seq,
+        CHECKPOINT_L0_RUN_LEVEL,
         writer_version,
-        |family| checkpoint_rows_for_family_after_seq(metadata_state, family, after_seq),
-        CheckpointTableSegmentation::Full,
-        |family, segment_index| {
-            checkpoint_run_table(
-                namespace_id.as_str(),
-                checkpoint_seq.0,
-                run_id,
-                checkpoint_table_family(family),
-                segment_index,
-            )
-        },
+        |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
+        MetadataTableSegmentation::Full,
     )
 }
 
 #[derive(Debug, Clone, Copy)]
-enum CheckpointTableSegmentation {
+enum MetadataTableSegmentation {
     Base { max_rows_per_segment: usize },
     Full,
 }
 
-struct CheckpointSegmentRows {
-    segment_key: CheckpointSegmentKey,
-    rows: Vec<CheckpointRow>,
+struct MetadataSstRows {
+    segment_key: MetadataSegmentKey,
+    rows: Vec<MetadataRow>,
 }
 
 #[tracing::instrument(
@@ -923,44 +1039,46 @@ struct CheckpointSegmentRows {
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "write_checkpoint_tables", key_class = "checkpoint_table")
+    fields(phase = "write_manifest_tables", key_class = "manifest_table")
 )]
-fn build_checkpoint_tables_from_rows<S, RowsForFamily, ObjectKeyForSegment>(
+fn build_manifest_tables_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
-    segment_seq: ChangeSeq,
+    run_seq: ChangeSeq,
+    level: u32,
     writer_version: &str,
     mut rows_for_family: RowsForFamily,
-    segmentation: CheckpointTableSegmentation,
-    mut object_key_for_segment: ObjectKeyForSegment,
-) -> Result<Vec<CheckpointTableManifest>, CoreError>
+    segmentation: MetadataTableSegmentation,
+) -> Result<Vec<MetadataTableManifest>, CoreError>
 where
     S: ObjectStore + ?Sized,
-    RowsForFamily: FnMut(CheckpointTableFamily) -> Vec<CheckpointRow>,
-    ObjectKeyForSegment: FnMut(CheckpointTableFamily, u32) -> String,
+    RowsForFamily: FnMut(MetadataTableFamily) -> Vec<MetadataRow>,
 {
     let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
     for family in CHECKPOINT_TABLE_FAMILIES {
         let rows = rows_for_family(family);
         if rows.is_empty() {
-            tables.push(CheckpointTableManifest {
+            tables.push(MetadataTableManifest {
                 family,
                 segments: Vec::new(),
             });
             continue;
         }
 
-        let segments = segment_checkpoint_rows(family, rows, segmentation);
+        let segments = segment_manifest_rows(family, rows, segmentation);
         let mut descriptors = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
-                .map_err(|_| CoreError::Store("checkpoint segment index overflow".to_owned()))?;
-            let object_key = object_key_for_segment(family, segment_index);
-            descriptors.push(write_checkpoint_segment(
+                .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
+            let table_id = generate_metadata_table_id();
+            let object_key = metadata_sst(namespace_id.as_str(), &table_id);
+            descriptors.push(write_manifest_segment(
                 store,
-                CheckpointSegmentWriteRequest {
+                MetadataSstWriteRequest {
                     namespace_id,
-                    segment_seq,
+                    table_id,
+                    run_seq,
+                    level,
                     family,
                     segment_index,
                     segment_key: segment_rows.segment_key,
@@ -970,7 +1088,7 @@ where
                 },
             )?);
         }
-        tables.push(CheckpointTableManifest {
+        tables.push(MetadataTableManifest {
             family,
             segments: descriptors,
         });
@@ -978,36 +1096,40 @@ where
     Ok(tables)
 }
 
-struct CheckpointSegmentWriteRequest<'a> {
+struct MetadataSstWriteRequest<'a> {
     namespace_id: &'a NamespaceId,
-    segment_seq: ChangeSeq,
-    family: CheckpointTableFamily,
+    table_id: String,
+    run_seq: ChangeSeq,
+    level: u32,
+    family: MetadataTableFamily,
     segment_index: u32,
-    segment_key: CheckpointSegmentKey,
-    rows: Vec<CheckpointRow>,
+    segment_key: MetadataSegmentKey,
+    rows: Vec<MetadataRow>,
     object_key: String,
     writer_version: &'a str,
 }
 
-fn write_checkpoint_segment<S: ObjectStore + ?Sized>(
+fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
-    request: CheckpointSegmentWriteRequest<'_>,
-) -> Result<CheckpointSegmentDescriptor, CoreError> {
+    request: MetadataSstWriteRequest<'_>,
+) -> Result<MetadataFileRef, CoreError> {
     let row_keys = request
         .rows
         .iter()
         .map(|row| row.row_key_for_family(request.family))
         .collect::<Vec<_>>();
-    let page = CheckpointPage {
+    let page = MetadataPage {
         page_index: 0,
         min_key: row_keys.first().cloned().unwrap_or_default(),
         max_key: row_keys.last().cloned().unwrap_or_default(),
         row_keys,
         rows: request.rows,
     };
-    let payload = CheckpointSegmentPayload {
+    let payload = MetadataSstPayload {
         namespace_id: request.namespace_id.clone(),
-        segment_seq: request.segment_seq,
+        table_id: request.table_id.clone(),
+        run_seq: request.run_seq,
+        level: request.level,
         family: request.family,
         segment_index: request.segment_index,
         segment_key: request.segment_key,
@@ -1016,20 +1138,24 @@ fn write_checkpoint_segment<S: ObjectStore + ?Sized>(
         max_key: page.max_key.clone(),
         pages: vec![page],
     };
-    let envelope = CheckpointSegmentEnvelope::from_payload(request.writer_version, payload)
+    let envelope = MetadataSstEnvelope::from_payload(request.writer_version, payload)
         .map_err(|err| CoreError::Store(err.to_string()))?;
-    let encoded = encode_checkpoint_segment_envelope_zstd(&envelope)
+    let encoded = encode_metadata_sst_envelope_zstd(&envelope)
         .map_err(|err| CoreError::Store(err.to_string()))?;
     write_immutable_object(store, &request.object_key, &encoded)?;
-    Ok(CheckpointSegmentDescriptor {
+    Ok(MetadataFileRef {
+        owner_namespace_id: request.namespace_id.clone(),
+        table_id: request.table_id,
         object_key: request.object_key,
-        segment_seq: request.segment_seq,
+        run_seq: request.run_seq,
+        level: request.level,
+        family: request.family,
         segment_index: request.segment_index,
         segment_key: envelope.payload.segment_key.clone(),
         row_count: envelope.payload.row_count,
         min_key: envelope.payload.min_key.clone(),
         max_key: envelope.payload.max_key.clone(),
-        payload_checksum_sha256: checkpoint_segment_payload_checksum_sha256(&envelope.payload)
+        payload_checksum_sha256: metadata_sst_payload_checksum_sha256(&envelope.payload)
             .map_err(|err| CoreError::Store(err.to_string()))?,
         page_checksums_sha256: envelope
             .page_checksums_sha256()
@@ -1037,58 +1163,58 @@ fn write_checkpoint_segment<S: ObjectStore + ?Sized>(
     })
 }
 
-fn segment_checkpoint_rows(
-    family: CheckpointTableFamily,
-    rows: Vec<CheckpointRow>,
-    segmentation: CheckpointTableSegmentation,
-) -> Vec<CheckpointSegmentRows> {
+fn segment_manifest_rows(
+    family: MetadataTableFamily,
+    rows: Vec<MetadataRow>,
+    segmentation: MetadataTableSegmentation,
+) -> Vec<MetadataSstRows> {
     match segmentation {
-        CheckpointTableSegmentation::Full => vec![CheckpointSegmentRows {
-            segment_key: CheckpointSegmentKey::Full,
+        MetadataTableSegmentation::Full => vec![MetadataSstRows {
+            segment_key: MetadataSegmentKey::Full,
             rows,
         }],
-        CheckpointTableSegmentation::Base {
+        MetadataTableSegmentation::Base {
             max_rows_per_segment,
         } => match family {
-            CheckpointTableFamily::DirentryBinds | CheckpointTableFamily::DirentryUnbinds => {
+            MetadataTableFamily::DirentryBinds | MetadataTableFamily::DirentryUnbinds => {
                 segment_rows_by_parent(rows)
             }
-            CheckpointTableFamily::Inodes
-            | CheckpointTableFamily::DirentryChildBinds
-            | CheckpointTableFamily::Revisions
-            | CheckpointTableFamily::Tombstones
-            | CheckpointTableFamily::CommitReceipts => {
+            MetadataTableFamily::Inodes
+            | MetadataTableFamily::DirentryChildBinds
+            | MetadataTableFamily::Revisions
+            | MetadataTableFamily::Tombstones
+            | MetadataTableFamily::CommitReceipts => {
                 segment_rows_by_row_key_range(rows, max_rows_per_segment.max(1))
             }
         },
     }
 }
 
-fn segment_rows_by_parent(rows: Vec<CheckpointRow>) -> Vec<CheckpointSegmentRows> {
-    let mut grouped: BTreeMap<InodeId, Vec<CheckpointRow>> = BTreeMap::new();
+fn segment_rows_by_parent(rows: Vec<MetadataRow>) -> Vec<MetadataSstRows> {
+    let mut grouped: BTreeMap<InodeId, Vec<MetadataRow>> = BTreeMap::new();
     for row in rows {
-        if let Some(parent_inode_id) = checkpoint_row_parent_inode_id(&row) {
+        if let Some(parent_inode_id) = manifest_row_parent_inode_id(&row) {
             grouped.entry(parent_inode_id).or_default().push(row);
         }
     }
 
     grouped
         .into_iter()
-        .map(|(parent_inode_id, rows)| CheckpointSegmentRows {
-            segment_key: CheckpointSegmentKey::DirentryParent { parent_inode_id },
+        .map(|(parent_inode_id, rows)| MetadataSstRows {
+            segment_key: MetadataSegmentKey::DirentryParent { parent_inode_id },
             rows,
         })
         .collect()
 }
 
 fn segment_rows_by_row_key_range(
-    rows: Vec<CheckpointRow>,
+    rows: Vec<MetadataRow>,
     max_rows_per_segment: usize,
-) -> Vec<CheckpointSegmentRows> {
+) -> Vec<MetadataSstRows> {
     rows.chunks(max_rows_per_segment)
         .enumerate()
-        .map(|(shard, rows)| CheckpointSegmentRows {
-            segment_key: CheckpointSegmentKey::RowKeyRange {
+        .map(|(shard, rows)| MetadataSstRows {
+            segment_key: MetadataSegmentKey::RowKeyRange {
                 shard: u32::try_from(shard).unwrap_or(u32::MAX),
             },
             rows: rows.to_vec(),
@@ -1096,12 +1222,12 @@ fn segment_rows_by_row_key_range(
         .collect()
 }
 
-fn checkpoint_row_parent_inode_id(row: &CheckpointRow) -> Option<InodeId> {
+fn manifest_row_parent_inode_id(row: &MetadataRow) -> Option<InodeId> {
     match row {
-        CheckpointRow::DirentryBind {
+        MetadataRow::DirentryBind {
             parent_inode_id, ..
         }
-        | CheckpointRow::DirentryUnbind {
+        | MetadataRow::DirentryUnbind {
             parent_inode_id, ..
         } => Some(*parent_inode_id),
         _ => None,
@@ -1113,18 +1239,18 @@ fn checkpoint_row_parent_inode_id(row: &CheckpointRow) -> Option<InodeId> {
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "write_checkpoint_manifest", key_class = "checkpoint_table")
+    fields(phase = "write_namespace_manifest", key_class = "manifest_table")
 )]
-fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
+pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
-    manifest: &CheckpointManifestEnvelope,
+    manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), BasisLoadError> {
-    let manifest_key = checkpoint_manifest(
+    let manifest_key = namespace_manifest(
         manifest.payload.namespace_id.as_str(),
-        manifest.payload.checkpoint_seq.0,
+        manifest.payload.manifest_id,
     );
-    let manifest_bytes = encode_checkpoint_manifest_json(manifest).map_err(|err| {
-        BasisLoadError::CheckpointLoad(CheckpointLoadError::ManifestCodec {
+    let manifest_bytes = encode_namespace_manifest_json(manifest).map_err(|err| {
+        BasisLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
             object_key: manifest_key.clone(),
             message: err.to_string(),
         })
@@ -1132,33 +1258,35 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&manifest_key, &manifest_bytes) {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
-            let Some(existing) = load_verified_checkpoint_materialization_if_present(
+            let Some(existing) = load_namespace_manifest_envelope_if_present(
                 store,
                 &manifest.payload.namespace_id,
-                manifest.payload.checkpoint_seq,
+                manifest.payload.manifest_id,
+                &manifest_key,
             )
-            .map_err(BasisLoadError::CheckpointLoad)?
+            .map_err(BasisLoadError::ManifestLoad)?
             else {
-                return Err(BasisLoadError::CheckpointLoad(
-                    CheckpointLoadError::MissingManifest {
+                return Err(BasisLoadError::ManifestLoad(
+                    ManifestLoadError::MissingManifest {
                         object_key: manifest_key,
                     },
                 ));
             };
-            if existing.manifest.payload.checkpoint_seq == manifest.payload.checkpoint_seq {
+            if existing.payload_checksum_sha256 == manifest.payload_checksum_sha256 {
                 Ok(())
             } else {
-                Err(BasisLoadError::CheckpointLoad(
-                    CheckpointLoadError::ManifestSeqMismatch {
+                Err(BasisLoadError::ManifestLoad(
+                    ManifestLoadError::ManifestConflict {
                         object_key: manifest_key,
-                        expected: manifest.payload.checkpoint_seq,
-                        actual: existing.manifest.payload.checkpoint_seq,
+                        manifest_id: manifest.payload.manifest_id,
+                        expected_payload_checksum_sha256: manifest.payload_checksum_sha256.clone(),
+                        actual_payload_checksum_sha256: existing.payload_checksum_sha256,
                     },
                 ))
             }
         }
-        Err(error) => Err(BasisLoadError::CheckpointLoad(
-            CheckpointLoadError::ReadManifest {
+        Err(error) => Err(BasisLoadError::ManifestLoad(
+            ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
                 message: error.to_string(),
             },
@@ -1173,27 +1301,46 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "publish_compacted_head", key_class = "namespace_head")
 )]
-fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
+fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
+    manifest_id: ManifestId,
+    checkpoint_id: &str,
     writer_version: &str,
-) -> Result<HeadState, CoreError> {
-    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
+) -> Result<ManifestPublicationOutcome, CoreError> {
+    for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let current_head = loaded_head.envelope.state;
-        if current_head.checkpoint_hint_seq >= Some(checkpoint_seq) {
-            return Ok(current_head);
+        if current_head.current_manifest_id >= Some(manifest_id) {
+            let current_manifest_id = current_head.current_manifest_id.ok_or_else(|| {
+                CoreError::CheckpointUnavailable(format!(
+                    "namespace `{}` has no published manifest",
+                    namespace_id.as_str()
+                ))
+            })?;
+            let current_manifest =
+                load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+            if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
+                return Ok(ManifestPublicationOutcome::Published(current_head));
+            }
+            return Ok(
+                ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
+                    current_manifest_id,
+                },
+            );
         }
 
         let next_head = HeadState {
             namespace_id: current_head.namespace_id.clone(),
             seq: current_head.seq,
+            head_commit_id: current_head.head_commit_id.clone(),
             active_fence_token: current_head.active_fence_token,
             next_inode_id: current_head.next_inode_id,
             name_policy: current_head.name_policy,
-            checkpoint_hint_seq: Some(checkpoint_seq),
+            current_manifest_id: Some(manifest_id),
+            latest_checkpoint_id: Some(checkpoint_id.to_owned()),
             retention_floor_seq: current_head.retention_floor_seq,
             visible_wal_tip: current_head.visible_wal_tip.clone(),
         };
@@ -1204,13 +1351,13 @@ fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
             writer_version,
             &next_head,
         ) {
-            Ok(()) => return Ok(next_head),
+            Ok(()) => return Ok(ManifestPublicationOutcome::Published(next_head)),
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
             Err(error) => return Err(CoreError::Store(error.to_string())),
         }
     }
 
-    Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+    Ok(ManifestPublicationOutcome::HeadCasRaceLost)
 }
 
 fn compare_and_swap_head<S: ObjectStore + ?Sized>(
@@ -1266,100 +1413,151 @@ fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn validate_checkpoint_manifest(
+fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
+    manifest_id: ManifestId,
     object_key: &str,
-    manifest: &CheckpointManifestEnvelope,
-) -> Result<(), CheckpointLoadError> {
+    manifest: &NamespaceManifestEnvelope,
+) -> Result<(), ManifestLoadError> {
     if manifest.payload.namespace_id != *namespace_id {
-        return Err(CheckpointLoadError::ManifestNamespaceMismatch {
+        return Err(ManifestLoadError::ManifestNamespaceMismatch {
             object_key: object_key.to_owned(),
             expected: namespace_id.clone(),
             actual: manifest.payload.namespace_id.clone(),
         });
     }
-    if manifest.payload.checkpoint_seq != checkpoint_seq {
-        return Err(CheckpointLoadError::ManifestSeqMismatch {
+    if manifest.payload.manifest_id != manifest_id {
+        return Err(ManifestLoadError::ManifestIdMismatch {
             object_key: object_key.to_owned(),
-            expected: checkpoint_seq,
-            actual: manifest.payload.checkpoint_seq,
+            expected: manifest_id,
+            actual: manifest.payload.manifest_id,
         });
     }
     if !manifest.payload.verified {
-        return Err(CheckpointLoadError::ManifestNotVerified {
+        return Err(ManifestLoadError::ManifestNotVerified {
             object_key: object_key.to_owned(),
         });
     }
+    if !manifest.payload.initialized {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "namespace manifest is not initialized".to_owned(),
+        });
+    }
+    validate_manifest_checkpoint_records(object_key, &manifest.payload)?;
     Ok(())
 }
 
-fn validate_checkpoint_materialization_ranges(
+fn validate_manifest_checkpoint_records(
     object_key: &str,
-    payload: &CheckpointManifestPayload,
-) -> Result<(), CheckpointLoadError> {
-    if payload.base_seq > payload.checkpoint_seq {
-        return Err(CheckpointLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: format!(
-                "base_seq {:?} is after checkpoint_seq {:?}",
-                payload.base_seq, payload.checkpoint_seq
-            ),
-        });
-    }
-
-    if payload.runs.is_empty() {
-        return Err(CheckpointLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: "checkpoint manifest must reference at least one run".to_owned(),
-        });
-    }
-
-    let mut saw_base_seq_run = false;
-    let mut saw_checkpoint_seq_run = false;
-    let mut seen_run_ids = Vec::new();
-    for run in &payload.runs {
-        validate_checkpoint_run_id(&run.run_id).map_err(|error| {
-            CheckpointLoadError::RunManifestMismatch {
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    let mut seen_checkpoint_ids = Vec::new();
+    for checkpoint in &payload.checkpoints {
+        validate_checkpoint_id(&checkpoint.checkpoint_id).map_err(|error| {
+            ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
                 message: error.to_string(),
             }
         })?;
-        if seen_run_ids.contains(&run.run_id.as_str()) {
-            return Err(CheckpointLoadError::RunManifestMismatch {
+        if seen_checkpoint_ids.contains(&checkpoint.checkpoint_id.as_str()) {
+            return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
-                message: format!("duplicate checkpoint run id `{}`", run.run_id),
+                message: format!("duplicate checkpoint id `{}`", checkpoint.checkpoint_id),
             });
         }
-        seen_run_ids.push(run.run_id.as_str());
-        if run.run_seq < payload.base_seq || run.run_seq > payload.checkpoint_seq {
-            return Err(CheckpointLoadError::RunManifestMismatch {
+        seen_checkpoint_ids.push(checkpoint.checkpoint_id.as_str());
+        if checkpoint.head_seq > payload.head_seq {
+            return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
-                    "checkpoint run `{}` seq {:?} is outside [{:?}, {:?}]",
-                    run.run_id, run.run_seq, payload.base_seq, payload.checkpoint_seq
+                    "checkpoint `{}` head seq {:?} is after manifest head seq {:?}",
+                    checkpoint.checkpoint_id, checkpoint.head_seq, payload.head_seq
                 ),
             });
         }
-        saw_base_seq_run |= run.run_seq == payload.base_seq;
-        saw_checkpoint_seq_run |= run.run_seq == payload.checkpoint_seq;
+        if checkpoint.manifest_id > payload.manifest_id {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "checkpoint `{}` references future manifest id {:?}",
+                    checkpoint.checkpoint_id, checkpoint.manifest_id
+                ),
+            });
+        }
     }
+    Ok(())
+}
 
-    if !saw_base_seq_run {
-        return Err(CheckpointLoadError::RunManifestMismatch {
+fn validate_manifest_materialization_ranges(
+    object_key: &str,
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    if payload.base_seq > payload.head_seq {
+        return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "checkpoint manifest has no run at base_seq {:?}",
+                "base_seq {:?} is after manifest head_seq {:?}",
+                payload.base_seq, payload.head_seq
+            ),
+        });
+    }
+
+    if payload.metadata_files.is_empty() {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: "namespace manifest must reference at least one metadata file".to_owned(),
+        });
+    }
+
+    let mut saw_base_seq_file = false;
+    let mut saw_head_seq_file = false;
+    let mut seen_table_ids = Vec::new();
+    for metadata_file in &payload.metadata_files {
+        validate_metadata_table_id(&metadata_file.table_id).map_err(|error| {
+            ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+        if seen_table_ids.contains(&metadata_file.table_id.as_str()) {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!("duplicate metadata table id `{}`", metadata_file.table_id),
+            });
+        }
+        seen_table_ids.push(metadata_file.table_id.as_str());
+        if metadata_file.run_seq < payload.base_seq || metadata_file.run_seq > payload.head_seq {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "metadata file `{}` run seq {:?} is outside [{:?}, {:?}]",
+                    metadata_file.table_id,
+                    metadata_file.run_seq,
+                    payload.base_seq,
+                    payload.head_seq
+                ),
+            });
+        }
+        saw_base_seq_file |= metadata_file.run_seq == payload.base_seq;
+        saw_head_seq_file |= metadata_file.run_seq == payload.head_seq;
+    }
+
+    if !saw_base_seq_file {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: format!(
+                "namespace manifest has no metadata file at base_seq {:?}",
                 payload.base_seq
             ),
         });
     }
-    if !saw_checkpoint_seq_run {
-        return Err(CheckpointLoadError::RunManifestMismatch {
+    if !saw_head_seq_file {
+        return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "checkpoint manifest has no run at checkpoint_seq {:?}",
-                payload.checkpoint_seq
+                "namespace manifest has no metadata file at head_seq {:?}",
+                payload.head_seq
             ),
         });
     }
@@ -1372,94 +1570,44 @@ fn validate_checkpoint_materialization_ranges(
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
+    fields(phase = "load_manifest_tables", key_class = "manifest_table")
 )]
-fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
+fn load_manifest_materialization_from_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_object_key: &str,
-    manifest: &CheckpointManifestEnvelope,
-) -> Result<MetadataState, CheckpointLoadError> {
+    manifest: &NamespaceManifestEnvelope,
+) -> Result<MetadataState, ManifestLoadError> {
     let mut metadata_state = MetadataStateBuilder::default();
-    validate_checkpoint_materialization_ranges(manifest_object_key, &manifest.payload)?;
+    validate_manifest_materialization_ranges(manifest_object_key, &manifest.payload)?;
     for run in runs_in_materialization_order(&manifest.payload) {
-        append_checkpoint_tables_to_metadata(
+        append_manifest_tables_to_metadata(
             store,
             namespace_id,
-            CheckpointTableLoadContext {
+            MetadataTableLoadContext {
                 manifest_object_key,
-                segment_seq_expectation: CheckpointSegmentSeqExpectation::Descriptor,
+                segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
                 row_seq_min: None,
                 row_seq_max: run.run_seq,
             },
             &run.tables,
             &mut metadata_state,
-            |family, segment_seq, segment_index| {
-                checkpoint_run_table(
-                    namespace_id.as_str(),
-                    segment_seq.0,
-                    &run.run_id,
-                    checkpoint_table_family(family),
-                    segment_index,
-                )
-            },
         )?;
     }
 
     Ok(metadata_state.finish())
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "loon.phase",
-    err,
-    skip_all,
-    fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
-)]
-fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    manifest_object_key: &str,
-    run_id: &str,
-    segment_seq: ChangeSeq,
-    tables: &[CheckpointTableManifest],
-) -> Result<MetadataState, CheckpointLoadError> {
-    let mut metadata_state = MetadataStateBuilder::default();
-    append_checkpoint_tables_to_metadata(
-        store,
-        namespace_id,
-        CheckpointTableLoadContext {
-            manifest_object_key,
-            segment_seq_expectation: CheckpointSegmentSeqExpectation::Exact(segment_seq),
-            row_seq_min: None,
-            row_seq_max: segment_seq,
-        },
-        tables,
-        &mut metadata_state,
-        |family, segment_seq, segment_index| {
-            checkpoint_run_table(
-                namespace_id.as_str(),
-                segment_seq.0,
-                run_id,
-                checkpoint_table_family(family),
-                segment_index,
-            )
-        },
-    )?;
-    Ok(metadata_state.finish())
-}
-
 #[derive(Clone, Copy)]
-struct CheckpointTableLoadContext<'a> {
+struct MetadataTableLoadContext<'a> {
     manifest_object_key: &'a str,
-    segment_seq_expectation: CheckpointSegmentSeqExpectation,
+    segment_seq_expectation: MetadataSstSeqExpectation,
     row_seq_min: Option<ChangeSeq>,
     row_seq_max: ChangeSeq,
 }
 
 #[derive(Clone, Copy)]
-enum CheckpointSegmentSeqExpectation {
-    Exact(ChangeSeq),
+enum MetadataSstSeqExpectation {
     Descriptor,
 }
 
@@ -1470,81 +1618,68 @@ enum MetadataTableCacheMode {
     ReadOnly,
 }
 
-impl CheckpointTableLoadContext<'_> {
+impl MetadataTableLoadContext<'_> {
     fn expected_segment_seq(
         &self,
-        descriptor: &CheckpointSegmentDescriptor,
-    ) -> Result<ChangeSeq, CheckpointLoadError> {
+        descriptor: &MetadataFileRef,
+    ) -> Result<ChangeSeq, ManifestLoadError> {
         match self.segment_seq_expectation {
-            CheckpointSegmentSeqExpectation::Exact(expected) => {
-                if descriptor.segment_seq != expected {
-                    return Err(CheckpointLoadError::SegmentSeqMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        expected,
-                        actual: descriptor.segment_seq,
-                    });
-                }
-                Ok(expected)
-            }
-            CheckpointSegmentSeqExpectation::Descriptor => {
-                if descriptor.segment_seq > self.row_seq_max {
-                    return Err(CheckpointLoadError::SegmentSeqMismatch {
+            MetadataSstSeqExpectation::Descriptor => {
+                if descriptor.run_seq > self.row_seq_max {
+                    return Err(ManifestLoadError::SegmentSeqMismatch {
                         object_key: descriptor.object_key.clone(),
                         expected: self.row_seq_max,
-                        actual: descriptor.segment_seq,
+                        actual: descriptor.run_seq,
                     });
                 }
-                Ok(descriptor.segment_seq)
+                Ok(descriptor.run_seq)
             }
         }
     }
 
-    fn row_seq_max(&self, descriptor: &CheckpointSegmentDescriptor) -> ChangeSeq {
+    fn row_seq_max(&self, descriptor: &MetadataFileRef) -> ChangeSeq {
         match self.segment_seq_expectation {
-            CheckpointSegmentSeqExpectation::Exact(_) => self.row_seq_max,
-            CheckpointSegmentSeqExpectation::Descriptor => descriptor.segment_seq,
+            MetadataSstSeqExpectation::Descriptor => descriptor.run_seq,
         }
     }
 }
 
-fn append_checkpoint_tables_to_metadata<S, ExpectedObjectKey>(
+fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
+    metadata_sst(
+        descriptor.owner_namespace_id.as_str(),
+        descriptor.table_id.as_str(),
+    )
+}
+
+fn append_manifest_tables_to_metadata<S>(
     store: &S,
-    namespace_id: &NamespaceId,
-    context: CheckpointTableLoadContext<'_>,
-    tables: &[CheckpointTableManifest],
+    _namespace_id: &NamespaceId,
+    context: MetadataTableLoadContext<'_>,
+    tables: &[MetadataTableManifest],
     metadata_state: &mut MetadataStateBuilder,
-    mut expected_object_key: ExpectedObjectKey,
-) -> Result<(), CheckpointLoadError>
+) -> Result<(), ManifestLoadError>
 where
     S: ObjectStore + ?Sized,
-    ExpectedObjectKey: FnMut(CheckpointTableFamily, ChangeSeq, u32) -> String,
 {
-    let ordered_tables = ordered_checkpoint_tables(context.manifest_object_key, tables)?;
+    let ordered_tables = ordered_manifest_tables(context.manifest_object_key, tables)?;
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     for table in ordered_tables {
         for descriptor in &table.segments {
-            let expected_segment_seq = context.expected_segment_seq(descriptor)?;
-            let expected_key =
-                expected_object_key(table.family, expected_segment_seq, descriptor.segment_index);
+            context.expected_segment_seq(descriptor)?;
+            let expected_key = metadata_file_object_key(descriptor);
             if descriptor.object_key != expected_key {
-                return Err(CheckpointLoadError::SegmentObjectKeyMismatch {
+                return Err(ManifestLoadError::SegmentObjectKeyMismatch {
                     object_key: descriptor.object_key.clone(),
                     expected: expected_key,
                 });
             }
-            let rows = load_checkpoint_segment_rows(
-                store,
-                namespace_id,
-                context,
-                table.family,
-                descriptor,
-            )?;
+            let rows = load_manifest_segment_rows(store, context, table.family, descriptor)?;
             match table.family {
-                CheckpointTableFamily::DirentryBinds => {
+                MetadataTableFamily::DirentryBinds => {
                     direntry_bind_rows.extend(rows.iter().cloned());
                 }
-                CheckpointTableFamily::DirentryChildBinds => {
+                MetadataTableFamily::DirentryChildBinds => {
                     direntry_child_bind_rows.extend(rows.iter().cloned());
                 }
                 _ => {}
@@ -1560,17 +1695,15 @@ where
     )
 }
 
-fn load_checkpoint_segment_rows<S: ObjectStore + ?Sized>(
+fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
-    context: CheckpointTableLoadContext<'_>,
-    family: CheckpointTableFamily,
-    descriptor: &CheckpointSegmentDescriptor,
-) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
-    load_checkpoint_segment_rows_with_cache(
+    context: MetadataTableLoadContext<'_>,
+    family: MetadataTableFamily,
+    descriptor: &MetadataFileRef,
+) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+    load_manifest_segment_rows_with_cache(
         store,
         None,
-        namespace_id,
         context,
         family,
         descriptor,
@@ -1578,15 +1711,14 @@ fn load_checkpoint_segment_rows<S: ObjectStore + ?Sized>(
     )
 }
 
-fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
+fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
-    namespace_id: &NamespaceId,
-    context: CheckpointTableLoadContext<'_>,
-    family: CheckpointTableFamily,
-    descriptor: &CheckpointSegmentDescriptor,
+    context: MetadataTableLoadContext<'_>,
+    family: MetadataTableFamily,
+    descriptor: &MetadataFileRef,
     cache_mode: MetadataTableCacheMode,
-) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+) -> Result<Vec<MetadataRow>, ManifestLoadError> {
     let expected_segment_seq = context.expected_segment_seq(descriptor)?;
     let cache_key = MetadataTableCacheKey {
         table_digest: descriptor.payload_checksum_sha256.clone(),
@@ -1595,8 +1727,8 @@ fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     };
     if cache_mode != MetadataTableCacheMode::Bypass {
         if let Some(block) = table_cache.and_then(|cache| cache.get(&cache_key)) {
-            validate_cached_checkpoint_block(family, expected_segment_seq, descriptor, &block)?;
-            validate_checkpoint_row_seq_range(
+            validate_cached_manifest_block(family, expected_segment_seq, descriptor, &block)?;
+            validate_manifest_row_seq_range(
                 &descriptor.object_key,
                 &block.rows,
                 context.row_seq_min,
@@ -1606,31 +1738,26 @@ fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
         }
     }
 
-    let Some(bytes) = store.get(&descriptor.object_key, None).map_err(|err| {
-        CheckpointLoadError::ReadSegment {
-            object_key: descriptor.object_key.clone(),
-            message: err.to_string(),
-        }
-    })?
+    let Some(bytes) =
+        store
+            .get(&descriptor.object_key, None)
+            .map_err(|err| ManifestLoadError::ReadSegment {
+                object_key: descriptor.object_key.clone(),
+                message: err.to_string(),
+            })?
     else {
-        return Err(CheckpointLoadError::MissingSegment {
+        return Err(ManifestLoadError::MissingSegment {
             object_key: descriptor.object_key.clone(),
         });
     };
-    let segment = decode_checkpoint_segment_envelope_zstd(&bytes).map_err(|err| {
-        CheckpointLoadError::SegmentCodec {
+    let segment = decode_metadata_sst_envelope_zstd(&bytes).map_err(|err| {
+        ManifestLoadError::SegmentCodec {
             object_key: descriptor.object_key.clone(),
             message: err.to_string(),
         }
     })?;
-    let rows = validate_checkpoint_segment(
-        namespace_id,
-        expected_segment_seq,
-        family,
-        descriptor,
-        &segment,
-    )?;
-    validate_checkpoint_row_seq_range(
+    let rows = validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
+    validate_manifest_row_seq_range(
         &descriptor.object_key,
         &rows,
         context.row_seq_min,
@@ -1650,7 +1777,7 @@ fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
                     min_key: descriptor.min_key.clone(),
                     max_key: descriptor.max_key.clone(),
                     page_checksums_sha256: descriptor.page_checksums_sha256.clone(),
-                    decoded_byte_len: decoded_checkpoint_block_weight(family, &rows),
+                    decoded_byte_len: decoded_manifest_block_weight(family, &rows),
                 },
             );
         }
@@ -1658,35 +1785,35 @@ fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     Ok(rows)
 }
 
-fn validate_cached_checkpoint_block(
-    family: CheckpointTableFamily,
+fn validate_cached_manifest_block(
+    family: MetadataTableFamily,
     expected_segment_seq: ChangeSeq,
-    descriptor: &CheckpointSegmentDescriptor,
+    descriptor: &MetadataFileRef,
     block: &DecodedMetadataTableBlock,
-) -> Result<(), CheckpointLoadError> {
+) -> Result<(), ManifestLoadError> {
     if block.segment_seq != expected_segment_seq {
-        return Err(CheckpointLoadError::SegmentSeqMismatch {
+        return Err(ManifestLoadError::SegmentSeqMismatch {
             object_key: descriptor.object_key.clone(),
             expected: expected_segment_seq,
             actual: block.segment_seq,
         });
     }
     if block.family != family {
-        return Err(CheckpointLoadError::SegmentFamilyMismatch {
+        return Err(ManifestLoadError::SegmentFamilyMismatch {
             object_key: descriptor.object_key.clone(),
             expected: family,
             actual: block.family,
         });
     }
     if block.segment_index != descriptor.segment_index {
-        return Err(CheckpointLoadError::SegmentIndexMismatch {
+        return Err(ManifestLoadError::SegmentIndexMismatch {
             object_key: descriptor.object_key.clone(),
             expected: descriptor.segment_index,
             actual: block.segment_index,
         });
     }
     if block.segment_key != descriptor.segment_key {
-        return Err(CheckpointLoadError::SegmentKeyMismatch {
+        return Err(ManifestLoadError::SegmentKeyMismatch {
             object_key: descriptor.object_key.clone(),
             expected: descriptor.segment_key.clone(),
             actual: block.segment_key.clone(),
@@ -1697,7 +1824,7 @@ fn validate_cached_checkpoint_block(
         || descriptor.max_key != block.max_key
         || descriptor.page_checksums_sha256 != block.page_checksums_sha256
     {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: "cached segment descriptor mismatch".to_owned(),
         });
@@ -1705,26 +1832,26 @@ fn validate_cached_checkpoint_block(
     Ok(())
 }
 
-fn decoded_checkpoint_block_weight(family: CheckpointTableFamily, rows: &[CheckpointRow]) -> usize {
+fn decoded_manifest_block_weight(family: MetadataTableFamily, rows: &[MetadataRow]) -> usize {
     let row_weight = rows
         .iter()
-        .map(|row| 64 + row.row_key_for_family(family).len() + decoded_checkpoint_row_weight(row))
+        .map(|row| 64 + row.row_key_for_family(family).len() + decoded_manifest_row_weight(row))
         .sum::<usize>();
     row_weight.saturating_add(128)
 }
 
-fn decoded_checkpoint_row_weight(row: &CheckpointRow) -> usize {
+fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
     match row {
-        CheckpointRow::Inode { .. } => 32,
-        CheckpointRow::DirentryBind {
+        MetadataRow::Inode { .. } => 32,
+        MetadataRow::DirentryBind {
             name_key,
             display_name,
             ..
         } => 96 + name_key.len() + display_name.len(),
-        CheckpointRow::DirentryUnbind { name_key, .. } => 96 + name_key.len(),
-        CheckpointRow::Revision { content_ref, .. } => 96 + content_ref.digest.len(),
-        CheckpointRow::Tombstone { .. } => 32,
-        CheckpointRow::CommitReceipt {
+        MetadataRow::DirentryUnbind { name_key, .. } => 96 + name_key.len(),
+        MetadataRow::Revision { content_ref, .. } => 96 + content_ref.digest.len(),
+        MetadataRow::Tombstone { .. } => 32,
+        MetadataRow::CommitReceipt {
             commit_id,
             semantic_commit_fingerprint_sha256,
             results,
@@ -1737,21 +1864,21 @@ fn decoded_checkpoint_row_weight(row: &CheckpointRow) -> usize {
     }
 }
 
-fn ordered_checkpoint_tables<'a>(
+fn ordered_manifest_tables<'a>(
     manifest_object_key: &str,
-    tables: &'a [CheckpointTableManifest],
-) -> Result<Vec<&'a CheckpointTableManifest>, CheckpointLoadError> {
+    tables: &'a [MetadataTableManifest],
+) -> Result<Vec<&'a MetadataTableManifest>, ManifestLoadError> {
     let mut ordered = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
     for family in CHECKPOINT_TABLE_FAMILIES {
         let mut matching = tables.iter().filter(|table| table.family == family);
         let Some(table) = matching.next() else {
-            return Err(CheckpointLoadError::MissingTableFamily {
+            return Err(ManifestLoadError::MissingTableFamily {
                 object_key: manifest_object_key.to_owned(),
                 family,
             });
         };
         if matching.next().is_some() {
-            return Err(CheckpointLoadError::DuplicateTableFamily {
+            return Err(ManifestLoadError::DuplicateTableFamily {
                 object_key: manifest_object_key.to_owned(),
                 family,
             });
@@ -1761,15 +1888,15 @@ fn ordered_checkpoint_tables<'a>(
     Ok(ordered)
 }
 
-fn checkpoint_table_for_family<'a>(
+fn manifest_table_for_family<'a>(
     manifest_object_key: &str,
-    tables: &'a [CheckpointTableManifest],
-    family: CheckpointTableFamily,
-) -> Result<&'a CheckpointTableManifest, CheckpointLoadError> {
-    ordered_checkpoint_tables(manifest_object_key, tables)?
+    tables: &'a [MetadataTableManifest],
+    family: MetadataTableFamily,
+) -> Result<&'a MetadataTableManifest, ManifestLoadError> {
+    ordered_manifest_tables(manifest_object_key, tables)?
         .into_iter()
         .find(|table| table.family == family)
-        .ok_or(CheckpointLoadError::MissingTableFamily {
+        .ok_or(ManifestLoadError::MissingTableFamily {
             object_key: manifest_object_key.to_owned(),
             family,
         })
@@ -1777,11 +1904,11 @@ fn checkpoint_table_for_family<'a>(
 
 fn count_matching_segments(
     manifest_object_key: &str,
-    tables: &[CheckpointTableManifest],
-    family: CheckpointTableFamily,
+    tables: &[MetadataTableManifest],
+    family: MetadataTableFamily,
     prefix: &str,
-) -> Result<usize, CheckpointLoadError> {
-    let table = checkpoint_table_for_family(manifest_object_key, tables, family)?;
+) -> Result<usize, ManifestLoadError> {
+    let table = manifest_table_for_family(manifest_object_key, tables, family)?;
     Ok(table
         .segments
         .iter()
@@ -1789,7 +1916,7 @@ fn count_matching_segments(
         .count())
 }
 
-fn descriptor_may_contain_prefix(descriptor: &CheckpointSegmentDescriptor, prefix: &str) -> bool {
+fn descriptor_may_contain_prefix(descriptor: &MetadataFileRef, prefix: &str) -> bool {
     if descriptor.row_count == 0 {
         return false;
     }
@@ -1819,56 +1946,75 @@ fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
     None
 }
 
-fn validate_checkpoint_segment(
-    namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-    family: CheckpointTableFamily,
-    descriptor: &CheckpointSegmentDescriptor,
-    segment: &CheckpointSegmentEnvelope,
-) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
-    if segment.payload.namespace_id != *namespace_id {
-        return Err(CheckpointLoadError::SegmentNamespaceMismatch {
+fn validate_manifest_segment(
+    run_seq: ChangeSeq,
+    family: MetadataTableFamily,
+    descriptor: &MetadataFileRef,
+    segment: &MetadataSstEnvelope,
+) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+    if segment.payload.namespace_id != descriptor.owner_namespace_id {
+        return Err(ManifestLoadError::SegmentNamespaceMismatch {
             object_key: descriptor.object_key.clone(),
-            expected: namespace_id.clone(),
+            expected: descriptor.owner_namespace_id.clone(),
             actual: segment.payload.namespace_id.clone(),
         });
     }
-    if segment.payload.segment_seq != checkpoint_seq {
-        return Err(CheckpointLoadError::SegmentSeqMismatch {
+    if segment.payload.table_id != descriptor.table_id {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
-            expected: checkpoint_seq,
-            actual: segment.payload.segment_seq,
+            message: format!(
+                "table id mismatch: expected `{}`, actual `{}`",
+                descriptor.table_id, segment.payload.table_id
+            ),
+        });
+    }
+    if segment.payload.run_seq != run_seq {
+        return Err(ManifestLoadError::SegmentSeqMismatch {
+            object_key: descriptor.object_key.clone(),
+            expected: run_seq,
+            actual: segment.payload.run_seq,
+        });
+    }
+    if segment.payload.level != descriptor.level {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+            object_key: descriptor.object_key.clone(),
+            message: format!(
+                "level mismatch: expected `{}`, actual `{}`",
+                descriptor.level, segment.payload.level
+            ),
         });
     }
     if segment.payload.family != family {
-        return Err(CheckpointLoadError::SegmentFamilyMismatch {
+        return Err(ManifestLoadError::SegmentFamilyMismatch {
             object_key: descriptor.object_key.clone(),
             expected: family,
             actual: segment.payload.family,
         });
     }
     if segment.payload.segment_index != descriptor.segment_index {
-        return Err(CheckpointLoadError::SegmentIndexMismatch {
+        return Err(ManifestLoadError::SegmentIndexMismatch {
             object_key: descriptor.object_key.clone(),
             expected: descriptor.segment_index,
             actual: segment.payload.segment_index,
         });
     }
     if segment.payload.segment_key != descriptor.segment_key {
-        return Err(CheckpointLoadError::SegmentKeyMismatch {
+        return Err(ManifestLoadError::SegmentKeyMismatch {
             object_key: descriptor.object_key.clone(),
             expected: descriptor.segment_key.clone(),
             actual: segment.payload.segment_key.clone(),
         });
     }
 
-    let actual_payload_checksum = checkpoint_segment_payload_checksum_sha256(&segment.payload)
-        .map_err(|err| CheckpointLoadError::SegmentCodec {
-            object_key: descriptor.object_key.clone(),
-            message: err.to_string(),
+    let actual_payload_checksum =
+        metadata_sst_payload_checksum_sha256(&segment.payload).map_err(|err| {
+            ManifestLoadError::SegmentCodec {
+                object_key: descriptor.object_key.clone(),
+                message: err.to_string(),
+            }
         })?;
     if descriptor.payload_checksum_sha256 != actual_payload_checksum {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: format!(
                 "payload checksum mismatch: expected `{}`, actual `{}`",
@@ -1880,26 +2026,25 @@ fn validate_checkpoint_segment(
     let mut collected_rows = Vec::new();
     let mut collected_page_checksums = Vec::new();
     for page in &segment.payload.pages {
-        let checksum = checkpoint_page_checksum_sha256(page).map_err(|err| {
-            CheckpointLoadError::SegmentCodec {
+        let checksum =
+            metadata_page_checksum_sha256(page).map_err(|err| ManifestLoadError::SegmentCodec {
                 object_key: descriptor.object_key.clone(),
                 message: err.to_string(),
-            }
-        })?;
+            })?;
         collected_page_checksums.push(checksum.clone());
-        validate_checkpoint_page(family, descriptor, page, &checksum)?;
+        validate_manifest_page(family, descriptor, page, &checksum)?;
         collected_rows.extend(page.rows.iter().cloned());
     }
 
     if descriptor.page_checksums_sha256 != collected_page_checksums {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: "page checksum descriptor mismatch".to_owned(),
         });
     }
 
     if segment.payload.row_count != collected_rows.len() as u64 {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: format!(
                 "row count mismatch: expected {}, actual {}",
@@ -1914,13 +2059,13 @@ fn validate_checkpoint_segment(
         .collect::<Vec<_>>();
     if let (Some(first), Some(last)) = (row_keys.first(), row_keys.last()) {
         if segment.payload.min_key != *first || segment.payload.max_key != *last {
-            return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: descriptor.object_key.clone(),
                 message: "payload min/max key mismatch".to_owned(),
             });
         }
     } else if segment.payload.row_count != 0 {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: "non-zero row count with no rows".to_owned(),
         });
@@ -1930,7 +2075,7 @@ fn validate_checkpoint_segment(
         || descriptor.min_key != segment.payload.min_key
         || descriptor.max_key != segment.payload.max_key
     {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: "descriptor row summary mismatch".to_owned(),
         });
@@ -1939,14 +2084,14 @@ fn validate_checkpoint_segment(
     Ok(collected_rows)
 }
 
-fn validate_checkpoint_page(
-    family: CheckpointTableFamily,
-    descriptor: &CheckpointSegmentDescriptor,
-    page: &CheckpointPage,
+fn validate_manifest_page(
+    family: MetadataTableFamily,
+    descriptor: &MetadataFileRef,
+    page: &MetadataPage,
     checksum: &str,
-) -> Result<(), CheckpointLoadError> {
+) -> Result<(), ManifestLoadError> {
     if page.row_keys.len() != page.rows.len() {
-        return Err(CheckpointLoadError::PageShapeMismatch {
+        return Err(ManifestLoadError::PageShapeMismatch {
             object_key: descriptor.object_key.clone(),
             page_index: page.page_index,
             message: format!(
@@ -1963,7 +2108,7 @@ fn validate_checkpoint_page(
         .cloned()
         .unwrap_or_default();
     if expected_checksum != *checksum {
-        return Err(CheckpointLoadError::PageChecksumMismatch {
+        return Err(ManifestLoadError::PageChecksumMismatch {
             object_key: descriptor.object_key.clone(),
             page_index: page.page_index,
             expected: expected_checksum,
@@ -1972,17 +2117,17 @@ fn validate_checkpoint_page(
     }
 
     for (index, row) in page.rows.iter().enumerate() {
-        if !checkpoint_row_matches_family(row, family) {
-            return Err(CheckpointLoadError::TableRowKindMismatch {
+        if !manifest_row_matches_family(row, family) {
+            return Err(ManifestLoadError::TableRowKindMismatch {
                 object_key: descriptor.object_key.clone(),
                 family,
-                row_kind: checkpoint_row_kind(row).to_owned(),
+                row_kind: manifest_row_kind(row).to_owned(),
             });
         }
         let actual = row.row_key_for_family(family);
         let expected = page.row_keys.get(index).cloned().unwrap_or_default();
         if actual != expected {
-            return Err(CheckpointLoadError::RowKeyMismatch {
+            return Err(ManifestLoadError::RowKeyMismatch {
                 object_key: descriptor.object_key.clone(),
                 page_index: page.page_index,
                 row_index: index,
@@ -1994,7 +2139,7 @@ fn validate_checkpoint_page(
 
     if let (Some(first), Some(last)) = (page.row_keys.first(), page.row_keys.last()) {
         if page.min_key != *first || page.max_key != *last {
-            return Err(CheckpointLoadError::PageShapeMismatch {
+            return Err(ManifestLoadError::PageShapeMismatch {
                 object_key: descriptor.object_key.clone(),
                 page_index: page.page_index,
                 message: "page min/max key mismatch".to_owned(),
@@ -2005,17 +2150,17 @@ fn validate_checkpoint_page(
     Ok(())
 }
 
-fn validate_checkpoint_row_seq_range(
+fn validate_manifest_row_seq_range(
     object_key: &str,
-    rows: &[CheckpointRow],
+    rows: &[MetadataRow],
     min_seq: Option<ChangeSeq>,
     max_seq: ChangeSeq,
-) -> Result<(), CheckpointLoadError> {
+) -> Result<(), ManifestLoadError> {
     for (row_index, row) in rows.iter().enumerate() {
-        let row_seq = checkpoint_row_commit_seq(row);
+        let row_seq = manifest_row_commit_seq(row);
         if let Some(min_seq) = min_seq {
             if row_seq < min_seq {
-                return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+                return Err(ManifestLoadError::SegmentDescriptorMismatch {
                     object_key: object_key.to_owned(),
                     message: format!(
                         "row {row_index} seq `{row_seq:?}` is before expected min `{min_seq:?}`"
@@ -2024,7 +2169,7 @@ fn validate_checkpoint_row_seq_range(
             }
         }
         if row_seq > max_seq {
-            return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
                     "row {row_index} seq `{row_seq:?}` is after expected max `{max_seq:?}`"
@@ -2037,15 +2182,15 @@ fn validate_checkpoint_row_seq_range(
 
 fn append_rows_to_metadata(
     metadata_state: &mut MetadataStateBuilder,
-    family: CheckpointTableFamily,
+    family: MetadataTableFamily,
     object_key: &str,
-    rows: &[CheckpointRow],
-) -> Result<(), CheckpointLoadError> {
+    rows: &[MetadataRow],
+) -> Result<(), ManifestLoadError> {
     for row in rows {
         match (family, row) {
             (
-                CheckpointTableFamily::Inodes,
-                CheckpointRow::Inode {
+                MetadataTableFamily::Inodes,
+                MetadataRow::Inode {
                     inode_id,
                     inode_kind,
                     created_seq,
@@ -2056,8 +2201,8 @@ fn append_rows_to_metadata(
                 created_seq: *created_seq,
             }),
             (
-                CheckpointTableFamily::DirentryBinds,
-                CheckpointRow::DirentryBind {
+                MetadataTableFamily::DirentryBinds,
+                MetadataRow::DirentryBind {
                     parent_inode_id,
                     name_key,
                     display_name,
@@ -2073,10 +2218,10 @@ fn append_rows_to_metadata(
                 bind_seq: *bind_seq,
                 bind_delta_index: *bind_delta_index,
             }),
-            (CheckpointTableFamily::DirentryChildBinds, CheckpointRow::DirentryBind { .. }) => {}
+            (MetadataTableFamily::DirentryChildBinds, MetadataRow::DirentryBind { .. }) => {}
             (
-                CheckpointTableFamily::DirentryUnbinds,
-                CheckpointRow::DirentryUnbind {
+                MetadataTableFamily::DirentryUnbinds,
+                MetadataRow::DirentryUnbind {
                     parent_inode_id,
                     name_key,
                     child_inode_id,
@@ -2095,8 +2240,8 @@ fn append_rows_to_metadata(
                 unbind_delta_index: *unbind_delta_index,
             }),
             (
-                CheckpointTableFamily::Revisions,
-                CheckpointRow::Revision {
+                MetadataTableFamily::Revisions,
+                MetadataRow::Revision {
                     inode_id,
                     revision_no,
                     committed_seq,
@@ -2111,8 +2256,8 @@ fn append_rows_to_metadata(
                 content_ref: content_ref.clone(),
             }),
             (
-                CheckpointTableFamily::Tombstones,
-                CheckpointRow::Tombstone {
+                MetadataTableFamily::Tombstones,
+                MetadataRow::Tombstone {
                     root_inode_id,
                     tombstone_seq,
                     tombstone_delta_index,
@@ -2123,8 +2268,8 @@ fn append_rows_to_metadata(
                 tombstone_delta_index: *tombstone_delta_index,
             }),
             (
-                CheckpointTableFamily::CommitReceipts,
-                CheckpointRow::CommitReceipt {
+                MetadataTableFamily::CommitReceipts,
+                MetadataRow::CommitReceipt {
                     commit_id,
                     semantic_commit_fingerprint_sha256,
                     committed_seq,
@@ -2137,10 +2282,10 @@ fn append_rows_to_metadata(
                 results: results.clone(),
             }),
             _ => {
-                return Err(CheckpointLoadError::TableRowKindMismatch {
+                return Err(ManifestLoadError::TableRowKindMismatch {
                     object_key: object_key.to_owned(),
                     family,
-                    row_kind: checkpoint_row_kind(row).to_owned(),
+                    row_kind: manifest_row_kind(row).to_owned(),
                 });
             }
         }
@@ -2150,16 +2295,16 @@ fn append_rows_to_metadata(
 
 fn validate_direntry_child_bind_index(
     object_key: &str,
-    mut direntry_bind_rows: Vec<CheckpointRow>,
-    mut direntry_child_bind_rows: Vec<CheckpointRow>,
-) -> Result<(), CheckpointLoadError> {
+    mut direntry_bind_rows: Vec<MetadataRow>,
+    mut direntry_child_bind_rows: Vec<MetadataRow>,
+) -> Result<(), ManifestLoadError> {
     direntry_bind_rows
-        .sort_by_key(|row| row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds));
+        .sort_by_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
     direntry_child_bind_rows
-        .sort_by_key(|row| row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds));
+        .sort_by_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
 
     if direntry_bind_rows != direntry_child_bind_rows {
-        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: object_key.to_owned(),
             message: "direntry-child-binds index does not match canonical direntry-binds"
                 .to_owned(),
@@ -2175,40 +2320,39 @@ mod tests {
     // These tests use panic in impossible match arms to preserve precise failure messages.
 
     use super::{
-        advance_retention_floor, build_checkpoint_manifest_for_basis, build_checkpoint_tables,
-        build_checkpoint_tables_from_rows, checkpoint_basis_head, checkpoint_rows_for_family,
-        checkpoint_table_family, create_checkpoint, create_checkpoint_with_policy,
-        load_checkpoint_materialization_from_manifest, load_verified_checkpoint_materialization,
-        metadata_states_equivalent, publish_checkpoint_hint_seq, write_checkpoint_manifest,
-        CheckpointLoadError, CheckpointTableSegmentation, MetadataLsmPolicy, MetadataTableCache,
-        MetadataTableCacheConfig, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
-        CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
+        advance_retention_floor, build_manifest_tables, build_manifest_tables_from_rows,
+        build_namespace_manifest_for_basis, checkpoint_record_by_id, create_checkpoint,
+        create_checkpoint_with_policy, flatten_manifest_tables,
+        load_manifest_materialization_from_manifest, load_verified_manifest_materialization,
+        manifest_basis_head, manifest_rows_for_family, metadata_states_equivalent,
+        publish_current_manifest_id, runs_from_metadata_files, write_namespace_manifest,
+        ManifestLoadError, ManifestPublicationOutcome, MetadataLsmPolicy, MetadataRunManifest,
+        MetadataTableCache, MetadataTableCacheConfig, MetadataTableSegmentation,
+        CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
+        DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
     use crate::error::CoreError;
     use crate::metadata::MetadataState;
     use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
-    use crate::{ErrorCode, MutationContext, PutFileBehavior};
-    use loon_api::wire::checkpoint::{
-        encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
-        CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
-        CheckpointRunManifest, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-        CheckpointSegmentKey, CheckpointSegmentPayload,
-        CheckpointTableFamily as ApiCheckpointTableFamily,
+    use crate::{MutationContext, PutFileBehavior};
+    use loon_api::wire::manifest::{
+        encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
+        MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
+        MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
+        NamespaceManifestPayload,
     };
-    use loon_api::{generate_checkpoint_run_id, ChangeSeq, NamespaceId};
+    use loon_api::{validate_checkpoint_id, ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{
-        checkpoint_manifest, checkpoint_run_table, namespace_head, CheckpointTableFamily,
-    };
+    use loon_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
     use tempfile::tempdir;
 
     #[test]
-    fn checkpoint_round_trip_uses_checkpoint_basis_for_mixed_namespace() {
+    fn manifest_round_trip_uses_manifest_basis_for_mixed_namespace() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2247,7 +2391,10 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
 
-        assert_eq!(after.head.checkpoint_hint_seq, Some(before.head.seq));
+        assert_eq!(
+            after.head.current_manifest_id,
+            Some(ManifestId(before.head.seq.0))
+        );
         assert_eq!(before.head.seq, after.head.seq);
         assert!(metadata_states_equivalent(
             &before.metadata_state,
@@ -2256,7 +2403,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_round_trip_preserves_direntry_unbind_rows() {
+    fn manifest_round_trip_preserves_direntry_unbind_rows() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2297,7 +2444,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_round_trip_supports_empty_namespace() {
+    fn manifest_round_trip_supports_empty_namespace() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2306,11 +2453,19 @@ mod tests {
 
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        assert_eq!(basis.head.checkpoint_hint_seq, Some(ChangeSeq(0)));
+        assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
+                .expect("load namespace manifest");
+        assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
+        let checkpoint = &materialized.manifest.payload.checkpoints[0];
+        assert!(validate_checkpoint_id(&checkpoint.checkpoint_id).is_ok());
+        assert_eq!(checkpoint.head_seq, ChangeSeq(0));
+        assert_eq!(checkpoint.manifest_id, ManifestId(0));
     }
 
     #[test]
-    fn strict_checkpoint_consumption_fails_when_manifest_is_corrupted() {
+    fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2327,14 +2482,14 @@ mod tests {
         .expect("write hello");
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
 
-        let manifest_key = checkpoint_manifest(namespace_id.as_str(), 1);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
         store
             .put_overwrite(&manifest_key, br#"{"bad":"json"}"#)
             .expect("corrupt manifest");
 
         match load_verified_namespace_basis(&store, &namespace_id) {
-            Err(BasisLoadError::CheckpointLoad(CheckpointLoadError::ManifestCodec { .. })) => {}
-            other => panic!("expected manifest codec checkpoint load error, got {other:?}"),
+            Err(BasisLoadError::ManifestLoad(ManifestLoadError::ManifestCodec { .. })) => {}
+            other => panic!("expected manifest codec manifest load error, got {other:?}"),
         }
     }
 
@@ -2343,7 +2498,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        let manifest_key = checkpoint_manifest(namespace_id.as_str(), 1);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
         let store = ConflictOnManifestCreateStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             manifest_key,
@@ -2361,14 +2516,14 @@ mod tests {
         .expect("write hello");
 
         match create_checkpoint(&store, &namespace_id, &context) {
-            Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
-                CheckpointLoadError::ManifestCodec { .. },
+            Err(CoreError::Basis(BasisLoadError::ManifestLoad(
+                ManifestLoadError::ManifestCodec { .. },
             ))) => {}
-            other => panic!("expected manifest codec checkpoint load error, got {other:?}"),
+            other => panic!("expected manifest codec manifest load error, got {other:?}"),
         }
 
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        assert_eq!(basis.head.checkpoint_hint_seq, None);
+        assert_eq!(basis.head.current_manifest_id, None);
     }
 
     #[test]
@@ -2381,7 +2536,7 @@ mod tests {
 
         match advance_retention_floor(&store, &namespace_id, &context) {
             Err(CoreError::CheckpointUnavailable(_)) => {}
-            other => panic!("expected checkpoint unavailable, got {other:?}"),
+            other => panic!("expected manifest unavailable, got {other:?}"),
         }
 
         write_file_bytes(
@@ -2408,13 +2563,13 @@ mod tests {
             1
         );
         assert!(store
-            .head(&checkpoint_manifest(namespace_id.as_str(), 1))
+            .head(&namespace_manifest(namespace_id.as_str(), ManifestId(1)))
             .expect("manifest head")
             .is_some());
     }
 
     #[test]
-    fn checkpoint_materialization_uses_written_segments() {
+    fn manifest_materialization_uses_written_segments() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2432,10 +2587,10 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
 
         let materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, ChangeSeq(1))
-                .expect("load materialized checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
+                .expect("load materialized manifest");
         let current = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        let basis_head = checkpoint_basis_head(&current.head, &materialized.manifest);
+        let basis_head = manifest_basis_head(&current.head, &materialized.manifest);
         assert_eq!(basis_head.seq, ChangeSeq(1));
         assert!(metadata_states_equivalent(
             &materialized.metadata_state,
@@ -2444,7 +2599,7 @@ mod tests {
 
         let segment_key = base_segment_object_keys_for_family(
             &materialized.manifest,
-            ApiCheckpointTableFamily::Revisions,
+            ApiMetadataTableFamily::Revisions,
         )
         .into_iter()
         .next()
@@ -2453,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_l0_run_materialization_matches_full_basis() {
+    fn manifest_l0_run_materialization_matches_full_basis() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2470,8 +2625,8 @@ mod tests {
         .expect("write hello");
         let first = create_checkpoint(&store, &namespace_id, &context).expect("first checkpoint");
         let first_materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, first.checkpoint_seq)
-                .expect("load first checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+                .expect("load first manifest");
 
         write_file_bytes(
             &store,
@@ -2485,8 +2640,8 @@ mod tests {
         let second = create_checkpoint(&store, &namespace_id, &context).expect("second checkpoint");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         let second_materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, second.checkpoint_seq)
-                .expect("load second checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+                .expect("load second manifest");
 
         assert_eq!(
             second_materialized.manifest.payload.base_seq,
@@ -2500,6 +2655,15 @@ mod tests {
         assert_eq!(l0_runs.len(), 1);
         assert_eq!(l0_runs[0].run_seq, second.checkpoint_seq);
         assert_eq!(l0_runs[0].level, CHECKPOINT_L0_RUN_LEVEL);
+        assert_eq!(second_materialized.manifest.payload.checkpoints.len(), 2);
+        assert_eq!(
+            second_materialized.manifest.payload.checkpoints[0].checkpoint_id,
+            first.checkpoint_id
+        );
+        assert_eq!(
+            second_materialized.manifest.payload.checkpoints[1].checkpoint_id,
+            second.checkpoint_id
+        );
         assert!(metadata_states_equivalent(
             &basis_after.metadata_state,
             &second_materialized.metadata_state
@@ -2507,7 +2671,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_l0_run_missing_table_fails_load() {
+    fn manifest_l0_run_missing_table_fails_load() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2534,8 +2698,8 @@ mod tests {
         .expect("write second");
         let second = create_checkpoint(&store, &namespace_id, &context).expect("second checkpoint");
         let materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, second.checkpoint_seq)
-                .expect("load materialized checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+                .expect("load materialized manifest");
         let deleted_key = l0_runs(&materialized.manifest)[0]
             .tables
             .iter()
@@ -2546,9 +2710,8 @@ mod tests {
             .clone();
         store.delete(&deleted_key).expect("delete l0 segment");
 
-        match load_verified_checkpoint_materialization(&store, &namespace_id, second.checkpoint_seq)
-        {
-            Err(CheckpointLoadError::MissingSegment { object_key }) => {
+        match load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id) {
+            Err(ManifestLoadError::MissingSegment { object_key }) => {
                 assert_eq!(object_key, deleted_key);
             }
             other => panic!("expected missing l0 segment, got {other:?}"),
@@ -2556,7 +2719,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_materialization_rejects_off_pattern_table_keys() {
+    fn manifest_materialization_rejects_off_pattern_table_keys() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2564,38 +2727,35 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1);
         let first_materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, first)
-                .expect("load first checkpoint");
-        let manifest_key = checkpoint_manifest(namespace_id.as_str(), first.0);
+            load_verified_manifest_materialization(&store, &namespace_id, manifest_id(first))
+                .expect("load first manifest");
+        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(first));
         let mut bad_base_manifest = first_materialized.manifest.clone();
         let expected_base_key = {
-            let base_run = bad_base_manifest
+            let base_descriptor = bad_base_manifest
                 .payload
-                .runs
+                .metadata_files
                 .iter_mut()
-                .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-                .expect("base run");
-            let base_descriptor = base_run.tables[0]
-                .segments
-                .get_mut(0)
-                .expect("base segment");
+                .find(|metadata_file| {
+                    metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                        && metadata_file.family == ApiMetadataTableFamily::Inodes
+                })
+                .expect("base metadata file");
+            let expected = metadata_sst(
+                base_descriptor.owner_namespace_id.as_str(),
+                base_descriptor.table_id.as_str(),
+            );
             base_descriptor.object_key = format!("{}-wrong", base_descriptor.object_key);
-            checkpoint_run_table(
-                namespace_id.as_str(),
-                base_run.run_seq.0,
-                &base_run.run_id,
-                CheckpointTableFamily::Inodes,
-                0,
-            )
+            expected
         };
 
-        match load_checkpoint_materialization_from_manifest(
+        match load_manifest_materialization_from_manifest(
             &store,
             &namespace_id,
             &manifest_key,
             &bad_base_manifest,
         ) {
-            Err(CheckpointLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
+            Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
                 assert_eq!(expected, expected_base_key);
             }
             other => panic!("expected base table key mismatch, got {other:?}"),
@@ -2603,35 +2763,35 @@ mod tests {
 
         let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2);
         let second_materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, second)
-                .expect("load second checkpoint");
-        let manifest_key = checkpoint_manifest(namespace_id.as_str(), second.0);
+            load_verified_manifest_materialization(&store, &namespace_id, manifest_id(second))
+                .expect("load second manifest");
+        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(second));
         let mut bad_l0_manifest = second_materialized.manifest.clone();
         let expected_l0_key = {
-            let l0_run = bad_l0_manifest
+            let l0_descriptor = bad_l0_manifest
                 .payload
-                .runs
+                .metadata_files
                 .iter_mut()
-                .find(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
-                .expect("l0 run");
-            let l0_descriptor = l0_run.tables[0].segments.get_mut(0).expect("l0 segment");
+                .find(|metadata_file| {
+                    metadata_file.level == CHECKPOINT_L0_RUN_LEVEL
+                        && metadata_file.family == ApiMetadataTableFamily::Inodes
+                })
+                .expect("l0 metadata file");
+            let expected = metadata_sst(
+                l0_descriptor.owner_namespace_id.as_str(),
+                l0_descriptor.table_id.as_str(),
+            );
             l0_descriptor.object_key = format!("{}-wrong", l0_descriptor.object_key);
-            checkpoint_run_table(
-                namespace_id.as_str(),
-                l0_run.run_seq.0,
-                &l0_run.run_id,
-                CheckpointTableFamily::Inodes,
-                0,
-            )
+            expected
         };
 
-        match load_checkpoint_materialization_from_manifest(
+        match load_manifest_materialization_from_manifest(
             &store,
             &namespace_id,
             &manifest_key,
             &bad_l0_manifest,
         ) {
-            Err(CheckpointLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
+            Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
                 assert_eq!(expected, expected_l0_key);
             }
             other => panic!("expected l0 table key mismatch, got {other:?}"),
@@ -2639,7 +2799,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_run_rejects_rows_after_run_seq() {
+    fn manifest_run_rejects_rows_after_run_seq() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2656,79 +2816,58 @@ mod tests {
         )
         .expect("write second file");
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        let malformed_run_id = "run_00000000000000000000000000000001";
-        let malformed_run_tables = build_checkpoint_tables_from_rows(
+        let malformed_run_tables = build_manifest_tables_from_rows(
             &store,
             &namespace_id,
             first,
+            CHECKPOINT_BASE_RUN_LEVEL,
             &context.writer_version,
-            |family| checkpoint_rows_for_family(&basis.metadata_state, family),
-            CheckpointTableSegmentation::Full,
-            |family, segment_index| {
-                checkpoint_run_table(
-                    namespace_id.as_str(),
-                    first.0,
-                    malformed_run_id,
-                    checkpoint_table_family(family),
-                    segment_index,
-                )
-            },
+            |family| manifest_rows_for_family(&basis.metadata_state, family),
+            MetadataTableSegmentation::Full,
         )
         .expect("write malformed run tables");
-        let checkpoint_run_id = "run_00000000000000000000000000000002";
-        let checkpoint_run_tables = build_checkpoint_tables_from_rows(
+        let metadata_ssts = build_manifest_tables_from_rows(
             &store,
             &namespace_id,
             basis.head.seq,
+            CHECKPOINT_L0_RUN_LEVEL,
             &context.writer_version,
-            |_| Vec::new(),
-            CheckpointTableSegmentation::Full,
-            |family, segment_index| {
-                checkpoint_run_table(
-                    namespace_id.as_str(),
-                    basis.head.seq.0,
-                    checkpoint_run_id,
-                    checkpoint_table_family(family),
-                    segment_index,
-                )
+            |family| {
+                super::manifest_rows_for_family_after_seq(&basis.metadata_state, family, first)
             },
+            MetadataTableSegmentation::Full,
         )
-        .expect("write empty checkpoint run tables");
-        let manifest = CheckpointManifestEnvelope::from_payload(
+        .expect("write empty metadata run tables");
+        let mut metadata_files = flatten_manifest_tables(malformed_run_tables);
+        metadata_files.extend(flatten_manifest_tables(metadata_ssts));
+        let manifest = NamespaceManifestEnvelope::from_payload(
             &context.writer_version,
-            CheckpointManifestPayload {
+            NamespaceManifestPayload {
                 namespace_id: namespace_id.clone(),
-                checkpoint_seq: basis.head.seq,
+                manifest_id: manifest_id(basis.head.seq),
+                head_seq: basis.head.seq,
+                head_commit_id: basis.head.head_commit_id.clone(),
                 base_seq: first,
                 active_fence_token: basis.head.active_fence_token,
                 next_inode_id: basis.head.next_inode_id,
+                name_policy: basis.head.name_policy,
                 retention_floor_seq: basis.head.retention_floor_seq,
+                initialized: true,
                 verified: true,
-                runs: vec![
-                    CheckpointRunManifest {
-                        run_id: malformed_run_id.to_owned(),
-                        run_seq: first,
-                        level: CHECKPOINT_BASE_RUN_LEVEL,
-                        tables: malformed_run_tables,
-                    },
-                    CheckpointRunManifest {
-                        run_id: checkpoint_run_id.to_owned(),
-                        run_seq: basis.head.seq,
-                        level: CHECKPOINT_L0_RUN_LEVEL,
-                        tables: checkpoint_run_tables,
-                    },
-                ],
+                fork: None,
+                checkpoints: Vec::new(),
+                metadata_files,
             },
         )
         .expect("build malformed manifest");
 
-        match load_checkpoint_materialization_from_manifest(
+        match load_manifest_materialization_from_manifest(
             &store,
             &namespace_id,
-            &checkpoint_manifest(namespace_id.as_str(), basis.head.seq.0),
+            &namespace_manifest(namespace_id.as_str(), manifest_id(basis.head.seq)),
             &manifest,
         ) {
-            Err(CheckpointLoadError::SegmentDescriptorMismatch { message, .. }) => {
+            Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
                 assert!(message.contains("after expected max"));
             }
             other => panic!("expected row range mismatch, got {other:?}"),
@@ -2736,7 +2875,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_l0_runs_chain_across_successive_checkpoints() {
+    fn manifest_l0_runs_chain_across_successive_manifests() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2748,8 +2887,8 @@ mod tests {
         }
 
         let materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, ChangeSeq(4))
-                .expect("load chained checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
+                .expect("load chained manifest");
         assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(1));
         let l0_runs = l0_runs(&materialized.manifest);
         assert_eq!(l0_runs.len(), 3);
@@ -2773,7 +2912,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_policy_compacts_when_l0_runs_exceed_threshold() {
+    fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2788,18 +2927,21 @@ mod tests {
             write_file_and_checkpoint_with_policy(&store, &namespace_id, &context, index, policy);
         }
 
-        let capped = load_verified_checkpoint_materialization(&store, &namespace_id, ChangeSeq(3))
-            .expect("load capped checkpoint");
+        let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(3))
+            .expect("load capped manifest");
         assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
         assert_eq!(l0_runs(&capped.manifest).len(), 2);
 
         let compacted =
-            load_verified_checkpoint_materialization(&store, &namespace_id, ChangeSeq(4))
-                .expect("load compacted checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
+                .expect("load compacted manifest");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         assert_eq!(compacted.manifest.payload.base_seq, ChangeSeq(4));
         assert!(l0_runs(&compacted.manifest).is_empty());
-        assert_eq!(compacted.manifest.payload.runs.len(), 1);
+        assert_eq!(
+            runs_from_metadata_files(&compacted.manifest.payload).len(),
+            1
+        );
         assert!(metadata_states_equivalent(
             &basis_after.metadata_state,
             &compacted.metadata_state
@@ -2807,7 +2949,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_rejects_segment_descriptor_payload_key_mismatch() {
+    fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2823,50 +2965,42 @@ mod tests {
         )
         .expect("write hello");
 
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
-        let materialized = load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        )
-        .expect("load checkpoint");
+        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .expect("load manifest");
         let mut manifest = materialized.manifest;
-        let revisions = manifest
+        let descriptor = manifest
             .payload
-            .runs
+            .metadata_files
             .iter_mut()
-            .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-            .expect("base run")
-            .tables
-            .iter_mut()
-            .find(|table| table.family == ApiCheckpointTableFamily::Revisions)
-            .expect("revision table");
-        let descriptor = revisions.segments.first_mut().expect("revision segment");
-        descriptor.segment_key = CheckpointSegmentKey::RowKeyRange { shard: u32::MAX };
+            .find(|metadata_file| {
+                metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                    && metadata_file.family == ApiMetadataTableFamily::Revisions
+            })
+            .expect("revision metadata file");
+        descriptor.segment_key = MetadataSegmentKey::RowKeyRange { shard: u32::MAX };
 
-        let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint.checkpoint_seq.0);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
         let writer_version = manifest.writer_version.clone();
+        let manifest_id = manifest.payload.manifest_id;
         let updated_manifest =
-            CheckpointManifestEnvelope::from_payload(writer_version, manifest.payload)
+            NamespaceManifestEnvelope::from_payload(writer_version, manifest.payload)
                 .expect("updated manifest");
         let manifest_bytes =
-            encode_checkpoint_manifest_json(&updated_manifest).expect("encode manifest");
+            encode_namespace_manifest_json(&updated_manifest).expect("encode manifest");
         store
             .put_overwrite(&manifest_key, &manifest_bytes)
             .expect("overwrite manifest");
 
-        match load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        ) {
-            Err(CheckpointLoadError::SegmentKeyMismatch { .. }) => {}
+        match load_verified_manifest_materialization(&store, &namespace_id, manifest_id) {
+            Err(ManifestLoadError::SegmentKeyMismatch { .. }) => {}
             other => panic!("expected segment key mismatch, got {other:?}"),
         }
     }
 
     #[test]
-    fn checkpoint_base_run_tables_have_sorted_segment_coverage() {
+    fn manifest_base_run_tables_have_sorted_segment_coverage() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2882,53 +3016,39 @@ mod tests {
             ..MetadataLsmPolicy::default()
         };
 
-        let checkpoint = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-            .expect("checkpoint");
-        let materialized = load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        )
-        .expect("load checkpoint");
+        let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("manifest");
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .expect("load manifest");
 
-        let revisions = materialized
-            .manifest
-            .payload
-            .runs
-            .iter()
-            .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-            .expect("base run")
+        let base = base_run(&materialized.manifest);
+        let revisions = base
             .tables
             .iter()
-            .find(|table| table.family == ApiCheckpointTableFamily::Revisions)
+            .find(|table| table.family == ApiMetadataTableFamily::Revisions)
             .expect("revision table");
         assert!(revisions.segments.len() >= 3);
         assert!(revisions.segments.iter().all(|descriptor| {
             matches!(
                 descriptor.segment_key,
-                CheckpointSegmentKey::RowKeyRange { .. }
+                MetadataSegmentKey::RowKeyRange { .. }
             )
         }));
 
-        let direntries = materialized
-            .manifest
-            .payload
-            .runs
-            .iter()
-            .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-            .expect("base run")
+        let direntries = base
             .tables
             .iter()
-            .find(|table| table.family == ApiCheckpointTableFamily::DirentryBinds)
+            .find(|table| table.family == ApiMetadataTableFamily::DirentryBinds)
             .expect("direntry table");
         assert!(direntries.segments.iter().all(|descriptor| {
             matches!(
                 descriptor.segment_key,
-                CheckpointSegmentKey::DirentryParent { .. }
+                MetadataSegmentKey::DirentryParent { .. }
             )
         }));
 
-        for table in &base_run(&materialized.manifest).tables {
+        for table in &base.tables {
             let mut previous_max_key: Option<&str> = None;
             for descriptor in &table.segments {
                 assert!(descriptor.min_key.as_str() <= descriptor.max_key.as_str());
@@ -2956,20 +3076,20 @@ mod tests {
             max_rows_per_segment: 1,
             ..MetadataLsmPolicy::default()
         };
-        let checkpoint = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-            .expect("checkpoint");
+        let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("manifest");
         let cache = super::MetadataTableCache::new(Default::default());
-        let tables = super::load_verified_checkpoint_tables_with_cache(
+        let tables = super::load_verified_manifest_tables_with_cache(
             &store,
             Some(&cache),
             &namespace_id,
-            checkpoint.checkpoint_seq,
+            manifest.manifest_id,
         )
         .expect("load tables");
 
         let before = cache.stats();
         let revisions = tables
-            .scan_prefix(ApiCheckpointTableFamily::Revisions, "revision-")
+            .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
             .expect("scan revisions");
         let after = cache.stats();
 
@@ -2994,23 +3114,23 @@ mod tests {
             None,
         )
         .expect("write file");
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
             enabled: true,
             max_blocks: 256,
             max_decoded_bytes: Some(1),
         });
-        let tables = super::load_verified_checkpoint_tables_with_cache(
+        let tables = super::load_verified_manifest_tables_with_cache(
             &store,
             Some(&cache),
             &namespace_id,
-            checkpoint.checkpoint_seq,
+            manifest.manifest_id,
         )
         .expect("load tables");
 
         let key = "inode-00000000000000000001";
         assert!(tables
-            .get(ApiCheckpointTableFamily::Inodes, key)
+            .get(ApiMetadataTableFamily::Inodes, key)
             .expect("get inode")
             .is_some());
 
@@ -3052,8 +3172,8 @@ mod tests {
         let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("first checkpoint");
         let first_materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, first.checkpoint_seq)
-                .expect("load first checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+                .expect("load first manifest");
         let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
 
         write_file_bytes(
@@ -3078,18 +3198,14 @@ mod tests {
         .expect("write hot compact");
         let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("compacted checkpoint");
-        let compacted_materialized = load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            compacted.checkpoint_seq,
-        )
-        .expect("load compacted checkpoint");
+        let compacted_materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
+                .expect("load compacted manifest");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
         let compacted_run_prefix = format!(
-            "namespaces/{}/compacted/checkpoints/{:020}/runs/",
-            namespace_id.as_str(),
-            compacted.checkpoint_seq.0
+            "namespaces/{}/compacted/metadata/tbl_",
+            namespace_id.as_str()
         );
 
         assert_eq!(
@@ -3097,7 +3213,10 @@ mod tests {
             compacted.checkpoint_seq
         );
         assert!(l0_runs(&compacted_materialized.manifest).is_empty());
-        assert_eq!(compacted_materialized.manifest.payload.runs.len(), 1);
+        assert_eq!(
+            runs_from_metadata_files(&compacted_materialized.manifest.payload).len(),
+            1
+        );
         assert!(!compacted_run_keys.is_empty());
         assert!(compacted_run_keys
             .iter()
@@ -3105,7 +3224,7 @@ mod tests {
         assert!(compacted_run_keys
             .iter()
             .all(|key| !first_run_keys.contains(key)));
-        assert_checkpoint_rows_have_unique_keys(&compacted_materialized.metadata_state);
+        assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
         assert!(metadata_states_equivalent(
             &basis_after.metadata_state,
             &compacted_materialized.metadata_state
@@ -3132,11 +3251,11 @@ mod tests {
         let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("first checkpoint");
         let first_materialized =
-            load_verified_checkpoint_materialization(&store, &namespace_id, first.checkpoint_seq)
-                .expect("load first checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+                .expect("load first manifest");
         let revision_keys_before = base_segment_object_keys_for_family(
             &first_materialized.manifest,
-            ApiCheckpointTableFamily::Revisions,
+            ApiMetadataTableFamily::Revisions,
         );
         assert!(revision_keys_before.len() >= 3);
 
@@ -3162,20 +3281,20 @@ mod tests {
         .expect("write compaction revision");
         let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("compacted checkpoint");
-        let compacted_materialized = load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            compacted.checkpoint_seq,
-        )
-        .expect("load compacted checkpoint");
+        let compacted_materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
+                .expect("load compacted manifest");
         let revision_keys_after = base_segment_object_keys_for_family(
             &compacted_materialized.manifest,
-            ApiCheckpointTableFamily::Revisions,
+            ApiMetadataTableFamily::Revisions,
         );
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
 
         assert!(l0_runs(&compacted_materialized.manifest).is_empty());
-        assert_eq!(compacted_materialized.manifest.payload.runs.len(), 1);
+        assert_eq!(
+            runs_from_metadata_files(&compacted_materialized.manifest.payload).len(),
+            1
+        );
         assert!(revision_keys_after
             .iter()
             .all(|key| !revision_keys_before.contains(key)));
@@ -3183,11 +3302,11 @@ mod tests {
             &basis_after.metadata_state,
             &compacted_materialized.metadata_state
         ));
-        assert_checkpoint_rows_have_unique_keys(&compacted_materialized.metadata_state);
+        assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
     }
 
     #[test]
-    fn checkpoint_writes_and_validates_direntry_child_bind_index() {
+    fn manifest_writes_and_validates_direntry_child_bind_index() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3203,25 +3322,16 @@ mod tests {
         )
         .expect("write hello");
 
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
-        let materialized = load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        )
-        .expect("load checkpoint");
-        let child_table = materialized
-            .manifest
-            .payload
-            .runs
-            .iter()
-            .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-            .expect("base run")
+        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .expect("load manifest");
+        let base = base_run(&materialized.manifest);
+        let child_table = base
             .tables
             .iter()
             .find(|table| {
-                table.family
-                    == loon_api::wire::checkpoint::CheckpointTableFamily::DirentryChildBinds
+                table.family == loon_api::wire::manifest::MetadataTableFamily::DirentryChildBinds
             })
             .expect("child bind table");
         let child_segment = child_table.segments.first().expect("child bind segment");
@@ -3231,12 +3341,8 @@ mod tests {
 
         let deleted_key = child_segment.object_key.clone();
         store.delete(&deleted_key).expect("delete child index");
-        match load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        ) {
-            Err(CheckpointLoadError::MissingSegment { object_key }) => {
+        match load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id) {
+            Err(ManifestLoadError::MissingSegment { object_key }) => {
                 assert_eq!(object_key, deleted_key);
             }
             other => panic!("expected missing child-bind segment, got {other:?}"),
@@ -3244,7 +3350,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_rejects_child_bind_index_that_diverges_from_canonical_binds() {
+    fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3269,73 +3375,65 @@ mod tests {
         )
         .expect("write other");
 
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
-        let materialized = load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        )
-        .expect("load checkpoint before corruption");
+        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .expect("load manifest before corruption");
         let mut manifest = materialized.manifest;
-        let mut child_index_rows = checkpoint_rows_for_family(
+        let mut child_index_rows = manifest_rows_for_family(
             &materialized.metadata_state,
-            ApiCheckpointTableFamily::DirentryChildBinds,
+            ApiMetadataTableFamily::DirentryChildBinds,
         );
         assert!(child_index_rows.len() >= 2);
         child_index_rows[0] = child_index_rows[1].clone();
-        child_index_rows.sort_by_key(|row| {
-            row.row_key_for_family(ApiCheckpointTableFamily::DirentryChildBinds)
-        });
+        child_index_rows
+            .sort_by_key(|row| row.row_key_for_family(ApiMetadataTableFamily::DirentryChildBinds));
 
-        let child_table = manifest
+        let child_descriptor = manifest
             .payload
-            .runs
+            .metadata_files
             .iter_mut()
-            .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
-            .expect("base run")
-            .tables
-            .iter_mut()
-            .find(|table| table.family == ApiCheckpointTableFamily::DirentryChildBinds)
-            .expect("child bind table");
-        let child_segment = child_table
-            .segments
-            .first_mut()
-            .expect("child bind segment");
-        rewrite_checkpoint_segment(
+            .find(|metadata_file| {
+                metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                    && metadata_file.family == ApiMetadataTableFamily::DirentryChildBinds
+            })
+            .expect("child bind metadata file");
+        rewrite_manifest_segment(
             &store,
             &namespace_id,
-            checkpoint.checkpoint_seq,
-            ApiCheckpointTableFamily::DirentryChildBinds,
-            child_segment,
+            manifest.payload.head_seq,
+            ApiMetadataTableFamily::DirentryChildBinds,
+            child_descriptor,
             child_index_rows,
             &context.writer_version,
         );
 
-        let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint.checkpoint_seq.0);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
         let writer_version = manifest.writer_version.clone();
+        let manifest_id = manifest.payload.manifest_id;
         let updated_manifest =
-            CheckpointManifestEnvelope::from_payload(writer_version, manifest.payload)
+            NamespaceManifestEnvelope::from_payload(writer_version, manifest.payload)
                 .expect("updated manifest");
         let manifest_bytes =
-            encode_checkpoint_manifest_json(&updated_manifest).expect("encode updated manifest");
+            encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
         store
             .put_overwrite(&manifest_key, &manifest_bytes)
             .expect("overwrite manifest");
 
-        assert_child_index_mismatch(load_verified_checkpoint_materialization(
+        assert_child_index_mismatch(load_verified_manifest_materialization(
             &store,
             &namespace_id,
-            checkpoint.checkpoint_seq,
+            manifest_id,
         ));
     }
 
-    fn rewrite_checkpoint_segment(
+    fn rewrite_manifest_segment(
         store: &LocalFsStore,
-        namespace_id: &NamespaceId,
-        checkpoint_seq: ChangeSeq,
-        family: ApiCheckpointTableFamily,
-        descriptor: &mut CheckpointSegmentDescriptor,
-        rows: Vec<CheckpointRow>,
+        _namespace_id: &NamespaceId,
+        run_seq: ChangeSeq,
+        family: ApiMetadataTableFamily,
+        descriptor: &mut MetadataFileRef,
+        rows: Vec<MetadataRow>,
         writer_version: &str,
     ) {
         let row_keys = rows
@@ -3344,16 +3442,18 @@ mod tests {
             .collect::<Vec<_>>();
         let min_key = row_keys.first().cloned().unwrap_or_default();
         let max_key = row_keys.last().cloned().unwrap_or_default();
-        let page = CheckpointPage {
+        let page = MetadataPage {
             page_index: 0,
             min_key: min_key.clone(),
             max_key: max_key.clone(),
             row_keys,
             rows,
         };
-        let payload = CheckpointSegmentPayload {
-            namespace_id: namespace_id.clone(),
-            segment_seq: checkpoint_seq,
+        let payload = MetadataSstPayload {
+            namespace_id: descriptor.owner_namespace_id.clone(),
+            table_id: descriptor.table_id.clone(),
+            run_seq,
+            level: descriptor.level,
             family,
             segment_index: descriptor.segment_index,
             segment_key: descriptor.segment_key.clone(),
@@ -3362,10 +3462,10 @@ mod tests {
             max_key,
             pages: vec![page],
         };
-        let envelope = CheckpointSegmentEnvelope::from_payload(writer_version, payload)
-            .expect("rewritten segment");
+        let envelope =
+            MetadataSstEnvelope::from_payload(writer_version, payload).expect("rewritten segment");
         let encoded =
-            encode_checkpoint_segment_envelope_zstd(&envelope).expect("encode rewritten segment");
+            encode_metadata_sst_envelope_zstd(&envelope).expect("encode rewritten segment");
         store
             .put_overwrite(&descriptor.object_key, &encoded)
             .expect("overwrite segment");
@@ -3379,9 +3479,9 @@ mod tests {
             .expect("rewritten page checksums");
     }
 
-    fn assert_child_index_mismatch<T>(result: Result<T, CheckpointLoadError>) {
+    fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
         match result {
-            Err(CheckpointLoadError::SegmentDescriptorMismatch { message, .. }) => {
+            Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
                 assert!(message.contains("direntry-child-binds index"));
             }
             Err(other) => panic!("expected child index mismatch, got {other:?}"),
@@ -3389,34 +3489,28 @@ mod tests {
         }
     }
 
-    fn base_run(manifest: &CheckpointManifestEnvelope) -> &CheckpointRunManifest {
-        manifest
-            .payload
-            .runs
-            .iter()
+    fn base_run(manifest: &NamespaceManifestEnvelope) -> MetadataRunManifest {
+        runs_from_metadata_files(&manifest.payload)
+            .into_iter()
             .find(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
             .expect("base run")
     }
 
-    fn l0_runs(manifest: &CheckpointManifestEnvelope) -> Vec<&CheckpointRunManifest> {
-        manifest
-            .payload
-            .runs
-            .iter()
+    fn l0_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
+        runs_from_metadata_files(&manifest.payload)
+            .into_iter()
             .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
             .collect()
     }
 
-    fn run_segment_object_keys(manifest: &CheckpointManifestEnvelope) -> Vec<String> {
-        manifest
-            .payload
-            .runs
-            .iter()
+    fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> {
+        runs_from_metadata_files(&manifest.payload)
+            .into_iter()
             .flat_map(|run| {
-                run.tables.iter().flat_map(|table| {
+                run.tables.into_iter().flat_map(|table| {
                     table
                         .segments
-                        .iter()
+                        .into_iter()
                         .map(|descriptor| descriptor.object_key.clone())
                 })
             })
@@ -3424,8 +3518,8 @@ mod tests {
     }
 
     fn base_segment_object_keys_for_family(
-        manifest: &CheckpointManifestEnvelope,
-        family: ApiCheckpointTableFamily,
+        manifest: &NamespaceManifestEnvelope,
+        family: ApiMetadataTableFamily,
     ) -> Vec<String> {
         base_run(manifest)
             .tables
@@ -3438,22 +3532,22 @@ mod tests {
             .collect()
     }
 
-    fn assert_checkpoint_rows_have_unique_keys(metadata_state: &MetadataState) {
+    fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
         for family in CHECKPOINT_TABLE_FAMILIES {
-            let rows = checkpoint_rows_for_family(metadata_state, family);
+            let rows = manifest_rows_for_family(metadata_state, family);
             let mut seen = BTreeSet::new();
             for row in rows {
                 let row_key = row.row_key_for_family(family);
                 assert!(
                     seen.insert(row_key.clone()),
-                    "duplicate checkpoint row key `{row_key}` in {family:?}"
+                    "duplicate metadata row key `{row_key}` in {family:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn checkpoint_l0_run_cap_collapses_back_to_base_checkpoint() {
+    fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3464,21 +3558,24 @@ mod tests {
             write_file_and_checkpoint(&store, &namespace_id, &context, index);
         }
 
-        let capped = load_verified_checkpoint_materialization(&store, &namespace_id, ChangeSeq(9))
-            .expect("load capped checkpoint");
+        let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(9))
+            .expect("load capped manifest");
         assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
         assert_eq!(l0_runs(&capped.manifest).len(), MAX_CHECKPOINT_L0_RUNS);
 
         let collapsed =
-            load_verified_checkpoint_materialization(&store, &namespace_id, ChangeSeq(10))
-                .expect("load collapsed checkpoint");
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(10))
+                .expect("load collapsed manifest");
         assert_eq!(collapsed.manifest.payload.base_seq, ChangeSeq(10));
         assert!(l0_runs(&collapsed.manifest).is_empty());
-        assert_eq!(collapsed.manifest.payload.runs.len(), 1);
+        assert_eq!(
+            runs_from_metadata_files(&collapsed.manifest.payload).len(),
+            1
+        );
     }
 
     #[test]
-    fn unreferenced_checkpoint_run_is_ignored_by_basis_load() {
+    fn unreferenced_manifest_run_is_ignored_by_basis_load() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3505,22 +3602,24 @@ mod tests {
         .expect("write second");
 
         let basis_before = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        let orphan_manifest = build_checkpoint_manifest_for_basis(
+        let orphan_manifest = build_namespace_manifest_for_basis(
             &store,
             &namespace_id,
             &basis_before,
             &context.writer_version,
             MetadataLsmPolicy::default(),
+            ManifestId(2),
+            None,
         )
-        .expect("build orphan checkpoint");
-        write_checkpoint_manifest(&store, &orphan_manifest).expect("write orphan checkpoint");
+        .expect("build orphan manifest");
+        write_namespace_manifest(&store, &orphan_manifest).expect("write orphan manifest");
 
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         assert_eq!(
-            basis_after.head.checkpoint_hint_seq,
-            Some(first.checkpoint_seq)
+            basis_after.head.current_manifest_id,
+            Some(first.manifest_id)
         );
-        assert_eq!(basis_after.head.seq, orphan_manifest.payload.checkpoint_seq);
+        assert_eq!(basis_after.head.seq, orphan_manifest.payload.head_seq);
         assert!(metadata_states_equivalent(
             &basis_before.metadata_state,
             &basis_after.metadata_state
@@ -3528,7 +3627,244 @@ mod tests {
     }
 
     #[test]
-    fn older_checkpoint_can_publish_after_head_advances() {
+    fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest");
+
+        write_namespace_manifest(&store, &manifest).expect("first manifest write");
+        write_namespace_manifest(&store, &manifest).expect("same manifest write is idempotent");
+    }
+
+    #[test]
+    fn write_namespace_manifest_conflict_different_payload_is_error() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest");
+        let mut conflicting_payload = manifest.payload.clone();
+        conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
+        let conflicting_manifest =
+            NamespaceManifestEnvelope::from_payload(&context.writer_version, conflicting_payload)
+                .expect("build conflicting manifest");
+
+        write_namespace_manifest(&store, &manifest).expect("first manifest write");
+        let error = write_namespace_manifest(&store, &conflicting_manifest)
+            .expect_err("different same-id manifest must conflict");
+
+        match error {
+            BasisLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+                manifest_id,
+                expected_payload_checksum_sha256,
+                actual_payload_checksum_sha256,
+                ..
+            }) => {
+                assert_eq!(manifest_id, ManifestId(1));
+                assert_eq!(
+                    expected_payload_checksum_sha256,
+                    conflicting_manifest.payload_checksum_sha256
+                );
+                assert_eq!(
+                    actual_payload_checksum_sha256,
+                    manifest.payload_checksum_sha256
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        let raw_store = LocalFsStore::new(temp_dir.path()).expect("raw store");
+        bootstrap_namespace(&raw_store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &raw_store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let basis = load_verified_namespace_basis(&raw_store, &namespace_id).expect("basis");
+        let conflicting = build_namespace_manifest_for_basis(
+            &raw_store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build conflicting manifest");
+        let mut conflicting_payload = conflicting.payload;
+        conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
+        let conflicting =
+            NamespaceManifestEnvelope::from_payload(&context.writer_version, conflicting_payload)
+                .expect("rewrap conflicting manifest");
+        let conflicting_bytes =
+            encode_namespace_manifest_json(&conflicting).expect("encode conflicting manifest");
+        let store = ConflictOnManifestCreateStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_manifest(namespace_id.as_str(), ManifestId(1)),
+            conflicting_bytes,
+        );
+
+        let checkpoint = create_checkpoint_with_policy(
+            &store,
+            &namespace_id,
+            &context,
+            MetadataLsmPolicy::default(),
+        )
+        .expect("create checkpoint should retry allocation");
+
+        assert_eq!(checkpoint.manifest_id, ManifestId(2));
+        let retried =
+            load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+                .expect("load retried manifest");
+        assert!(checkpoint_record_by_id(&retried.manifest, &checkpoint.checkpoint_id).is_some());
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        assert_eq!(basis_after.head.current_manifest_id, Some(ManifestId(2)));
+    }
+
+    #[test]
+    fn create_checkpoint_adds_record_when_current_manifest_exists_without_it() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest_without_checkpoint = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest");
+        let original_files = manifest_without_checkpoint.payload.metadata_files.clone();
+        write_namespace_manifest(&store, &manifest_without_checkpoint).expect("write manifest");
+        publish_current_manifest_id(
+            &store,
+            &namespace_id,
+            ManifestId(1),
+            "chk_00000000000000000000000000000099",
+            &context.writer_version,
+        )
+        .expect("publish manifest without checkpoint");
+
+        let checkpoint = create_checkpoint_with_policy(
+            &store,
+            &namespace_id,
+            &context,
+            MetadataLsmPolicy::default(),
+        )
+        .expect("create checkpoint");
+
+        assert_eq!(checkpoint.manifest_id, ManifestId(2));
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+                .expect("load new manifest");
+        assert_eq!(materialized.manifest.payload.metadata_files, original_files);
+        assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
+        assert_eq!(
+            materialized.manifest.payload.checkpoints[0].checkpoint_id,
+            checkpoint.checkpoint_id
+        );
+        assert_eq!(
+            materialized.manifest.payload.checkpoints[0].manifest_id,
+            checkpoint.manifest_id
+        );
+    }
+
+    #[test]
+    fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest without checkpoint");
+        assert!(manifest.payload.checkpoints.is_empty());
+        let mut newer_live_head = basis.head.clone();
+        newer_live_head.head_commit_id =
+            CommitId::parse("c_00000000000000000000000000000099").expect("commit id");
+
+        let reconstructed = manifest_basis_head(&newer_live_head, &manifest);
+
+        assert_eq!(
+            reconstructed.head_commit_id,
+            manifest.payload.head_commit_id
+        );
+        assert_ne!(reconstructed.head_commit_id, newer_live_head.head_commit_id);
+    }
+
+    #[test]
+    fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3545,37 +3881,37 @@ mod tests {
         .expect("write hello");
 
         let basis_before = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        let run_id = generate_checkpoint_run_id();
-        let tables = build_checkpoint_tables(
+        let tables = build_manifest_tables(
             &store,
             &namespace_id,
-            &run_id,
             basis_before.head.seq,
+            CHECKPOINT_BASE_RUN_LEVEL,
             &basis_before.metadata_state,
             &context.writer_version,
             MetadataLsmPolicy::default().max_rows_per_segment,
         )
-        .expect("build checkpoint tables");
-        let manifest = CheckpointManifestEnvelope::from_payload(
+        .expect("build metadata tables");
+        let manifest = NamespaceManifestEnvelope::from_payload(
             &context.writer_version,
-            CheckpointManifestPayload {
+            NamespaceManifestPayload {
                 namespace_id: namespace_id.clone(),
-                checkpoint_seq: basis_before.head.seq,
+                manifest_id: ManifestId(basis_before.head.seq.0),
+                head_seq: basis_before.head.seq,
+                head_commit_id: basis_before.head.head_commit_id.clone(),
                 base_seq: basis_before.head.seq,
                 active_fence_token: basis_before.head.active_fence_token,
                 next_inode_id: basis_before.head.next_inode_id,
+                name_policy: basis_before.head.name_policy,
                 retention_floor_seq: basis_before.head.retention_floor_seq,
+                initialized: true,
                 verified: true,
-                runs: vec![CheckpointRunManifest {
-                    run_id,
-                    run_seq: basis_before.head.seq,
-                    level: CHECKPOINT_BASE_RUN_LEVEL,
-                    tables,
-                }],
+                fork: None,
+                checkpoints: Vec::new(),
+                metadata_files: flatten_manifest_tables(tables),
             },
         )
         .expect("build manifest");
-        write_checkpoint_manifest(&store, &manifest).expect("write manifest");
+        write_namespace_manifest(&store, &manifest).expect("write manifest");
 
         write_file_bytes(
             &store,
@@ -3586,24 +3922,30 @@ mod tests {
             None,
         )
         .expect("write second");
-        let published = publish_checkpoint_hint_seq(
+        let later_checkpoint =
+            create_checkpoint(&store, &namespace_id, &context).expect("later checkpoint");
+        assert!(later_checkpoint.manifest_id > ManifestId(basis_before.head.seq.0));
+
+        let checkpoint_id = "chk_00000000000000000000000000000099";
+        let outcome = publish_current_manifest_id(
             &store,
             &namespace_id,
-            basis_before.head.seq,
+            ManifestId(basis_before.head.seq.0),
+            checkpoint_id,
             &context.writer_version,
         )
-        .expect("publish snapshot hint");
+        .expect("manifest publication check should classify current manifest");
 
-        assert_eq!(published.seq, ChangeSeq(2));
-        assert_eq!(published.checkpoint_hint_seq, Some(ChangeSeq(1)));
-
-        let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
-        assert_eq!(after.head.seq, ChangeSeq(2));
-        assert_eq!(after.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
+        assert_eq!(
+            outcome,
+            ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
+                current_manifest_id: later_checkpoint.manifest_id
+            }
+        );
     }
 
     #[test]
-    fn checkpoint_hint_cas_retry_exhaustion_is_stale_head() {
+    fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
@@ -3614,15 +3956,16 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
         store.fail_head_cas();
-        let error = publish_checkpoint_hint_seq(
+        let outcome = publish_current_manifest_id(
             &store,
             &namespace_id,
-            ChangeSeq(0),
+            ManifestId(0),
+            "chk_00000000000000000000000000000000",
             &context.writer_version,
         )
-        .expect_err("checkpoint hint publication should exhaust CAS retries");
+        .expect("current manifest publication should report CAS race");
 
-        assert_eq!(error.code(), ErrorCode::StaleHead);
+        assert_eq!(outcome, ManifestPublicationOutcome::HeadCasRaceLost);
     }
 
     fn test_context() -> MutationContext {
@@ -3632,6 +3975,10 @@ mod tests {
             now_ms: 1_000,
             lease_duration_ms: 60_000,
         }
+    }
+
+    fn manifest_id(seq: ChangeSeq) -> ManifestId {
+        ManifestId(seq.0)
     }
 
     fn write_file_and_checkpoint(

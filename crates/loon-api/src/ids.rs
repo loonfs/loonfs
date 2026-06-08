@@ -156,8 +156,16 @@ pub fn generate_wal_segment_id() -> String {
     generated_id("seg")
 }
 
-pub fn generate_checkpoint_run_id() -> String {
-    generated_id("run")
+pub fn generate_metadata_table_id() -> String {
+    generated_id("tbl")
+}
+
+pub fn generate_gc_pin_id() -> String {
+    generated_id("pin")
+}
+
+pub fn generate_checkpoint_id() -> String {
+    generated_id("chk")
 }
 
 pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
@@ -168,10 +176,18 @@ pub fn validate_wal_segment_id(value: impl AsRef<str>) -> Result<(), GeneratedId
     validate_generated_id("seg", value.as_ref())
 }
 
-pub fn validate_checkpoint_run_id(
+pub fn validate_metadata_table_id(
     value: impl AsRef<str>,
 ) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("run", value.as_ref())
+    validate_generated_id("tbl", value.as_ref())
+}
+
+pub fn validate_gc_pin_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
+    validate_generated_id("pin", value.as_ref())
+}
+
+pub fn validate_checkpoint_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
+    validate_generated_id("chk", value.as_ref())
 }
 
 pub fn validate_generated_id(
@@ -527,6 +543,15 @@ pub struct RevisionNo(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChangeSeq(pub u64);
 
+/// Monotonically increasing namespace manifest identity.
+///
+/// This is the durable file-set version identity for namespace manifests.
+/// Initial/fork manifests may be seeded from the current head sequence, but
+/// later manifest ids can advance for checkpoint metadata, compaction, or
+/// fork/index metadata without a new namespace commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ManifestId(pub u64);
+
 /// Fencing token for write-lease concurrency control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FenceToken(pub u64);
@@ -591,11 +616,24 @@ impl fmt::Display for InodeId {
     }
 }
 
+impl From<u64> for ManifestId {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for ManifestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "manifest-{}", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_checkpoint_run_id, generate_upload_id, generate_wal_segment_id,
-        validate_checkpoint_run_id, validate_upload_id, validate_wal_segment_id, CommitId,
+        generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
+        generate_wal_segment_id, validate_checkpoint_id, validate_gc_pin_id,
+        validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, CommitId,
         ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
@@ -714,27 +752,37 @@ mod tests {
     }
 
     #[test]
-    fn generated_upload_wal_segment_and_checkpoint_run_validators_reject_hyphenated_ids() {
+    fn generated_upload_wal_segment_table_and_pin_validators_reject_hyphenated_ids() {
         assert!(validate_upload_id("upl_00000000000000000000000000000001").is_ok());
         assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
-        assert!(validate_checkpoint_run_id("run_00000000000000000000000000000001").is_ok());
+        assert!(validate_metadata_table_id("tbl_00000000000000000000000000000001").is_ok());
+        assert!(validate_gc_pin_id("pin_00000000000000000000000000000001").is_ok());
+        assert!(validate_checkpoint_id("chk_00000000000000000000000000000001").is_ok());
         assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
         assert!(validate_wal_segment_id(["seg", "123"].join("-")).is_err());
-        assert!(validate_checkpoint_run_id(["run", "123"].join("-")).is_err());
+        assert!(validate_metadata_table_id(["tbl", "123"].join("-")).is_err());
+        assert!(validate_gc_pin_id(["pin", "123"].join("-")).is_err());
+        assert!(validate_checkpoint_id(["chk", "123"].join("-")).is_err());
     }
 
     #[test]
     fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
         let upload_id = generate_upload_id();
         let wal_segment_id = generate_wal_segment_id();
-        let checkpoint_run_id = generate_checkpoint_run_id();
+        let metadata_table_id = generate_metadata_table_id();
+        let gc_pin_id = generate_gc_pin_id();
+        let checkpoint_id = generate_checkpoint_id();
 
         assert_generated_id_shape(&upload_id, "upl");
         assert_generated_id_shape(&wal_segment_id, "seg");
-        assert_generated_id_shape(&checkpoint_run_id, "run");
+        assert_generated_id_shape(&metadata_table_id, "tbl");
+        assert_generated_id_shape(&gc_pin_id, "pin");
+        assert_generated_id_shape(&checkpoint_id, "chk");
         assert!(validate_upload_id(&upload_id).is_ok());
         assert!(validate_wal_segment_id(&wal_segment_id).is_ok());
-        assert!(validate_checkpoint_run_id(&checkpoint_run_id).is_ok());
+        assert!(validate_metadata_table_id(&metadata_table_id).is_ok());
+        assert!(validate_gc_pin_id(&gc_pin_id).is_ok());
+        assert!(validate_checkpoint_id(&checkpoint_id).is_ok());
     }
 
     #[test]

@@ -99,13 +99,13 @@ define_invariant_ids! {
     (WalTailSeqIsContiguous, "wal_tail_seq_is_contiguous"),
     (WalReplayAppliesMetadataRows, "wal_replay_applies_metadata_rows"),
 
-    // Namespace core checkpoint replay invariants.
-    (CheckpointManifestChecksumMatchesPayload, "checkpoint_manifest_checksum_matches_payload"),
-    (CheckpointManifestKeyMatchesSeq, "checkpoint_manifest_key_matches_seq"),
-    (CheckpointManifestMustBeVerified, "checkpoint_manifest_must_be_verified"),
-    (CheckpointReplayRequiresAllManifestSegments, "checkpoint_replay_requires_all_manifest_segments"),
-    (CheckpointSegmentDescriptorMatchesPayload, "checkpoint_segment_descriptor_matches_payload"),
-    (CheckpointSegmentRowsRestoreBasisMetadata, "checkpoint_segment_rows_restore_basis_metadata"),
+    // Namespace core manifest replay invariants.
+    (NamespaceManifestChecksumMatchesPayload, "namespace_manifest_checksum_matches_payload"),
+    (NamespaceManifestKeyMatchesId, "namespace_manifest_key_matches_id"),
+    (NamespaceManifestMustBeVerified, "namespace_manifest_must_be_verified"),
+    (ManifestReplayRequiresAllManifestSegments, "manifest_replay_requires_all_manifest_segments"),
+    (MetadataFileRefMatchesPayload, "manifest_segment_descriptor_matches_payload"),
+    (MetadataSstRowsRestoreBasisMetadata, "manifest_segment_rows_restore_basis_metadata"),
     (CheckpointPlusWalTailReproducesHead, "checkpoint_plus_wal_tail_reproduces_head"),
     (CheckpointPlusWalTailReproducesMetadata, "checkpoint_plus_wal_tail_reproduces_metadata"),
 
@@ -121,8 +121,8 @@ define_invariant_ids! {
 
     // Background work queue mutation invariants.
     (LostEnqueueRepairEnqueuesWhenHeadOutpacesProgress, "lost_enqueue_repair_enqueues_when_head_outpaces_progress"),
-    (CheckpointRepairDedupeKeyIsNamespaceScoped, "checkpoint_repair_dedupe_key_is_namespace_scoped"),
-    (CheckpointRepairClaimedJobGetsFollowUp, "checkpoint_repair_claimed_job_gets_follow_up"),
+    (ManifestRepairDedupeKeyIsNamespaceScoped, "manifest_repair_dedupe_key_is_namespace_scoped"),
+    (ManifestRepairClaimedJobGetsFollowUp, "manifest_repair_claimed_job_gets_follow_up"),
     (BrokerLeaseTakeoverIncrementsEpoch, "broker_lease_takeover_increments_epoch"),
     (ActiveBrokerLeaseRequiredForShardMutation, "active_broker_lease_required_for_shard_mutation"),
     (ClaimTimeoutAllowsSteal, "claim_timeout_allows_steal"),
@@ -131,8 +131,8 @@ define_invariant_ids! {
     (StolenJobCompletesOnce, "stolen_job_completes_once"),
 
     // Background work checkpoint head publish invariants.
-    (CheckpointPublishRequiresVerifiedCheckpoint, "checkpoint_publish_requires_verified_checkpoint"),
-    (CheckpointHintSeqAdvancesMonotonically, "checkpoint_hint_seq_advances_monotonically"),
+    (CheckpointPublishRequiresVerifiedManifest, "checkpoint_publish_requires_verified_manifest"),
+    (CurrentManifestIdAdvancesMonotonically, "current_manifest_id_advances_monotonically"),
     (RetentionFloorSeqAdvancesMonotonically, "retention_floor_seq_advances_monotonically"),
     (RetentionFloorSeqRequiresCheckpointCoverage, "retention_floor_seq_requires_checkpoint_coverage"),
     (RetentionFloorSeqRequiresDerivedProgress, "retention_floor_seq_requires_derived_progress"),
@@ -144,12 +144,12 @@ define_invariant_ids! {
     (WholeFileContentSizeMatchesRef, "whole_file_content_size_matches_ref"),
     (WholeFileContentDigestMatchesRef, "whole_file_content_digest_matches_ref"),
 
-    // Checkpoint object immutable invariants.
-    (CheckpointSegmentPayloadChecksumMatchesPayload, "checkpoint_segment_payload_checksum_matches_payload"),
-    (CheckpointSegmentKeyMatchesFamilyAndIndex, "checkpoint_segment_key_matches_family_and_index"),
-    (VerifiedCheckpointManifestRequiresDurableSegments, "verified_checkpoint_manifest_requires_durable_segments"),
-    (CheckpointManifestPreservesHeadSummary, "checkpoint_manifest_preserves_head_summary"),
-    (CheckpointManifestPreservesBasisMetadata, "checkpoint_manifest_preserves_basis_metadata"),
+    // Manifest object immutable invariants.
+    (MetadataSstPayloadChecksumMatchesPayload, "manifest_segment_payload_checksum_matches_payload"),
+    (MetadataSegmentKeyMatchesFamilyAndIndex, "manifest_segment_key_matches_family_and_index"),
+    (VerifiedNamespaceManifestRequiresDurableSegments, "verified_namespace_manifest_requires_durable_segments"),
+    (NamespaceManifestPreservesHeadSummary, "namespace_manifest_preserves_head_summary"),
+    (NamespaceManifestPreservesBasisMetadata, "namespace_manifest_preserves_basis_metadata"),
 
     // Client transfer download invariants.
     (DownloadTransferByteRangeAdvancesMonotonically, "download_transfer_byte_range_advances_monotonically"),

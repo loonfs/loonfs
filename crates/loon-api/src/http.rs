@@ -1,4 +1,6 @@
-use crate::{v0::RenameMode, ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, RevisionNo};
+use crate::{
+    v0::RenameMode, ChangeSeq, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,12 +147,16 @@ pub struct RestoreFileRevisionRequest {
 pub struct CreateCheckpointResponse {
     /// Namespace that was checkpointed.
     pub namespace_id: NamespaceId,
+    /// Durable checkpoint id.
+    pub checkpoint_id: String,
     /// Sequence covered by the checkpoint.
     pub checkpoint_seq: ChangeSeq,
-    /// Head's current checkpoint hint after the operation.
-    pub checkpoint_hint_seq: Option<ChangeSeq>,
-    /// Whether the head now points at this checkpoint.
-    pub checkpoint_hint_points_at_checkpoint: bool,
+    /// Manifest pinned by the checkpoint.
+    pub manifest_id: ManifestId,
+    /// Head's current manifest pointer after the operation.
+    pub current_manifest_id: Option<ManifestId>,
+    /// Latest checkpoint id recorded on the head after the operation.
+    pub latest_checkpoint_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

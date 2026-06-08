@@ -11,6 +11,7 @@ Each namespace has:
 - a descriptor that records its namespace id and content-store id
 - a current head
 - an ordered WAL of logical commits stored in immutable segments
+- immutable namespace manifests that describe recoverable file-set versions
 - zero or more checkpoints
 - a retention policy
 
@@ -188,7 +189,7 @@ Namespace deletion does not imply content-store deletion. In v0, content-store d
 
 ## 6. Forks
 
-Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, reserves the target namespace by writing its head first, copies checkpoint metadata under the target namespace's object keys, writes `control/fork.json` to record where the fork came from, writes the target lease, and writes the namespace descriptor last as the publish/list marker.
+Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, writes a source-side GC pin for the source checkpoint/manifest pair, then initializes the target namespace with a manifest that references immutable metadata files owned by the source namespace. The target descriptor is written last as the publish/list marker.
 
 The `control/fork.json` object is informational. It records the source namespace and fork sequence so operators can see where the namespace came from. Normal reads and recovery do not load it in v0. After fork, the clone must remain readable even if the source namespace metadata is deleted or corrupted. Source writes after the fork do not affect the clone, and clone writes do not affect the source.
 
@@ -221,19 +222,25 @@ Across namespaces, a move is modeled as a copy plus a delete from the source nam
 Readers reconstruct authoritative state from:
 
 1. the current head;
-2. the checkpoint named by the head, if any; and
-3. the visible WAL segment chain after that checkpoint through `head.seq`, replayed as logical commits in ascending `seq` order.
+2. the namespace manifest named by `head.current_manifest_id`, if any; and
+3. the visible WAL segment chain after that manifest through `head.seq`, replayed as logical commits in ascending `seq` order.
 
 The head summarizes the current visible boundary and replay hints, including at minimum:
 
 - `seq`
+- `head_commit_id`
 - `next_inode_id`
-- `checkpoint_hint_seq`
+- `current_manifest_id`
+- `latest_checkpoint_id`
 - `retention_floor_seq`
 - `wal_tip_segment_id` or an equivalent visible tail pointer
 
-A checkpoint is authoritative only when it has been verified against its durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
+`current_manifest_id` is the live read/recovery pointer. `latest_checkpoint_id`
+is an admin/provenance convenience pointer to a checkpoint record; readers do
+not use it as the file-set authority.
 
-A checkpoint manifest is the durable pin for one materialized sequence. It may reference one or more immutable metadata runs. Each run is internally segmented without overlapping segment key ranges; different runs may overlap and readers apply the normal metadata visibility rules across all referenced runs. Readers load the referenced runs, then replay only the visible WAL chain after the checkpoint sequence.
+A checkpoint is a durable pin to a namespace manifest version. It is authoritative only when its checkpoint record and referenced namespace manifest have been verified against durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
+
+A namespace manifest is the durable object for one namespace file-set version. It may reference one or more immutable metadata runs and may include checkpoint records that pin manifest versions for retention, fork, or stable read workflows. Each run is internally segmented without overlapping segment key ranges; different runs may overlap and readers apply the normal metadata visibility rules across all referenced runs. Readers load the referenced runs, then replay only the visible WAL chain after the manifest's `head_seq`.
 
 The WAL preserves ordered history even when multiple logical commits are stored in one segment. Each logical commit records semantic results plus normalized metadata deltas such as inode creation, direntry bind/unbind, file revision append, and subtree tombstone rows. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.

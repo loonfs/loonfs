@@ -1,10 +1,11 @@
 mod provider_env;
 
+use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    checkpoint_manifest, checkpoint_run_table, content_blob, content_store_descriptor,
-    derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
-    wal_segment, CheckpointTableFamily, DerivedWorkClass,
+    content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
+    namespace_head, namespace_lease, namespace_manifest, queue_shard, wal_segment,
+    DerivedWorkClass,
 };
 use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
@@ -149,46 +150,28 @@ fn key_builders_cover_locked_object_families() {
         "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
-        wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001"),
-        "namespaces/ns-1/wal/00000000000000000420-00000000000000000420-seg_00000000000000000000000000000001.cbor.zst"
+        wal_segment("ns-1", "seg_00000000000000000000000000000001"),
+        "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
     );
     assert_eq!(
-        checkpoint_manifest("ns-1", 420),
-        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/manifest.json"
+        namespace_manifest("ns-1", ManifestId(420)),
+        "namespaces/ns-1/manifest/00000000000000000420.manifest"
     );
     assert_eq!(
-        checkpoint_run_table(
-            "ns-1",
-            420,
-            "run_00000000000000000000000000000001",
-            CheckpointTableFamily::Inodes,
-            3
-        ),
-        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/inodes/00003.sst.zst"
+        metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
+        "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
     );
     assert_eq!(
-        checkpoint_run_table(
-            "ns-1",
-            420,
-            "run_00000000000000000000000000000001",
-            CheckpointTableFamily::DirentryChildBinds,
-            4
-        ),
-        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/direntry-child-binds/00004.sst.zst"
+        metadata_sst("source-ns", "tbl_00000000000000000000000000000002"),
+        "namespaces/source-ns/compacted/metadata/tbl_00000000000000000000000000000002.sst"
     );
     assert_eq!(
-        checkpoint_run_table(
-            "ns-1",
-            420,
-            "run_00000000000000000000000000000001",
-            CheckpointTableFamily::CommitReceipts,
-            0
-        ),
-        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/commit-receipts/00000.sst.zst"
+        metadata_sst("ns-1", "tbl_ffffffffffffffffffffffffffffffff"),
+        "namespaces/ns-1/compacted/metadata/tbl_ffffffffffffffffffffffffffffffff.sst"
     );
     assert_eq!(
-        derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),
-        "namespaces/ns-1/derived/checkpoint-builder/progress.json"
+        derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
+        "namespaces/ns-1/derived/manifest-builder/progress.json"
     );
     assert_eq!(queue_shard(12), "queue/shards/00012.json");
 }
@@ -429,7 +412,7 @@ fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
 }
 
 fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
-    let key = derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder);
+    let key = derived_progress("ns-1", DerivedWorkClass::ManifestBuilder);
     let _ = store.delete(&key);
 
     store
@@ -451,7 +434,7 @@ fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
 
 fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
-        derived_progress("ns-sort", DerivedWorkClass::CheckpointBuilder),
+        derived_progress("ns-sort", DerivedWorkClass::ManifestBuilder),
         namespace_head("ns-sort"),
         namespace_lease("ns-sort"),
     ];
@@ -482,7 +465,7 @@ fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
 }
 
 fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
-    let key = wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001");
+    let key = wal_segment("ns-1", "seg_00000000000000000000000000000001");
     let _ = store.delete(&key);
 
     store

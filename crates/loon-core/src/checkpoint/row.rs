@@ -1,34 +1,33 @@
 use super::CHECKPOINT_TABLE_FAMILIES;
 use crate::metadata::MetadataState;
-use loon_api::wire::checkpoint::{CheckpointRow, CheckpointTableFamily};
+use loon_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loon_api::ChangeSeq;
-use loon_objectstore::keys::CheckpointTableFamily as ObjectStoreCheckpointTableFamily;
 
 pub(super) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
     CHECKPOINT_TABLE_FAMILIES.into_iter().all(|family| {
-        checkpoint_rows_for_family(left, family) == checkpoint_rows_for_family(right, family)
+        manifest_rows_for_family(left, family) == manifest_rows_for_family(right, family)
     })
 }
 
-pub(super) fn checkpoint_rows_for_family(
+pub(super) fn manifest_rows_for_family(
     metadata_state: &MetadataState,
-    family: CheckpointTableFamily,
-) -> Vec<CheckpointRow> {
+    family: MetadataTableFamily,
+) -> Vec<MetadataRow> {
     let mut rows = match family {
-        CheckpointTableFamily::Inodes => metadata_state
+        MetadataTableFamily::Inodes => metadata_state
             .inodes()
             .iter()
-            .map(|inode| CheckpointRow::Inode {
+            .map(|inode| MetadataRow::Inode {
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind.clone(),
                 created_seq: inode.created_seq,
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::DirentryBinds | CheckpointTableFamily::DirentryChildBinds => {
+        MetadataTableFamily::DirentryBinds | MetadataTableFamily::DirentryChildBinds => {
             metadata_state
                 .direntry_binds()
                 .iter()
-                .map(|direntry| CheckpointRow::DirentryBind {
+                .map(|direntry| MetadataRow::DirentryBind {
                     parent_inode_id: direntry.parent_inode_id,
                     name_key: direntry.name_key.clone(),
                     display_name: direntry.display_name.clone(),
@@ -38,10 +37,10 @@ pub(super) fn checkpoint_rows_for_family(
                 })
                 .collect::<Vec<_>>()
         }
-        CheckpointTableFamily::DirentryUnbinds => metadata_state
+        MetadataTableFamily::DirentryUnbinds => metadata_state
             .direntry_unbinds()
             .iter()
-            .map(|unbind| CheckpointRow::DirentryUnbind {
+            .map(|unbind| MetadataRow::DirentryUnbind {
                 parent_inode_id: unbind.parent_inode_id,
                 name_key: unbind.name_key.clone(),
                 child_inode_id: unbind.child_inode_id,
@@ -51,10 +50,10 @@ pub(super) fn checkpoint_rows_for_family(
                 unbind_delta_index: unbind.unbind_delta_index,
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::Revisions => metadata_state
+        MetadataTableFamily::Revisions => metadata_state
             .revisions()
             .iter()
-            .map(|revision| CheckpointRow::Revision {
+            .map(|revision| MetadataRow::Revision {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
@@ -62,19 +61,19 @@ pub(super) fn checkpoint_rows_for_family(
                 content_ref: revision.content_ref.clone(),
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::Tombstones => metadata_state
+        MetadataTableFamily::Tombstones => metadata_state
             .subtree_tombstones()
             .iter()
-            .map(|tombstone| CheckpointRow::Tombstone {
+            .map(|tombstone| MetadataRow::Tombstone {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::CommitReceipts => metadata_state
+        MetadataTableFamily::CommitReceipts => metadata_state
             .commit_receipts()
             .iter()
-            .map(|record| CheckpointRow::CommitReceipt {
+            .map(|record| MetadataRow::CommitReceipt {
                 commit_id: record.commit_id.clone(),
                 semantic_commit_fingerprint_sha256: record
                     .semantic_commit_fingerprint_sha256
@@ -88,85 +87,63 @@ pub(super) fn checkpoint_rows_for_family(
     rows
 }
 
-pub(super) fn checkpoint_rows_for_family_after_seq(
+pub(super) fn manifest_rows_for_family_after_seq(
     metadata_state: &MetadataState,
-    family: CheckpointTableFamily,
+    family: MetadataTableFamily,
     after_seq: ChangeSeq,
-) -> Vec<CheckpointRow> {
-    checkpoint_rows_for_family(metadata_state, family)
+) -> Vec<MetadataRow> {
+    manifest_rows_for_family(metadata_state, family)
         .into_iter()
-        .filter(|row| checkpoint_row_commit_seq(row) > after_seq)
+        .filter(|row| manifest_row_commit_seq(row) > after_seq)
         .collect()
 }
 
-pub(super) fn checkpoint_row_commit_seq(row: &CheckpointRow) -> ChangeSeq {
+pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
     match row {
-        CheckpointRow::Inode { created_seq, .. } => *created_seq,
-        CheckpointRow::DirentryBind { bind_seq, .. } => *bind_seq,
-        CheckpointRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq,
-        CheckpointRow::Revision { committed_seq, .. } => *committed_seq,
-        CheckpointRow::Tombstone { tombstone_seq, .. } => *tombstone_seq,
-        CheckpointRow::CommitReceipt { committed_seq, .. } => *committed_seq,
+        MetadataRow::Inode { created_seq, .. } => *created_seq,
+        MetadataRow::DirentryBind { bind_seq, .. } => *bind_seq,
+        MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq,
+        MetadataRow::Revision { committed_seq, .. } => *committed_seq,
+        MetadataRow::Tombstone { tombstone_seq, .. } => *tombstone_seq,
+        MetadataRow::CommitReceipt { committed_seq, .. } => *committed_seq,
     }
 }
 
-pub(super) fn checkpoint_table_family(
-    family: CheckpointTableFamily,
-) -> ObjectStoreCheckpointTableFamily {
-    match family {
-        CheckpointTableFamily::Inodes => ObjectStoreCheckpointTableFamily::Inodes,
-        CheckpointTableFamily::DirentryBinds => ObjectStoreCheckpointTableFamily::DirentryBinds,
-        CheckpointTableFamily::DirentryChildBinds => {
-            ObjectStoreCheckpointTableFamily::DirentryChildBinds
-        }
-        CheckpointTableFamily::DirentryUnbinds => ObjectStoreCheckpointTableFamily::DirentryUnbinds,
-        CheckpointTableFamily::Revisions => ObjectStoreCheckpointTableFamily::Revisions,
-        CheckpointTableFamily::Tombstones => ObjectStoreCheckpointTableFamily::Tombstones,
-        CheckpointTableFamily::CommitReceipts => ObjectStoreCheckpointTableFamily::CommitReceipts,
-    }
-}
-
-pub(super) fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
+pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
     match row {
-        CheckpointRow::Inode { .. } => "inode",
-        CheckpointRow::DirentryBind { .. } => "direntry_bind",
-        CheckpointRow::DirentryUnbind { .. } => "direntry_unbind",
-        CheckpointRow::Revision { .. } => "revision",
-        CheckpointRow::Tombstone { .. } => "tombstone",
-        CheckpointRow::CommitReceipt { .. } => "commit_receipt",
+        MetadataRow::Inode { .. } => "inode",
+        MetadataRow::DirentryBind { .. } => "direntry_bind",
+        MetadataRow::DirentryUnbind { .. } => "direntry_unbind",
+        MetadataRow::Revision { .. } => "revision",
+        MetadataRow::Tombstone { .. } => "tombstone",
+        MetadataRow::CommitReceipt { .. } => "commit_receipt",
     }
 }
 
-pub(super) fn checkpoint_row_matches_family(
-    row: &CheckpointRow,
-    family: CheckpointTableFamily,
-) -> bool {
+pub(super) fn manifest_row_matches_family(row: &MetadataRow, family: MetadataTableFamily) -> bool {
     matches!(
         (family, row),
-        (CheckpointTableFamily::Inodes, CheckpointRow::Inode { .. })
+        (MetadataTableFamily::Inodes, MetadataRow::Inode { .. })
             | (
-                CheckpointTableFamily::DirentryBinds,
-                CheckpointRow::DirentryBind { .. }
+                MetadataTableFamily::DirentryBinds,
+                MetadataRow::DirentryBind { .. }
             )
             | (
-                CheckpointTableFamily::DirentryChildBinds,
-                CheckpointRow::DirentryBind { .. }
+                MetadataTableFamily::DirentryChildBinds,
+                MetadataRow::DirentryBind { .. }
             )
             | (
-                CheckpointTableFamily::DirentryUnbinds,
-                CheckpointRow::DirentryUnbind { .. }
+                MetadataTableFamily::DirentryUnbinds,
+                MetadataRow::DirentryUnbind { .. }
+            )
+            | (MetadataTableFamily::Revisions, MetadataRow::Revision { .. })
+            | (
+                MetadataTableFamily::Tombstones,
+                MetadataRow::Tombstone { .. }
             )
             | (
-                CheckpointTableFamily::Revisions,
-                CheckpointRow::Revision { .. }
-            )
-            | (
-                CheckpointTableFamily::Tombstones,
-                CheckpointRow::Tombstone { .. }
-            )
-            | (
-                CheckpointTableFamily::CommitReceipts,
-                CheckpointRow::CommitReceipt { .. }
+                MetadataTableFamily::CommitReceipts,
+                MetadataRow::CommitReceipt { .. }
             )
     )
 }

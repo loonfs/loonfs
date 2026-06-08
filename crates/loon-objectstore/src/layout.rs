@@ -1,5 +1,6 @@
-use crate::keys::{CheckpointTableFamily, DerivedWorkClass};
+use crate::keys::DerivedWorkClass;
 use crate::ObjectStoreError;
+use loon_api::ManifestId;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ObjectLayout;
@@ -16,8 +17,6 @@ pub enum DurableObjectFamily {
     WalSegment,
     NamespaceCompactions,
     CompactedMetadataSst,
-    CheckpointManifest,
-    CheckpointRunTable,
     CompactedIndexSst,
     IndexManifest,
     IndexGcBoundary,
@@ -72,8 +71,6 @@ typed_key!(ConflictArtifactKey);
 typed_key!(UploadSessionKey);
 typed_key!(NamespaceManifestKey);
 typed_key!(NamespaceCompactionsKey);
-typed_key!(CheckpointManifestKey);
-typed_key!(CheckpointRunTableKey);
 typed_key!(CompactedMetadataSstKey);
 typed_key!(CompactedIndexSstKey);
 typed_key!(IndexManifestKey);
@@ -87,8 +84,6 @@ typed_key!(QueueShardKey);
 pub enum NamespaceGcBoundaryKind {
     Manifest,
     Compactions,
-    Wal,
-    Compacted,
 }
 
 impl NamespaceGcBoundaryKind {
@@ -96,8 +91,6 @@ impl NamespaceGcBoundaryKind {
         match self {
             Self::Manifest => "manifest",
             Self::Compactions => "compactions",
-            Self::Wal => "wal",
-            Self::Compacted => "compacted",
         }
     }
 }
@@ -159,15 +152,9 @@ impl ObjectLayout {
         )))
     }
 
-    pub fn wal_segment(
-        &self,
-        namespace: &str,
-        start_seq: u64,
-        end_seq: u64,
-        segment_id: &str,
-    ) -> WalSegmentKey {
+    pub fn wal_segment(&self, namespace: &str, wal_file_id: &str) -> WalSegmentKey {
         WalSegmentKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/{start_seq:020}-{end_seq:020}-{segment_id}.cbor.zst"
+            "namespaces/{namespace}/wal/{wal_file_id}.wal.zst"
         )))
     }
 
@@ -211,9 +198,14 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    pub fn namespace_manifest(&self, namespace: &str, manifest_id: u64) -> NamespaceManifestKey {
+    pub fn namespace_manifest(
+        &self,
+        namespace: &str,
+        manifest_id: ManifestId,
+    ) -> NamespaceManifestKey {
         NamespaceManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/manifest/{manifest_id:020}.manifest"
+            "namespaces/{namespace}/manifest/{:020}.manifest",
+            manifest_id.0
         )))
     }
 
@@ -227,23 +219,9 @@ impl ObjectLayout {
         )))
     }
 
-    pub fn checkpoint_manifest(&self, namespace: &str, seq: u64) -> CheckpointManifestKey {
-        CheckpointManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compacted/checkpoints/{seq:020}/manifest.json"
-        )))
-    }
-
-    pub fn checkpoint_run_table(
-        &self,
-        namespace: &str,
-        run_seq: u64,
-        run_id: &str,
-        family: CheckpointTableFamily,
-        segment_index: u32,
-    ) -> CheckpointRunTableKey {
-        CheckpointRunTableKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compacted/checkpoints/{run_seq:020}/runs/{run_id}/tables/{}/{segment_index:05}.sst.zst",
-            family.as_str()
+    pub fn metadata_sst(&self, namespace: &str, table_id: &str) -> CompactedMetadataSstKey {
+        CompactedMetadataSstKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/compacted/metadata/{table_id}.sst"
         )))
     }
 
@@ -265,7 +243,7 @@ impl ObjectLayout {
         table_id: &str,
     ) -> CompactedIndexSstKey {
         CompactedIndexSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compacted/indexes/{family}/{instance}/{table_id}.sst"
+            "namespaces/{namespace}/indexes/{family}/{instance}/compacted/{table_id}.sst"
         )))
     }
 
@@ -274,10 +252,11 @@ impl ObjectLayout {
         namespace: &str,
         family: &str,
         instance: &str,
-        manifest_id: u64,
+        manifest_id: ManifestId,
     ) -> IndexManifestKey {
         IndexManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/{instance}/manifest/{manifest_id:020}.manifest"
+            "namespaces/{namespace}/indexes/{family}/{instance}/manifest/{:020}.manifest",
+            manifest_id.0
         )))
     }
 
@@ -358,7 +337,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "manifest", manifest] if manifest.ends_with(".manifest") => {
             parsed(DurableObjectFamily::NamespaceManifest, Some(namespace))
         }
-        ["namespaces", namespace, "wal", _] => {
+        ["namespaces", namespace, "wal", wal] if wal.ends_with(".wal.zst") => {
             parsed(DurableObjectFamily::WalSegment, Some(namespace))
         }
         ["namespaces", namespace, "compactions", compactions]
@@ -369,15 +348,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "compacted", "metadata", table] if table.ends_with(".sst") => {
             parsed(DurableObjectFamily::CompactedMetadataSst, Some(namespace))
         }
-        ["namespaces", namespace, "compacted", "checkpoints", _, "manifest.json"] => {
-            parsed(DurableObjectFamily::CheckpointManifest, Some(namespace))
-        }
-        ["namespaces", namespace, "compacted", "checkpoints", _, "runs", _, "tables", _, table]
-            if table.ends_with(".sst.zst") =>
-        {
-            parsed(DurableObjectFamily::CheckpointRunTable, Some(namespace))
-        }
-        ["namespaces", namespace, "compacted", "indexes", _, _, table]
+        ["namespaces", namespace, "indexes", _, _, "compacted", table]
             if table.ends_with(".sst") =>
         {
             parsed(DurableObjectFamily::CompactedIndexSst, Some(namespace))
@@ -391,13 +362,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             parsed(DurableObjectFamily::IndexGcBoundary, Some(namespace))
         }
         ["namespaces", namespace, "gc", boundary]
-            if matches!(
-                *boundary,
-                "manifest.boundary"
-                    | "compactions.boundary"
-                    | "wal.boundary"
-                    | "compacted.boundary"
-            ) =>
+            if matches!(*boundary, "manifest.boundary" | "compactions.boundary") =>
         {
             parsed(DurableObjectFamily::NamespaceGcBoundary, Some(namespace))
         }
@@ -443,7 +408,8 @@ mod tests {
         parse_object_key, sha256_hex_from_digest, DurableObjectFamily, NamespaceGcBoundaryKind,
         ObjectLayout,
     };
-    use crate::keys::{CheckpointTableFamily, DerivedWorkClass};
+    use crate::keys::DerivedWorkClass;
+    use loon_api::ManifestId;
 
     #[test]
     fn layout_golden_tree_matches_expected_paths() {
@@ -474,16 +440,16 @@ mod tests {
         );
         assert_eq!(
             layout
-                .wal_segment("ns-1", 420, 425, "seg_00000000000000000000000000000001")
+                .wal_segment("ns-1", "seg_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/wal/00000000000000000420-00000000000000000425-seg_00000000000000000000000000000001.cbor.zst"
+            "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
         );
         assert_eq!(
-            layout.checkpoint_manifest("ns-1", 400).as_str(),
-            "namespaces/ns-1/compacted/checkpoints/00000000000000000400/manifest.json"
+            layout.namespace_manifest("ns-1", ManifestId(400)).as_str(),
+            "namespaces/ns-1/manifest/00000000000000000400.manifest"
         );
         assert_eq!(
-            layout.namespace_manifest("ns-1", 42).as_str(),
+            layout.namespace_manifest("ns-1", ManifestId(42)).as_str(),
             "namespaces/ns-1/manifest/00000000000000000042.manifest"
         );
         assert_eq!(
@@ -492,15 +458,9 @@ mod tests {
         );
         assert_eq!(
             layout
-                .checkpoint_run_table(
-                    "ns-1",
-                    400,
-                    "run_00000000000000000000000000000001",
-                    CheckpointTableFamily::DirentryBinds,
-                    7
-                )
+                .metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/compacted/checkpoints/00000000000000000400/runs/run_00000000000000000000000000000001/tables/direntry-binds/00007.sst.zst"
+            "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
         );
         assert_eq!(
             layout
@@ -514,14 +474,14 @@ mod tests {
                     "ns-1",
                     "grep",
                     "default",
-                    "tbl_00000000000000000000000000000002"
+                    "tbl_00000000000000000000000000000002",
                 )
                 .as_str(),
-            "namespaces/ns-1/compacted/indexes/grep/default/tbl_00000000000000000000000000000002.sst"
+            "namespaces/ns-1/indexes/grep/default/compacted/tbl_00000000000000000000000000000002.sst"
         );
         assert_eq!(
             layout
-                .index_manifest("ns-1", "grep", "default", 17)
+                .index_manifest("ns-1", "grep", "default", ManifestId(17))
                 .as_str(),
             "namespaces/ns-1/indexes/grep/default/manifest/00000000000000000017.manifest"
         );
@@ -531,9 +491,9 @@ mod tests {
         );
         assert_eq!(
             layout
-                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Compacted)
+                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Manifest)
                 .as_str(),
-            "namespaces/ns-1/gc/compacted.boundary"
+            "namespaces/ns-1/gc/manifest.boundary"
         );
         assert_eq!(
             layout
@@ -543,9 +503,9 @@ mod tests {
         );
         assert_eq!(
             layout
-                .derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder)
+                .derived_progress("ns-1", DerivedWorkClass::ManifestBuilder)
                 .as_str(),
-            "namespaces/ns-1/derived/checkpoint-builder/progress.json"
+            "namespaces/ns-1/derived/manifest-builder/progress.json"
         );
         assert_eq!(
             layout
@@ -599,12 +559,14 @@ mod tests {
                 DurableObjectFamily::ConflictArtifact,
             ),
             (
-                layout.namespace_manifest("ns-1", 1).into_string(),
+                layout
+                    .namespace_manifest("ns-1", ManifestId(1))
+                    .into_string(),
                 DurableObjectFamily::NamespaceManifest,
             ),
             (
                 layout
-                    .wal_segment("ns-1", 1, 2, "seg_00000000000000000000000000000001")
+                    .wal_segment("ns-1", "seg_00000000000000000000000000000001")
                     .into_string(),
                 DurableObjectFamily::WalSegment,
             ),
@@ -619,22 +581,6 @@ mod tests {
                 DurableObjectFamily::CompactedMetadataSst,
             ),
             (
-                layout.checkpoint_manifest("ns-1", 1).into_string(),
-                DurableObjectFamily::CheckpointManifest,
-            ),
-            (
-                layout
-                    .checkpoint_run_table(
-                        "ns-1",
-                        1,
-                        "run_00000000000000000000000000000001",
-                        CheckpointTableFamily::Inodes,
-                        0,
-                    )
-                    .into_string(),
-                DurableObjectFamily::CheckpointRunTable,
-            ),
-            (
                 layout
                     .compacted_index_sst("ns-1", "grep", "default", "tbl_abc")
                     .into_string(),
@@ -642,7 +588,7 @@ mod tests {
             ),
             (
                 layout
-                    .index_manifest("ns-1", "grep", "default", 1)
+                    .index_manifest("ns-1", "grep", "default", ManifestId(1))
                     .into_string(),
                 DurableObjectFamily::IndexManifest,
             ),
@@ -654,7 +600,7 @@ mod tests {
             ),
             (
                 layout
-                    .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Wal)
+                    .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Compactions)
                     .into_string(),
                 DurableObjectFamily::NamespaceGcBoundary,
             ),
@@ -666,7 +612,7 @@ mod tests {
             ),
             (
                 layout
-                    .derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder)
+                    .derived_progress("ns-1", DerivedWorkClass::ManifestBuilder)
                     .into_string(),
                 DurableObjectFamily::DerivedProgress,
             ),
@@ -677,6 +623,21 @@ mod tests {
             assert_eq!(parsed.family(), family);
             assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
         }
+    }
+
+    #[test]
+    fn parse_wal_segment_requires_current_wal_suffix() {
+        let parsed =
+            parse_object_key("namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst")
+                .expect("current WAL key parses");
+        assert_eq!(parsed.family(), DurableObjectFamily::WalSegment);
+        assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
+
+        assert!(
+            parse_object_key("namespaces/ns-1/wal/seg_00000000000000000000000000000001.sst")
+                .is_none()
+        );
+        assert!(parse_object_key("namespaces/ns-1/wal/random.tmp").is_none());
     }
 
     #[test]
