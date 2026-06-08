@@ -144,7 +144,7 @@ struct FsInner {
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
-    metadata_table_cache: MetadataTableCache,
+    metadata_table_cache: Arc<MetadataTableCache>,
     uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     cache_stats: RuntimeCacheStatsInner,
 }
@@ -1050,8 +1050,9 @@ impl FsBuilder {
 impl Fs {
     pub fn open(store: SharedObjectStore, config: FsConfig) -> Result<Self> {
         validate_config(&config)?;
-        let metadata_table_cache =
-            MetadataTableCache::new(config.runtime_cache.metadata_table_cache.clone());
+        let metadata_table_cache = Arc::new(MetadataTableCache::new(
+            config.runtime_cache.metadata_table_cache.clone(),
+        ));
         Ok(Self {
             inner: Arc::new(FsInner {
                 store,
@@ -1219,25 +1220,24 @@ impl Fs {
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
         if head.state.checkpoint_hint_seq.is_some() {
-            if let Some(entry) = engine.resolve_path_from_materialized_tables_at_head(
-                &head.state,
+            let entry = engine.resolve_path(
                 absolute_path,
-                Some(&self.inner.metadata_table_cache),
-                loon_core::ReadOptions::default(),
-            )? {
-                span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
-                self.inner
-                    .cache_stats
-                    .record_metadata_read_source(MetadataReadSource::MaterializedTables);
-                return Ok(entry);
-            }
+                loon_core::ReadOptions::materialized_tables_at_head(
+                    head.state.clone(),
+                    Some(Arc::clone(&self.inner.metadata_table_cache)),
+                ),
+            )?;
+            span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
+            self.inner
+                .cache_stats
+                .record_metadata_read_source(MetadataReadSource::MaterializedTables);
+            return Ok(entry);
         }
 
         let basis = self.basis_for_read_at_head(namespace_id, &head)?;
-        let entry = engine.resolve_path_from_basis(
-            &basis,
+        let entry = engine.resolve_path(
             absolute_path,
-            loon_core::ReadOptions::default(),
+            loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
         )?;
         self.inner
             .cache_stats
@@ -1253,24 +1253,23 @@ impl Fs {
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
         if head.state.checkpoint_hint_seq.is_some() {
-            if let Some(entries) = engine.list_path_from_materialized_tables_at_head(
-                &head.state,
+            let entries = engine.list_path(
                 absolute_path,
-                Some(&self.inner.metadata_table_cache),
-                loon_core::ReadOptions::default(),
-            )? {
-                self.inner
-                    .cache_stats
-                    .record_metadata_read_source(MetadataReadSource::MaterializedTables);
-                return Ok(entries);
-            }
+                loon_core::ReadOptions::materialized_tables_at_head(
+                    head.state.clone(),
+                    Some(Arc::clone(&self.inner.metadata_table_cache)),
+                ),
+            )?;
+            self.inner
+                .cache_stats
+                .record_metadata_read_source(MetadataReadSource::MaterializedTables);
+            return Ok(entries);
         }
 
         let basis = self.basis_for_read_at_head(namespace_id, &head)?;
-        let entries = engine.list_path_from_basis(
-            &basis,
+        let entries = engine.list_path(
             absolute_path,
-            loon_core::ReadOptions::default(),
+            loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
         )?;
         self.inner
             .cache_stats
@@ -1284,10 +1283,9 @@ impl Fs {
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
         let basis = self.basis_for_read(namespace_id)?;
-        Ok(self.namespace_engine(namespace_id).read_file_from_basis(
-            basis.as_ref(),
+        Ok(self.namespace_engine(namespace_id).read_file(
             absolute_path,
-            loon_core::ReadOptions::default(),
+            loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
         )?)
     }
 
@@ -1297,13 +1295,10 @@ impl Fs {
         absolute_path: &str,
     ) -> Result<ListFileRevisionsResponse> {
         let basis = self.basis_for_read(namespace_id)?;
-        Ok(self
-            .namespace_engine(namespace_id)
-            .list_file_revisions_from_basis(
-                basis.as_ref(),
-                absolute_path,
-                loon_core::ReadOptions::default(),
-            )?)
+        Ok(self.namespace_engine(namespace_id).list_file_revisions(
+            absolute_path,
+            loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+        )?)
     }
 
     pub fn list_file_revisions_for_inode(
@@ -1314,10 +1309,9 @@ impl Fs {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(self
             .namespace_engine(namespace_id)
-            .list_file_revisions_for_inode_from_basis(
-                basis.as_ref(),
+            .list_file_revisions_for_inode(
                 inode_id,
-                loon_core::ReadOptions::default(),
+                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )?)
     }
 
@@ -1328,14 +1322,11 @@ impl Fs {
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
         let basis = self.basis_for_read(namespace_id)?;
-        Ok(self
-            .namespace_engine(namespace_id)
-            .read_file_revision_from_basis(
-                basis.as_ref(),
-                absolute_path,
-                revision_no,
-                loon_core::ReadOptions::default(),
-            )?)
+        Ok(self.namespace_engine(namespace_id).read_file_revision(
+            absolute_path,
+            revision_no,
+            loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+        )?)
     }
 
     pub fn read_file_revision_bytes_for_inode(
@@ -1347,11 +1338,10 @@ impl Fs {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(self
             .namespace_engine(namespace_id)
-            .read_file_revision_for_inode_from_basis(
-                basis.as_ref(),
+            .read_file_revision_for_inode(
                 inode_id,
                 revision_no,
-                loon_core::ReadOptions::default(),
+                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )?)
     }
 

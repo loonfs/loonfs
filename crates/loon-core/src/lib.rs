@@ -55,5 +55,7 @@ pub use context::MutationContext;
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{Error, ErrorCode, ErrorKind, Result};
 pub use namespace::{list_namespaces, BootstrapNamespaceError};
-pub use options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
+pub use options::{
+    BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, ReadSource, WriteOptions,
+};
 pub use path::intent::PutFileBehavior;

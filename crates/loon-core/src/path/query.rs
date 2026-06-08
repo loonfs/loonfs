@@ -1,5 +1,5 @@
 use super::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
-use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
+use crate::basis::{BasisLoadError, VerifiedNamespaceBasis};
 use crate::checkpoint::{
     checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, CheckpointLoadError,
     MetadataTableCache, VerifiedCheckpointTables,
@@ -25,19 +25,6 @@ use loon_api::{
 };
 use loon_objectstore::ObjectStore;
 
-pub(crate) fn resolve_path<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<AuthoritativePathEntry, CoreError> {
-    if let Some(entry) = resolve_path_from_materialized_tables(store, namespace_id, absolute_path)?
-    {
-        return Ok(entry);
-    }
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    resolve_path_from_basis(&basis, absolute_path)
-}
-
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -61,18 +48,6 @@ pub(crate) fn resolve_path_from_basis(
         &basis.metadata_state,
         &resolved,
     )
-}
-
-pub(crate) fn list_path<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-    if let Some(entries) = list_path_from_materialized_tables(store, namespace_id, absolute_path)? {
-        return Ok(entries);
-    }
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    list_path_from_basis(&basis, absolute_path)
 }
 
 #[tracing::instrument(
@@ -135,17 +110,6 @@ pub(crate) fn list_path_from_basis(
         .collect()
 }
 
-pub(crate) fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<Option<AuthoritativePathEntry>, CoreError> {
-    let Some(view) = MaterializedLatestView::load(store, namespace_id)? else {
-        return Ok(None);
-    };
-    Ok(Some(view.resolve_path(absolute_path)?))
-}
-
 pub(crate) fn resolve_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -165,15 +129,15 @@ pub(crate) fn resolve_path_from_materialized_tables_at_head_with_cache<S: Object
     Ok(Some(view.resolve_path(absolute_path)?))
 }
 
-pub(crate) fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
+) -> Result<Option<AuthoritativePathEntry>, CoreError> {
     let Some(view) = MaterializedLatestView::load(store, namespace_id)? else {
         return Ok(None);
     };
-    Ok(Some(view.list_path(absolute_path)?))
+    Ok(Some(view.resolve_path(absolute_path)?))
 }
 
 pub(crate) fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
@@ -190,6 +154,17 @@ pub(crate) fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectSto
         table_cache,
     )?
     else {
+        return Ok(None);
+    };
+    Ok(Some(view.list_path(absolute_path)?))
+}
+
+pub(crate) fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
+    let Some(view) = MaterializedLatestView::load(store, namespace_id)? else {
         return Ok(None);
     };
     Ok(Some(view.list_path(absolute_path)?))
@@ -854,15 +829,6 @@ fn unbind_matches_binding(unbind: &DirentryUnbindRecord, direntry: &DirentryBind
         && unbind.bind_delta_index == direntry.bind_delta_index
 }
 
-pub(crate) fn read_file_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<AuthoritativeFileBytes, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    read_file_bytes_from_basis(store, &basis, absolute_path)
-}
-
 pub(crate) fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &VerifiedNamespaceBasis,
@@ -886,15 +852,6 @@ pub(crate) fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) fn list_file_revisions<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<ListFileRevisionsResponse, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    list_file_revisions_from_basis(&basis, absolute_path)
-}
-
 pub(crate) fn list_file_revisions_from_basis(
     basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
@@ -907,15 +864,6 @@ pub(crate) fn list_file_revisions_from_basis(
         });
     }
     list_file_revisions_for_inode_from_basis(basis, entry.inode_id)
-}
-
-pub(crate) fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    inode_id: InodeId,
-) -> Result<ListFileRevisionsResponse, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    list_file_revisions_for_inode_from_basis(&basis, inode_id)
 }
 
 pub(crate) fn list_file_revisions_for_inode_from_basis(
@@ -957,16 +905,6 @@ pub(crate) fn list_file_revisions_for_inode_from_basis(
     })
 }
 
-pub(crate) fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-    revision_no: RevisionNo,
-) -> Result<AuthoritativeFileBytes, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    read_file_revision_bytes_from_basis(store, &basis, absolute_path, revision_no)
-}
-
 pub(crate) fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &VerifiedNamespaceBasis,
@@ -989,16 +927,6 @@ pub(crate) fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
         entry,
         bytes: read.bytes,
     })
-}
-
-pub(crate) fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    inode_id: InodeId,
-    revision_no: RevisionNo,
-) -> Result<Vec<u8>, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    read_file_revision_bytes_for_inode_from_basis(store, &basis, inode_id, revision_no)
 }
 
 pub(crate) fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
