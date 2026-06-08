@@ -1,15 +1,14 @@
-use crate::basis::{
-    load_verified_namespace_basis, probe_namespace_head_etag, BasisLoadError,
-    NamespaceHeadEtagProbe, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
-};
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
-use crate::lease::acquire_or_renew_namespace_lease;
-use crate::loading::load_namespace_lease_control;
-use crate::path::intent::PathMutationIntent;
-use crate::path::planner::{
-    path_intent_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
+use crate::namespace::basis::{
+    load_verified_namespace_basis, probe_namespace_head_etag, BasisLoadError,
+    NamespaceHeadEtagProbe, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
+};
+use crate::namespace::control::load_namespace_lease_control;
+use crate::namespace::lease::acquire_or_renew_namespace_lease;
+use crate::path::write::{
+    path_intent_fingerprint_for_path_intent, PathMutationIntent, PathPlanner, PlannedPathMutation,
 };
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::wire::control::LeaseState;
@@ -405,8 +404,8 @@ pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::basis::NamespaceHeadEtagProbe;
     use crate::metadata::MetadataState;
+    use crate::namespace::basis::NamespaceHeadEtagProbe;
     use loon_api::wire::control::{HeadState, NamespaceDescriptorState};
     use loon_api::{ChangeSeq, ContentStoreId, FenceToken};
 

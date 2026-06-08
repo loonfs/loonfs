@@ -1,12 +1,12 @@
-use super::helpers::{
-    final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
-};
 use super::intent::{PathMutationIntent, PutFileBehavior};
-use super::tombstone::reject_tombstoned_path_ancestor;
-use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::commit::{PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
+use crate::path::helpers::{
+    final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
+};
+use crate::path::tombstone::reject_tombstoned_path_ancestor;
 use loon_api::wire::control::payload_checksum_sha256;
 use loon_api::wire::control::HeadState;
 use loon_api::wire::wal::WalDelta;
@@ -774,12 +774,12 @@ fn resolve_parent_directory(
 mod tests {
     use super::*;
     use crate::commit::core_commit_fingerprint_for_v0_request;
-    use crate::content::store_bytes_as_content;
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
     use crate::metadata::{DirentryBindRecord, InodeRecord};
-    use crate::namespace::lifecycle::bootstrap_namespace;
-    use crate::path::mutation::{delete_path, put_file_bytes};
+    use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::path::write::ops::{delete_path, put_file_bytes};
+    use crate::storage::content::store_bytes_as_content;
     use loon_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loon_api::RevisionNo;
     use loon_objectstore::fs::LocalFsStore;

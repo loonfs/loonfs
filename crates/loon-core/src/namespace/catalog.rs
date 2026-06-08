@@ -1,10 +1,12 @@
-use crate::loading::{
+use crate::error::CoreError;
+use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
 use loon_api::wire::control::NamespaceDescriptorState;
-use loon_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
+use loon_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError, NamespaceSummary};
 use loon_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -73,6 +75,33 @@ pub(crate) fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
     expected_namespace: &NamespaceId,
 ) -> Result<ContentStoreId, NamespaceCatalogLoadError> {
     Ok(load_namespace_catalog_entry(store, expected_namespace)?.content_store_id)
+}
+
+pub(crate) fn list_namespaces<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> Result<Vec<NamespaceSummary>, CoreError> {
+    let keys = store
+        .list_prefix("namespaces/")
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    let mut names = BTreeSet::new();
+    for key in keys {
+        let Some(rest) = key.strip_prefix("namespaces/") else {
+            continue;
+        };
+        let Some((namespace, leaf)) = rest.split_once('/') else {
+            continue;
+        };
+        if leaf != "descriptor.json" {
+            continue;
+        };
+        let namespace_id = NamespaceId::parse(namespace)?;
+        load_namespace_descriptor(store, &namespace_id)?;
+        names.insert(namespace_id);
+    }
+    Ok(names
+        .into_iter()
+        .map(|namespace_id| NamespaceSummary { namespace_id })
+        .collect())
 }
 
 pub(crate) fn namespace_initialization_state<S: ObjectStore + ?Sized>(

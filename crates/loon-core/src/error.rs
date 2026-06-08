@@ -1,10 +1,10 @@
-use crate::basis::BasisLoadError;
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
-use crate::content::{DurableContentValidationError, ImmutableObjectWriteError};
-use crate::lease::LeaseAcquireError;
-use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, VisiblePathError};
+use crate::namespace::basis::BasisLoadError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
+use crate::namespace::control::ControlObjectLoadError;
+use crate::namespace::lease::LeaseAcquireError;
+use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::wal::{WalBuildError, WalChainLoadError};
 use loon_api::{
     ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
