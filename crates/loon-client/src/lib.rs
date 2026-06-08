@@ -1,3 +1,10 @@
+//! Blocking HTTP client for a LoonFS server.
+//!
+//! Use this crate when your process should talk to a hosted LoonFS runtime
+//! instead of embedding the runtime directly. The client keeps paths simple:
+//! pass a [`NamespacePath`] for filesystem operations and use explicit commit
+//! helpers when you need retry control.
+
 #![forbid(unsafe_code)]
 
 use http::Uri;
@@ -22,12 +29,16 @@ use thiserror::Error;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Deserialize)]
+/// Client configuration loaded from TOML or built by the caller.
 pub struct ClientConfig {
+    /// Base URL for the LoonFS server.
     pub server_url: String,
+    /// Optional bearer token.
     pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
+/// Synchronous HTTP client for LoonFS.
 pub struct Client {
     base_url: String,
     auth_token: Option<String>,
@@ -35,23 +46,29 @@ pub struct Client {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of downloading a remote path to local storage.
 pub struct GetPathResult {
     pub destination: PathBuf,
     pub bytes_written: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of uploading a local path.
 pub struct PutPathResult {
     pub committed_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A path qualified by namespace.
 pub struct NamespacePath {
+    /// Namespace id as text.
     pub namespace: String,
+    /// Absolute path inside the namespace.
     pub absolute_path: String,
 }
 
 #[derive(Debug, Error)]
+/// Error returned by the blocking HTTP client.
 pub enum ClientError {
     #[error("failed to read config: {0}")]
     ConfigIo(String),
@@ -80,6 +97,7 @@ pub enum ClientError {
 }
 
 impl ClientConfig {
+    /// Loads and validates a client config from TOML.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ClientError> {
         let bytes =
             fs::read(path.as_ref()).map_err(|err| ClientError::ConfigIo(err.to_string()))?;
@@ -107,6 +125,7 @@ impl ClientConfig {
 }
 
 impl Client {
+    /// Creates a client from validated config.
     pub fn new(config: ClientConfig) -> Self {
         Self {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),

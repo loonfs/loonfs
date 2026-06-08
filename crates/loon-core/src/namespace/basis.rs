@@ -24,6 +24,10 @@ use std::mem::size_of;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Fully verified namespace view at one head.
+///
+/// A basis contains enough metadata to answer normal path reads and validate
+/// mutations for the head it was reconstructed from.
 pub struct VerifiedNamespaceBasis {
     pub namespace_descriptor: NamespaceDescriptorState,
     pub content_store_id: ContentStoreId,
@@ -34,12 +38,16 @@ pub struct VerifiedNamespaceBasis {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Approximate size of a verified basis.
+///
+/// Runtime caches use this as an eviction weight, not exact heap accounting.
 pub struct VerifiedNamespaceBasisWeight {
     pub rows: usize,
     pub decoded_bytes: usize,
 }
 
 impl VerifiedNamespaceBasis {
+    /// Returns the approximate cache weight for this basis.
     pub fn weight(&self) -> VerifiedNamespaceBasisWeight {
         VerifiedNamespaceBasisWeight {
             rows: self.row_count(),
@@ -47,10 +55,12 @@ impl VerifiedNamespaceBasis {
         }
     }
 
+    /// Returns the number of metadata rows in this basis.
     pub fn row_count(&self) -> usize {
         self.metadata_state.row_count()
     }
 
+    /// Returns an approximate decoded byte size for this basis.
     pub fn decoded_bytes(&self) -> usize {
         size_of::<Self>()
             + self.namespace_descriptor.namespace_id.as_str().len()
@@ -77,6 +87,7 @@ fn wal_tip_decoded_bytes(pointer: Option<&loon_api::wire::control::WalSegmentPoi
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Lightweight namespace head status.
 pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
@@ -86,11 +97,16 @@ pub struct NamespaceHeadSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Opaque ETag probe for the namespace head object.
+///
+/// This only proves that the durable head object identity still matches a
+/// previously reconstructed basis.
 pub struct NamespaceHeadEtagProbe {
     pub head_etag: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+/// Error while reconstructing a verified namespace basis.
 pub enum BasisLoadError {
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
@@ -130,6 +146,7 @@ impl From<NamespaceCatalogLoadError> for BasisLoadError {
     }
 }
 
+/// Reconstructs and verifies the current namespace basis.
 pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
@@ -153,6 +170,7 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     )
 }
 
+/// Reconstructs and verifies a namespace basis for an already-loaded head.
 pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,

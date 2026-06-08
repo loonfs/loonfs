@@ -23,6 +23,11 @@ use thiserror::Error;
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 #[derive(Debug)]
+/// A namespace-scoped core API.
+///
+/// `NamespaceEngine` owns an object store handle plus the writer identity used
+/// for mutations. It is the main entrypoint for direct reads, path writes,
+/// explicit commits, uploads, checkpoints, and retention work.
 pub struct NamespaceEngine<S> {
     store: S,
     namespace_id: NamespaceId,
@@ -35,6 +40,9 @@ pub struct NamespaceEngine<S> {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S> {
+    /// Starts an engine builder for the supplied object store.
+    ///
+    /// The builder requires a namespace id and writer id before it can build.
     pub fn builder(store: S) -> NamespaceEngineBuilder<S> {
         NamespaceEngineBuilder {
             store,
@@ -48,38 +56,49 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         }
     }
 
+    /// Returns the namespace this engine is bound to.
     pub fn namespace_id(&self) -> &NamespaceId {
         &self.namespace_id
     }
 
+    /// Returns the writer id used for leases and commit publication.
     pub fn writer_id(&self) -> &str {
         &self.writer_id
     }
 
+    /// Returns the writer version reported in mutation context.
     pub fn writer_version(&self) -> &str {
         &self.writer_version
     }
 
+    /// Returns the lease duration used by write operations.
     pub fn lease_duration_ms(&self) -> u64 {
         self.lease_duration_ms
     }
 
+    /// Returns the default read options configured on the builder.
     pub fn read_options(&self) -> &ReadOptions {
         &self.read_options
     }
 
+    /// Returns the default write options configured on the builder.
     pub fn write_options(&self) -> &WriteOptions {
         &self.write_options
     }
 
+    /// Returns the default explicit-commit options configured on the builder.
     pub fn commit_options(&self) -> &CommitOptions {
         &self.commit_options
     }
 
+    /// Consumes the engine and returns the underlying object store.
     pub fn into_store(self) -> S {
         self.store
     }
 
+    /// Creates the namespace if it does not already exist.
+    ///
+    /// Use this before normal reads and writes for a new namespace.
     pub fn bootstrap_namespace(
         &self,
         options: BootstrapOptions,
@@ -92,6 +111,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Creates a new namespace at the current head of this namespace.
+    ///
+    /// The fork shares immutable file bytes but gets its own metadata history.
     pub fn fork_namespace(
         &self,
         target: &NamespaceId,
@@ -105,10 +127,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Lists complete namespaces visible in the object store.
     pub fn list_namespaces(&self) -> CoreResult<Vec<NamespaceSummary>> {
         catalog::list_namespaces(&self.store)
     }
 
+    /// Resolves one absolute path to the authoritative entry at the current head.
     pub fn resolve_path(
         &self,
         path: impl AsRef<str>,
@@ -144,6 +168,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::path::query::resolve_path_from_basis(&basis, path)
     }
 
+    /// Lists the children of a directory path.
     pub fn list_path(
         &self,
         path: impl AsRef<str>,
@@ -179,6 +204,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::path::query::list_path_from_basis(&basis, path)
     }
 
+    /// Reads the current bytes for a file path.
+    ///
+    /// Content bytes are validated against the file's `content_ref` before they
+    /// are returned.
     pub fn read_file(
         &self,
         path: impl AsRef<str>,
@@ -188,6 +217,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path.as_ref())
     }
 
+    /// Lists retained revisions for the file currently visible at `path`.
     pub fn list_file_revisions(
         &self,
         path: impl AsRef<str>,
@@ -197,6 +227,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::path::query::list_file_revisions_from_basis(&basis, path.as_ref())
     }
 
+    /// Lists retained revisions for a file inode, independent of its current path.
     pub fn list_file_revisions_for_inode(
         &self,
         inode_id: InodeId,
@@ -206,6 +237,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::path::query::list_file_revisions_for_inode_from_basis(&basis, inode_id)
     }
 
+    /// Reads a retained revision for the file currently visible at `path`.
     pub fn read_file_revision(
         &self,
         path: impl AsRef<str>,
@@ -221,6 +253,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Reads a retained revision by stable inode id.
     pub fn read_file_revision_for_inode(
         &self,
         inode_id: InodeId,
@@ -236,6 +269,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Writes file bytes to a path.
+    ///
+    /// The bytes become durable content first. Metadata is published only after
+    /// that content is safe to reference.
     pub fn put_file(
         &self,
         path: impl AsRef<str>,
@@ -256,6 +293,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Publishes a file revision that points at an already-durable content ref.
+    ///
+    /// Use this when the caller staged content separately.
     pub fn put_file_content_ref(
         &self,
         path: impl AsRef<str>,
@@ -276,6 +316,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Creates a directory at an absolute path.
     pub fn create_dir(
         &self,
         path: impl AsRef<str>,
@@ -293,6 +334,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Deletes a file or directory path.
     pub fn delete_path(
         &self,
         path: impl AsRef<str>,
@@ -321,6 +363,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         }
     }
 
+    /// Moves a path within the same namespace.
     pub fn move_path(
         &self,
         source: impl AsRef<str>,
@@ -340,6 +383,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Copies a file path within the same namespace.
     pub fn copy_path(
         &self,
         source: impl AsRef<str>,
@@ -359,6 +403,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Restores a prior file revision by appending a new current revision.
     pub fn restore_file_revision(
         &self,
         path: impl AsRef<str>,
@@ -378,6 +423,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Submits one explicit semantic commit request.
+    ///
+    /// This is the lower-level surface used by clients that need their own
+    /// commit ids, preconditions, and operation lists.
     pub fn commit_operations(
         &self,
         request: CommitRequest,
@@ -391,6 +440,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Submits explicit semantic commit requests as one publication attempt.
     pub fn commit_operations_batch(
         &self,
         requests: Vec<CommitRequest>,
@@ -404,6 +454,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Publishes already-classified namespace mutation candidates.
+    ///
+    /// Server code uses this to batch path intents and explicit commits through
+    /// one namespace publisher.
     pub fn publish_namespace_mutations_batch(
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -416,14 +470,17 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Reads committed changes after `after_seq`.
     pub fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq)
     }
 
+    /// Starts a durable upload session for this namespace.
     pub fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
         crate::protocol::begin_upload(&self.store, &self.namespace_id, &self.mutation_context())
     }
 
+    /// Uploads whole-file content into an upload session.
     pub fn upload_content(
         &self,
         upload_id: &str,
@@ -438,6 +495,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Completes an upload session when the expected content ref matches.
     pub fn complete_upload(
         &self,
         upload_id: &str,
@@ -452,6 +510,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Writes or reuses a checkpoint for the current namespace head.
     pub fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
         crate::checkpoint::create_checkpoint(
             &self.store,
@@ -460,6 +519,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    /// Advances the retention floor when a verified checkpoint makes it safe.
     pub fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
         crate::checkpoint::advance_retention_floor(
             &self.store,
@@ -493,6 +553,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 }
 
 #[derive(Debug)]
+/// Builder for [`NamespaceEngine`].
+///
+/// The builder keeps construction explicit: choose a namespace, choose the
+/// writer identity, then build the engine.
 pub struct NamespaceEngineBuilder<S> {
     store: S,
     namespace_id: Option<NamespaceId>,
@@ -505,41 +569,49 @@ pub struct NamespaceEngineBuilder<S> {
 }
 
 impl<S: ObjectStore> NamespaceEngineBuilder<S> {
+    /// Sets the namespace this engine will operate on.
     pub fn namespace(mut self, namespace_id: NamespaceId) -> Self {
         self.namespace_id = Some(namespace_id);
         self
     }
 
+    /// Sets the writer identity used for leases and commits.
     pub fn writer(mut self, writer_id: impl Into<String>) -> Self {
         self.writer_id = Some(writer_id.into());
         self
     }
 
+    /// Sets a human-readable writer version.
     pub fn writer_version(mut self, writer_version: impl Into<String>) -> Self {
         self.writer_version = writer_version.into();
         self
     }
 
+    /// Sets how long this writer's namespace lease should remain valid.
     pub fn lease_duration_ms(mut self, lease_duration_ms: u64) -> Self {
         self.lease_duration_ms = lease_duration_ms;
         self
     }
 
+    /// Sets default read options stored on the engine.
     pub fn read_options(mut self, options: ReadOptions) -> Self {
         self.read_options = options;
         self
     }
 
+    /// Sets default write options stored on the engine.
     pub fn write_options(mut self, options: WriteOptions) -> Self {
         self.write_options = options;
         self
     }
 
+    /// Sets default explicit-commit options stored on the engine.
     pub fn commit_options(mut self, options: CommitOptions) -> Self {
         self.commit_options = options;
         self
     }
 
+    /// Builds the engine after required fields are present.
     pub fn build(self) -> Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
         let namespace_id = self
             .namespace_id
@@ -568,13 +640,18 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+/// Error returned when a [`NamespaceEngine`] cannot be built.
 pub enum NamespaceEngineBuildError {
+    /// A namespace id was not supplied.
     #[error("namespace is required")]
     MissingNamespace,
+    /// A writer id was not supplied.
     #[error("writer identity is required")]
     MissingWriter,
+    /// The writer id was empty or whitespace.
     #[error("writer identity must not be empty")]
     EmptyWriter,
+    /// The writer version was empty or whitespace.
     #[error("writer version must not be empty")]
     EmptyWriterVersion,
 }
