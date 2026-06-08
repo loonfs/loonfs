@@ -776,7 +776,7 @@ mod tests {
     use crate::commit::core_commit_fingerprint_for_v0_request;
     use crate::content::store_bytes_as_content;
     use crate::context::MutationContext;
-    use crate::error::CoreErrorKind;
+    use crate::error::ErrorCode;
     use crate::metadata::{DirentryBindRecord, InodeRecord};
     use crate::namespace::lifecycle::bootstrap_namespace;
     use crate::path::mutation::{delete_path, put_file_bytes};
@@ -1057,7 +1057,7 @@ mod tests {
         let error =
             binding_is_precondition(&view, &resolved).expect_err("invalid durable name key");
 
-        assert_eq!(error.kind(), CoreErrorKind::NamespaceCorrupt);
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
 
     #[test]
@@ -1146,6 +1146,6 @@ mod tests {
             )
             .expect_err("tombstoned ancestor");
 
-        assert_eq!(error.kind(), CoreErrorKind::TombstoneConflict);
+        assert_eq!(error.code(), ErrorCode::TombstoneConflict);
     }
 }

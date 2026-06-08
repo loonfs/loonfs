@@ -12,8 +12,31 @@ use loon_api::{
 };
 use thiserror::Error;
 
+pub type Error = CoreError;
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreErrorKind {
+pub enum ErrorKind {
+    /// Caller input is malformed or names an unsupported operation shape.
+    InvalidRequest,
+    /// The requested namespace, path, inode, revision, or upload session does not exist.
+    NotFound,
+    /// The caller attempted to create a resource that already exists.
+    AlreadyExists,
+    /// The request conflicts with current namespace state or another writer.
+    Conflict,
+    /// A caller-supplied precondition was false at validation time.
+    PreconditionFailed,
+    /// The operation is temporarily unavailable and may succeed later.
+    Unavailable,
+    /// Durable namespace, WAL, checkpoint, or content state is malformed.
+    DataCorruption,
+    /// LoonFS hit an internal invariant or implementation failure.
+    Internal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
     InvalidPath,
     InvalidNamespaceId,
     InvalidCommitId,
@@ -174,7 +197,11 @@ impl From<ImmutableObjectWriteError> for CoreError {
 }
 
 impl CoreError {
-    pub fn kind(&self) -> CoreErrorKind {
+    pub fn kind(&self) -> ErrorKind {
+        self.code().kind()
+    }
+
+    pub fn code(&self) -> ErrorCode {
         match self {
             CoreError::Basis(error) => classify_basis_load_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
@@ -184,81 +211,146 @@ impl CoreError {
             CoreError::WalBuild(_)
             | CoreError::MetadataApply(_)
             | CoreError::WalWrite(_)
-            | CoreError::Store(_) => CoreErrorKind::ServerError,
+            | CoreError::Store(_) => ErrorCode::ServerError,
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
-            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
-                CoreErrorKind::InvalidPath
-            }
-            CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
-            CoreError::InvalidCommitId(_) => CoreErrorKind::InvalidCommitId,
-            CoreError::InvalidUploadId(_) => CoreErrorKind::InvalidUploadId,
-            CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
-            CoreError::MissingRevision { .. } => CoreErrorKind::RevisionNotFound,
-            CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
-            CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
-            CoreError::CommitIdReuseConflict(_) => CoreErrorKind::CommitIdReuseConflict,
-            CoreError::CommitQueueFull => CoreErrorKind::CommitQueueFull,
-            CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
-            CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
-            CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
-            CoreError::UploadContentConflict { .. } => CoreErrorKind::UploadContentConflict,
-            CoreError::InvalidUploadContent(_) => CoreErrorKind::InvalidUploadContent,
-            CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
+            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => ErrorCode::InvalidPath,
+            CoreError::InvalidNamespaceId(_) => ErrorCode::InvalidNamespaceId,
+            CoreError::InvalidCommitId(_) => ErrorCode::InvalidCommitId,
+            CoreError::InvalidUploadId(_) => ErrorCode::InvalidUploadId,
+            CoreError::MissingPath(_) => ErrorCode::PathNotFound,
+            CoreError::MissingRevision { .. } => ErrorCode::RevisionNotFound,
+            CoreError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
+            CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
+            CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
+            CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
+            CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
+            CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
+            CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
+            CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
+            CoreError::InvalidUploadContent(_) => ErrorCode::InvalidUploadContent,
+            CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
-            | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
-            CoreError::DirectoryNotEmpty(_) => CoreErrorKind::DirectoryNotEmpty,
-            CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
-            CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
-            CoreError::NamespaceCorrupt(_) => CoreErrorKind::NamespaceCorrupt,
+            | CoreError::DestinationExists(_) => ErrorCode::PathConflict,
+            CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
+            CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
+            CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidPath,
+            CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
+        }
+    }
+
+    pub fn message(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl ErrorCode {
+    pub fn kind(self) -> ErrorKind {
+        match self {
+            ErrorCode::InvalidPath
+            | ErrorCode::InvalidNamespaceId
+            | ErrorCode::InvalidCommitId
+            | ErrorCode::InvalidUploadId
+            | ErrorCode::UnsupportedRenameMode
+            | ErrorCode::InvalidUploadContent => ErrorKind::InvalidRequest,
+            ErrorCode::NamespaceNotFound
+            | ErrorCode::PathNotFound
+            | ErrorCode::RevisionNotFound
+            | ErrorCode::UploadNotFound => ErrorKind::NotFound,
+            ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
+            ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
+            ErrorCode::CommitQueueFull | ErrorCode::CheckpointUnavailable => ErrorKind::Unavailable,
+            ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
+            ErrorCode::ServerError => ErrorKind::Internal,
+            ErrorCode::NamespacePartial
+            | ErrorCode::PathConflict
+            | ErrorCode::DirectoryNotEmpty
+            | ErrorCode::StaleHead
+            | ErrorCode::TombstoneConflict
+            | ErrorCode::LeaseConflict
+            | ErrorCode::WouldCycle
+            | ErrorCode::CommitIdReuseConflict
+            | ErrorCode::UploadAlreadyCompleted
+            | ErrorCode::UploadContentConflict
+            | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::InvalidPath => "invalid_path",
+            ErrorCode::InvalidNamespaceId => "invalid_namespace_id",
+            ErrorCode::InvalidCommitId => "invalid_commit_id",
+            ErrorCode::InvalidUploadId => "invalid_upload_id",
+            ErrorCode::NamespaceNotFound => "namespace_not_found",
+            ErrorCode::NamespaceExists => "namespace_exists",
+            ErrorCode::NamespacePartial => "namespace_partial",
+            ErrorCode::PathNotFound => "path_not_found",
+            ErrorCode::RevisionNotFound => "revision_not_found",
+            ErrorCode::PathConflict => "path_conflict",
+            ErrorCode::DirectoryNotEmpty => "directory_not_empty",
+            ErrorCode::StaleHead => "stale_head",
+            ErrorCode::StaleRevision => "stale_revision",
+            ErrorCode::TombstoneConflict => "tombstone_conflict",
+            ErrorCode::LeaseConflict => "lease_conflict",
+            ErrorCode::WouldCycle => "would_cycle",
+            ErrorCode::UnsupportedRenameMode => "unsupported_rename_mode",
+            ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
+            ErrorCode::CommitQueueFull => "commit_queue_full",
+            ErrorCode::CheckpointUnavailable => "checkpoint_unavailable",
+            ErrorCode::UploadNotFound => "upload_not_found",
+            ErrorCode::UploadAlreadyCompleted => "upload_already_completed",
+            ErrorCode::UploadContentConflict => "upload_content_conflict",
+            ErrorCode::InvalidUploadContent => "invalid_upload_content",
+            ErrorCode::RebootstrapRequired => "rebootstrap_required",
+            ErrorCode::NamespaceCorrupt => "namespace_corrupt",
+            ErrorCode::ServerError => "server_error",
         }
     }
 }
 
-fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
+fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
-        ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
+        ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
         ControlObjectLoadError::MissingObject { .. }
-        | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
+        | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceNotFound,
         ControlObjectLoadError::KindMismatch { .. }
         | ControlObjectLoadError::NamespaceMismatch { .. }
         | ControlObjectLoadError::ContentStoreMismatch { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
-        | ControlObjectLoadError::Codec { .. } => CoreErrorKind::NamespaceCorrupt,
-        ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
+        | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
+        ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
     }
 }
 
-fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
+fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
     match error {
         BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
         BasisLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
-            ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
-            _ => CoreErrorKind::NamespaceCorrupt,
+            ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
+            ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
+            _ => ErrorCode::NamespaceCorrupt,
         },
         BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
             ControlObjectLoadError::MissingObject { .. }
-            | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
-                CoreErrorKind::NamespaceCorrupt
-            }
+            | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
             _ => classify_control_object_load_error(error),
         },
         BasisLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
         BasisLoadError::WalReplay(_) | BasisLoadError::ReconstructedHeadMismatch { .. } => {
-            CoreErrorKind::NamespaceCorrupt
+            ErrorCode::NamespaceCorrupt
         }
         BasisLoadError::CheckpointLoad(error) => match error.kind() {
-            crate::checkpoint::CheckpointLoadErrorKind::Corrupt => CoreErrorKind::NamespaceCorrupt,
-            crate::checkpoint::CheckpointLoadErrorKind::Store => CoreErrorKind::ServerError,
+            crate::checkpoint::CheckpointLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
+            crate::checkpoint::CheckpointLoadErrorKind::Store => ErrorCode::ServerError,
         },
-        BasisLoadError::MissingHeadEtag { .. } => CoreErrorKind::ServerError,
+        BasisLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
     }
 }
 
-fn classify_wal_chain_load_error(error: &WalChainLoadError) -> CoreErrorKind {
+fn classify_wal_chain_load_error(error: &WalChainLoadError) -> ErrorCode {
     match error {
-        WalChainLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
+        WalChainLoadError::ReadWal { .. } => ErrorCode::ServerError,
         WalChainLoadError::InvalidSeqRange { .. }
         | WalChainLoadError::MissingVisibleTip { .. }
         | WalChainLoadError::TipEndSeqMismatch { .. }
@@ -266,39 +358,39 @@ fn classify_wal_chain_load_error(error: &WalChainLoadError) -> CoreErrorKind {
         | WalChainLoadError::PointerMismatch { .. }
         | WalChainLoadError::HeadSeqMismatch { .. }
         | WalChainLoadError::CursorNotCovered { .. }
-        | WalChainLoadError::Replay(_) => CoreErrorKind::NamespaceCorrupt,
+        | WalChainLoadError::Replay(_) => ErrorCode::NamespaceCorrupt,
     }
 }
 
-fn classify_visible_path_error(error: &VisiblePathError) -> CoreErrorKind {
+fn classify_visible_path_error(error: &VisiblePathError) -> ErrorCode {
     match error {
-        VisiblePathError::InvalidAbsolutePath { .. } => CoreErrorKind::InvalidPath,
-        VisiblePathError::RootMissing => CoreErrorKind::NamespaceCorrupt,
-        VisiblePathError::PathNotFound { .. } => CoreErrorKind::PathNotFound,
-        VisiblePathError::PathComponentNotDirectory { .. } => CoreErrorKind::PathConflict,
+        VisiblePathError::InvalidAbsolutePath { .. } => ErrorCode::InvalidPath,
+        VisiblePathError::RootMissing => ErrorCode::NamespaceCorrupt,
+        VisiblePathError::PathNotFound { .. } => ErrorCode::PathNotFound,
+        VisiblePathError::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
     }
 }
 
-fn classify_durable_content_error(error: &DurableContentValidationError) -> CoreErrorKind {
+fn classify_durable_content_error(error: &DurableContentValidationError) -> ErrorCode {
     match error {
         DurableContentValidationError::UnsupportedContentRefKind { .. }
         | DurableContentValidationError::InvalidDigest { .. }
         | DurableContentValidationError::MissingContentObject { .. }
         | DurableContentValidationError::ContentLengthMismatch { .. }
         | DurableContentValidationError::ContentDigestMismatch { .. } => {
-            CoreErrorKind::NamespaceCorrupt
+            ErrorCode::NamespaceCorrupt
         }
-        DurableContentValidationError::Store { .. } => CoreErrorKind::ServerError,
+        DurableContentValidationError::Store { .. } => ErrorCode::ServerError,
     }
 }
 
-fn classify_lease_acquire_error(error: &LeaseAcquireError) -> CoreErrorKind {
+fn classify_lease_acquire_error(error: &LeaseAcquireError) -> ErrorCode {
     match error {
         LeaseAcquireError::LoadHead(error) | LeaseAcquireError::LoadLease(error) => {
             classify_control_object_load_error(error)
         }
-        LeaseAcquireError::HeldByOtherWriter { .. } => CoreErrorKind::LeaseConflict,
-        LeaseAcquireError::UnexpectedControlState { .. } => CoreErrorKind::NamespaceCorrupt,
+        LeaseAcquireError::HeldByOtherWriter { .. } => ErrorCode::LeaseConflict,
+        LeaseAcquireError::UnexpectedControlState { .. } => ErrorCode::NamespaceCorrupt,
         LeaseAcquireError::EmptyWriterId
         | LeaseAcquireError::ZeroLeaseDuration
         | LeaseAcquireError::MissingHeadEtag { .. }
@@ -306,18 +398,18 @@ fn classify_lease_acquire_error(error: &LeaseAcquireError) -> CoreErrorKind {
         | LeaseAcquireError::HeadFenceTakeover(_)
         | LeaseAcquireError::HeadWrite(_)
         | LeaseAcquireError::LeaseWrite(_)
-        | LeaseAcquireError::RetryExhausted { .. } => CoreErrorKind::ServerError,
+        | LeaseAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
     }
 }
 
-fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorKind {
+fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode {
     match error {
         CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
         | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
-            CoreErrorKind::StaleRevision
+            ErrorCode::StaleRevision
         }
         CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
-            CoreErrorKind::RevisionNotFound
+            ErrorCode::RevisionNotFound
         }
         CommitValidationError::CreateUnderSubtreeTombstone { .. }
         | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
@@ -326,7 +418,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
         | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
         | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
-            CoreErrorKind::TombstoneConflict
+            ErrorCode::TombstoneConflict
         }
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::NamePreconditionParentNotDirectory { .. }
@@ -340,10 +432,10 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::RenameTargetNameCollision { .. }
         | CommitValidationError::DeleteSubtreeRootNotDirectory { .. }
         | CommitValidationError::DirectoryEmptyPreconditionInodeNotDirectory { .. } => {
-            CoreErrorKind::PathConflict
+            ErrorCode::PathConflict
         }
         CommitValidationError::DirectoryEmptyPreconditionNotEmpty { .. } => {
-            CoreErrorKind::DirectoryNotEmpty
+            ErrorCode::DirectoryNotEmpty
         }
         CommitValidationError::CreateParentMissing { .. }
         | CommitValidationError::NamePreconditionParentMissing { .. }
@@ -356,14 +448,14 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::RenameTargetParentMissing { .. }
         | CommitValidationError::DeleteSubtreeRootMissing { .. }
         | CommitValidationError::DirectoryEmptyPreconditionInodeMissing { .. } => {
-            CoreErrorKind::PathNotFound
+            ErrorCode::PathNotFound
         }
-        CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
-        CommitValidationError::UnsupportedRenameMode { .. } => CoreErrorKind::UnsupportedRenameMode,
-        CommitValidationError::InvalidDisplayName { .. } => CoreErrorKind::InvalidPath,
+        CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
+        CommitValidationError::UnsupportedRenameMode { .. } => ErrorCode::UnsupportedRenameMode,
+        CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidPath,
         CommitValidationError::StaleWriterFenceToken { .. }
         | CommitValidationError::LeaseHolderMismatch { .. }
-        | CommitValidationError::LeaseExpired { .. } => CoreErrorKind::LeaseConflict,
+        | CommitValidationError::LeaseExpired { .. } => ErrorCode::LeaseConflict,
         CommitValidationError::EmptyCommit
         | CommitValidationError::NamespaceMismatch
         | CommitValidationError::HeadLeaseNamespaceMismatch
@@ -373,13 +465,13 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::SeqOverflow
         | CommitValidationError::NextInodeOverflow
         | CommitValidationError::OpIndexOverflow
-        | CommitValidationError::DeltaIndexOverflow => CoreErrorKind::ServerError,
+        | CommitValidationError::DeltaIndexOverflow => ErrorCode::ServerError,
     }
 }
 
-fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind {
+fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
     match error {
-        CommitHeadPublishError::StaleHead => CoreErrorKind::StaleHead,
+        CommitHeadPublishError::StaleHead => ErrorCode::StaleHead,
         CommitHeadPublishError::EmptyWriterVersion
         | CommitHeadPublishError::EmptyExpectedHeadEtag
         | CommitHeadPublishError::NamespaceMismatch { .. }
@@ -390,6 +482,40 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind 
         | CommitHeadPublishError::EmptyWalSegment
         | CommitHeadPublishError::SeqOverflow
         | CommitHeadPublishError::Codec(_)
-        | CommitHeadPublishError::Store(_) => CoreErrorKind::ServerError,
+        | CommitHeadPublishError::Store(_) => ErrorCode::ServerError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CoreError, ErrorCode, ErrorKind};
+    use loon_api::NamespaceId;
+
+    #[test]
+    fn public_error_kind_groups_detailed_codes() {
+        assert_eq!(ErrorCode::InvalidPath.kind(), ErrorKind::InvalidRequest);
+        assert_eq!(ErrorCode::PathNotFound.kind(), ErrorKind::NotFound);
+        assert_eq!(ErrorCode::NamespaceExists.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(
+            ErrorCode::StaleRevision.kind(),
+            ErrorKind::PreconditionFailed
+        );
+        assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
+        assert_eq!(
+            ErrorCode::NamespaceCorrupt.kind(),
+            ErrorKind::DataCorruption
+        );
+        assert_eq!(ErrorCode::ServerError.kind(), ErrorKind::Internal);
+    }
+
+    #[test]
+    fn core_error_exposes_public_kind_and_detailed_code() {
+        let error = CoreError::NamespaceAlreadyExists {
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+        };
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(error.code(), ErrorCode::NamespaceExists);
+        assert_eq!(error.code().as_str(), "namespace_exists");
+        assert!(error.message().contains("already exists"));
     }
 }

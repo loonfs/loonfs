@@ -8,7 +8,7 @@ use loon_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecor
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
-    CoreErrorKind, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId,
+    CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
     MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId,
     NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
@@ -44,9 +44,9 @@ fn assert_config_error(result: loonfs::Result<Fs>, expected: &str) {
     }
 }
 
-fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: CoreErrorKind) {
+fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: ErrorCode) {
     match result {
-        Err(RuntimeError::Core(error)) => assert_eq!(error.kind(), expected),
+        Err(RuntimeError::Core(error)) => assert_eq!(error.code(), expected),
         Err(error) => panic!("expected core error {expected:?}, got {error:?}"),
         Ok(_) => panic!("expected core error {expected:?}"),
     }
@@ -628,7 +628,7 @@ fn runtime_publish_retries_warm_rejection_after_external_head_race() {
 
     assert_core_error_kind(
         first.stat_path(&namespace_id, "/a"),
-        CoreErrorKind::PathNotFound,
+        ErrorCode::PathNotFound,
     );
     let stats = first.runtime_cache_stats();
     assert_eq!(stats.publish_warm_basis_hits, 0);
@@ -702,7 +702,7 @@ fn runtime_publish_stale_head_invalidates_warm_basis() {
         .next()
         .expect("one result")
         .expect_err("head CAS failure should be stale");
-    assert_core_error_kind::<()>(Err(stale), CoreErrorKind::StaleHead);
+    assert_core_error_kind::<()>(Err(stale), ErrorCode::StaleHead);
 
     raw_store.allow_head_cas();
     raw_store.reset_wal_get_count();
@@ -746,7 +746,7 @@ fn stale_head_write_error_invalidates_runtime_cache() {
     raw_store.fail_head_cas();
     assert_core_error_kind(
         fs.create_dir(&namespace_id, "/stale", CreateDirOptions::default()),
-        CoreErrorKind::StaleHead,
+        ErrorCode::StaleHead,
     );
 
     raw_store.allow_head_cas();
@@ -777,7 +777,7 @@ fn delete_options_select_recursive_behavior() {
         .expect_err("non-recursive delete should reject non-empty directory");
     assert!(matches!(
         error,
-        RuntimeError::Core(error) if error.kind() == loonfs::CoreErrorKind::DirectoryNotEmpty
+        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::DirectoryNotEmpty
     ));
 
     fs.delete_path(
@@ -794,7 +794,7 @@ fn delete_options_select_recursive_behavior() {
         .expect_err("deleted file should not stat");
     assert!(matches!(
         error,
-        RuntimeError::Core(error) if error.kind() == loonfs::CoreErrorKind::PathNotFound
+        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
     ));
 }
 
@@ -1251,10 +1251,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
         .expect("build runtime");
     let namespace_id = namespace();
 
-    assert_core_error_kind(
-        fs.begin_upload(&namespace_id),
-        CoreErrorKind::NamespaceNotFound,
-    );
+    assert_core_error_kind(fs.begin_upload(&namespace_id), ErrorCode::NamespaceNotFound);
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1262,10 +1259,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
         .delete(&namespace_descriptor(namespace_id.as_str()))
         .expect("delete namespace descriptor");
 
-    assert_core_error_kind(
-        fs.begin_upload(&namespace_id),
-        CoreErrorKind::NamespacePartial,
-    );
+    assert_core_error_kind(fs.begin_upload(&namespace_id), ErrorCode::NamespacePartial);
 }
 
 #[test]
@@ -1287,10 +1281,7 @@ fn begin_upload_rejects_malformed_descriptors() {
             br#"{"not":"a namespace descriptor"}"#,
         )
         .expect("corrupt namespace descriptor");
-    assert_core_error_kind(
-        fs.begin_upload(&namespace_id),
-        CoreErrorKind::NamespaceCorrupt,
-    );
+    assert_core_error_kind(fs.begin_upload(&namespace_id), ErrorCode::NamespaceCorrupt);
 
     let content_bad = NamespaceId::parse("content-bad").expect("valid namespace id");
     fs.create_namespace(&content_bad, CreateNamespaceOptions::default())
@@ -1305,10 +1296,7 @@ fn begin_upload_rejects_malformed_descriptors() {
             .put_overwrite(&key, br#"{"not":"a content store descriptor"}"#)
             .expect("corrupt content store descriptor");
     }
-    assert_core_error_kind(
-        fs.begin_upload(&content_bad),
-        CoreErrorKind::NamespaceCorrupt,
-    );
+    assert_core_error_kind(fs.begin_upload(&content_bad), ErrorCode::NamespaceCorrupt);
 }
 
 #[test]
@@ -1328,7 +1316,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     raw_store
         .put_overwrite(&namespace_head(head_bad.as_str()), br#"{"not":"a head"}"#)
         .expect("corrupt head");
-    assert_core_error_kind(fs.begin_upload(&head_bad), CoreErrorKind::NamespaceCorrupt);
+    assert_core_error_kind(fs.begin_upload(&head_bad), ErrorCode::NamespaceCorrupt);
 
     let lease_bad = NamespaceId::parse("lease-bad").expect("valid namespace id");
     fs.create_namespace(&lease_bad, CreateNamespaceOptions::default())
@@ -1339,7 +1327,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
             br#"{"not":"a lease"}"#,
         )
         .expect("corrupt lease");
-    assert_core_error_kind(fs.begin_upload(&lease_bad), CoreErrorKind::NamespaceCorrupt);
+    assert_core_error_kind(fs.begin_upload(&lease_bad), ErrorCode::NamespaceCorrupt);
 }
 
 #[test]
@@ -1417,11 +1405,11 @@ fn namespace_status_and_tick_reject_missing_namespace() {
 
     assert_core_error_kind(
         fs.namespace_status(&namespace_id),
-        CoreErrorKind::NamespaceNotFound,
+        ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
         fs.maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default()),
-        CoreErrorKind::NamespaceNotFound,
+        ErrorCode::NamespaceNotFound,
     );
 }
 
@@ -1444,11 +1432,11 @@ fn namespace_status_and_tick_reject_partial_namespace() {
 
     assert_core_error_kind(
         fs.namespace_status(&namespace_id),
-        CoreErrorKind::NamespacePartial,
+        ErrorCode::NamespacePartial,
     );
     assert_core_error_kind(
         fs.maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default()),
-        CoreErrorKind::NamespacePartial,
+        ErrorCode::NamespacePartial,
     );
 }
 

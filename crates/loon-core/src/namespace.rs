@@ -7,9 +7,7 @@ use loon_api::{FenceToken, NamespaceSummary};
 use loon_objectstore::ObjectStore;
 use thiserror::Error;
 
-pub fn list_namespaces<S: ObjectStore + ?Sized>(
-    store: &S,
-) -> Result<Vec<NamespaceSummary>, crate::CoreError> {
+pub fn list_namespaces<S: ObjectStore + ?Sized>(store: &S) -> crate::Result<Vec<NamespaceSummary>> {
     lifecycle::list_namespaces(store)
 }
 

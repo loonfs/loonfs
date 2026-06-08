@@ -53,7 +53,7 @@ pub mod publish {
 
 pub use context::MutationContext;
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
-pub use error::{CoreError, CoreErrorKind};
+pub use error::{Error, ErrorCode, ErrorKind, Result};
 pub use namespace::{list_namespaces, BootstrapNamespaceError};
 pub use options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
 pub use path::intent::PutFileBehavior;
