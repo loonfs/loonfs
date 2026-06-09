@@ -26,7 +26,6 @@ use loonfs::{
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::task;
 use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
@@ -227,13 +226,12 @@ async fn create_namespace(
     Json(request): Json<CreateNamespaceRequest>,
 ) -> Result<Json<loon_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(request.namespace_id)?;
-    let summary = run_blocking(move || {
-        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .map_err(ApiResponseError::runtime)
-    })
-    .await?;
+    let summary = state
+        .fs
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(summary))
 }
 
@@ -242,9 +240,11 @@ async fn list_namespaces_handler(
     headers: HeaderMap,
 ) -> Result<Json<ListNamespacesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
-    let namespaces =
-        run_blocking(move || fs.list_namespaces().map_err(ApiResponseError::runtime)).await?;
+    let namespaces = state
+        .fs
+        .list_namespaces()
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(ListNamespacesResponse { namespaces }))
 }
 
@@ -255,14 +255,13 @@ async fn fork_namespace_handler(
     Json(request): Json<ForkNamespaceRequest>,
 ) -> Result<Json<loon_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let source_namespace_id = parse_namespace_id(namespace)?;
     let new_namespace_id = parse_namespace_id(request.new_namespace_id)?;
-    let summary = run_blocking(move || {
-        fs.fork_namespace(&source_namespace_id, &new_namespace_id)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))
-    })
-    .await?;
+    let summary = state
+        .fs
+        .fork_namespace(&source_namespace_id, &new_namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
     Ok(Json(summary))
 }
 
@@ -273,14 +272,13 @@ async fn list_entries(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<Vec<loon_api::AuthoritativePathEntry>>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
-    let entries = run_blocking(move || {
-        fs.list_path(&namespace_id, &path)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let entries = state
+        .fs
+        .list_path(&namespace_id, &path)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entries))
 }
 
@@ -291,14 +289,13 @@ async fn stat_entry(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<loon_api::AuthoritativePathEntry>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
-    let entry = run_blocking(move || {
-        fs.stat_path(&namespace_id, &path)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let entry = state
+        .fs
+        .stat_path(&namespace_id, &path)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entry))
 }
 
@@ -309,7 +306,6 @@ async fn get_content(
     Query(query): Query<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let revision_no = query
@@ -317,14 +313,16 @@ async fn get_content(
         .as_deref()
         .map(parse_revision_no)
         .transpose()?;
-    let file = run_blocking(move || {
-        match revision_no {
-            Some(revision_no) => fs.read_file_revision_bytes(&namespace_id, &path, revision_no),
-            None => fs.read_file_bytes(&namespace_id, &path),
+    let file = match revision_no {
+        Some(revision_no) => {
+            state
+                .fs
+                .read_file_revision_bytes(&namespace_id, &path, revision_no)
+                .await
         }
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+        None => state.fs.read_file_bytes(&namespace_id, &path).await,
+    }
+    .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, file.bytes).into_response())
 }
 
@@ -335,14 +333,13 @@ async fn list_path_revisions(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
-    let response = run_blocking(move || {
-        fs.list_file_revisions(&namespace_id, &path)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .fs
+        .list_file_revisions(&namespace_id, &path)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -352,14 +349,13 @@ async fn list_inode_revisions(
     headers: HeaderMap,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let inode_id = parse_inode_id(&inode_id)?;
-    let response = run_blocking(move || {
-        fs.list_file_revisions_for_inode(&namespace_id, inode_id)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .fs
+        .list_file_revisions_for_inode(&namespace_id, inode_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -369,15 +365,14 @@ async fn get_inode_revision_content(
     headers: HeaderMap,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let inode_id = parse_inode_id(&inode_id)?;
     let revision_no = parse_revision_no(&revision_no)?;
-    let bytes = run_blocking(move || {
-        fs.read_file_revision_bytes_for_inode(&namespace_id, inode_id, revision_no)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let bytes = state
+        .fs
+        .read_file_revision_bytes_for_inode(&namespace_id, inode_id, revision_no)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, bytes).into_response())
 }
 
@@ -509,13 +504,12 @@ async fn begin_upload_handler(
     headers: HeaderMap,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = run_blocking(move || {
-        fs.begin_upload(&namespace_id)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .fs
+        .begin_upload(&namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -526,14 +520,13 @@ async fn upload_content_handler(
     body: Bytes,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let bytes = body.to_vec();
-    let response = run_blocking(move || {
-        fs.upload_content(&namespace_id, &upload_id, &bytes)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .fs
+        .upload_content(&namespace_id, &upload_id, &bytes)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -544,13 +537,12 @@ async fn complete_upload_handler(
     Json(request): Json<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = run_blocking(move || {
-        fs.complete_upload(&namespace_id, &upload_id, &request)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .fs
+        .complete_upload(&namespace_id, &upload_id, &request)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -577,14 +569,13 @@ async fn list_changes_handler(
     Query(query): Query<ChangesQuery>,
 ) -> Result<Json<ChangesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let after_seq = loon_api::ChangeSeq(query.after_seq);
-    let response = run_blocking(move || {
-        fs.list_changes_after(&namespace_id, after_seq)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .fs
+        .list_changes_after(&namespace_id, after_seq)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -594,13 +585,12 @@ async fn create_checkpoint_handler(
     headers: HeaderMap,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = run_blocking(move || {
-        fs.create_checkpoint(&namespace_id)
-            .map_err(ApiResponseError::runtime)
-    })
-    .await?;
+    let response = state
+        .fs
+        .create_checkpoint(&namespace_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -610,13 +600,12 @@ async fn advance_retention_handler(
     headers: HeaderMap,
 ) -> Result<Json<AdvanceRetentionResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = run_blocking(move || {
-        fs.advance_retention_floor(&namespace_id)
-            .map_err(ApiResponseError::runtime)
-    })
-    .await?;
+    let response = state
+        .fs
+        .advance_retention_floor(&namespace_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -668,20 +657,6 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
             &format!("invalid revision_no `{value}`: {err}"),
         )
     })
-}
-
-async fn run_blocking<T, F>(operation: F) -> Result<T, ApiResponseError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, ApiResponseError> + Send + 'static,
-{
-    task::spawn_blocking(operation).await.map_err(|err| {
-        ApiResponseError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            &format!("blocking operation failed: {err}"),
-        )
-    })?
 }
 
 struct ApiResponseError {
@@ -740,6 +715,11 @@ impl ApiResponseError {
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
             }
+            error @ RuntimeError::RuntimeTask(_) => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &error.to_string(),
+            ),
         }
     }
 
@@ -767,6 +747,11 @@ impl ApiResponseError {
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
             }
+            error @ RuntimeError::RuntimeTask(_) => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &error.to_string(),
+            ),
         }
     }
 }
@@ -909,7 +894,16 @@ mod tests {
                 Some(metrics_path.clone().into_os_string()),
             )
             .expect("build fs");
-            fs.create_namespace(&namespace_id("metrics"), CreateNamespaceOptions::default())
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(
+                    fs.create_namespace(
+                        &namespace_id("metrics"),
+                        CreateNamespaceOptions::default(),
+                    ),
+                )
                 .expect("create namespace");
         }
 
@@ -925,6 +919,7 @@ mod tests {
         let fs = test_runtime(store.clone(), "runtime-writer");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
             .expect("create namespace through runtime");
         fs.put_file_bytes(
             &namespace_id,
@@ -935,6 +930,7 @@ mod tests {
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
             },
         )
+        .await
         .expect("write file through runtime");
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -978,6 +974,7 @@ mod tests {
                 &NamespaceId::parse("demo").expect("valid namespace id"),
                 "/notes/from-http.txt",
             )
+            .await
             .expect("read file through runtime");
         assert_eq!(file.bytes, b"hello from http");
 

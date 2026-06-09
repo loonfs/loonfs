@@ -1095,6 +1095,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "toml",
  "ureq",
 ]
@@ -1204,6 +1205,7 @@ dependencies = [
  "loon-objectstore",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

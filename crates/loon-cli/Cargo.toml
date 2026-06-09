@@ -21,6 +21,7 @@ loonfs = { path = "../loonfs" }
 loon-objectstore = { path = "../loon-objectstore" }
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
