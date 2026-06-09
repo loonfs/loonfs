@@ -1,8 +1,6 @@
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::checksum;
 use crate::keyspace::validate_segments;
-use crate::AsyncObjectStore;
-use crate::ObjectStoreError;
+use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
@@ -137,8 +135,8 @@ impl LocalFsStore {
     }
 }
 
-impl ObjectStore for LocalFsStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+impl LocalFsStore {
+    fn head_sync(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
         if !path.exists() {
             return Ok(None);
@@ -147,7 +145,10 @@ impl ObjectStore for LocalFsStore {
         Self::metadata_for_path(&path, false).map(Some)
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    fn head_with_checksum_sync(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
         if !path.exists() {
             return Ok(None);
@@ -156,7 +157,7 @@ impl ObjectStore for LocalFsStore {
         Self::metadata_for_path(&path, true).map(Some)
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    fn get_with_metadata_sync(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
         let mut file = match File::open(&path) {
             Ok(file) => file,
@@ -176,7 +177,7 @@ impl ObjectStore for LocalFsStore {
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
-    fn get(
+    fn get_sync(
         &self,
         key: &str,
         range: Option<ByteRange>,
@@ -209,7 +210,7 @@ impl ObjectStore for LocalFsStore {
         }
     }
 
-    fn put(
+    fn put_sync(
         &self,
         key: &str,
         bytes: &[u8],
@@ -230,7 +231,8 @@ impl ObjectStore for LocalFsStore {
                 Self::create_new_object(&path, bytes)?;
             }
             PutMode::CompareAndSwap { expected_etag } => {
-                let current = <Self as ObjectStore>::head(self, key)?
+                let current = self
+                    .head_sync(key)?
                     .ok_or(ObjectStoreError::PreconditionFailed)?;
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
                     return Err(ObjectStoreError::PreconditionFailed);
@@ -242,7 +244,7 @@ impl ObjectStore for LocalFsStore {
         Self::metadata_for_path(&path, true)
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    fn delete_sync(&self, key: &str) -> Result<(), ObjectStoreError> {
         let path = self.resolve_key(key)?;
         let _guard = self
             .write_lock
@@ -259,7 +261,7 @@ impl ObjectStore for LocalFsStore {
         }
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+    fn list_prefix_sync(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
         validate_segments(prefix, true)?;
 
         if !self.root.exists() {
@@ -275,20 +277,20 @@ impl ObjectStore for LocalFsStore {
 }
 
 #[async_trait]
-impl AsyncObjectStore for LocalFsStore {
+impl ObjectStore for LocalFsStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        <Self as ObjectStore>::head(self, key)
+        self.head_sync(key)
     }
 
     async fn head_with_checksum(
         &self,
         key: &str,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        <Self as ObjectStore>::head_with_checksum(self, key)
+        self.head_with_checksum_sync(key)
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        <Self as ObjectStore>::get_with_metadata(self, key)
+        self.get_with_metadata_sync(key)
     }
 
     async fn get(
@@ -296,7 +298,8 @@ impl AsyncObjectStore for LocalFsStore {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Bytes>, ObjectStoreError> {
-        <Self as ObjectStore>::get(self, key, range).map(|maybe| maybe.map(Bytes::from))
+        self.get_sync(key, range)
+            .map(|maybe| maybe.map(Bytes::from))
     }
 
     async fn put(
@@ -305,18 +308,18 @@ impl AsyncObjectStore for LocalFsStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        <Self as ObjectStore>::put(self, key, &bytes, mode)
+        self.put_sync(key, &bytes, mode)
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        <Self as ObjectStore>::delete(self, key)
+        self.delete_sync(key)
     }
 
     fn list_prefix_stream(
         &self,
         prefix: &str,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        match <Self as ObjectStore>::list_prefix(self, prefix) {
+        match self.list_prefix_sync(prefix) {
             Ok(keys) => Box::pin(stream::iter(keys.into_iter().map(Ok))),
             Err(err) => Box::pin(stream::once(async { Err(err) })),
         }
@@ -431,46 +434,66 @@ mod tests {
     use super::LocalFsStore;
     use super::{ObjectStore, PutMode};
     use crate::keys::{namespace_head, namespace_lease};
+    use bytes::Bytes;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn overwrite_refreshes_head_and_visible_bytes() {
+    #[tokio::test]
+    async fn overwrite_refreshes_head_and_visible_bytes() {
         let temp_dir = TestDir::new("overwrite");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = namespace_head("ns-1");
 
         let first = store
-            .put(&key, br#"{"seq":1}"#, PutMode::Overwrite)
+            .put(
+                &key,
+                Bytes::from_static(br#"{"seq":1}"#),
+                PutMode::Overwrite,
+            )
+            .await
             .expect("seed first object");
         let second = store
-            .put(&key, br#"{"seq":2}"#, PutMode::Overwrite)
+            .put(
+                &key,
+                Bytes::from_static(br#"{"seq":2}"#),
+                PutMode::Overwrite,
+            )
+            .await
             .expect("overwrite object");
 
         assert_eq!(
-            store.get(&key, None).expect("get object"),
-            Some(br#"{"seq":2}"#.to_vec())
+            store.get(&key, None).await.expect("get object"),
+            Some(Bytes::from_static(br#"{"seq":2}"#))
         );
-        let head = store.head(&key).expect("head object").expect("head exists");
+        let head = store
+            .head(&key)
+            .await
+            .expect("head object")
+            .expect("head exists");
         assert_eq!(head.etag, second.etag);
         assert_eq!(head.size_bytes, second.size_bytes);
         assert_ne!(first, second);
     }
 
-    #[test]
-    fn delete_is_idempotent_and_head_reflects_removal() {
+    #[tokio::test]
+    async fn delete_is_idempotent_and_head_reflects_removal() {
         let temp_dir = TestDir::new("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = namespace_lease("ns-1");
 
         store
-            .put_if_absent(&key, br#"{"holder":"writer-a"}"#)
+            .put_if_absent(&key, Bytes::from_static(br#"{"holder":"writer-a"}"#))
+            .await
             .expect("seed lease object");
-        assert!(store.head(&key).expect("head before delete").is_some());
-        store.delete(&key).expect("delete existing object");
-        store.delete(&key).expect("delete missing object");
-        assert_eq!(store.head(&key).expect("head after delete"), None);
+        assert!(store
+            .head(&key)
+            .await
+            .expect("head before delete")
+            .is_some());
+        store.delete(&key).await.expect("delete existing object");
+        store.delete(&key).await.expect("delete missing object");
+        assert_eq!(store.head(&key).await.expect("head after delete"), None);
     }
 
     struct TestDir {

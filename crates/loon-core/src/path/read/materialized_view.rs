@@ -21,7 +21,9 @@ use loon_api::{
 };
 use loon_objectstore::ObjectStore;
 
-pub(crate) fn resolve_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
+pub(crate) async fn resolve_path_from_materialized_tables_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
@@ -33,25 +35,28 @@ pub(crate) fn resolve_path_from_materialized_tables_at_head_with_cache<S: Object
         namespace_id,
         head.clone(),
         table_cache,
-    )?
+    )
+    .await?
     else {
         return Ok(None);
     };
-    Ok(Some(view.resolve_path(absolute_path)?))
+    Ok(Some(view.resolve_path(absolute_path).await?))
 }
 
-pub(crate) fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) async fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Option<AuthoritativePathEntry>, CoreError> {
-    let Some(view) = MaterializedLatestView::load(store, namespace_id)? else {
+    let Some(view) = MaterializedLatestView::load(store, namespace_id).await? else {
         return Ok(None);
     };
-    Ok(Some(view.resolve_path(absolute_path)?))
+    Ok(Some(view.resolve_path(absolute_path).await?))
 }
 
-pub(crate) fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_path_from_materialized_tables_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
@@ -63,22 +68,23 @@ pub(crate) fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectSto
         namespace_id,
         head.clone(),
         table_cache,
-    )?
+    )
+    .await?
     else {
         return Ok(None);
     };
-    Ok(Some(view.list_path(absolute_path)?))
+    Ok(Some(view.list_path(absolute_path).await?))
 }
 
-pub(crate) fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
-    let Some(view) = MaterializedLatestView::load(store, namespace_id)? else {
+    let Some(view) = MaterializedLatestView::load(store, namespace_id).await? else {
         return Ok(None);
     };
-    Ok(Some(view.list_path(absolute_path)?))
+    Ok(Some(view.list_path(absolute_path).await?))
 }
 
 struct MaterializedLatestView<'a, S: ObjectStore + ?Sized> {
@@ -89,21 +95,22 @@ struct MaterializedLatestView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
-    fn load(store: &'a S, namespace_id: &NamespaceId) -> Result<Option<Self>, CoreError> {
-        let loaded_head =
-            read_head_object(store, namespace_id).map_err(BasisLoadError::LoadHead)?;
-        Self::load_at_head(store, namespace_id, loaded_head.envelope.state)
+    async fn load(store: &'a S, namespace_id: &NamespaceId) -> Result<Option<Self>, CoreError> {
+        let loaded_head = read_head_object(store, namespace_id)
+            .await
+            .map_err(BasisLoadError::LoadHead)?;
+        Self::load_at_head(store, namespace_id, loaded_head.envelope.state).await
     }
 
-    fn load_at_head(
+    async fn load_at_head(
         store: &'a S,
         namespace_id: &NamespaceId,
         head: HeadState,
     ) -> Result<Option<Self>, CoreError> {
-        Self::load_at_head_with_cache(store, namespace_id, head, None)
+        Self::load_at_head_with_cache(store, namespace_id, head, None).await
     }
 
-    fn load_at_head_with_cache(
+    async fn load_at_head_with_cache(
         store: &'a S,
         namespace_id: &NamespaceId,
         head: HeadState,
@@ -118,10 +125,12 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         let Some(manifest_id) = head.current_manifest_id else {
             return Ok(None);
         };
-        let _catalog_entry =
-            load_namespace_catalog_entry(store, namespace_id).map_err(BasisLoadError::from)?;
+        let _catalog_entry = load_namespace_catalog_entry(store, namespace_id)
+            .await
+            .map_err(BasisLoadError::from)?;
         let tables =
             load_verified_manifest_tables_with_cache(store, table_cache, namespace_id, manifest_id)
+                .await
                 .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
         let manifest_head = manifest_basis_head(&head, tables.manifest());
         let wal_chain = load_validated_wal_chain(
@@ -134,6 +143,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 stop_after_seq: None,
             },
         )
+        .await
         .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
         let replayed = {
             let _span =
@@ -160,10 +170,10 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         skip_all,
         fields(phase = "walk_path")
     )]
-    fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry, CoreError> {
+    async fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry, CoreError> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-        let resolved = self.resolve_visible_path(&absolute_path)?;
-        self.build_authoritative_path_entry(&resolved)
+        let resolved = self.resolve_visible_path(&absolute_path).await?;
+        self.build_authoritative_path_entry(&resolved).await
     }
 
     #[tracing::instrument(
@@ -173,11 +183,14 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         skip_all,
         fields(phase = "walk_path")
     )]
-    fn list_path(&self, absolute_path: &str) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    async fn list_path(
+        &self,
+        absolute_path: &str,
+    ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-        let resolved = self.resolve_visible_path(&absolute_path)?;
+        let resolved = self.resolve_visible_path(&absolute_path).await?;
         if resolved.inode_kind == InodeKind::File {
-            return Ok(vec![self.build_authoritative_path_entry(&resolved)?]);
+            return Ok(vec![self.build_authoritative_path_entry(&resolved).await?]);
         }
         if resolved.inode_kind != InodeKind::Dir {
             return Err(CoreError::ExpectedDirectory {
@@ -186,18 +199,16 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             });
         }
 
-        self.visible_children(resolved.inode_id)?
-            .into_iter()
-            .map(|direntry| {
-                let child = self
-                    .visible_inode(direntry.child_inode_id)?
-                    .expect("visible child listing should resolve inode");
-                let child_path = AbsolutePath::parse(&resolved.absolute_path)
-                    .map_err(map_path_error_to_core)?
-                    .join(
-                        &DisplayName::parse(&direntry.display_name)
-                            .map_err(map_path_error_to_core)?,
-                    );
+        let mut entries = Vec::new();
+        for direntry in self.visible_children(resolved.inode_id).await? {
+            let child = self
+                .visible_inode(direntry.child_inode_id)
+                .await?
+                .expect("visible child listing should resolve inode");
+            let child_path = AbsolutePath::parse(&resolved.absolute_path)
+                .map_err(map_path_error_to_core)?
+                .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
+            entries.push(
                 self.build_authoritative_path_entry(&ResolvedVisiblePath {
                     absolute_path: child_path.as_str().to_owned(),
                     inode_id: direntry.child_inode_id,
@@ -205,17 +216,20 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                     parent_inode_id: Some(direntry.parent_inode_id),
                     display_name: direntry.display_name,
                 })
-            })
-            .collect()
+                .await?,
+            );
+        }
+        Ok(entries)
     }
 
-    fn resolve_visible_path(
+    async fn resolve_visible_path(
         &self,
         absolute_path: &AbsolutePath,
     ) -> Result<ResolvedVisiblePath, CoreError> {
         let root_inode_id = InodeId(1);
         let root = self
-            .visible_inode(root_inode_id)?
+            .visible_inode(root_inode_id)
+            .await?
             .ok_or(crate::metadata::VisiblePathError::RootMissing)?;
         if absolute_path.is_root() {
             return Ok(ResolvedVisiblePath {
@@ -233,7 +247,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         let mut current_display_name = String::new();
 
         for component in absolute_path.components() {
-            let current_inode = self.visible_inode(current_inode_id)?.ok_or_else(|| {
+            let current_inode = self.visible_inode(current_inode_id).await?.ok_or_else(|| {
                 crate::metadata::VisiblePathError::PathNotFound {
                     absolute_path: current_absolute_path.clone(),
                 }
@@ -257,7 +271,8 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             let display_name = component.to_display_name();
             let name_key = NameKey::for_display_name(self.head.name_policy, &display_name);
             let direntry = self
-                .visible_child(current_inode_id, name_key.as_str())?
+                .visible_child(current_inode_id, name_key.as_str())
+                .await?
                 .ok_or(crate::metadata::VisiblePathError::PathNotFound {
                     absolute_path: requested_absolute_path,
                 })?;
@@ -269,7 +284,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             current_display_name = direntry.display_name;
         }
 
-        let inode = self.visible_inode(current_inode_id)?.ok_or_else(|| {
+        let inode = self.visible_inode(current_inode_id).await?.ok_or_else(|| {
             crate::metadata::VisiblePathError::PathNotFound {
                 absolute_path: current_absolute_path.clone(),
             }
@@ -283,11 +298,11 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         })
     }
 
-    fn build_authoritative_path_entry(
+    async fn build_authoritative_path_entry(
         &self,
         resolved: &ResolvedVisiblePath,
     ) -> Result<AuthoritativePathEntry, CoreError> {
-        let revision = self.latest_revision_head(resolved.inode_id)?;
+        let revision = self.latest_revision_head(resolved.inode_id).await?;
         let content_ref = revision
             .as_ref()
             .map(|revision| revision.content_ref.clone());
@@ -309,18 +324,18 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         })
     }
 
-    fn visible_children(
+    async fn visible_children(
         &self,
         parent_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let Some(parent) = self.visible_inode(parent_inode_id)? else {
+        let Some(parent) = self.visible_inode(parent_inode_id).await? else {
             return Ok(Vec::new());
         };
         if parent.inode_kind != InodeKind::Dir {
             return Ok(Vec::new());
         }
 
-        let mut candidates = self.direntry_binds_for_parent(parent_inode_id)?;
+        let mut candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
         candidates.extend(
             self.wal_tail_rows
                 .direntry_binds()
@@ -330,7 +345,9 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         );
         let mut children = Vec::new();
         for direntry in candidates {
-            let active = self.visible_child(parent_inode_id, &direntry.name_key)?;
+            let active = self
+                .visible_child(parent_inode_id, &direntry.name_key)
+                .await?;
             if active
                 .as_ref()
                 .map(|active| {
@@ -339,7 +356,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                         && active.bind_delta_index == direntry.bind_delta_index
                 })
                 .unwrap_or(false)
-                && self.visible_inode(direntry.child_inode_id)?.is_some()
+                && self.visible_inode(direntry.child_inode_id).await?.is_some()
             {
                 children.push(direntry);
             }
@@ -352,26 +369,27 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         Ok(children)
     }
 
-    fn visible_child(
+    async fn visible_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
-        let Some(parent) = self.visible_inode(parent_inode_id)? else {
+        let Some(parent) = self.visible_inode(parent_inode_id).await? else {
             return Ok(None);
         };
         if parent.inode_kind != InodeKind::Dir {
             return Ok(None);
         }
 
-        let Some(direntry) = self.bound_child(parent_inode_id, name_key)? else {
+        let Some(direntry) = self.bound_child(parent_inode_id, name_key).await? else {
             return Ok(None);
         };
-        if self.is_direntry_unbound(&direntry)? {
+        if self.is_direntry_unbound(&direntry).await? {
             return Ok(None);
         }
-        let Some(latest_binding) =
-            self.current_parent_binding_for_child(direntry.child_inode_id)?
+        let Some(latest_binding) = self
+            .current_parent_binding_for_child(direntry.child_inode_id)
+            .await?
         else {
             return Ok(None);
         };
@@ -379,7 +397,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             || latest_binding.name_key != direntry.name_key
             || latest_binding.bind_seq != direntry.bind_seq
             || latest_binding.bind_delta_index != direntry.bind_delta_index
-            || self.is_direntry_unbound(&latest_binding)?
+            || self.is_direntry_unbound(&latest_binding).await?
         {
             return Ok(None);
         }
@@ -387,17 +405,17 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         Ok(Some(direntry))
     }
 
-    fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, CoreError> {
-        let Some(inode) = self.inode_at_seq(inode_id)? else {
+    async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, CoreError> {
+        let Some(inode) = self.inode_at_seq(inode_id).await? else {
             return Ok(None);
         };
-        if self.covering_subtree_tombstone(inode_id)?.is_some() {
+        if self.covering_subtree_tombstone(inode_id).await?.is_some() {
             return Ok(None);
         }
         Ok(Some(inode))
     }
 
-    fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, CoreError> {
+    async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, CoreError> {
         if let Some(inode) = self
             .wal_tail_rows
             .inodes()
@@ -407,14 +425,17 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         {
             return Ok(Some(inode));
         }
-        manifest_index::inode_at_seq(&self.tables, inode_id)
+        manifest_index::inode_at_seq(&self.tables, inode_id).await
     }
 
-    fn latest_revision_head(&self, inode_id: InodeId) -> Result<Option<RevisionRecord>, CoreError> {
-        if self.visible_inode(inode_id)?.is_none() {
+    async fn latest_revision_head(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<RevisionRecord>, CoreError> {
+        if self.visible_inode(inode_id).await?.is_none() {
             return Ok(None);
         }
-        let mut revisions = self.revisions_for_inode(inode_id)?;
+        let mut revisions = self.revisions_for_inode(inode_id).await?;
         revisions.extend(
             self.wal_tail_rows
                 .revisions()
@@ -428,12 +449,14 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index)))
     }
 
-    fn bound_child(
+    async fn bound_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
-        let mut bindings = self.direntry_binds_for_parent_name(parent_inode_id, name_key)?;
+        let mut bindings = self
+            .direntry_binds_for_parent_name(parent_inode_id, name_key)
+            .await?;
         bindings.extend(
             self.wal_tail_rows
                 .direntry_binds()
@@ -449,11 +472,11 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
     }
 
-    fn current_parent_binding_for_child(
+    async fn current_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
-        let mut bindings = self.direntry_binds_for_child(child_inode_id)?;
+        let mut bindings = self.direntry_binds_for_child(child_inode_id).await?;
         bindings.extend(
             self.wal_tail_rows
                 .direntry_binds()
@@ -468,14 +491,14 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         else {
             return Ok(None);
         };
-        if self.is_direntry_unbound(&binding)? {
+        if self.is_direntry_unbound(&binding).await? {
             return Ok(None);
         }
         Ok(Some(binding))
     }
 
-    fn is_direntry_unbound(&self, direntry: &DirentryBindRecord) -> Result<bool, CoreError> {
-        let mut unbinds = self.direntry_unbinds_for_binding(direntry)?;
+    async fn is_direntry_unbound(&self, direntry: &DirentryBindRecord) -> Result<bool, CoreError> {
+        let mut unbinds = self.direntry_unbinds_for_binding(direntry).await?;
         unbinds.extend(
             self.wal_tail_rows
                 .direntry_unbinds()
@@ -488,11 +511,11 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             .any(|unbind| unbind.unbind_seq <= self.head.seq))
     }
 
-    fn active_subtree_tombstone(
+    async fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
-        let mut tombstones = self.tombstones_for_root(root_inode_id)?;
+        let mut tombstones = self.tombstones_for_root(root_inode_id).await?;
         tombstones.extend(
             self.wal_tail_rows
                 .subtree_tombstones()
@@ -506,7 +529,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index)))
     }
 
-    fn covering_subtree_tombstone(
+    async fn covering_subtree_tombstone(
         &self,
         inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
@@ -516,54 +539,59 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             if !visited.insert(candidate_inode_id.0) {
                 break;
             }
-            if let Some(tombstone) = self.active_subtree_tombstone(candidate_inode_id)? {
+            if let Some(tombstone) = self.active_subtree_tombstone(candidate_inode_id).await? {
                 return Ok(Some(tombstone));
             }
             current = self
-                .current_parent_binding_for_child(candidate_inode_id)?
+                .current_parent_binding_for_child(candidate_inode_id)
+                .await?
                 .map(|direntry| direntry.parent_inode_id);
         }
         Ok(None)
     }
 
-    fn direntry_binds_for_parent(
+    async fn direntry_binds_for_parent(
         &self,
         parent_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        manifest_index::direntry_binds_for_parent(&self.tables, parent_inode_id)
+        manifest_index::direntry_binds_for_parent(&self.tables, parent_inode_id).await
     }
 
-    fn direntry_binds_for_parent_name(
+    async fn direntry_binds_for_parent_name(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
         manifest_index::direntry_binds_for_parent_name(&self.tables, parent_inode_id, name_key)
+            .await
     }
 
-    fn direntry_binds_for_child(
+    async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        manifest_index::direntry_binds_for_child(&self.tables, child_inode_id)
+        manifest_index::direntry_binds_for_child(&self.tables, child_inode_id).await
     }
 
-    fn direntry_unbinds_for_binding(
+    async fn direntry_unbinds_for_binding(
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
-        manifest_index::direntry_unbinds_for_binding(&self.tables, direntry)
+        manifest_index::direntry_unbinds_for_binding(&self.tables, direntry).await
     }
 
-    fn revisions_for_inode(&self, inode_id: InodeId) -> Result<Vec<RevisionRecord>, CoreError> {
-        manifest_index::revisions_for_inode(&self.tables, inode_id)
+    async fn revisions_for_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Vec<RevisionRecord>, CoreError> {
+        manifest_index::revisions_for_inode(&self.tables, inode_id).await
     }
 
-    fn tombstones_for_root(
+    async fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
-        manifest_index::tombstones_for_root(&self.tables, root_inode_id)
+        manifest_index::tombstones_for_root(&self.tables, root_inode_id).await
     }
 }
 

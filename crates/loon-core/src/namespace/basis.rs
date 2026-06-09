@@ -148,12 +148,12 @@ impl From<NamespaceCatalogLoadError> for BasisLoadError {
 }
 
 /// Reconstructs and verifies the current namespace basis.
-pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
+pub async fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
-    let catalog_entry = load_namespace_catalog_entry(store, expected_namespace)?;
-    let loaded_head = read_head_object(store, expected_namespace)?;
+    let catalog_entry = load_namespace_catalog_entry(store, expected_namespace).await?;
+    let loaded_head = read_head_object(store, expected_namespace).await?;
     let head_etag =
         loaded_head
             .metadata
@@ -169,10 +169,11 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
         loaded_head.envelope.state,
         head_etag,
     )
+    .await
 }
 
 /// Reconstructs and verifies a namespace basis for an already-loaded head.
-pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
+pub async fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
     head: HeadState,
@@ -187,7 +188,7 @@ pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let catalog_entry = load_namespace_catalog_entry(store, expected_namespace)?;
+    let catalog_entry = load_namespace_catalog_entry(store, expected_namespace).await?;
     load_verified_namespace_basis_at_head_with_catalog(
         store,
         expected_namespace,
@@ -195,6 +196,7 @@ pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
         head,
         head_etag,
     )
+    .await
 }
 
 #[tracing::instrument(
@@ -204,20 +206,21 @@ pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "reconstruct_basis")
 )]
-fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
+async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
     catalog_entry: VerifiedNamespaceCatalogEntry,
     head: HeadState,
     head_etag: String,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
-    let loaded_lease =
-        read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
+    let loaded_lease = read_lease_object(store, expected_namespace)
+        .await
+        .map_err(BasisLoadError::LoadLease)?;
 
     let (initial_head, initial_metadata_state) = if let Some(manifest_id) = head.current_manifest_id
     {
         let materialized =
-            load_verified_manifest_materialization(store, expected_namespace, manifest_id)?;
+            load_verified_manifest_materialization(store, expected_namespace, manifest_id).await?;
         (
             manifest_basis_head(&head, &materialized.manifest),
             materialized.metadata_state,
@@ -237,7 +240,8 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
         },
-    )?;
+    )
+    .await?;
     let replayed = {
         let _span = tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
         replay_validated_wal_tail_with_metadata(
@@ -259,11 +263,11 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<NamespaceHeadSummary, CoreError> {
-    match namespace_initialization_state(store, expected_namespace) {
+    match namespace_initialization_state(store, expected_namespace).await {
         Ok(NamespaceInitializationState::Complete) => {}
         Ok(NamespaceInitializationState::Absent) => {
             return Err(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
@@ -281,10 +285,12 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     }
 
     let loaded_head = read_head_object(store, expected_namespace)
+        .await
         .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
     let head = loaded_head.envelope.state;
     let manifest_basis_seq = if let Some(manifest_id) = head.current_manifest_id {
         load_verified_manifest_materialization(store, expected_namespace, manifest_id)
+            .await
             .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?
             .manifest
             .payload
@@ -302,6 +308,7 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             stop_after_seq: None,
         },
     )
+    .await
     .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
     let wal_tail_segments = u64::try_from(wal_chain.segments().len())
         .map_err(|_| CoreError::Store("WAL tail segment count overflow".to_owned()))?;
@@ -322,7 +329,7 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "probe_namespace_head_etag", key_class = "namespace_head")
 )]
-pub fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
+pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<NamespaceHeadEtagProbe, CoreError> {
@@ -330,6 +337,7 @@ pub fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     let object_key = namespace_head(expected_namespace.as_str());
     let metadata = store
         .head(&object_key)
+        .await
         .map_err(|err| {
             CoreError::Basis(BasisLoadError::LoadHead(ControlObjectLoadError::Store(
                 err.to_string(),

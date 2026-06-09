@@ -6,7 +6,7 @@ use crate::error::CoreError;
 use loon_api::{v0::RenameMode, ContentRef, MutationResult, NamespaceId, RevisionNo};
 use loon_objectstore::ObjectStore;
 
-pub(crate) fn put_file_bytes<S: ObjectStore + ?Sized>(
+pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -16,7 +16,7 @@ pub(crate) fn put_file_bytes<S: ObjectStore + ?Sized>(
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
     let content_ref =
-        store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes)?;
+        store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes).await?;
     put_file_content_ref(
         store,
         namespace_id,
@@ -26,10 +26,11 @@ pub(crate) fn put_file_bytes<S: ObjectStore + ?Sized>(
         context,
         commit_id,
     )
+    .await
 }
 
 #[cfg(test)]
-pub(crate) fn write_file_bytes<S: ObjectStore + ?Sized>(
+pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -46,9 +47,10 @@ pub(crate) fn write_file_bytes<S: ObjectStore + ?Sized>(
         context,
         commit_id,
     )
+    .await
 }
 
-pub(crate) fn create_dir_path<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_dir_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -65,9 +67,10 @@ pub(crate) fn create_dir_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-pub(crate) fn put_file_content_ref<S: ObjectStore + ?Sized>(
+pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -88,19 +91,20 @@ pub(crate) fn put_file_content_ref<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-pub(crate) fn delete_path<S: ObjectStore + ?Sized>(
+pub(crate) async fn delete_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    delete_path_with_recursion(store, namespace_id, absolute_path, true, context, commit_id)
+    delete_path_with_recursion(store, namespace_id, absolute_path, true, context, commit_id).await
 }
 
-pub(crate) fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
+pub(crate) async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -115,9 +119,10 @@ pub(crate) fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
         context,
         commit_id,
     )
+    .await
 }
 
-fn delete_path_with_recursion<S: ObjectStore + ?Sized>(
+async fn delete_path_with_recursion<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -136,9 +141,10 @@ fn delete_path_with_recursion<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-pub(crate) fn move_path<S: ObjectStore + ?Sized>(
+pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -158,9 +164,10 @@ pub(crate) fn move_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-pub(crate) fn copy_file_path<S: ObjectStore + ?Sized>(
+pub(crate) async fn copy_file_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -179,9 +186,10 @@ pub(crate) fn copy_file_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-pub(crate) fn restore_file_revision<S: ObjectStore + ?Sized>(
+pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -200,4 +208,5 @@ pub(crate) fn restore_file_revision<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }

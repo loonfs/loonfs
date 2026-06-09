@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 loon-api = { path = "../loon-api" }
 loon-objectstore = { path = "../loon-objectstore" }
+bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -19,8 +20,11 @@ default = []
 inspection = []
 
 [dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
 loon-model = { path = "../loon-model" }
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

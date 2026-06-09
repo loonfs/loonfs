@@ -48,10 +48,12 @@ mod tests {
     use loon_objectstore::fs::LocalFsStore;
     use std::sync::Arc;
 
-    #[test]
-    fn visible_paths_from_basis_are_sorted() {
-        let (_temp_dir, store, namespace) = populated_namespace();
-        let basis = load_verified_namespace_basis(&store, &namespace).expect("load basis");
+    #[tokio::test]
+    async fn visible_paths_from_basis_are_sorted() {
+        let (_temp_dir, store, namespace) = populated_namespace().await;
+        let basis = load_verified_namespace_basis(&store, &namespace)
+            .await
+            .expect("load basis");
 
         let paths = list_visible_paths_from_basis(&basis).expect("visible paths");
         let actual: Vec<_> = paths.into_iter().map(|entry| entry.absolute_path).collect();
@@ -59,11 +61,15 @@ mod tests {
         assert_eq!(actual, vec!["/", "/a", "/a/file.txt", "/z"]);
     }
 
-    #[test]
-    fn visible_tree_hash_from_basis_is_deterministic() {
-        let (_temp_dir, store, namespace) = populated_namespace();
-        let left = load_verified_namespace_basis(&store, &namespace).expect("load left basis");
-        let right = load_verified_namespace_basis(&store, &namespace).expect("load right basis");
+    #[tokio::test]
+    async fn visible_tree_hash_from_basis_is_deterministic() {
+        let (_temp_dir, store, namespace) = populated_namespace().await;
+        let left = load_verified_namespace_basis(&store, &namespace)
+            .await
+            .expect("load left basis");
+        let right = load_verified_namespace_basis(&store, &namespace)
+            .await
+            .expect("load right basis");
 
         assert_eq!(
             visible_tree_hash_from_basis(&left).expect("left hash"),
@@ -71,7 +77,7 @@ mod tests {
         );
     }
 
-    fn populated_namespace() -> (tempfile::TempDir, Arc<LocalFsStore>, NamespaceId) {
+    async fn populated_namespace() -> (tempfile::TempDir, Arc<LocalFsStore>, NamespaceId) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
         let namespace = NamespaceId::parse("inspection").expect("valid namespace id");
@@ -83,15 +89,19 @@ mod tests {
 
         engine
             .bootstrap_namespace(BootstrapOptions::default())
+            .await
             .expect("bootstrap");
         engine
             .create_dir("/z", WriteOptions::default())
+            .await
             .expect("create z");
         engine
             .create_dir("/a", WriteOptions::default())
+            .await
             .expect("create a");
         engine
             .put_file("/a/file.txt", b"content", WriteOptions::default())
+            .await
             .expect("put file");
 
         (temp_dir, store, namespace)

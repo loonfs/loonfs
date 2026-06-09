@@ -1,3 +1,6 @@
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::{self, BoxStream};
 use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -15,14 +18,23 @@ use loon_objectstore::{
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-#[test]
-fn records_put_success() {
+fn bytes(bytes: &'static [u8]) -> Bytes {
+    Bytes::from_static(bytes)
+}
+
+#[tokio::test]
+async fn records_put_success() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put(&namespace_head("ns-1"), b"head", PutMode::CreateIfAbsent)
+        .put(
+            &namespace_head("ns-1"),
+            bytes(b"head"),
+            PutMode::CreateIfAbsent,
+        )
+        .await
         .expect("put object");
 
     let samples = recorder.samples();
@@ -37,19 +49,22 @@ fn records_put_success() {
     assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
 }
 
-#[test]
-fn delegates_convenience_writes_to_inner_store() {
+#[tokio::test]
+async fn delegates_convenience_writes_to_inner_store() {
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
-        .put_overwrite(&namespace_head("ns-1"), b"overwrite")
+        .put_overwrite(&namespace_head("ns-1"), bytes(b"overwrite"))
+        .await
         .expect("put overwrite");
     store
-        .put_if_absent(&namespace_head("ns-1"), b"create")
+        .put_if_absent(&namespace_head("ns-1"), bytes(b"create"))
+        .await
         .expect("put if absent");
     store
-        .compare_and_swap(&namespace_head("ns-1"), "etag-old", b"swap")
+        .compare_and_swap(&namespace_head("ns-1"), "etag-old", bytes(b"swap"))
+        .await
         .expect("compare and swap");
 
     let inner = store.into_inner();
@@ -65,14 +80,18 @@ fn delegates_convenience_writes_to_inner_store() {
     assert_eq!(samples[2].put_mode, Some(PutModeClass::CompareAndSwap));
 }
 
-#[test]
-fn records_get_success_bytes_out() {
+#[tokio::test]
+async fn records_get_success_bytes_out() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite("content-stores/cs_abc/blobs/sha256/ab/cd/abcdef", b"abcdef")
+        .put_overwrite(
+            "content-stores/cs_abc/blobs/sha256/ab/cd/abcdef",
+            bytes(b"abcdef"),
+        )
+        .await
         .expect("put object");
     let bytes = store
         .get(
@@ -82,10 +101,11 @@ fn records_get_success_bytes_out() {
                 end_exclusive: 4,
             }),
         )
+        .await
         .expect("get object")
         .expect("object exists");
 
-    assert_eq!(bytes, b"bcd");
+    assert_eq!(bytes, Bytes::from_static(b"bcd"));
     let samples = recorder.samples();
     let sample = samples.last().expect("get sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
@@ -95,21 +115,24 @@ fn records_get_success_bytes_out() {
     assert_eq!(sample.range_class, Some(RangeClass::Bounded));
 }
 
-#[test]
-fn records_head_and_head_with_checksum_as_distinct_operations() {
+#[tokio::test]
+async fn records_head_and_head_with_checksum_as_distinct_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite(&namespace_lease("ns-1"), b"lease")
+        .put_overwrite(&namespace_lease("ns-1"), bytes(b"lease"))
+        .await
         .expect("put object");
-    store.head(&namespace_lease("ns-1")).expect("head");
+    store.head(&namespace_lease("ns-1")).await.expect("head");
     store
         .head_with_checksum(&namespace_lease("ns-1"))
+        .await
         .expect("head with checksum");
     store
         .get_with_metadata(&namespace_lease("ns-1"))
+        .await
         .expect("get with metadata");
 
     let samples = recorder.samples();
@@ -121,14 +144,18 @@ fn records_head_and_head_with_checksum_as_distinct_operations() {
     assert_eq!(samples[3].key_class, KeyClass::Lease);
 }
 
-#[test]
-fn records_not_found_without_key_leak() {
+#[tokio::test]
+async fn records_not_found_without_key_leak() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
-    assert!(store.get(raw_key, None).expect("get missing").is_none());
+    assert!(store
+        .get(raw_key, None)
+        .await
+        .expect("get missing")
+        .is_none());
 
     let sample = recorder.samples().pop().expect("get sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
@@ -138,15 +165,16 @@ fn records_not_found_without_key_leak() {
     assert!(!encoded.contains("secret-segment"));
 }
 
-#[test]
-fn records_invalid_key_without_error_text() {
+#[tokio::test]
+async fn records_invalid_key_without_error_text() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let raw_key = "../escape";
 
     store
-        .put_overwrite(raw_key, b"bad")
+        .put_overwrite(raw_key, bytes(b"bad"))
+        .await
         .expect_err("invalid key should fail");
 
     let sample = recorder.samples().pop().expect("put sample");
@@ -157,20 +185,23 @@ fn records_invalid_key_without_error_text() {
     assert!(!encoded.contains("escape"));
 }
 
-#[test]
-fn records_list_count() {
+#[tokio::test]
+async fn records_list_count() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite("namespaces/ns-1/descriptor.json", b"descriptor")
+        .put_overwrite("namespaces/ns-1/descriptor.json", bytes(b"descriptor"))
+        .await
         .expect("put descriptor");
     store
-        .put_overwrite(&namespace_head("ns-1"), b"head")
+        .put_overwrite(&namespace_head("ns-1"), bytes(b"head"))
+        .await
         .expect("put head");
     let keys = store
         .list_prefix("namespaces/ns-1/")
+        .await
         .expect("list namespace");
 
     assert_eq!(keys.len(), 2);
@@ -181,8 +212,8 @@ fn records_list_count() {
     assert_eq!(sample.range_class, Some(RangeClass::Prefix));
 }
 
-#[test]
-fn classifies_wal_and_manifest_key_families() {
+#[tokio::test]
+async fn classifies_wal_and_manifest_key_families() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
@@ -190,17 +221,23 @@ fn classifies_wal_and_manifest_key_families() {
     store
         .put_overwrite(
             &wal_segment("ns-1", "seg_00000000000000000000000000000001"),
-            b"wal",
+            bytes(b"wal"),
         )
+        .await
         .expect("put wal");
     store
-        .put_overwrite(&namespace_manifest("ns-1", ManifestId(2)), b"manifest")
+        .put_overwrite(
+            &namespace_manifest("ns-1", ManifestId(2)),
+            bytes(b"manifest"),
+        )
+        .await
         .expect("put manifest");
     store
         .put_overwrite(
             &metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
-            b"table",
+            bytes(b"table"),
         )
+        .await
         .expect("put table");
 
     let samples = recorder.samples();
@@ -209,8 +246,8 @@ fn classifies_wal_and_manifest_key_families() {
     assert_eq!(samples[2].key_class, KeyClass::MetadataSst);
 }
 
-#[test]
-fn classifies_reserved_namespace_layout_families() {
+#[tokio::test]
+async fn classifies_reserved_namespace_layout_families() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
@@ -221,22 +258,25 @@ fn classifies_reserved_namespace_layout_families() {
             &layout
                 .namespace_manifest("ns-1", ManifestId(1))
                 .into_string(),
-            b"manifest",
+            bytes(b"manifest"),
         )
+        .await
         .expect("put namespace manifest");
     store
         .put_overwrite(
             &layout.namespace_compactions("ns-1", 1).into_string(),
-            b"compactions",
+            bytes(b"compactions"),
         )
+        .await
         .expect("put compactions");
     store
         .put_overwrite(
             &layout
                 .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .into_string(),
-            b"metadata",
+            bytes(b"metadata"),
         )
+        .await
         .expect("put metadata sst");
     store
         .put_overwrite(
@@ -248,24 +288,27 @@ fn classifies_reserved_namespace_layout_families() {
                     "tbl_00000000000000000000000000000002",
                 )
                 .into_string(),
-            b"index",
+            bytes(b"index"),
         )
+        .await
         .expect("put index sst");
     store
         .put_overwrite(
             &layout
                 .index_manifest("ns-1", "grep", "default", ManifestId(1))
                 .into_string(),
-            b"index manifest",
+            bytes(b"index manifest"),
         )
+        .await
         .expect("put index manifest");
     store
         .put_overwrite(
             &layout
                 .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Manifest)
                 .into_string(),
-            b"boundary",
+            bytes(b"boundary"),
         )
+        .await
         .expect("put gc boundary");
 
     let samples = recorder.samples();
@@ -277,8 +320,8 @@ fn classifies_reserved_namespace_layout_families() {
     assert_eq!(samples[5].key_class, KeyClass::GcControl);
 }
 
-#[test]
-fn jsonl_recorder_writes_privacy_safe_samples() {
+#[tokio::test]
+async fn jsonl_recorder_writes_privacy_safe_samples() {
     let temp_dir = tempdir().expect("tempdir");
     let metrics_path = temp_dir.path().join("metrics/object-store.ndjson");
     let recorder =
@@ -287,9 +330,14 @@ fn jsonl_recorder_writes_privacy_safe_samples() {
     let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     store
-        .put_overwrite(&namespace_head("ns-1"), b"head")
+        .put_overwrite(&namespace_head("ns-1"), bytes(b"head"))
+        .await
         .expect("put object");
-    assert!(store.get(raw_key, None).expect("get missing").is_none());
+    assert!(store
+        .get(raw_key, None)
+        .await
+        .expect("get missing")
+        .is_none());
     recorder.flush().expect("flush metrics");
 
     let jsonl = std::fs::read_to_string(metrics_path).expect("read metrics");
@@ -317,7 +365,7 @@ where
         .with_store_kind("local-fs")
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct DelegatingWriteStore {
     calls: Mutex<Vec<&'static str>>,
 }
@@ -344,54 +392,66 @@ impl DelegatingWriteStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for DelegatingWriteStore {
-    fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         Ok(None)
     }
 
-    fn get(
+    async fn get(
         &self,
         _key: &str,
         _range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         Ok(None)
     }
 
-    fn get_with_metadata(&self, _key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, _key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         Ok(None)
     }
 
-    fn put(
+    async fn put(
         &self,
         _key: &str,
-        _bytes: &[u8],
+        _bytes: Bytes,
         _mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put"))
     }
 
-    fn put_overwrite(&self, _key: &str, _bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_overwrite(
+        &self,
+        _key: &str,
+        _bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put_overwrite"))
     }
 
-    fn put_if_absent(&self, _key: &str, _bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_if_absent(
+        &self,
+        _key: &str,
+        _bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put_if_absent"))
     }
 
-    fn compare_and_swap(
+    async fn compare_and_swap(
         &self,
         _key: &str,
         _expected_etag: &str,
-        _bytes: &[u8],
+        _bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("compare_and_swap"))
     }
 
-    fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
         Ok(())
     }
 
-    fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        Ok(Vec::new())
+    fn list_prefix_stream(
+        &self,
+        _prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        Box::pin(stream::empty())
     }
 }

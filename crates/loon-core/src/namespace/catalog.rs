@@ -46,22 +46,24 @@ pub(crate) enum NamespaceInitializationError {
     LoadContentStoreDescriptor(ControlObjectLoadError),
 }
 
-pub(crate) fn load_namespace_descriptor<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_namespace_descriptor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<NamespaceDescriptorState, NamespaceCatalogLoadError> {
     let loaded_descriptor = read_namespace_descriptor_object(store, expected_namespace)
+        .await
         .map_err(NamespaceCatalogLoadError::LoadNamespaceDescriptor)?;
     Ok(loaded_descriptor.envelope.state)
 }
 
-pub(crate) fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
-    let namespace_descriptor = load_namespace_descriptor(store, expected_namespace)?;
+    let namespace_descriptor = load_namespace_descriptor(store, expected_namespace).await?;
     let content_store_id = namespace_descriptor.content_store_id.clone();
     read_content_store_descriptor_object(store, &content_store_id)
+        .await
         .map_err(NamespaceCatalogLoadError::LoadContentStoreDescriptor)?;
 
     Ok(VerifiedNamespaceCatalogEntry {
@@ -70,18 +72,21 @@ pub(crate) fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<ContentStoreId, NamespaceCatalogLoadError> {
-    Ok(load_namespace_catalog_entry(store, expected_namespace)?.content_store_id)
+    Ok(load_namespace_catalog_entry(store, expected_namespace)
+        .await?
+        .content_store_id)
 }
 
-pub(crate) fn list_namespaces<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_namespaces<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<Vec<NamespaceSummary>, CoreError> {
     let keys = store
         .list_prefix("namespaces/")
+        .await
         .map_err(|err| CoreError::Store(err.to_string()))?;
     let mut names = BTreeSet::new();
     for key in keys {
@@ -95,7 +100,7 @@ pub(crate) fn list_namespaces<S: ObjectStore + ?Sized>(
             continue;
         };
         let namespace_id = NamespaceId::parse(namespace)?;
-        load_namespace_descriptor(store, &namespace_id)?;
+        load_namespace_descriptor(store, &namespace_id).await?;
         names.insert(namespace_id);
     }
     Ok(names
@@ -104,7 +109,7 @@ pub(crate) fn list_namespaces<S: ObjectStore + ?Sized>(
         .collect())
 }
 
-pub(crate) fn namespace_initialization_state<S: ObjectStore + ?Sized>(
+pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceInitializationState, NamespaceInitializationError> {
@@ -116,14 +121,17 @@ pub(crate) fn namespace_initialization_state<S: ObjectStore + ?Sized>(
 
     let descriptor_exists = store
         .head(&descriptor_key)
+        .await
         .map_err(|err| NamespaceInitializationError::InspectNamespaceDescriptor(err.to_string()))?
         .is_some();
     let head_exists = store
         .head(&head_key)
+        .await
         .map_err(|err| NamespaceInitializationError::InspectNamespaceHead(err.to_string()))?
         .is_some();
     let lease_exists = store
         .head(&lease_key)
+        .await
         .map_err(|err| NamespaceInitializationError::InspectNamespaceLease(err.to_string()))?
         .is_some();
 
@@ -131,11 +139,13 @@ pub(crate) fn namespace_initialization_state<S: ObjectStore + ?Sized>(
         (false, false, false) => Ok(NamespaceInitializationState::Absent),
         (true, true, true) => {
             let descriptor = read_namespace_descriptor_object(store, namespace_id)
+                .await
                 .map_err(NamespaceInitializationError::LoadNamespaceDescriptor)?;
             read_content_store_descriptor_object(
                 store,
                 &descriptor.envelope.state.content_store_id,
             )
+            .await
             .map_err(NamespaceInitializationError::LoadContentStoreDescriptor)?;
             Ok(NamespaceInitializationState::Complete)
         }

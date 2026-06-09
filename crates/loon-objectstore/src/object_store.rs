@@ -72,7 +72,7 @@ pub enum ObjectStoreError {
 }
 
 #[async_trait]
-pub trait ObjectStore: Send + Sync + Debug + 'static {
+pub trait ObjectStore: Send + Sync + Debug {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
 
     async fn head_with_checksum(
@@ -140,5 +140,97 @@ pub trait ObjectStore: Send + Sync + Debug + 'static {
             },
         )
         .await
+    }
+}
+
+#[async_trait]
+impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.as_ref().head(key).await
+    }
+
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.as_ref().head_with_checksum(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.as_ref().get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.as_ref().get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.as_ref().put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.as_ref().delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.as_ref().list_prefix_stream(prefix)
+    }
+}
+
+#[async_trait]
+impl<T: ObjectStore + ?Sized> ObjectStore for &T {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        (*self).head(key).await
+    }
+
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        (*self).head_with_checksum(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        (*self).get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        (*self).get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        (*self).put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        (*self).delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        (*self).list_prefix_stream(prefix)
     }
 }

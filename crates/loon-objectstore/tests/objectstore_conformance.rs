@@ -1,5 +1,6 @@
 mod provider_env;
 
+use bytes::Bytes;
 use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -11,7 +12,6 @@ use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
 use loon_objectstore::r2::{R2Store, R2StoreConfig};
 use loon_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
-use loon_objectstore::BlockingObjectStoreAdapter;
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ByteRange, ObjectStore};
 use provider_env::{
@@ -205,63 +205,65 @@ fn provider_env_example_covers_real_provider_contract() {
     }
 }
 
-#[test]
-fn local_fs_create_if_absent_is_enforced() {
+#[tokio::test]
+async fn local_fs_create_if_absent_is_enforced() {
     let temp_dir = TestDir::new("create-if-absent");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_create_if_absent_is_enforced(&store);
+    assert_create_if_absent_is_enforced(&store).await;
 }
 
-#[test]
-fn local_fs_compare_and_swap_rejects_stale_writer() {
+#[tokio::test]
+async fn local_fs_compare_and_swap_rejects_stale_writer() {
     let temp_dir = TestDir::new("cas");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_compare_and_swap_rejects_stale_writer(&store);
+    assert_compare_and_swap_rejects_stale_writer(&store).await;
 }
 
-#[test]
-fn local_fs_overwrite_visibility_and_delete_idempotence() {
+#[tokio::test]
+async fn local_fs_overwrite_visibility_and_delete_idempotence() {
     let temp_dir = TestDir::new("overwrite-delete");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_overwrite_updates_head_and_body(&store);
-    assert_get_with_metadata_returns_body_and_identity(&store);
-    assert_delete_missing_is_idempotent(&store);
+    assert_overwrite_updates_head_and_body(&store).await;
+    assert_get_with_metadata_returns_body_and_identity(&store).await;
+    assert_delete_missing_is_idempotent(&store).await;
 }
 
-#[test]
-fn local_fs_lists_immediately_after_write_and_delete() {
+#[tokio::test]
+async fn local_fs_lists_immediately_after_write_and_delete() {
     let temp_dir = TestDir::new("listing");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_lists_immediately_after_write_and_delete(&store);
-    assert_sorted_list_prefix(&store);
+    assert_lists_immediately_after_write_and_delete(&store).await;
+    assert_sorted_list_prefix(&store).await;
 }
 
-#[test]
-fn local_fs_supports_range_reads() {
+#[tokio::test]
+async fn local_fs_supports_range_reads() {
     let temp_dir = TestDir::new("ranges");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_supports_range_reads(&store);
+    assert_supports_range_reads(&store).await;
 }
 
-#[test]
-fn local_fs_rejects_path_traversal_keys() {
+#[tokio::test]
+async fn local_fs_rejects_path_traversal_keys() {
     let temp_dir = TestDir::new("invalid-key");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_rejects_invalid_keys_consistently(&store);
+    assert_rejects_invalid_keys_consistently(&store).await;
 }
 
-#[test]
-fn local_fs_compare_and_swap_missing_object_rejects_writer() {
+#[tokio::test]
+async fn local_fs_compare_and_swap_missing_object_rejects_writer() {
     let temp_dir = TestDir::new("cas-missing");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_compare_and_swap_missing_object_rejects_writer(&store);
+    assert_compare_and_swap_missing_object_rejects_writer(&store).await;
 }
 
-#[test]
-fn local_fs_contract_probes_match_doctor_surface() {
+#[tokio::test]
+async fn local_fs_contract_probes_match_doctor_surface() {
     let temp_dir = TestDir::new("doctor-probes");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    let report = run_contract_probes(&store, "local-fs-doctor").expect("run doctor probes");
+    let report = run_contract_probes(&store, "local-fs-doctor")
+        .await
+        .expect("run doctor probes");
     assert_eq!(
         report.checks,
         vec![
@@ -276,9 +278,9 @@ fn local_fs_contract_probes_match_doctor_surface() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
-fn aws_s3_real_provider_conformance() {
+async fn aws_s3_real_provider_conformance() {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
     let store = AwsS3Store::new(AwsS3StoreConfig {
@@ -292,15 +294,12 @@ fn aws_s3_real_provider_conformance() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
-    let store = BlockingObjectStoreAdapter::new(std::sync::Arc::new(store))
-        .expect("create blocking adapter");
-
-    assert_provider_conformance(&store);
+    assert_provider_conformance(&store).await;
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
-fn cloudflare_r2_real_provider_conformance() {
+async fn cloudflare_r2_real_provider_conformance() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
     let store = R2Store::new(R2StoreConfig {
@@ -312,35 +311,39 @@ fn cloudflare_r2_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    let store = BlockingObjectStoreAdapter::new(std::sync::Arc::new(store))
-        .expect("create blocking adapter");
-
-    assert_provider_conformance(&store);
+    assert_provider_conformance(&store).await;
 }
 
-fn assert_provider_conformance<S: ObjectStore>(store: &S) {
-    run_contract_probes(store, "provider-conformance").expect("run shared contract probes");
-    assert_create_if_absent_is_enforced(store);
-    assert_compare_and_swap_rejects_stale_writer(store);
-    assert_compare_and_swap_missing_object_rejects_writer(store);
-    assert_overwrite_updates_head_and_body(store);
-    assert_get_with_metadata_returns_body_and_identity(store);
-    assert_delete_missing_is_idempotent(store);
-    assert_lists_immediately_after_write_and_delete(store);
-    assert_sorted_list_prefix(store);
-    assert_supports_range_reads(store);
-    assert_rejects_invalid_keys_consistently(store);
+async fn assert_provider_conformance<S: ObjectStore>(store: &S) {
+    run_contract_probes(store, "provider-conformance")
+        .await
+        .expect("run shared contract probes");
+    assert_create_if_absent_is_enforced(store).await;
+    assert_compare_and_swap_rejects_stale_writer(store).await;
+    assert_compare_and_swap_missing_object_rejects_writer(store).await;
+    assert_overwrite_updates_head_and_body(store).await;
+    assert_get_with_metadata_returns_body_and_identity(store).await;
+    assert_delete_missing_is_idempotent(store).await;
+    assert_lists_immediately_after_write_and_delete(store).await;
+    assert_sorted_list_prefix(store).await;
+    assert_supports_range_reads(store).await;
+    assert_rejects_invalid_keys_consistently(store).await;
 }
 
-fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S) {
+async fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-1");
-    let _ = store.delete(&key);
+    let _ = store.delete(&key).await;
 
     let written = store
-        .put_overwrite(&key, br#"{"seq":41,"source":"get-with-metadata"}"#)
+        .put_overwrite(
+            &key,
+            Bytes::from_static(br#"{"seq":41,"source":"get-with-metadata"}"#),
+        )
+        .await
         .expect("write object for get_with_metadata");
     let loaded = store
         .get_with_metadata(&key)
+        .await
         .expect("get_with_metadata")
         .expect("object should exist");
 
@@ -350,167 +353,209 @@ fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S)
 
     store
         .delete(&key)
+        .await
         .expect("cleanup get_with_metadata object");
 }
 
-fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
+async fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-1");
-    let _ = store.delete(&key);
+    let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, br#"{"seq":41}"#)
+        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41}"#))
+        .await
         .expect("initial create should succeed");
 
-    let second = store.put_if_absent(&key, br#"{"seq":42}"#);
+    let second = store
+        .put_if_absent(&key, Bytes::from_static(br#"{"seq":42}"#))
+        .await;
     assert_precondition_failed(second);
 
     assert_eq!(
         store
             .get(&key, None)
+            .await
             .expect("read body")
             .expect("body exists"),
-        br#"{"seq":41}"#
+        Bytes::from_static(br#"{"seq":41}"#)
     );
 
-    store.delete(&key).expect("cleanup create-if-absent object");
+    store
+        .delete(&key)
+        .await
+        .expect("cleanup create-if-absent object");
 }
 
-fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S) {
+async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-1");
-    let _ = store.delete(&key);
+    let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, br#"{"seq":41,"fence_token":8}"#)
+        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41,"fence_token":8}"#))
+        .await
         .expect("seed initial head");
     let first_read = store
         .head(&key)
+        .await
         .expect("head read")
         .expect("head should exist")
         .etag
         .expect("etag should exist");
 
     store
-        .compare_and_swap(&key, &first_read, br#"{"seq":42,"fence_token":8}"#)
+        .compare_and_swap(
+            &key,
+            &first_read,
+            Bytes::from_static(br#"{"seq":42,"fence_token":8}"#),
+        )
+        .await
         .expect("first CAS should succeed");
 
-    let stale = store.compare_and_swap(&key, &first_read, br#"{"seq":42,"fence_token":9}"#);
+    let stale = store
+        .compare_and_swap(
+            &key,
+            &first_read,
+            Bytes::from_static(br#"{"seq":42,"fence_token":9}"#),
+        )
+        .await;
     assert_precondition_failed(stale);
 
     assert_eq!(
         store
             .get(&key, None)
+            .await
             .expect("read body")
             .expect("body exists"),
-        br#"{"seq":42,"fence_token":8}"#
+        Bytes::from_static(br#"{"seq":42,"fence_token":8}"#)
     );
 
-    store.delete(&key).expect("cleanup CAS object");
+    store.delete(&key).await.expect("cleanup CAS object");
 }
 
-fn assert_compare_and_swap_missing_object_rejects_writer<S: ObjectStore>(store: &S) {
+async fn assert_compare_and_swap_missing_object_rejects_writer<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-cas-missing");
-    let _ = store.delete(&key);
-    assert_precondition_failed(store.compare_and_swap(&key, "missing-etag", br#"{"seq":1}"#));
+    let _ = store.delete(&key).await;
+    assert_precondition_failed(
+        store
+            .compare_and_swap(&key, "missing-etag", Bytes::from_static(br#"{"seq":1}"#))
+            .await,
+    );
 }
 
-fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
+async fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-overwrite");
-    let _ = store.delete(&key);
+    let _ = store.delete(&key).await;
 
     let first = store
-        .put_overwrite(&key, br#"{"seq":41}"#)
+        .put_overwrite(&key, Bytes::from_static(br#"{"seq":41}"#))
+        .await
         .expect("initial overwrite should succeed");
     let second = store
-        .put_overwrite(&key, br#"{"seq":42}"#)
+        .put_overwrite(&key, Bytes::from_static(br#"{"seq":42}"#))
+        .await
         .expect("second overwrite should succeed");
 
     assert_eq!(
         store
             .get(&key, None)
+            .await
             .expect("read overwritten body")
             .expect("overwritten body exists"),
-        br#"{"seq":42}"#
+        Bytes::from_static(br#"{"seq":42}"#)
     );
     let head = store
         .head(&key)
+        .await
         .expect("head after overwrite")
         .expect("overwritten object exists");
     assert_eq!(head.etag, second.etag);
     assert_eq!(head.size_bytes, second.size_bytes);
     assert_ne!(first, second, "overwrite should refresh visible metadata");
 
-    store.delete(&key).expect("cleanup overwritten object");
-    assert_eq!(store.head(&key).expect("head after delete"), None);
-}
-
-fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-delete-missing");
-    let _ = store.delete(&key);
     store
         .delete(&key)
-        .expect("delete missing object should succeed");
-    assert_eq!(store.head(&key).expect("head missing object"), None);
+        .await
+        .expect("cleanup overwritten object");
+    assert_eq!(store.head(&key).await.expect("head after delete"), None);
 }
 
-fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
+async fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
+    let key = namespace_head("ns-delete-missing");
+    let _ = store.delete(&key).await;
+    store
+        .delete(&key)
+        .await
+        .expect("delete missing object should succeed");
+    assert_eq!(store.head(&key).await.expect("head missing object"), None);
+}
+
+async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
     let key = derived_progress("ns-1", DerivedWorkClass::ManifestBuilder);
-    let _ = store.delete(&key);
+    let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, br#"{"built_through_seq":420}"#)
+        .put_if_absent(&key, Bytes::from_static(br#"{"built_through_seq":420}"#))
+        .await
         .expect("create progress object");
     assert_eq!(
         store
             .list_prefix("namespaces/ns-1/derived/")
+            .await
             .expect("list after write"),
         vec![key.clone()]
     );
 
-    store.delete(&key).expect("delete progress object");
+    store.delete(&key).await.expect("delete progress object");
     assert!(store
         .list_prefix("namespaces/ns-1/derived/")
+        .await
         .expect("list after delete")
         .is_empty());
 }
 
-fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
+async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
         derived_progress("ns-sort", DerivedWorkClass::ManifestBuilder),
         namespace_head("ns-sort"),
         namespace_lease("ns-sort"),
     ];
     for key in &keys {
-        let _ = store.delete(key);
+        let _ = store.delete(key).await;
     }
 
     store
-        .put_if_absent(&keys[1], br#"{"seq":1}"#)
+        .put_if_absent(&keys[1], Bytes::from_static(br#"{"seq":1}"#))
+        .await
         .expect("seed second sort key");
     store
-        .put_if_absent(&keys[2], br#"{"lease":1}"#)
+        .put_if_absent(&keys[2], Bytes::from_static(br#"{"lease":1}"#))
+        .await
         .expect("seed third sort key");
     store
-        .put_if_absent(&keys[0], br#"{"through_seq":1}"#)
+        .put_if_absent(&keys[0], Bytes::from_static(br#"{"through_seq":1}"#))
+        .await
         .expect("seed first sort key");
 
     let listed = store
         .list_prefix("namespaces/ns-sort/")
+        .await
         .expect("list sorted keys");
     let mut expected = keys.clone();
     expected.sort();
     assert_eq!(listed, expected);
 
     for key in &keys {
-        store.delete(key).expect("cleanup sort key");
+        store.delete(key).await.expect("cleanup sort key");
     }
 }
 
-fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
+async fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
     let key = wal_segment("ns-1", "seg_00000000000000000000000000000001");
-    let _ = store.delete(&key);
+    let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, b"abcdef")
+        .put_if_absent(&key, Bytes::from_static(b"abcdef"))
+        .await
         .expect("create wal object");
 
     let range = store
@@ -521,42 +566,45 @@ fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
                 end_exclusive: 4,
             }),
         )
+        .await
         .expect("range read")
         .expect("range body should exist");
 
-    assert_eq!(range, b"bcd");
+    assert_eq!(range, Bytes::from_static(b"bcd"));
 
-    store.delete(&key).expect("cleanup range object");
+    store.delete(&key).await.expect("cleanup range object");
 }
 
-fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
+async fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
     for key in ["../escape", "namespaces//bad", "./escape"] {
         assert!(matches!(
-            store.head(key),
+            store.head(key).await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
         assert!(matches!(
-            store.get(key, None),
+            store.get(key, None).await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
         assert!(matches!(
-            store.put_if_absent(key, b"oops"),
+            store.put_if_absent(key, Bytes::from_static(b"oops")).await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
         assert!(matches!(
-            store.put_overwrite(key, b"oops"),
+            store.put_overwrite(key, Bytes::from_static(b"oops")).await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
         assert!(matches!(
-            store.compare_and_swap(key, "etag", b"oops"),
+            store
+                .compare_and_swap(key, "etag", Bytes::from_static(b"oops"))
+                .await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
         assert!(matches!(
-            store.delete(key),
+            store.delete(key).await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
         assert!(matches!(
-            store.list_prefix(key),
+            store.list_prefix(key).await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
     }

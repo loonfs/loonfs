@@ -8,6 +8,7 @@ use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
+use bytes::Bytes;
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
     NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkState,
@@ -25,13 +26,14 @@ use loon_objectstore::keys::{
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 
-pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
+pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<NamespaceSummary, CoreError> {
     match namespace_initialization_state(store, new_namespace_id)
+        .await
         .map_err(map_namespace_initialization_error_to_core)?
     {
         NamespaceInitializationState::Absent => {}
@@ -47,9 +49,10 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    let checkpoint = create_checkpoint(store, source_namespace_id, context)?;
+    let checkpoint = create_checkpoint(store, source_namespace_id, context).await?;
     let source_manifest =
         load_verified_manifest_materialization(store, source_namespace_id, checkpoint.manifest_id)
+            .await
             .map_err(|err| CoreError::Basis(BasisLoadError::ManifestLoad(err)))?;
     let source_checkpoint =
         checkpoint_record_by_id(&source_manifest.manifest, &checkpoint.checkpoint_id)?;
@@ -58,7 +61,7 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_head_commit_id = source_checkpoint.head_commit_id.clone();
     let source_manifest_id = source_checkpoint.manifest_id;
     let source_checkpoint_id = source_checkpoint.checkpoint_id.clone();
-    let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
+    let source_basis = load_verified_namespace_basis(store, source_namespace_id).await?;
     let target_manifest_id = ManifestId(fork_seq.0);
     let target_checkpoint_id = generate_checkpoint_id();
 
@@ -183,49 +186,55 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let gc_pin_key = gc_pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
-    write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope)?;
-    write_namespace_manifest(store, &target_manifest).map_err(CoreError::Basis)?;
+    write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope).await?;
+    write_namespace_manifest(store, &target_manifest)
+        .await
+        .map_err(CoreError::Basis)?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &head_key,
         &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
+    )
+    .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &fork_state_key,
         &serde_json::to_vec(&fork_state).map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
+    )
+    .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &lease_key,
         &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
+    )
+    .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &descriptor_key,
         &serde_json::to_vec(&namespace_descriptor_envelope)
             .map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
+    )
+    .await?;
 
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
 }
 
-fn write_source_gc_pin<S: ObjectStore + ?Sized>(
+async fn write_source_gc_pin<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected: &NamespaceGcPinStateEnvelope,
 ) -> Result<(), CoreError> {
     let bytes = serde_json::to_vec(expected).map_err(|err| CoreError::Store(err.to_string()))?;
-    match store.put_if_absent(object_key, &bytes) {
+    match store.put_if_absent(object_key, Bytes::from(bytes)).await {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
-            verify_existing_gc_pin(store, object_key, expected)
+            verify_existing_gc_pin(store, object_key, expected).await
         }
         Err(err) => Err(CoreError::Store(err.to_string())),
     }
@@ -270,13 +279,14 @@ fn deterministic_gc_pin_id(
     format!("pin_{}", &hex[..32])
 }
 
-fn verify_existing_gc_pin<S: ObjectStore + ?Sized>(
+async fn verify_existing_gc_pin<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected: &NamespaceGcPinStateEnvelope,
 ) -> Result<(), CoreError> {
     let Some(bytes) = store
         .get(object_key, None)
+        .await
         .map_err(|err| CoreError::Store(err.to_string()))?
     else {
         return Err(CoreError::Store(format!(
@@ -317,16 +327,20 @@ fn gc_pin_matches(
         && existing.state.source_head_seq == expected.state.source_head_seq
 }
 
-fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
+async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     object_key: &str,
     bytes: &[u8],
 ) -> Result<(), CoreError> {
-    match store.put_if_absent(object_key, bytes) {
+    match store
+        .put_if_absent(object_key, Bytes::copy_from_slice(bytes))
+        .await
+    {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
             match namespace_initialization_state(store, namespace_id)
+                .await
                 .map_err(map_namespace_initialization_error_to_core)?
             {
                 NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
@@ -359,6 +373,7 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
 mod tests {
     use super::{checkpoint_record_by_id, deterministic_gc_pin_id, write_source_gc_pin};
     use crate::error::CoreError;
+    use bytes::Bytes;
     use loon_api::wire::control::{
         ControlObjectKind, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
     };
@@ -374,8 +389,8 @@ mod tests {
     use loon_objectstore::ObjectStore;
     use tempfile::tempdir;
 
-    #[test]
-    fn gc_pin_id_is_deterministic_for_same_source_target_checkpoint_manifest() {
+    #[tokio::test]
+    async fn gc_pin_id_is_deterministic_for_same_source_target_checkpoint_manifest() {
         let source = NamespaceId::parse("source").expect("source namespace");
         let target = NamespaceId::parse("target").expect("target namespace");
         let first = deterministic_gc_pin_id(
@@ -397,8 +412,8 @@ mod tests {
         validate_gc_pin_id(&first).expect("valid deterministic pin id");
     }
 
-    #[test]
-    fn checkpoint_record_by_id_returns_fork_base_record() {
+    #[tokio::test]
+    async fn checkpoint_record_by_id_returns_fork_base_record() {
         let manifest = namespace_manifest_with_checkpoint(
             "chk_00000000000000000000000000000001",
             ManifestId(42),
@@ -417,19 +432,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gc_pin_conflict_same_payload_is_idempotent() {
+    #[tokio::test]
+    async fn gc_pin_conflict_same_payload_is_idempotent() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let expected = gc_pin_envelope("source", "target", 1_000);
         let object_key = gc_pin("source", &expected.state.pin_id);
 
-        write_source_gc_pin(&store, &object_key, &expected).expect("first write");
-        write_source_gc_pin(&store, &object_key, &expected).expect("conflict is idempotent");
+        write_source_gc_pin(&store, &object_key, &expected)
+            .await
+            .expect("first write");
+        write_source_gc_pin(&store, &object_key, &expected)
+            .await
+            .expect("conflict is idempotent");
     }
 
-    #[test]
-    fn gc_pin_conflict_different_payload_is_error() {
+    #[tokio::test]
+    async fn gc_pin_conflict_different_payload_is_error() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let expected = gc_pin_envelope("source", "target", 1_000);
@@ -445,11 +464,13 @@ mod tests {
         store
             .put_if_absent(
                 &object_key,
-                &serde_json::to_vec(&conflicting).expect("encode conflicting pin"),
+                Bytes::from(serde_json::to_vec(&conflicting).expect("encode conflicting pin")),
             )
+            .await
             .expect("write conflicting pin");
 
         let error = write_source_gc_pin(&store, &object_key, &expected)
+            .await
             .expect_err("conflicting pin should fail");
 
         assert!(matches!(error, CoreError::NamespaceCorrupt(_)));

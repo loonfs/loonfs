@@ -18,6 +18,7 @@ mod tests {
         materialize_commit, wal_payload_from_materialized_commit, CommitOp, CommitPlan,
         CommitRequest, MaterializedCommit, PreparedCommit, ValidatedOp,
     };
+    use bytes::Bytes;
     use loon_api::wire::control::WalSegmentPointer;
     use loon_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
     use loon_api::{
@@ -28,8 +29,8 @@ mod tests {
     use loon_objectstore::ObjectStore;
     use tempfile::tempdir;
 
-    #[test]
-    fn build_wal_record_payload_matches_segment_record_payload() {
+    #[tokio::test]
+    async fn build_wal_record_payload_matches_segment_record_payload() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let request = CommitRequest {
             namespace_id: namespace_id.clone(),
@@ -76,8 +77,8 @@ mod tests {
         assert_eq!(payload, segment.envelope.payload.records[0]);
     }
 
-    #[test]
-    fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
+    #[tokio::test]
+    async fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let record = materialized_create_dir(
             &namespace_id,
@@ -108,8 +109,8 @@ mod tests {
         validate_wal_segment_id(&second.segment_id).expect("second segment id shape");
     }
 
-    #[test]
-    fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
+    #[tokio::test]
+    async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -121,7 +122,8 @@ mod tests {
             "alpha",
             ChangeSeq(0),
             ChangeSeq(1),
-        );
+        )
+        .await;
 
         let chain = load_validated_wal_chain(
             &store,
@@ -133,14 +135,15 @@ mod tests {
                 stop_after_seq: None,
             },
         )
+        .await
         .expect("load valid chain");
 
         assert_eq!(chain.segments().len(), 1);
         assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(1));
     }
 
-    #[test]
-    fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
+    #[tokio::test]
+    async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -152,7 +155,8 @@ mod tests {
             "alpha",
             ChangeSeq(0),
             ChangeSeq(1),
-        );
+        )
+        .await;
         let second = write_create_dir_segment(
             &store,
             &namespace_id,
@@ -161,7 +165,8 @@ mod tests {
             "beta",
             ChangeSeq(1),
             ChangeSeq(2),
-        );
+        )
+        .await;
 
         let chain = load_validated_wal_chain(
             &store,
@@ -173,18 +178,20 @@ mod tests {
                 stop_after_seq: Some(ChangeSeq(1)),
             },
         )
+        .await
         .expect("load suffix chain");
 
         assert_eq!(chain.segments().len(), 1);
         assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(2));
     }
 
-    #[test]
-    fn validated_wal_chain_rejects_corrupt_visible_segments() {
+    #[tokio::test]
+    async fn validated_wal_chain_rejects_corrupt_visible_segments() {
         assert_wal_chain_corruption_rejected(|object_key, _envelope, pointer| {
             *object_key = wal_segment("other", "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
             pointer.object_key = object_key.clone();
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
             envelope.payload.namespace_id =
                 NamespaceId::parse("other").expect("valid namespace id");
@@ -194,19 +201,23 @@ mod tests {
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|_object_key, envelope, _pointer| {
             envelope.payload.segment_id = "seg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
             rewrap_envelope(envelope);
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|_object_key, _envelope, pointer| {
             pointer.payload_checksum_sha256 = "sha256:not-the-payload".to_owned();
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
             envelope.payload.records.clear();
             rewrap_envelope(envelope);
             *pointer = envelope.pointer(object_key.clone());
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
             envelope.payload.end_seq = ChangeSeq(2);
             rewrap_envelope(envelope);
@@ -215,7 +226,8 @@ mod tests {
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
             let mut skipped = envelope.payload.records[0].clone();
             skipped.seq = ChangeSeq(3);
@@ -228,7 +240,8 @@ mod tests {
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
-        });
+        })
+        .await;
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
             envelope.payload.base_head_seq = ChangeSeq(1);
             envelope.payload.start_seq = ChangeSeq(2);
@@ -240,7 +253,8 @@ mod tests {
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
-        });
+        })
+        .await;
     }
 
     fn materialized_create_dir(
@@ -287,7 +301,7 @@ mod tests {
         materialize_commit(prepared)
     }
 
-    fn assert_wal_chain_corruption_rejected(
+    async fn assert_wal_chain_corruption_rejected(
         corrupt: impl FnOnce(&mut String, &mut WalSegmentEnvelope, &mut WalSegmentPointer),
     ) {
         let temp_dir = tempdir().expect("tempdir");
@@ -315,7 +329,8 @@ mod tests {
         let encoded =
             encode_wal_segment_envelope_zstd(&envelope).expect("encode corrupted envelope");
         store
-            .put_if_absent(&object_key, &encoded)
+            .put_if_absent(&object_key, Bytes::from(encoded))
+            .await
             .expect("write corrupted wal segment");
 
         load_validated_wal_chain(
@@ -328,10 +343,11 @@ mod tests {
                 stop_after_seq: None,
             },
         )
+        .await
         .expect_err("corrupted WAL chain should be rejected");
     }
 
-    fn write_create_dir_segment(
+    async fn write_create_dir_segment(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         prev_visible_segment: Option<WalSegmentPointer>,
@@ -354,7 +370,11 @@ mod tests {
         )
         .expect("prepare wal segment");
         store
-            .put_if_absent(&segment.object_key, &segment.encoded_bytes)
+            .put_if_absent(
+                &segment.object_key,
+                Bytes::copy_from_slice(&segment.encoded_bytes),
+            )
+            .await
             .expect("write wal segment");
         segment
     }

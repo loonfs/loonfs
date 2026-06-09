@@ -1,6 +1,10 @@
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::{BoxStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -164,6 +168,15 @@ pub struct InstrumentedObjectStore<S> {
     store_kind: Option<String>,
 }
 
+impl<S: fmt::Debug> fmt::Debug for InstrumentedObjectStore<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InstrumentedObjectStore")
+            .field("inner", &self.inner)
+            .field("store_kind", &self.store_kind)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S> InstrumentedObjectStore<S> {
     pub fn new(inner: S, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
         Self {
@@ -184,21 +197,25 @@ impl<S> InstrumentedObjectStore<S> {
 }
 
 // Instrumentation is the explicit timing boundary for object-store latency metrics.
+#[async_trait]
 #[allow(clippy::disallowed_methods)]
 impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
     S: ObjectStore,
 {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.head(key);
+        let result = self.inner.head(key).await;
         self.record_head_like(ObjectStoreOperation::Head, key, start.elapsed(), &result);
         result
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.head_with_checksum(key);
+        let result = self.inner.head_with_checksum(key).await;
         self.record_head_like(
             ObjectStoreOperation::HeadWithChecksum,
             key,
@@ -208,55 +225,60 @@ where
         result
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.get(key, range.clone());
+        let result = self.inner.get(key, range.clone()).await;
         self.record_get(key, range.as_ref(), start.elapsed(), &result);
         result
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.get_with_metadata(key);
+        let result = self.inner.get_with_metadata(key).await;
         self.record_get_with_metadata(key, start.elapsed(), &result);
         result
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.put(key, bytes, mode.clone());
-        self.record_put(key, bytes.len() as u64, &mode, start.elapsed(), &result);
+        let bytes_in = bytes.len() as u64;
+        let result = self.inner.put(key, bytes, mode.clone()).await;
+        self.record_put(key, bytes_in, &mode, start.elapsed(), &result);
         result
     }
 
-    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_overwrite(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.put_overwrite(key, bytes);
-        self.record_put(
-            key,
-            bytes.len() as u64,
-            &PutMode::Overwrite,
-            start.elapsed(),
-            &result,
-        );
+        let bytes_in = bytes.len() as u64;
+        let result = self.inner.put_overwrite(key, bytes).await;
+        self.record_put(key, bytes_in, &PutMode::Overwrite, start.elapsed(), &result);
         result
     }
 
-    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.put_if_absent(key, bytes);
+        let bytes_in = bytes.len() as u64;
+        let result = self.inner.put_if_absent(key, bytes).await;
         self.record_put(
             key,
-            bytes.len() as u64,
+            bytes_in,
             &PutMode::CreateIfAbsent,
             start.elapsed(),
             &result,
@@ -264,31 +286,52 @@ where
         result
     }
 
-    fn compare_and_swap(
+    async fn compare_and_swap(
         &self,
         key: &str,
         expected_etag: &str,
-        bytes: &[u8],
+        bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let start = Instant::now();
-        let mode = PutMode::CompareAndSwap {
-            expected_etag: expected_etag.to_owned(),
-        };
-        let result = self.inner.compare_and_swap(key, expected_etag, bytes);
-        self.record_put(key, bytes.len() as u64, &mode, start.elapsed(), &result);
+        let bytes_in = bytes.len() as u64;
+        let result = self.inner.compare_and_swap(key, expected_etag, bytes).await;
+        self.record_put(
+            key,
+            bytes_in,
+            &PutMode::CompareAndSwap {
+                expected_etag: expected_etag.to_owned(),
+            },
+            start.elapsed(),
+            &result,
+        );
         result
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.delete(key);
+        let result = self.inner.delete(key).await;
         self.record_unit(ObjectStoreOperation::Delete, key, start.elapsed(), &result);
         result
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
         let start = Instant::now();
-        let result = self.inner.list_prefix(prefix);
+        let result: Result<Vec<_>, _> = self
+            .inner
+            .list_prefix_stream(prefix)
+            .try_collect()
+            .await
+            .map(|mut keys: Vec<String>| {
+                keys.sort();
+                keys
+            });
         self.record_list(prefix, start.elapsed(), &result);
         result
     }
@@ -321,7 +364,7 @@ impl<S> InstrumentedObjectStore<S> {
         key: &str,
         range: Option<&ByteRange>,
         elapsed: Duration,
-        result: &Result<Option<Vec<u8>>, ObjectStoreError>,
+        result: &Result<Option<Bytes>, ObjectStoreError>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Get,

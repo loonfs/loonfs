@@ -24,6 +24,7 @@ use crate::path::write::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{write_immutable_object, ContentValidationTracker};
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
+use bytes::Bytes;
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
@@ -104,16 +105,16 @@ struct CandidateCoreRequest {
     identity_source: CommitIdentitySource,
 }
 
-pub(crate) fn begin_upload<S: ObjectStore + ?Sized>(
+pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<BeginUploadResponse, CoreError> {
-    ensure_upload_namespace_available(store, namespace_id)?;
-    create_upload_session(store, namespace_id, context)
+    ensure_upload_namespace_available(store, namespace_id).await?;
+    create_upload_session(store, namespace_id, context).await
 }
 
-fn create_upload_session<S: ObjectStore + ?Sized>(
+async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -135,7 +136,8 @@ fn create_upload_session<S: ObjectStore + ?Sized>(
     let encoded = serde_json::to_vec(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
     let object_key = upload_session(namespace_id.as_str(), &upload_id);
     store
-        .put_if_absent(&object_key, &encoded)
+        .put_if_absent(&object_key, Bytes::from(encoded))
+        .await
         .map_err(|err| CoreError::Store(err.to_string()))?;
 
     Ok(BeginUploadResponse {
@@ -145,23 +147,27 @@ fn create_upload_session<S: ObjectStore + ?Sized>(
     })
 }
 
-fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
+async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<(), CoreError> {
-    match namespace_initialization_state(store, namespace_id) {
+    match namespace_initialization_state(store, namespace_id).await {
         Ok(NamespaceInitializationState::Complete) => {
-            let descriptor =
-                load_namespace_descriptor_control(store, namespace_id).map_err(|error| {
+            let descriptor = load_namespace_descriptor_control(store, namespace_id)
+                .await
+                .map_err(|error| {
                     CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(error))
                 })?;
             load_content_store_descriptor_control(store, &descriptor.state.content_store_id)
+                .await
                 .map_err(|error| {
                     CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(error))
                 })?;
             load_namespace_head_control(store, namespace_id)
+                .await
                 .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
             load_namespace_lease_control(store, namespace_id)
+                .await
                 .map_err(|error| CoreError::Basis(BasisLoadError::LoadLease(error)))?;
             Ok(())
         }
@@ -200,20 +206,20 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
     }
 }
 
-pub(crate) fn upload_content<S: ObjectStore + ?Sized>(
+pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &str,
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<UploadContentResponse, CoreError> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
 
     for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
-        let loaded = read_upload_session_object(store, namespace_id, upload_id)?;
+        let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
         if loaded.envelope.state.completed.is_some() {
             return Err(CoreError::UploadAlreadyCompleted {
                 upload_id: upload_id.to_owned(),
@@ -233,7 +239,7 @@ pub(crate) fn upload_content<S: ObjectStore + ?Sized>(
             });
         }
 
-        write_immutable_object(store, &object_key, bytes)?;
+        write_immutable_object(store, &object_key, bytes).await?;
 
         let mut next_state = loaded.envelope.state.clone();
         next_state.staged_content_ref = Some(content_ref.clone());
@@ -252,7 +258,10 @@ pub(crate) fn upload_content<S: ObjectStore + ?Sized>(
             .as_deref()
             .ok_or_else(|| CoreError::Store("missing upload session etag".to_owned()))?;
 
-        match store.compare_and_swap(&loaded.object_key, expected_etag, &encoded) {
+        match store
+            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
+            .await
+        {
             Ok(_) => {
                 return Ok(UploadContentResponse {
                     namespace_id: namespace_id.clone(),
@@ -270,7 +279,7 @@ pub(crate) fn upload_content<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub(crate) fn complete_upload<S: ObjectStore + ?Sized>(
+pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &str,
@@ -278,7 +287,7 @@ pub(crate) fn complete_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<CompleteUploadResponse, CoreError> {
     for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
-        let loaded = read_upload_session_object(store, namespace_id, upload_id)?;
+        let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
         if let Some(completed) = &loaded.envelope.state.completed {
             if completed.content_ref == request.content_ref {
                 return Ok(CompleteUploadResponse {
@@ -321,7 +330,10 @@ pub(crate) fn complete_upload<S: ObjectStore + ?Sized>(
             .as_deref()
             .ok_or_else(|| CoreError::Store("missing upload session etag".to_owned()))?;
 
-        match store.compare_and_swap(&loaded.object_key, expected_etag, &encoded) {
+        match store
+            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
+            .await
+        {
             Ok(_) => {
                 return Ok(CompleteUploadResponse {
                     namespace_id: namespace_id.clone(),
@@ -339,7 +351,7 @@ pub(crate) fn complete_upload<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub(crate) fn commit_operations<S: ObjectStore + ?Sized>(
+pub(crate) async fn commit_operations<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: ApiCommitRequest,
@@ -351,11 +363,12 @@ pub(crate) fn commit_operations<S: ObjectStore + ?Sized>(
         vec![NamespaceMutationCandidate::Commit(request)],
         context,
     )
+    .await
     .pop()
     .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
 }
 
-pub(crate) fn commit_operations_batch<S: ObjectStore + ?Sized>(
+pub(crate) async fn commit_operations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     requests: Vec<ApiCommitRequest>,
@@ -370,18 +383,19 @@ pub(crate) fn commit_operations_batch<S: ObjectStore + ?Sized>(
             .collect(),
         context,
     )
+    .await
 }
 
-pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
-    commit_namespace_mutations_batch(store, namespace_id, candidates, context)
+    commit_namespace_mutations_batch(store, namespace_id, candidates, context).await
 }
 
-fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
@@ -390,7 +404,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     if candidates.is_empty() {
         return Vec::new();
     }
-    if let Err(error) = acquire_or_renew_namespace_lease(store, namespace_id, context) {
+    if let Err(error) = acquire_or_renew_namespace_lease(store, namespace_id, context).await {
         return (0..candidates.len())
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
@@ -399,7 +413,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         let _span = tracing::info_span!("loon.phase", phase = "load_basis_for_publish").entered();
         load_verified_namespace_basis(store, namespace_id)
     };
-    let basis = match basis_result {
+    let basis = match basis_result.await {
         Ok(basis) => basis,
         Err(error) => {
             return (0..candidates.len())
@@ -414,10 +428,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         context,
         &basis,
     )
+    .await
     .results
 }
 
-pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: &[NamespaceMutationCandidate],
@@ -489,7 +504,9 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             &request,
             &resolved_restore_content_refs,
             &mut content_validation,
-        ) {
+        )
+        .await
+        {
             outcomes[index] = Some(Err(error));
             continue;
         }
@@ -582,7 +599,10 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             &records,
             &context.writer_version,
         ) {
-            Ok(wal) => match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
+            Ok(wal) => match store
+                .put_if_absent(&wal.object_key, Bytes::copy_from_slice(&wal.encoded_bytes))
+                .await
+            {
                 Ok(_) => Ok(wal),
                 Err(error) => Err(CoreError::WalWrite(error.to_string())),
             },
@@ -632,7 +652,7 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     );
     let head_metadata_result = {
         let _span = head_cas_span.enter();
-        publish_commit_head(store, &basis.head_etag, &head_publish)
+        publish_commit_head(store, &basis.head_etag, &head_publish).await
     };
     head_cas_span.record(
         "result",
@@ -836,12 +856,12 @@ fn record_primary_request_or_complete_idempotent(
     true
 }
 
-pub(crate) fn list_changes_after<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
 ) -> Result<ChangesResponse, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let basis = load_verified_namespace_basis(store, namespace_id).await?;
     if after_seq < basis.head.retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
             after_seq,
@@ -867,6 +887,7 @@ pub(crate) fn list_changes_after<S: ObjectStore + ?Sized>(
             stop_after_seq: Some(after_seq),
         },
     )
+    .await
     .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
     let mut changes = Vec::new();
     for segment in wal_chain.segments() {
@@ -966,7 +987,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
     })
 }
 
-fn validate_commit_content_references<S: ObjectStore + ?Sized>(
+async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     request: &CoreCommitRequest,
@@ -997,13 +1018,15 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     }
 
     for content_ref in content_refs {
-        content_validation.ensure_validated(store, content_store_id, content_ref)?;
+        content_validation
+            .ensure_validated(store, content_store_id, content_ref)
+            .await?;
     }
 
     Ok(())
 }
 
-fn read_upload_session_object<S: ObjectStore + ?Sized>(
+async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &str,
@@ -1013,12 +1036,14 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
     let object_key = upload_session(namespace_id.as_str(), upload_id);
     let metadata = store
         .head(&object_key)
+        .await
         .map_err(|err| CoreError::Store(err.to_string()))?
         .ok_or_else(|| CoreError::UploadNotFound {
             upload_id: upload_id.to_owned(),
         })?;
     let encoded = store
         .get(&object_key, None)
+        .await
         .map_err(|err| CoreError::Store(err.to_string()))?
         .ok_or_else(|| CoreError::UploadNotFound {
             upload_id: upload_id.to_owned(),

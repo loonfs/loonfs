@@ -801,6 +801,9 @@ mod tests {
     use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
     use crate::config::RuntimeCacheConfigOverrides;
     use crate::{ServerConfig, StoreConfig};
+    use async_trait::async_trait;
+    use axum::body::Bytes;
+    use futures::stream::BoxStream;
     use loon_api::{ChangeSeq, CommitId, NamespaceId};
     use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
     use loon_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
@@ -836,46 +839,53 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ObjectStore for StaleHeadOnceStore {
-        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key)
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
         }
 
-        fn get(
+        async fn get(
             &self,
             key: &str,
             range: Option<ByteRange>,
-        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-            self.inner.get(key, range)
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
         }
 
-        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key)
-        }
-
-        fn put(
+        async fn get_with_metadata(
             &self,
             key: &str,
-            bytes: &[u8],
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
             mode: PutMode,
         ) -> Result<ObjectMetadata, ObjectStoreError> {
             if key == self.head_key
                 && matches!(mode, PutMode::CompareAndSwap { .. })
                 && self.armed.swap(false, Ordering::SeqCst)
             {
-                if let Some(existing) = self.inner.get(key, None)? {
-                    let _ = self.inner.put_overwrite(key, &existing)?;
+                if let Some(existing) = self.inner.get(key, None).await? {
+                    let _ = self.inner.put_overwrite(key, existing).await?;
                 }
             }
-            self.inner.put(key, bytes, mode)
+            self.inner.put(key, bytes, mode).await
         }
 
-        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key)
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
         }
 
-        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-            self.inner.list_prefix(prefix)
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
         }
     }
 
@@ -1047,6 +1057,7 @@ mod tests {
             &context("server-writer", now_ms),
             false,
         )
+        .await
         .expect("bootstrap namespace");
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -1072,6 +1083,7 @@ mod tests {
         let now_ms = now_ms();
         let context = context("server-writer", now_ms);
         bootstrap_namespace(store.as_ref(), &namespace_id("demo"), &context, false)
+            .await
             .expect("bootstrap namespace");
         write_file_bytes(
             store.as_ref(),
@@ -1081,6 +1093,7 @@ mod tests {
             &context,
             Some("seed-docs"),
         )
+        .await
         .expect("seed docs");
         write_file_bytes(
             store.as_ref(),
@@ -1090,6 +1103,7 @@ mod tests {
             &context,
             Some("seed-tmp"),
         )
+        .await
         .expect("seed tmp");
         write_file_bytes(
             store.as_ref(),
@@ -1099,6 +1113,7 @@ mod tests {
             &context,
             Some("seed-target"),
         )
+        .await
         .expect("seed target");
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -1133,6 +1148,7 @@ mod tests {
         let now_ms = now_ms();
         let context = context("server-writer", now_ms);
         bootstrap_namespace(store.as_ref(), &namespace_id("demo"), &context, false)
+            .await
             .expect("bootstrap namespace");
         write_file_bytes(
             store.as_ref(),
@@ -1142,6 +1158,7 @@ mod tests {
             &context,
             Some("seed-docs"),
         )
+        .await
         .expect("seed docs");
         write_file_bytes(
             store.as_ref(),
@@ -1151,6 +1168,7 @@ mod tests {
             &context,
             Some("seed-source"),
         )
+        .await
         .expect("seed source");
         delete_path(
             store.as_ref(),
@@ -1159,6 +1177,7 @@ mod tests {
             &context,
             Some("delete-docs"),
         )
+        .await
         .expect("delete docs");
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -1197,6 +1216,7 @@ mod tests {
             &context("server-writer", now_ms),
             false,
         )
+        .await
         .expect("bootstrap namespace");
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -1225,6 +1245,7 @@ mod tests {
             &context("other-writer", now_ms),
             false,
         )
+        .await
         .expect("bootstrap namespace");
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -1321,7 +1342,7 @@ mod tests {
             .expect("test context should build namespace engine")
     }
 
-    fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+    async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
@@ -1329,9 +1350,10 @@ mod tests {
     ) -> Result<loon_api::NamespaceSummary, loon_core::BootstrapNamespaceError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(BootstrapOptions { allow_existing })
+            .await
     }
 
-    fn write_file_bytes<S: ObjectStore + ?Sized>(
+    async fn write_file_bytes<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1339,34 +1361,38 @@ mod tests {
         context: &MutationContext,
         commit_id: Option<&str>,
     ) -> Result<loon_api::MutationResult, loon_core::Error> {
-        namespace_engine(store, namespace_id, context).put_file(
-            absolute_path,
-            bytes,
-            WriteOptions {
-                commit_id: commit_id
-                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                put_file_behavior: PutFileBehavior::ReplaceExisting,
-                ..WriteOptions::default()
-            },
-        )
+        namespace_engine(store, namespace_id, context)
+            .put_file(
+                absolute_path,
+                bytes,
+                WriteOptions {
+                    commit_id: commit_id
+                        .map(|value| CommitId::parse(value).expect("valid test commit id")),
+                    put_file_behavior: PutFileBehavior::ReplaceExisting,
+                    ..WriteOptions::default()
+                },
+            )
+            .await
     }
 
-    fn delete_path<S: ObjectStore + ?Sized>(
+    async fn delete_path<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         context: &MutationContext,
         commit_id: Option<&str>,
     ) -> Result<loon_api::MutationResult, loon_core::Error> {
-        namespace_engine(store, namespace_id, context).delete_path(
-            absolute_path,
-            WriteOptions {
-                commit_id: commit_id
-                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                recursive_delete: true,
-                ..WriteOptions::default()
-            },
-        )
+        namespace_engine(store, namespace_id, context)
+            .delete_path(
+                absolute_path,
+                WriteOptions {
+                    commit_id: commit_id
+                        .map(|value| CommitId::parse(value).expect("valid test commit id")),
+                    recursive_delete: true,
+                    ..WriteOptions::default()
+                },
+            )
+            .await
     }
 
     fn namespace_id(value: &str) -> NamespaceId {

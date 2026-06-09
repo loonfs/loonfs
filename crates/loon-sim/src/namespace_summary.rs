@@ -15,13 +15,13 @@ pub struct SimNamespaceObjectSummary {
     pub content_blob_count_hint: Option<usize>,
 }
 
-pub fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
+pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<SimNamespaceObjectSummary, ObjectStoreError> {
     let layout = ObjectLayout::new();
     let prefix = layout.namespace_root_prefix(namespace_id.as_str());
-    let keys = store.list_prefix(&prefix)?;
+    let keys = store.list_prefix(&prefix).await?;
     let mut summary = SimNamespaceObjectSummary {
         namespace_id: namespace_id.clone(),
         namespace_objects: 0,
@@ -80,10 +80,11 @@ pub fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use loon_objectstore::fs::LocalFsStore;
 
-    #[test]
-    fn namespace_object_summary_counts_known_key_families() {
+    #[tokio::test]
+    async fn namespace_object_summary_counts_known_key_families() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = LocalFsStore::new(temp_dir.path()).expect("local store");
         let namespace_id = NamespaceId::parse("sim").expect("valid namespace id");
@@ -92,8 +93,9 @@ mod tests {
         store
             .put_overwrite(
                 layout.namespace_head(namespace_id.as_str()).as_str(),
-                b"head",
+                Bytes::from_static(b"head"),
             )
+            .await
             .expect("head");
         store
             .put_overwrite(
@@ -103,17 +105,21 @@ mod tests {
                         "seg_00000000000000000000000000000001",
                     )
                     .as_str(),
-                b"wal",
+                Bytes::from_static(b"wal"),
             )
+            .await
             .expect("wal");
         store
             .put_overwrite(
                 layout.gc_pin(namespace_id.as_str(), "pin_abc").as_str(),
-                b"pin",
+                Bytes::from_static(b"pin"),
             )
+            .await
             .expect("pin");
 
-        let summary = summarize_namespace_objects(&store, &namespace_id).expect("summary");
+        let summary = summarize_namespace_objects(&store, &namespace_id)
+            .await
+            .expect("summary");
         assert_eq!(summary.namespace_objects, 3);
         assert_eq!(summary.control_objects, 1);
         assert_eq!(summary.wal_objects, 1);

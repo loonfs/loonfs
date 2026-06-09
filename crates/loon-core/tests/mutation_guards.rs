@@ -1,6 +1,9 @@
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::{executor::block_on, stream::BoxStream};
 use loon_api::{
     sha256_digest,
     v0::{
@@ -78,8 +81,10 @@ fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<loon_api::NamespaceSummary, loon_core::BootstrapNamespaceError> {
-    namespace_engine(store, namespace_id, context)
-        .bootstrap_namespace(BootstrapOptions { allow_existing })
+    block_on(
+        namespace_engine(store, namespace_id, context)
+            .bootstrap_namespace(BootstrapOptions { allow_existing }),
+    )
 }
 
 fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -88,14 +93,16 @@ fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loon_api::NamespaceSummary, CoreError> {
-    namespace_engine(store, source_namespace_id, context)
-        .fork_namespace(new_namespace_id, ForkOptions::default())
+    block_on(
+        namespace_engine(store, source_namespace_id, context)
+            .fork_namespace(new_namespace_id, ForkOptions::default()),
+    )
 }
 
 fn list_namespaces<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<Vec<loon_api::NamespaceSummary>, CoreError> {
-    loon_core::namespace::list_namespaces(store)
+    block_on(loon_core::namespace::list_namespaces(store))
 }
 
 fn commit_operations<S: ObjectStore + ?Sized>(
@@ -139,7 +146,7 @@ fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Vec<Result<loon_api::v0::CommitResponse, CoreError>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    engine.publish_batch(store, candidates, context).results
+    block_on(engine.publish_batch(store, candidates, context)).results
 }
 
 fn begin_upload<S: ObjectStore + ?Sized>(
@@ -147,7 +154,7 @@ fn begin_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loon_api::v0::BeginUploadResponse, CoreError> {
-    namespace_engine(store, namespace_id, context).begin_upload()
+    block_on(namespace_engine(store, namespace_id, context).begin_upload())
 }
 
 fn upload_content<S: ObjectStore + ?Sized>(
@@ -157,7 +164,7 @@ fn upload_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<loon_api::v0::UploadContentResponse, CoreError> {
-    namespace_engine(store, namespace_id, context).upload_content(upload_id, bytes)
+    block_on(namespace_engine(store, namespace_id, context).upload_content(upload_id, bytes))
 }
 
 fn complete_upload<S: ObjectStore + ?Sized>(
@@ -167,7 +174,7 @@ fn complete_upload<S: ObjectStore + ?Sized>(
     request: &CompleteUploadRequest,
     context: &MutationContext,
 ) -> Result<loon_api::v0::CompleteUploadResponse, CoreError> {
-    namespace_engine(store, namespace_id, context).complete_upload(upload_id, request)
+    block_on(namespace_engine(store, namespace_id, context).complete_upload(upload_id, request))
 }
 
 fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -175,7 +182,9 @@ fn list_changes_after<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
 ) -> Result<loon_api::v0::ChangesResponse, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context()).list_changes_after(after_seq)
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context()).list_changes_after(after_seq),
+    )
 }
 
 fn create_checkpoint<S: ObjectStore + ?Sized>(
@@ -183,7 +192,7 @@ fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loon_api::CreateCheckpointResponse, CoreError> {
-    namespace_engine(store, namespace_id, context).create_checkpoint()
+    block_on(namespace_engine(store, namespace_id, context).create_checkpoint())
 }
 
 fn write_options(commit_id: Option<&str>, behavior: PutFileBehavior) -> WriteOptions {
@@ -203,11 +212,11 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).put_file(
+    block_on(namespace_engine(store, namespace_id, context).put_file(
         absolute_path,
         bytes,
         write_options(commit_id, behavior),
-    )
+    ))
 }
 
 fn write_file_bytes<S: ObjectStore + ?Sized>(
@@ -236,13 +245,13 @@ fn create_dir_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).create_dir(
+    block_on(namespace_engine(store, namespace_id, context).create_dir(
         absolute_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
             ..WriteOptions::default()
         },
-    )
+    ))
 }
 
 fn delete_path<S: ObjectStore + ?Sized>(
@@ -252,14 +261,14 @@ fn delete_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).delete_path(
+    block_on(namespace_engine(store, namespace_id, context).delete_path(
         absolute_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
             recursive_delete: true,
             ..WriteOptions::default()
         },
-    )
+    ))
 }
 
 fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
@@ -269,14 +278,14 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).delete_path(
+    block_on(namespace_engine(store, namespace_id, context).delete_path(
         absolute_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
             recursive_delete: false,
             ..WriteOptions::default()
         },
-    )
+    ))
 }
 
 fn move_path<S: ObjectStore + ?Sized>(
@@ -287,14 +296,14 @@ fn move_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).move_path(
+    block_on(namespace_engine(store, namespace_id, context).move_path(
         from_path,
         to_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
             ..WriteOptions::default()
         },
-    )
+    ))
 }
 
 fn copy_file_path<S: ObjectStore + ?Sized>(
@@ -305,14 +314,14 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).copy_path(
+    block_on(namespace_engine(store, namespace_id, context).copy_path(
         from_path,
         to_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
             ..WriteOptions::default()
         },
-    )
+    ))
 }
 
 fn restore_file_revision<S: ObjectStore + ?Sized>(
@@ -323,13 +332,16 @@ fn restore_file_revision<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loon_api::MutationResult, CoreError> {
-    namespace_engine(store, namespace_id, context).restore_file_revision(
-        absolute_path,
-        source_revision_no,
-        WriteOptions {
-            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            ..WriteOptions::default()
-        },
+    block_on(
+        namespace_engine(store, namespace_id, context).restore_file_revision(
+            absolute_path,
+            source_revision_no,
+            WriteOptions {
+                commit_id: commit_id
+                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
+                ..WriteOptions::default()
+            },
+        ),
     )
 }
 
@@ -338,8 +350,10 @@ fn resolve_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loon_api::AuthoritativePathEntry, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context())
-        .resolve_path(absolute_path, ReadOptions::default())
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .resolve_path(absolute_path, ReadOptions::default()),
+    )
 }
 
 fn list_path<S: ObjectStore + ?Sized>(
@@ -347,8 +361,10 @@ fn list_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<loon_api::AuthoritativePathEntry>, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context())
-        .list_path(absolute_path, ReadOptions::default())
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .list_path(absolute_path, ReadOptions::default()),
+    )
 }
 
 fn read_file_bytes<S: ObjectStore + ?Sized>(
@@ -356,8 +372,10 @@ fn read_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loon_api::AuthoritativeFileBytes, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context())
-        .read_file(absolute_path, ReadOptions::default())
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .read_file(absolute_path, ReadOptions::default()),
+    )
 }
 
 fn list_file_revisions<S: ObjectStore + ?Sized>(
@@ -365,8 +383,10 @@ fn list_file_revisions<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loon_api::ListFileRevisionsResponse, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context())
-        .list_file_revisions(absolute_path, ReadOptions::default())
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .list_file_revisions(absolute_path, ReadOptions::default()),
+    )
 }
 
 fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
@@ -374,8 +394,10 @@ fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     inode_id: InodeId,
 ) -> Result<loon_api::ListFileRevisionsResponse, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context())
-        .list_file_revisions_for_inode(inode_id, ReadOptions::default())
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .list_file_revisions_for_inode(inode_id, ReadOptions::default()),
+    )
 }
 
 fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
@@ -384,10 +406,12 @@ fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     revision_no: RevisionNo,
 ) -> Result<loon_api::AuthoritativeFileBytes, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context()).read_file_revision(
-        absolute_path,
-        revision_no,
-        ReadOptions::default(),
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context()).read_file_revision(
+            absolute_path,
+            revision_no,
+            ReadOptions::default(),
+        ),
     )
 }
 
@@ -397,10 +421,12 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
-    namespace_engine(store, namespace_id, &mutation_context()).read_file_revision_for_inode(
-        inode_id,
-        revision_no,
-        ReadOptions::default(),
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context()).read_file_revision_for_inode(
+            inode_id,
+            revision_no,
+            ReadOptions::default(),
+        ),
     )
 }
 
@@ -410,15 +436,17 @@ fn resolve_path_using_basis_option(
 ) -> Result<loon_api::AuthoritativePathEntry, CoreError> {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    NamespaceEngine::builder(&store)
-        .namespace(basis.head.namespace_id.clone())
-        .writer("test")
-        .build()
-        .expect("test engine")
-        .resolve_path(
-            absolute_path,
-            ReadOptions::verified_basis(Arc::new(basis.clone())),
-        )
+    block_on(
+        NamespaceEngine::builder(&store)
+            .namespace(basis.head.namespace_id.clone())
+            .writer("test")
+            .build()
+            .expect("test engine")
+            .resolve_path(
+                absolute_path,
+                ReadOptions::verified_basis(Arc::new(basis.clone())),
+            ),
+    )
 }
 
 fn list_path_using_basis_option(
@@ -427,15 +455,17 @@ fn list_path_using_basis_option(
 ) -> Result<Vec<loon_api::AuthoritativePathEntry>, CoreError> {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    NamespaceEngine::builder(&store)
-        .namespace(basis.head.namespace_id.clone())
-        .writer("test")
-        .build()
-        .expect("test engine")
-        .list_path(
-            absolute_path,
-            ReadOptions::verified_basis(Arc::new(basis.clone())),
-        )
+    block_on(
+        NamespaceEngine::builder(&store)
+            .namespace(basis.head.namespace_id.clone())
+            .writer("test")
+            .build()
+            .expect("test engine")
+            .list_path(
+                absolute_path,
+                ReadOptions::verified_basis(Arc::new(basis.clone())),
+            ),
+    )
 }
 
 fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
@@ -444,22 +474,24 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<MetadataRead<loon_api::AuthoritativePathEntry>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
-    let head = load_namespace_head_control(store, namespace_id)
+    let head = block_on(load_namespace_head_control(store, namespace_id))
         .map_err(BasisLoadError::LoadHead)?
         .state;
     if head.current_manifest_id.is_some() {
-        let value = engine.resolve_path(
+        let value = block_on(engine.resolve_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
-        )?;
+        ))?;
         return Ok(MetadataRead {
             value,
             source: MetadataReadSource::MaterializedTables,
         });
     }
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let basis = block_on(load_verified_namespace_basis(store, namespace_id))?;
     Ok(MetadataRead {
-        value: engine.resolve_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis)))?,
+        value: block_on(
+            engine.resolve_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis))),
+        )?,
         source: MetadataReadSource::FullBasisFallback,
     })
 }
@@ -470,22 +502,24 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<MetadataRead<Vec<loon_api::AuthoritativePathEntry>>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
-    let head = load_namespace_head_control(store, namespace_id)
+    let head = block_on(load_namespace_head_control(store, namespace_id))
         .map_err(BasisLoadError::LoadHead)?
         .state;
     if head.current_manifest_id.is_some() {
-        let value = engine.list_path(
+        let value = block_on(engine.list_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
-        )?;
+        ))?;
         return Ok(MetadataRead {
             value,
             source: MetadataReadSource::MaterializedTables,
         });
     }
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let basis = block_on(load_verified_namespace_basis(store, namespace_id))?;
     Ok(MetadataRead {
-        value: engine.list_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis)))?,
+        value: block_on(
+            engine.list_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis))),
+        )?,
         source: MetadataReadSource::FullBasisFallback,
     })
 }
@@ -568,8 +602,8 @@ fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
     }]
 }
 
-#[test]
-fn stale_revision_precondition_is_rejected() {
+#[tokio::test]
+async fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -608,8 +642,8 @@ fn stale_revision_precondition_is_rejected() {
     ));
 }
 
-#[test]
-fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
+#[tokio::test]
+async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
     let request = CommitRequest {
@@ -650,8 +684,8 @@ fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         .is_none());
 }
 
-#[test]
-fn create_and_replace_under_ancestor_tombstone_are_rejected() {
+#[tokio::test]
+async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -718,8 +752,8 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     ));
 }
 
-#[test]
-fn restore_revision_validation_rejects_missing_inode() {
+#[tokio::test]
+async fn restore_revision_validation_rejects_missing_inode() {
     let metadata_state =
         metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
@@ -747,8 +781,8 @@ fn restore_revision_validation_rejects_missing_inode() {
     ));
 }
 
-#[test]
-fn restore_revision_validation_rejects_non_file_target() {
+#[tokio::test]
+async fn restore_revision_validation_rejects_non_file_target() {
     let metadata_state =
         metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
@@ -777,8 +811,8 @@ fn restore_revision_validation_rejects_non_file_target() {
     ));
 }
 
-#[test]
-fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
+#[tokio::test]
+async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -846,8 +880,8 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     ));
 }
 
-#[test]
-fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
+#[tokio::test]
+async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -895,8 +929,8 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     ));
 }
 
-#[test]
-fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
+#[tokio::test]
+async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -952,8 +986,8 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     ));
 }
 
-#[test]
-fn restore_revision_under_tombstoned_ancestor_is_rejected() {
+#[tokio::test]
+async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -994,8 +1028,8 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     ));
 }
 
-#[test]
-fn restore_revision_overflow_is_rejected() {
+#[tokio::test]
+async fn restore_revision_overflow_is_rejected() {
     let mut deltas = wal_create_file(
         0,
         InodeId(2),
@@ -1049,8 +1083,8 @@ fn restore_revision_overflow_is_rejected() {
     ));
 }
 
-#[test]
-fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
+#[tokio::test]
+async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1067,10 +1101,13 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
         bootstrap_namespace(&store, &namespace_id, &context, true).expect("allow existing");
     assert_eq!(existing.namespace_id, namespace_id);
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load namespace basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load namespace basis");
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     let descriptor_bytes = store
         .get(&descriptor_key, None)
+        .await
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
     let descriptor: NamespaceDescriptorEnvelope =
@@ -1082,6 +1119,7 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     assert!(
         store
             .head(&namespace_fork_state(namespace_id.as_str()))
+            .await
             .expect("head root fork state")
             .is_none(),
         "root namespace creation must not write fork provenance"
@@ -1090,6 +1128,7 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     let content_descriptor_key = content_store_descriptor(basis.content_store_id.as_str());
     let content_descriptor_bytes = store
         .get(&content_descriptor_key, None)
+        .await
         .expect("read content-store descriptor")
         .expect("content-store descriptor exists");
     let content_descriptor: ContentStoreDescriptorEnvelope =
@@ -1108,6 +1147,7 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
 
     let content_store_descriptors = store
         .list_prefix("content-stores/")
+        .await
         .expect("list content stores");
     assert_eq!(
         content_store_descriptors,
@@ -1116,7 +1156,11 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     );
 
     store
-        .put_if_absent(&namespace_head("partial"), br#"{"not":"a descriptor"}"#)
+        .put_if_absent(
+            &namespace_head("partial"),
+            Bytes::from_static(br#"{"not":"a descriptor"}"#),
+        )
+        .await
         .expect("write partial namespace key");
     let listed = list_namespaces(&store).expect("list namespaces");
     assert_eq!(listed.len(), 1);
@@ -1135,8 +1179,8 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     ));
 }
 
-#[test]
-fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
+#[tokio::test]
+async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let context = mutation_context();
@@ -1158,6 +1202,7 @@ fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     assert!(
         store
             .list_prefix("content-stores/")
+            .await
             .expect("list content stores")
             .is_empty(),
         "content-store descriptor must not be allocated before namespace head reservation"
@@ -1165,8 +1210,8 @@ fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     assert_namespace_partial(&store, &namespace_id, &context);
 }
 
-#[test]
-fn begin_upload_rejects_missing_and_partial_namespace() {
+#[tokio::test]
+async fn begin_upload_rejects_missing_and_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1179,6 +1224,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     store
         .delete(&namespace_descriptor(namespace_id.as_str()))
+        .await
         .expect("delete descriptor");
 
     let partial_error =
@@ -1186,8 +1232,8 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
     assert_eq!(partial_error.code(), ErrorCode::NamespacePartial);
 }
 
-#[test]
-fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
+#[tokio::test]
+async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1222,8 +1268,8 @@ fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     assert_eq!(guarded_store.guarded_get_count(), 0);
 }
 
-#[test]
-fn complete_upload_does_not_get_content_blob_after_staging() {
+#[tokio::test]
+async fn complete_upload_does_not_get_content_blob_after_staging() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1289,15 +1335,17 @@ fn complete_upload_does_not_get_content_blob_after_staging() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[test]
-fn path_put_file_uses_checksum_metadata_for_content_validation() {
+#[tokio::test]
+async fn path_put_file_uses_checksum_metadata_for_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
+        .await
+        .expect("stage content");
 
     store.reset_content_blob_get_count();
     let responses = publish_namespace_mutations_batch(
@@ -1318,15 +1366,17 @@ fn path_put_file_uses_checksum_metadata_for_content_validation() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[test]
-fn path_planning_does_not_validate_content() {
+#[tokio::test]
+async fn path_planning_does_not_validate_content() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"planned").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"planned")
+        .await
+        .expect("stage content");
 
     store.reset_content_blob_get_count();
     let planned = DirectObjectStorePublisher::new(&store)
@@ -1339,6 +1389,7 @@ fn path_planning_does_not_validate_content() {
                 behavior: PutFileBehavior::CreateOnly,
             },
         )
+        .await
         .expect("plan path intent");
 
     assert_eq!(
@@ -1348,15 +1399,17 @@ fn path_planning_does_not_validate_content() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[test]
-fn path_batch_validates_repeated_content_ref_without_blob_gets() {
+#[tokio::test]
+async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"shared").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"shared")
+        .await
+        .expect("stage content");
 
     store.reset_content_blob_get_count();
     let responses = publish_namespace_mutations_batch(
@@ -1383,8 +1436,8 @@ fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[test]
-fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
+#[tokio::test]
+async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
@@ -1433,8 +1486,8 @@ fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     assert_eq!(store.content_blob_get_count(), 1);
 }
 
-#[test]
-fn query_driven_reads_fallback_without_manifest() {
+#[tokio::test]
+async fn query_driven_reads_fallback_without_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1463,8 +1516,8 @@ fn query_driven_reads_fallback_without_manifest() {
     assert_eq!(list.value.len(), 1);
 }
 
-#[test]
-fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
+#[tokio::test]
+async fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
@@ -1543,7 +1596,9 @@ fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
     )
     .expect("put wal tail");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("basis");
     let expected_stat =
         resolve_path_using_basis_option(&basis, "/docs/moved.txt").expect("basis stat");
     let expected_list = list_path_using_basis_option(&basis, "/docs").expect("basis list");
@@ -1581,8 +1636,8 @@ fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
     assert!(resolve_path_with_read_source(&store, &namespace_id, "/dead/leaf.txt").is_err());
 }
 
-#[test]
-fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
+#[tokio::test]
+async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
@@ -1611,7 +1666,9 @@ fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     .expect("put report-2024");
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("basis");
     let expected = resolve_path_using_basis_option(&basis, "/docs/report").expect("basis stat");
     let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
         .expect("materialized stat");
@@ -1622,8 +1679,8 @@ fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     assert_eq!(actual.value.size_bytes, Some(5));
 }
 
-#[test]
-fn upload_content_rejects_invalid_upload_id_before_key_construction() {
+#[tokio::test]
+async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1644,13 +1701,14 @@ fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     assert_eq!(
         store
             .list_prefix(&upload_session_prefix(namespace_id.as_str()))
+            .await
             .expect("list upload sessions"),
         Vec::<String>::new()
     );
 }
 
-#[test]
-fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
+#[tokio::test]
+async fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1743,8 +1801,8 @@ fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
     );
 }
 
-#[test]
-fn batch_commit_writes_one_segment_and_expands_change_feed() {
+#[tokio::test]
+async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1783,10 +1841,14 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(first.committed_seq, ChangeSeq(1));
     assert_eq!(second.committed_seq, ChangeSeq(2));
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
+        .await
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
@@ -1810,8 +1872,9 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     store
         .put_if_absent(
             "namespaces/demo/wal/seg_99999999999999999999999999999999.wal.zst",
-            &wal_bytes,
+            wal_bytes,
         )
+        .await
         .expect("write unreachable orphan");
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
@@ -1847,8 +1910,8 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     ));
 }
 
-#[test]
-fn change_feed_validates_wal_chain_before_current_manifest() {
+#[tokio::test]
+async fn change_feed_validates_wal_chain_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1857,21 +1920,26 @@ fn change_feed_validates_wal_chain_before_current_manifest() {
     create_dir_path(&store, &namespace_id, "/docs", &context, None).expect("create docs");
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
     store
-        .put_overwrite(&wal_keys[0], b"not a wal segment")
+        .put_overwrite(&wal_keys[0], Bytes::from_static(b"not a wal segment"))
+        .await
         .expect("corrupt wal");
 
     load_verified_namespace_basis(&store, &namespace_id)
+        .await
         .expect("checkpoint-backed basis should not read pre-checkpoint wal");
     let error =
         list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect_err("corrupt wal chain");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
-#[test]
-fn binding_is_precondition_observes_earlier_batch_candidate() {
+#[tokio::test]
+async fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1892,7 +1960,9 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
     let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
         .expect("resolve file")
         .inode_id;
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load basis");
     let original_binding = basis
         .metadata_state
         .current_parent_binding_for_child(file_inode, basis.head.seq)
@@ -1944,8 +2014,8 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[test]
-fn directory_empty_precondition_observes_earlier_batch_candidate() {
+#[tokio::test]
+async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1971,7 +2041,9 @@ fn directory_empty_precondition_observes_earlier_batch_candidate() {
         loon_api::v0::CommitOpResult::CreateDir { inode_id, .. } => inode_id,
         ref other => panic!("unexpected seed result: {other:?}"),
     };
-    let content = store_bytes_as_content(&store, &namespace_id, b"child").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"child")
+        .await
+        .expect("stage content");
 
     let responses = commit_operations_batch(
         &store,
@@ -2015,14 +2087,16 @@ fn directory_empty_precondition_observes_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
-#[test]
-fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
+#[tokio::test]
+async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"retry").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"retry")
+        .await
+        .expect("stage content");
     let publisher = DirectObjectStorePublisher::new(&store);
 
     let result = publisher
@@ -2037,14 +2111,20 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("path intent retries stale head");
     assert_eq!(result.committed_seq, ChangeSeq(1));
     assert!(store.injected_stale_head());
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load basis");
     assert_eq!(basis.head.seq, ChangeSeq(1));
     let visible_tip = basis
         .head
@@ -2060,6 +2140,7 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
 
     let visible_wal = store
         .get(&visible_tip.object_key, None)
+        .await
         .expect("read visible wal")
         .expect("visible wal exists");
     let visible_segment =
@@ -2080,8 +2161,8 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     );
 }
 
-#[test]
-fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
+#[tokio::test]
+async fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -2143,12 +2224,14 @@ fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
     );
     resolve_path(&store, &namespace_id, "/parent/child").expect("child directory remains visible");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load basis");
     assert_eq!(basis.head.seq, ChangeSeq(4));
 }
 
-#[test]
-fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
+#[tokio::test]
+async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2176,10 +2259,14 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let duplicate = responses[1].as_ref().expect("duplicate commit");
     assert_eq!(first, duplicate);
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
+        .await
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
@@ -2193,8 +2280,8 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     );
 }
 
-#[test]
-fn visible_commit_id_retry_aliases_across_writer_takeover() {
+#[tokio::test]
+async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2230,8 +2317,8 @@ fn visible_commit_id_retry_aliases_across_writer_takeover() {
     assert_eq!(first, retry);
 }
 
-#[test]
-fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
+#[tokio::test]
+async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2273,10 +2360,14 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         CoreError::CommitIdReuseConflict(commit_id) if commit_id == "req-conflict"
     ));
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
+        .await
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
@@ -2290,8 +2381,8 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     );
 }
 
-#[test]
-fn explicit_commit_rejects_invalid_display_names() {
+#[tokio::test]
+async fn explicit_commit_rejects_invalid_display_names() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2331,7 +2422,9 @@ fn explicit_commit_rejects_invalid_display_names() {
         Some("seed-for-invalid-rename"),
     )
     .expect("seed file");
-    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load basis");
     let file = basis
         .metadata_state
         .resolve_visible_path(
@@ -2368,8 +2461,8 @@ fn explicit_commit_rejects_invalid_display_names() {
     ));
 }
 
-#[test]
-fn direct_publisher_path_intents_cover_basic_mutations() {
+#[tokio::test]
+async fn direct_publisher_path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2377,7 +2470,9 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     let publisher = DirectObjectStorePublisher::new(&store);
 
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
+        .await
+        .expect("stage content");
     let put = publisher
         .submit_path_intent(
             &namespace_id,
@@ -2390,6 +2485,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("put path");
     assert_eq!(put.committed_seq, ChangeSeq(1));
 
@@ -2405,6 +2501,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("move path");
     assert_eq!(moved.committed_seq, ChangeSeq(2));
 
@@ -2419,6 +2516,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("copy path");
     assert_eq!(copied.committed_seq, ChangeSeq(3));
 
@@ -2433,6 +2531,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("delete path");
     assert_eq!(deleted.committed_seq, ChangeSeq(4));
 
@@ -2441,15 +2540,17 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
     assert_eq!(copied_bytes.bytes, b"hello");
 }
 
-#[test]
-fn direct_publisher_uses_durable_path_commit_receipt_index() {
+#[tokio::test]
+async fn direct_publisher_uses_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     let publisher = DirectObjectStorePublisher::new(&store);
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
+        .await
+        .expect("stage content");
 
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
@@ -2464,6 +2565,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("first publish");
     let retry = publisher
         .submit_path_intent(
@@ -2477,6 +2579,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect("idempotent retry");
     assert_eq!(retry.committed_seq, first.committed_seq);
 
@@ -2491,24 +2594,30 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
             &context,
             PublishOptions::default(),
         )
+        .await
         .expect_err("conflicting retry");
     assert!(matches!(
         conflict,
         CoreError::CommitIdReuseConflict(commit_id) if commit_id == "same-path-request"
     ));
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
 }
 
-#[test]
-fn path_intents_in_one_batch_see_tentative_state() {
+#[tokio::test]
+async fn path_intents_in_one_batch_see_tentative_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello")
+        .await
+        .expect("stage content");
 
     let responses = publish_namespace_mutations_batch(
         &store,
@@ -2542,18 +2651,22 @@ fn path_intents_in_one_batch_see_tentative_state() {
         read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read moved file");
     assert_eq!(moved_bytes.bytes, b"hello");
 
-    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/")
+        .await
+        .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
     let wal_bytes = store
         .get(&wal_keys[0], None)
+        .await
         .expect("read wal")
         .expect("wal exists");
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
     assert_eq!(segment.payload.records.len(), 2);
 }
 
-#[test]
-fn namespace_descriptor_checksum_is_validated() {
+#[tokio::test]
+async fn namespace_descriptor_checksum_is_validated() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2564,6 +2677,7 @@ fn namespace_descriptor_checksum_is_validated() {
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     let descriptor_bytes = store
         .get(&descriptor_key, None)
+        .await
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
     let mut descriptor: NamespaceDescriptorEnvelope =
@@ -2571,19 +2685,21 @@ fn namespace_descriptor_checksum_is_validated() {
     descriptor.payload_checksum_sha256 = "not-the-payload-checksum".to_owned();
     let corrupted = serde_json::to_vec(&descriptor).expect("encode corrupted descriptor");
     store
-        .put_overwrite(&descriptor_key, &corrupted)
+        .put_overwrite(&descriptor_key, Bytes::from(corrupted))
+        .await
         .expect("overwrite descriptor");
 
-    let error =
-        load_verified_namespace_basis(&store, &namespace_id).expect_err("descriptor checksum");
+    let error = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect_err("descriptor checksum");
     assert!(
         error.to_string().contains("checksum mismatch"),
         "unexpected error: {error}"
     );
 }
 
-#[test]
-fn fork_namespace_reuses_content_store_and_isolates_metadata() {
+#[tokio::test]
+async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -2602,8 +2718,9 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     )
     .expect("seed shared file");
 
-    let source_basis =
-        load_verified_namespace_basis(&store, &source_namespace_id).expect("source basis");
+    let source_basis = load_verified_namespace_basis(&store, &source_namespace_id)
+        .await
+        .expect("source basis");
     assert_eq!(source_basis.head.seq, ChangeSeq(1));
     let content_store_id = source_basis.content_store_id.clone();
     let blobs_before = store
@@ -2611,6 +2728,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             "content-stores/{}/blobs/",
             content_store_id.as_str()
         ))
+        .await
         .expect("list blobs before fork");
 
     fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
@@ -2619,6 +2737,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let fork_state_key = namespace_fork_state(clone_namespace_id.as_str());
     let fork_state_bytes = store
         .get(&fork_state_key, None)
+        .await
         .expect("read fork state")
         .expect("fork state exists");
     let fork_state: NamespaceForkStateEnvelope =
@@ -2638,11 +2757,13 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             "content-stores/{}/blobs/",
             content_store_id.as_str()
         ))
+        .await
         .expect("list blobs after fork");
     assert_eq!(blobs_after, blobs_before, "fork must not copy content");
 
-    let clone_basis =
-        load_verified_namespace_basis(&store, &clone_namespace_id).expect("clone basis");
+    let clone_basis = load_verified_namespace_basis(&store, &clone_namespace_id)
+        .await
+        .expect("clone basis");
     assert_eq!(clone_basis.content_store_id, content_store_id);
     assert_eq!(clone_basis.head.seq, ChangeSeq(1));
     assert_eq!(clone_basis.head.current_manifest_id, Some(ManifestId(1)));
@@ -2651,6 +2772,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), ManifestId(1));
     let target_manifest_bytes = store
         .get(&target_manifest_key, None)
+        .await
         .expect("read target manifest")
         .expect("target manifest exists");
     let target_manifest =
@@ -2679,6 +2801,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
                 "namespaces/{}/compacted/metadata/",
                 clone_namespace_id.as_str()
             ))
+            .await
             .expect("list target metadata SSTs")
             .is_empty(),
         "COW fork should not copy metadata SSTs into the target namespace"
@@ -2689,6 +2812,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             "namespaces/{}/gc/pins/",
             source_namespace_id.as_str()
         ))
+        .await
         .expect("list source pins");
     assert_eq!(
         pin_keys.len(),
@@ -2697,6 +2821,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     );
     let pin_bytes = store
         .get(&pin_keys[0], None)
+        .await
         .expect("read source pin")
         .expect("source pin exists");
     let pin: NamespaceGcPinStateEnvelope =
@@ -2722,6 +2847,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     );
     assert!(store
         .head(&gc_pin(source_namespace_id.as_str(), &pin.state.pin_id))
+        .await
         .expect("head source pin")
         .is_some());
 
@@ -2741,7 +2867,10 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .bytes,
         b"base"
     );
-    store.delete(&fork_state_key).expect("delete fork state");
+    store
+        .delete(&fork_state_key)
+        .await
+        .expect("delete fork state");
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .expect("read clone without fork state")
@@ -2749,7 +2878,8 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         b"base"
     );
     store
-        .put_overwrite(&fork_state_key, b"not-json")
+        .put_overwrite(&fork_state_key, Bytes::from_static(b"not-json"))
+        .await
         .expect("corrupt fork state");
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
@@ -2816,9 +2946,10 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     ] {
         for key in store
             .list_prefix(&prefix)
+            .await
             .expect("list source mutable keys")
         {
-            store.delete(&key).expect("delete source mutable key");
+            store.delete(&key).await.expect("delete source mutable key");
         }
     }
     assert_eq!(
@@ -2834,14 +2965,15 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .clone();
     store
         .delete(&referenced_sst)
+        .await
         .expect("delete referenced source metadata SST");
     let corrupt_target = read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
         .expect_err("target should fail when referenced source SST is missing");
     assert_eq!(corrupt_target.code(), ErrorCode::NamespaceCorrupt);
 }
 
-#[test]
-fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
+#[tokio::test]
+async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2865,6 +2997,7 @@ fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
                 "namespaces/{}/manifest/",
                 clone_namespace_id.as_str()
             ))
+            .await
             .expect("list target manifests")
             .is_empty(),
         "target manifest should be written before target head reservation"
@@ -2872,6 +3005,7 @@ fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     assert!(
         store
             .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
             .expect("head target descriptor")
             .is_none(),
         "descriptor must remain unpublished"
@@ -2879,8 +3013,8 @@ fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
 
-#[test]
-fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
+#[tokio::test]
+async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2903,6 +3037,7 @@ fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     assert!(
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
+            .await
             .expect("head target head")
             .is_none(),
         "target head must not be reserved before source retention is pinned"
@@ -2910,6 +3045,7 @@ fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     assert!(
         store
             .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
             .expect("head target descriptor")
             .is_none(),
         "target descriptor must remain unpublished"
@@ -2920,6 +3056,7 @@ fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
                 "namespaces/{}/manifest/",
                 clone_namespace_id.as_str()
             ))
+            .await
             .expect("list target manifests")
             .is_empty(),
         "target manifest must not be written before source retention is pinned"
@@ -2934,8 +3071,8 @@ fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     );
 }
 
-#[test]
-fn fork_target_manifest_failure_leaves_target_namespace_absent() {
+#[tokio::test]
+async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2958,6 +3095,7 @@ fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     assert!(
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
+            .await
             .expect("head target head")
             .is_none(),
         "target head must not be reserved before target manifest exists"
@@ -2965,6 +3103,7 @@ fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     assert!(
         store
             .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
             .expect("head target descriptor")
             .is_none(),
         "descriptor must remain unpublished"
@@ -2975,6 +3114,7 @@ fn fork_target_manifest_failure_leaves_target_namespace_absent() {
                 "namespaces/{}/manifest/",
                 clone_namespace_id.as_str()
             ))
+            .await
             .expect("list target manifests")
             .is_empty(),
         "target manifest should not exist after injected manifest write failure"
@@ -2989,8 +3129,8 @@ fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     );
 }
 
-#[test]
-fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
+#[tokio::test]
+async fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -3010,6 +3150,7 @@ fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     assert!(
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
+            .await
             .expect("head target head")
             .is_some(),
         "target head should still reserve namespace"
@@ -3017,6 +3158,7 @@ fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     assert!(
         store
             .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
             .expect("head target descriptor")
             .is_none(),
         "descriptor must remain unpublished"
@@ -3026,6 +3168,7 @@ fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
             "namespaces/{}/manifest/",
             clone_namespace_id.as_str()
         ))
+        .await
         .expect("list target manifests");
     assert!(
         !target_manifest_keys.is_empty(),
@@ -3034,6 +3177,7 @@ fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     assert!(
         store
             .head(&namespace_fork_state(clone_namespace_id.as_str()))
+            .await
             .expect("head target fork state")
             .is_none(),
         "fork state should not be durable after injected fork-state failure"
@@ -3041,8 +3185,8 @@ fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
 
-#[test]
-fn fork_failure_after_target_manifest_artifacts_remains_partial() {
+#[tokio::test]
+async fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -3062,6 +3206,7 @@ fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     assert!(
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
+            .await
             .expect("head target head")
             .is_some(),
         "target head should still reserve namespace"
@@ -3069,6 +3214,7 @@ fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     assert!(
         store
             .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
             .expect("head target descriptor")
             .is_none(),
         "descriptor must remain unpublished"
@@ -3078,6 +3224,7 @@ fn fork_failure_after_target_manifest_artifacts_remains_partial() {
             "namespaces/{}/manifest/",
             clone_namespace_id.as_str()
         ))
+        .await
         .expect("list target manifests");
     assert!(
         !target_manifest_keys.is_empty(),
@@ -3086,8 +3233,8 @@ fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
 
-#[test]
-fn fork_target_control_conflict_rechecks_complete_namespace() {
+#[tokio::test]
+async fn fork_target_control_conflict_rechecks_complete_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -3095,6 +3242,7 @@ fn fork_target_control_conflict_rechecks_complete_namespace() {
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     seed_source_namespace_for_fork(&inner, &source_namespace_id, &context);
     let content_store_id = load_verified_namespace_basis(&inner, &source_namespace_id)
+        .await
         .expect("source basis")
         .content_store_id;
     let descriptor = NamespaceDescriptorEnvelope::from_state(
@@ -3137,14 +3285,16 @@ fn fork_target_control_conflict_rechecks_complete_namespace() {
     );
 }
 
-#[test]
-fn restore_revision_revalidates_durable_content_before_publish() {
+#[tokio::test]
+async fn restore_revision_revalidates_durable_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
 
-    let first = store_bytes_as_content(&store, &namespace_id(), b"first").expect("stage first");
+    let first = store_bytes_as_content(&store, &namespace_id(), b"first")
+        .await
+        .expect("stage first");
     let create = commit_operations(
         &store,
         &namespace_id(),
@@ -3167,7 +3317,9 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         other => panic!("unexpected create result: {other:?}"),
     };
 
-    let second = store_bytes_as_content(&store, &namespace_id(), b"second").expect("stage second");
+    let second = store_bytes_as_content(&store, &namespace_id(), b"second")
+        .await
+        .expect("stage second");
     commit_operations(
         &store,
         &namespace_id(),
@@ -3191,6 +3343,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
             &content_blob(first.content_store_id.as_str(), &first.content_ref.digest)
                 .expect("first content key"),
         )
+        .await
         .expect("delete first content");
 
     let error = commit_operations(
@@ -3218,8 +3371,8 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     ));
 }
 
-#[test]
-fn metadata_only_commit_does_not_validate_content_store_refs() {
+#[tokio::test]
+async fn metadata_only_commit_does_not_validate_content_store_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3260,8 +3413,8 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
     );
 }
 
-#[test]
-fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
+#[tokio::test]
+async fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3293,8 +3446,8 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     ));
 }
 
-#[test]
-fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
+#[tokio::test]
+async fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3337,8 +3490,8 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
     ));
 }
 
-#[test]
-fn restore_revision_missing_source_is_revision_not_found() {
+#[tokio::test]
+async fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3376,14 +3529,16 @@ fn restore_revision_missing_source_is_revision_not_found() {
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
 }
 
-#[test]
-fn restore_revision_resolves_same_request_source_before_durable_content_validation() {
+#[tokio::test]
+async fn restore_revision_resolves_same_request_source_before_durable_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
 
-    let first = store_bytes_as_content(&store, &namespace_id(), b"first").expect("stage first");
+    let first = store_bytes_as_content(&store, &namespace_id(), b"first")
+        .await
+        .expect("stage first");
     let create = commit_operations(
         &store,
         &namespace_id(),
@@ -3407,12 +3562,15 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         other => panic!("unexpected create result: {other:?}"),
     };
 
-    let second = store_bytes_as_content(&store, &namespace_id(), b"second").expect("stage second");
+    let second = store_bytes_as_content(&store, &namespace_id(), b"second")
+        .await
+        .expect("stage second");
     store
         .delete(
             &content_blob(second.content_store_id.as_str(), &second.content_ref.digest)
                 .expect("second content key"),
         )
+        .await
         .expect("delete second content");
 
     let error = commit_operations(
@@ -3448,8 +3606,8 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     ));
 }
 
-#[test]
-fn move_path_into_occupied_target_is_path_conflict() {
+#[tokio::test]
+async fn move_path_into_occupied_target_is_path_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3485,8 +3643,8 @@ fn move_path_into_occupied_target_is_path_conflict() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[test]
-fn move_path_directory_cycle_is_would_cycle() {
+#[tokio::test]
+async fn move_path_directory_cycle_is_would_cycle() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3513,8 +3671,8 @@ fn move_path_directory_cycle_is_would_cycle() {
     assert_eq!(error.code(), ErrorCode::WouldCycle);
 }
 
-#[test]
-fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
+#[tokio::test]
+async fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3569,8 +3727,8 @@ fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     assert_eq!(move_error.code(), ErrorCode::TombstoneConflict);
 }
 
-#[test]
-fn create_dir_path_creates_directory_without_auto_parents() {
+#[tokio::test]
+async fn create_dir_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3599,8 +3757,8 @@ fn create_dir_path_creates_directory_without_auto_parents() {
     assert_eq!(missing_parent.code(), ErrorCode::PathNotFound);
 }
 
-#[test]
-fn path_move_writes_unbind_and_stale_binding_is_fails() {
+#[tokio::test]
+async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3614,8 +3772,9 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
         Some("seed-a"),
     )
     .expect("seed file");
-    let basis_before_move =
-        load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
+    let basis_before_move = load_verified_namespace_basis(&store, &namespace_id())
+        .await
+        .expect("load basis");
     let file = basis_before_move
         .metadata_state
         .resolve_visible_path(
@@ -3638,7 +3797,9 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
         Some("move-a-to-b"),
     )
     .expect("move file");
-    let moved_basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
+    let moved_basis = load_verified_namespace_basis(&store, &namespace_id())
+        .await
+        .expect("load basis");
     assert_eq!(moved_basis.metadata_state.direntry_unbinds().len(), 1);
     assert!(resolve_path(&store, &namespace_id(), "/docs/a.txt").is_err());
     resolve_path(&store, &namespace_id(), "/docs/b.txt").expect("new path visible");
@@ -3667,8 +3828,8 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
     assert_eq!(stale_binding.code(), ErrorCode::PathConflict);
 }
 
-#[test]
-fn unsupported_rename_mode_is_named_bad_request_failure() {
+#[tokio::test]
+async fn unsupported_rename_mode_is_named_bad_request_failure() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3682,7 +3843,9 @@ fn unsupported_rename_mode_is_named_bad_request_failure() {
         Some("seed-rename-mode"),
     )
     .expect("seed file");
-    let basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
+    let basis = load_verified_namespace_basis(&store, &namespace_id())
+        .await
+        .expect("load basis");
     let file = basis
         .metadata_state
         .resolve_visible_path(
@@ -3713,8 +3876,8 @@ fn unsupported_rename_mode_is_named_bad_request_failure() {
     assert_eq!(error.code(), ErrorCode::UnsupportedRenameMode);
 }
 
-#[test]
-fn put_file_create_only_rejects_existing_target_without_force() {
+#[tokio::test]
+async fn put_file_create_only_rejects_existing_target_without_force() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3742,8 +3905,8 @@ fn put_file_create_only_rejects_existing_target_without_force() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[test]
-fn delete_path_non_recursive_rejects_non_empty_directory() {
+#[tokio::test]
+async fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3769,8 +3932,8 @@ fn delete_path_non_recursive_rejects_non_empty_directory() {
     assert!(matches!(error, CoreError::DirectoryNotEmpty(path) if path == "/docs"));
 }
 
-#[test]
-fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
+#[tokio::test]
+async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3804,8 +3967,8 @@ fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     );
 }
 
-#[test]
-fn resolve_path_uses_nfc_casefold_name_policy() {
+#[tokio::test]
+async fn resolve_path_uses_nfc_casefold_name_policy() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3827,8 +3990,8 @@ fn resolve_path_uses_nfc_casefold_name_policy() {
     assert_eq!(resolved.display_name, "Cafe\u{0301}.txt");
 }
 
-#[test]
-fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
+#[tokio::test]
+async fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -3937,11 +4100,11 @@ enum InjectedCreateFailure {
 }
 
 impl InjectedCreateFailure {
-    fn apply_before_error(
+    async fn apply_before_error(
         &self,
         inner: &LocalFsStore,
         attempted_key: &str,
-        attempted_bytes: &[u8],
+        attempted_bytes: Bytes,
     ) -> Result<(), ObjectStoreError> {
         match self {
             Self::Transport { .. } => Ok(()),
@@ -3954,10 +4117,14 @@ impl InjectedCreateFailure {
                 additional_writes,
             } => {
                 if *write_attempted_object {
-                    inner.put_overwrite(attempted_key, attempted_bytes)?;
+                    inner
+                        .put_overwrite(attempted_key, attempted_bytes.clone())
+                        .await?;
                 }
                 for (key, bytes) in additional_writes {
-                    inner.put_overwrite(key, bytes)?;
+                    inner
+                        .put_overwrite(key, Bytes::copy_from_slice(bytes))
+                        .await?;
                 }
                 Ok(())
             }
@@ -3973,27 +4140,28 @@ impl InjectedCreateFailure {
     }
 }
 
+#[async_trait]
 impl ObjectStore for InjectCreateFailureStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        self.inner.get(key, range)
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key)
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         if matches!(&mode, PutMode::CreateIfAbsent) && self.matcher.matches(key) {
@@ -4010,20 +4178,25 @@ impl ObjectStore for InjectCreateFailureStore {
                 }
             };
             if should_inject {
-                self.failure.apply_before_error(&self.inner, key, bytes)?;
+                self.failure
+                    .apply_before_error(&self.inner, key, bytes.clone())
+                    .await?;
                 return Err(self.failure.error());
             }
         }
 
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
@@ -4104,6 +4277,7 @@ fn content_ref(seed: &str) -> ContentRef {
     }
 }
 
+#[derive(Debug)]
 struct ReplayReadGuardStore {
     inner: LocalFsStore,
     guarded_prefixes: Vec<String>,
@@ -4141,43 +4315,48 @@ impl ReplayReadGuardStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for ReplayReadGuardStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         self.reject_replay_read(key)?;
-        self.inner.get(key, range)
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.reject_replay_read(key)?;
-        self.inner.get_with_metadata(key)
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
+#[derive(Debug)]
 struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
@@ -4206,47 +4385,55 @@ impl ContentBlobGetCountingStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for ContentBlobGetCountingStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head_with_checksum(key)
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         self.record_content_blob_get(key);
-        self.inner.get(key, range)
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.record_content_blob_get(key);
-        self.inner.get_with_metadata(key)
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
+#[derive(Debug)]
 struct ContentStoreAccessLimitStore {
     inner: LocalFsStore,
     content_store_accesses: AtomicUsize,
@@ -4281,50 +4468,56 @@ impl ContentStoreAccessLimitStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for ContentStoreAccessLimitStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.record_content_store_access(key)?;
-        self.inner.head(key)
+        self.inner.head(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         self.record_content_store_access(key)?;
-        self.inner.get(key, range)
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.record_content_store_access(key)?;
-        self.inner.get_with_metadata(key)
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
+#[derive(Debug)]
 struct StaleHeadGetStore {
     inner: LocalFsStore,
     head_key: String,
     state: Mutex<StaleHeadGetState>,
 }
 
+#[derive(Debug)]
 struct StaleHeadGetState {
     stale_head_body: Option<ObjectBody>,
     clean_head_gets_before_injection: Option<usize>,
@@ -4374,16 +4567,20 @@ impl StaleHeadGetStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for StaleHeadGetStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head_with_checksum(key)
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         if key == self.head_key {
             let stale_head = {
                 let mut state = self
@@ -4408,44 +4605,48 @@ impl ObjectStore for StaleHeadGetStore {
             }
         }
 
-        self.inner.get_with_metadata(key)
+        self.inner.get_with_metadata(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        self.inner.get(key, range)
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let previous_head = if key == self.head_key {
-            self.inner.get_with_metadata(key)?
+            self.inner.get_with_metadata(key).await?
         } else {
             None
         };
-        let metadata = self.inner.put(key, bytes, mode)?;
+        let metadata = self.inner.put(key, bytes, mode).await?;
         if key == self.head_key {
             self.record_head_write(previous_head);
         }
         Ok(metadata)
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
+#[derive(Debug)]
 struct StaleHeadAfterWalWriteStore {
     inner: LocalFsStore,
     head_key: String,
@@ -4469,27 +4670,28 @@ impl StaleHeadAfterWalWriteStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for StaleHeadAfterWalWriteStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        self.inner.get(key, range)
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key)
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
@@ -4506,20 +4708,23 @@ impl ObjectStore for StaleHeadAfterWalWriteStore {
                 }
             };
             if should_inject {
-                if let Some(existing) = self.inner.get(key, None)? {
-                    self.inner.put_overwrite(key, &existing)?;
+                if let Some(existing) = self.inner.get(key, None).await? {
+                    self.inner.put_overwrite(key, existing).await?;
                 }
                 return Err(ObjectStoreError::PreconditionFailed);
             }
         }
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }

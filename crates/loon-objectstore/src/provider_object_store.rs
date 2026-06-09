@@ -2,7 +2,7 @@ use crate::checksum;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
-use crate::{AsyncObjectStore, ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
@@ -116,7 +116,7 @@ impl ProviderObjectStore {
 }
 
 #[async_trait]
-impl AsyncObjectStore for ProviderObjectStore {
+impl ObjectStore for ProviderObjectStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let path = self.to_path(key)?;
         match self.inner.head(&path).await {

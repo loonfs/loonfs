@@ -1,6 +1,9 @@
 use crate::fault::{FaultSchedule, ObjectStoreFault, ScheduledFault};
 use crate::object_op::{ObjectOp, ObjectOpKind};
 use crate::trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use loon_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -8,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+#[derive(Debug)]
 pub struct FaultInjectingObjectStore<S> {
     inner: S,
     schedule: FaultSchedule,
@@ -80,11 +84,11 @@ impl<S> FaultInjectingObjectStore<S> {
         self.schedule.fault_for(op).cloned()
     }
 
-    fn remember_current_value(&self, key: &str)
+    async fn remember_current_value(&self, key: &str)
     where
         S: ObjectStore,
     {
-        if let Ok(Some(body)) = self.inner.get_with_metadata(key) {
+        if let Ok(Some(body)) = self.inner.get_with_metadata(key).await {
             self.stale_values
                 .lock()
                 .expect("stale value lock poisoned")
@@ -109,14 +113,14 @@ impl<S> FaultInjectingObjectStore<S> {
             .and_then(|values| values.last().cloned())
     }
 
-    fn put_with<F>(
+    async fn put_with(
         &self,
         key: &str,
         kind: ObjectOpKind,
-        write: F,
+        bytes: Bytes,
+        mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError>
     where
-        F: FnOnce(&S) -> Result<ObjectMetadata, ObjectStoreError>,
         S: ObjectStore,
     {
         let op = self.next_object_op(kind, key);
@@ -136,8 +140,8 @@ impl<S> FaultInjectingObjectStore<S> {
                 ))
             }
             Some(ObjectStoreFault::PutSucceedsButResponseLost) => {
-                self.remember_current_value(key);
-                let result = write(&self.inner);
+                self.remember_current_value(key).await;
+                let result = self.inner.put(key, bytes, mode).await;
                 if result.is_ok() {
                     self.remember_successful_write(key);
                     self.push_trace(
@@ -174,8 +178,8 @@ impl<S> FaultInjectingObjectStore<S> {
             }
             Some(incompatible) => {
                 let fault = incompatible.clone();
-                self.remember_current_value(key);
-                let result = write(&self.inner);
+                self.remember_current_value(key).await;
+                let result = self.inner.put(key, bytes, mode).await;
                 if result.is_ok() {
                     self.remember_successful_write(key);
                 }
@@ -190,8 +194,8 @@ impl<S> FaultInjectingObjectStore<S> {
                 result
             }
             None => {
-                self.remember_current_value(key);
-                let result = write(&self.inner);
+                self.remember_current_value(key).await;
+                let result = self.inner.put(key, bytes, mode).await;
                 if result.is_ok() {
                     self.remember_successful_write(key);
                 }
@@ -202,29 +206,33 @@ impl<S> FaultInjectingObjectStore<S> {
     }
 }
 
+#[async_trait]
 impl<S> ObjectStore for FaultInjectingObjectStore<S>
 where
     S: ObjectStore,
 {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOpKind::Head, key);
-        let result = self.inner.head(key);
+        let result = self.inner.head(key).await;
         self.push_trace(op, "head", None, result_class(&result));
         result
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOpKind::HeadWithChecksum, key);
-        let result = self.inner.head_with_checksum(key);
+        let result = self.inner.head_with_checksum(key).await;
         self.push_trace(op, "head_with_checksum", None, result_class(&result));
         result
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOpKind::Get, key);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
@@ -238,7 +246,7 @@ where
                     );
                     return Ok(Some(apply_range(body.bytes, range)?));
                 }
-                let result = self.inner.get(key, range);
+                let result = self.inner.get(key, range).await;
                 self.push_trace(
                     op,
                     "get_stale_value_skipped",
@@ -250,11 +258,13 @@ where
                 result
             }
             Some(ObjectStoreFault::CorruptObjectBytes) => {
-                let mut result = self.inner.get(key, range);
+                let mut result = self.inner.get(key, range).await;
                 if let Ok(Some(bytes)) = &mut result {
-                    if let Some(first) = bytes.first_mut() {
+                    let mut corrupted = bytes.to_vec();
+                    if let Some(first) = corrupted.first_mut() {
                         *first ^= 0x01;
                     }
+                    *bytes = Bytes::from(corrupted);
                 }
                 self.push_trace(
                     op,
@@ -265,7 +275,7 @@ where
                 result
             }
             Some(incompatible) => {
-                let result = self.inner.get(key, range);
+                let result = self.inner.get(key, range).await;
                 self.push_trace(
                     op,
                     "get_fault_skipped",
@@ -277,14 +287,14 @@ where
                 result
             }
             None => {
-                let result = self.inner.get(key, range);
+                let result = self.inner.get(key, range).await;
                 self.push_trace(op, "get", None, result_class(&result));
                 result
             }
         }
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOpKind::Get, key);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
@@ -298,7 +308,7 @@ where
                     );
                     return Ok(Some(body));
                 }
-                let result = self.inner.get_with_metadata(key);
+                let result = self.inner.get_with_metadata(key).await;
                 self.push_trace(
                     op,
                     "get_with_metadata_stale_value_skipped",
@@ -310,7 +320,7 @@ where
                 result
             }
             Some(ObjectStoreFault::CorruptObjectBytes) => {
-                let mut result = self.inner.get_with_metadata(key);
+                let mut result = self.inner.get_with_metadata(key).await;
                 if let Ok(Some(body)) = &mut result {
                     if let Some(first) = body.bytes.first_mut() {
                         *first ^= 0x01;
@@ -325,7 +335,7 @@ where
                 result
             }
             Some(incompatible) => {
-                let result = self.inner.get_with_metadata(key);
+                let result = self.inner.get_with_metadata(key).await;
                 self.push_trace(
                     op,
                     "get_with_metadata_fault_skipped",
@@ -337,24 +347,24 @@ where
                 result
             }
             None => {
-                let result = self.inner.get_with_metadata(key);
+                let result = self.inner.get_with_metadata(key).await;
                 self.push_trace(op, "get_with_metadata", None, result_class(&result));
                 result
             }
         }
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let kind = put_mode_kind(&mode);
-        self.put_with(key, kind, |inner| inner.put(key, bytes, mode))
+        self.put_with(key, kind, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let op = self.next_object_op(ObjectOpKind::Delete, key);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
@@ -372,7 +382,7 @@ where
                 ))
             }
             Some(incompatible) => {
-                let result = self.inner.delete(key);
+                let result = self.inner.delete(key).await;
                 self.push_trace(
                     op,
                     "delete_fault_skipped",
@@ -384,19 +394,19 @@ where
                 result
             }
             None => {
-                let result = self.inner.delete(key);
+                let result = self.inner.delete(key).await;
                 self.push_trace(op, "delete", None, result_class(&result));
                 result
             }
         }
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOpKind::ListPrefix, prefix);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
             Some(ObjectStoreFault::ListOmitsRecentObject) => {
-                let mut result = self.inner.list_prefix(prefix);
+                let mut result = self.inner.list_prefix(prefix).await;
                 if let Ok(keys) = &mut result {
                     keys.sort();
                     if let Some(index) = recent_key_to_omit(
@@ -419,7 +429,7 @@ where
                 result
             }
             Some(incompatible) => {
-                let result = self.inner.list_prefix(prefix);
+                let result = self.inner.list_prefix(prefix).await;
                 self.push_trace(
                     op,
                     "list_fault_skipped",
@@ -431,34 +441,58 @@ where
                 result
             }
             None => {
-                let result = self.inner.list_prefix(prefix);
+                let result = self.inner.list_prefix(prefix).await;
                 self.push_trace(op, "list_prefix", None, result_class(&result));
                 result
             }
         }
     }
 
-    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put_with(key, ObjectOpKind::Put, |inner| {
-            inner.put_overwrite(key, bytes)
-        })
+    async fn put_overwrite(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put_with(key, ObjectOpKind::Put, bytes, PutMode::Overwrite)
+            .await
     }
 
-    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put_with(key, ObjectOpKind::PutIfAbsent, |inner| {
-            inner.put_if_absent(key, bytes)
-        })
+    async fn put_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put_with(
+            key,
+            ObjectOpKind::PutIfAbsent,
+            bytes,
+            PutMode::CreateIfAbsent,
+        )
+        .await
     }
 
-    fn compare_and_swap(
+    async fn compare_and_swap(
         &self,
         key: &str,
         expected_etag: &str,
-        bytes: &[u8],
+        bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put_with(key, ObjectOpKind::CompareAndSwap, |inner| {
-            inner.compare_and_swap(key, expected_etag, bytes)
-        })
+        self.put_with(
+            key,
+            ObjectOpKind::CompareAndSwap,
+            bytes,
+            PutMode::CompareAndSwap {
+                expected_etag: expected_etag.to_owned(),
+            },
+        )
+        .await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
@@ -470,9 +504,9 @@ fn put_mode_kind(mode: &PutMode) -> ObjectOpKind {
     }
 }
 
-fn apply_range(bytes: Vec<u8>, range: Option<ByteRange>) -> Result<Vec<u8>, ObjectStoreError> {
+fn apply_range(bytes: Vec<u8>, range: Option<ByteRange>) -> Result<Bytes, ObjectStoreError> {
     let Some(range) = range else {
-        return Ok(bytes);
+        return Ok(Bytes::from(bytes));
     };
     let start =
         usize::try_from(range.start_inclusive).map_err(|_| ObjectStoreError::InvalidRange)?;
@@ -480,7 +514,7 @@ fn apply_range(bytes: Vec<u8>, range: Option<ByteRange>) -> Result<Vec<u8>, Obje
     if start > end || end > bytes.len() {
         return Err(ObjectStoreError::InvalidRange);
     }
-    Ok(bytes[start..end].to_vec())
+    Ok(Bytes::copy_from_slice(&bytes[start..end]))
 }
 
 fn recent_key_to_omit(keys: &[String], prefix: &str, recent_writes: &[String]) -> Option<usize> {
@@ -531,14 +565,17 @@ mod tests {
         (temp_dir, store)
     }
 
-    #[test]
-    fn fault_store_records_trace() {
+    #[tokio::test]
+    async fn fault_store_records_trace() {
         let (_temp_dir, store) = temp_store();
         let schedule = FaultSchedule::empty(SimSeed(1));
         let store = FaultInjectingObjectStore::new(store, schedule);
 
-        store.put_overwrite("a", b"abc").expect("put");
-        store.get("a", None).expect("get");
+        store
+            .put_overwrite("a", Bytes::from_static(b"abc"))
+            .await
+            .expect("put");
+        store.get("a", None).await.expect("get");
 
         let trace = store.trace().snapshot();
         assert_eq!(trace.events.len(), 2);
@@ -546,8 +583,8 @@ mod tests {
         assert_eq!(trace.events[1].object_op.as_ref().unwrap().step, 2);
     }
 
-    #[test]
-    fn lost_success_fault_performs_inner_write_and_returns_error() {
+    #[tokio::test]
+    async fn lost_success_fault_performs_inner_write_and_returns_error() {
         let (_temp_dir, store) = temp_store();
         let schedule = FaultSchedule {
             seed: SimSeed(1),
@@ -561,14 +598,17 @@ mod tests {
         let store = FaultInjectingObjectStore::new(store, schedule);
 
         assert!(matches!(
-            store.put_overwrite("a", b"abc"),
+            store.put_overwrite("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport(_))
         ));
-        assert_eq!(store.inner().get("a", None).unwrap(), Some(b"abc".to_vec()));
+        assert_eq!(
+            store.inner().get("a", None).await.unwrap(),
+            Some(Bytes::from_static(b"abc"))
+        );
     }
 
-    #[test]
-    fn transient_put_fault_does_not_perform_inner_write() {
+    #[tokio::test]
+    async fn transient_put_fault_does_not_perform_inner_write() {
         let (_temp_dir, store) = temp_store();
         let schedule = FaultSchedule {
             seed: SimSeed(1),
@@ -582,14 +622,14 @@ mod tests {
         let store = FaultInjectingObjectStore::new(store, schedule);
 
         assert!(matches!(
-            store.put_overwrite("a", b"abc"),
+            store.put_overwrite("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport(_))
         ));
-        assert_eq!(store.inner().get("a", None).unwrap(), None);
+        assert_eq!(store.inner().get("a", None).await.unwrap(), None);
     }
 
-    #[test]
-    fn stale_get_with_metadata_returns_stale_body_and_metadata() {
+    #[tokio::test]
+    async fn stale_get_with_metadata_returns_stale_body_and_metadata() {
         let (_temp_dir, store) = temp_store();
         let schedule = FaultSchedule {
             seed: SimSeed(1),
@@ -602,10 +642,17 @@ mod tests {
         };
         let store = FaultInjectingObjectStore::new(store, schedule);
 
-        store.put_overwrite("a", b"old").expect("put old");
-        store.put_overwrite("a", b"new-value").expect("put new");
+        store
+            .put_overwrite("a", Bytes::from_static(b"old"))
+            .await
+            .expect("put old");
+        store
+            .put_overwrite("a", Bytes::from_static(b"new-value"))
+            .await
+            .expect("put new");
         let body = store
             .get_with_metadata("a")
+            .await
             .expect("get with metadata")
             .expect("body");
 
@@ -613,8 +660,8 @@ mod tests {
         assert_eq!(body.metadata.size_bytes, 3);
     }
 
-    #[test]
-    fn list_omission_fault_is_deterministic() {
+    #[tokio::test]
+    async fn list_omission_fault_is_deterministic() {
         let (_temp_dir, store) = temp_store();
         let schedule = FaultSchedule {
             seed: SimSeed(1),
@@ -627,9 +674,15 @@ mod tests {
         };
         let store = FaultInjectingObjectStore::new(store, schedule);
 
-        store.put_overwrite("prefix/a", b"a").expect("put a");
-        store.put_overwrite("prefix/b", b"b").expect("put b");
-        let keys = store.list_prefix("prefix/").expect("list");
+        store
+            .put_overwrite("prefix/a", Bytes::from_static(b"a"))
+            .await
+            .expect("put a");
+        store
+            .put_overwrite("prefix/b", Bytes::from_static(b"b"))
+            .await
+            .expect("put b");
+        let keys = store.list_prefix("prefix/").await.expect("list");
 
         assert_eq!(keys, vec!["prefix/a".to_owned()]);
     }

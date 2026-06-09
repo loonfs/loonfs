@@ -4,6 +4,7 @@ use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
 use crate::namespace::control::ControlObjectLoadError;
+use bytes::Bytes;
 use loon_api::wire::control::{
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ControlObjectKind, HeadState,
     HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope,
@@ -66,7 +67,7 @@ impl From<NamespaceInitializationError> for BootstrapNamespaceError {
     }
 }
 
-pub(crate) fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -79,7 +80,7 @@ pub(crate) fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         return Err(BootstrapNamespaceError::EmptyWriterVersion);
     }
 
-    match namespace_initialization_state(store, namespace_id)? {
+    match namespace_initialization_state(store, namespace_id).await? {
         NamespaceInitializationState::Complete if allow_existing => {
             return Ok(NamespaceSummary {
                 namespace_id: namespace_id.clone(),
@@ -125,13 +126,15 @@ pub(crate) fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let head_key = namespace_head(namespace_id.as_str());
     let lease_key = namespace_lease(namespace_id.as_str());
     store
-        .put_if_absent(&head_key, &head_bytes)
+        .put_if_absent(&head_key, Bytes::from(head_bytes))
+        .await
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
     store
-        .put_if_absent(&lease_key, &lease_bytes)
+        .put_if_absent(&lease_key, Bytes::from(lease_bytes))
+        .await
         .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
 
-    let content_store_id = create_new_content_store(store, context)?;
+    let content_store_id = create_new_content_store(store, context).await?;
     let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
         &context.writer_version,
@@ -146,7 +149,8 @@ pub(crate) fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     store
-        .put_if_absent(&descriptor_key, &namespace_descriptor_bytes)
+        .put_if_absent(&descriptor_key, Bytes::from(namespace_descriptor_bytes))
+        .await
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
 
     let _ = bootstrap_basis_metadata_state();
@@ -158,7 +162,7 @@ pub(crate) fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
 const CONTENT_STORE_ID_RETRY_LIMIT: usize = 8;
 
-fn create_new_content_store<S: ObjectStore + ?Sized>(
+async fn create_new_content_store<S: ObjectStore + ?Sized>(
     store: &S,
     context: &MutationContext,
 ) -> Result<ContentStoreId, BootstrapNamespaceError> {
@@ -175,7 +179,7 @@ fn create_new_content_store<S: ObjectStore + ?Sized>(
         let bytes = serde_json::to_vec(&descriptor)
             .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
         let key = content_store_descriptor(content_store_id.as_str());
-        match store.put_if_absent(&key, &bytes) {
+        match store.put_if_absent(&key, Bytes::from(bytes)).await {
             Ok(_) => return Ok(content_store_id),
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
             Err(err) => return Err(BootstrapNamespaceError::ContentStoreWrite(err.to_string())),

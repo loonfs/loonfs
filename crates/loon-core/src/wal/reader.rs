@@ -11,7 +11,7 @@ use loon_objectstore::ObjectStore;
     skip_all,
     fields(phase = "load_validated_wal_chain", key_class = "wal_segment")
 )]
-pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalChainLoadRequest<'_>,
 ) -> Result<ValidatedWalChain, WalChainLoadError> {
@@ -50,6 +50,7 @@ pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
         let object_key = pointer.object_key.clone();
         let encoded_bytes = store
             .get(&object_key, None)
+            .await
             .map_err(|err| WalChainLoadError::ReadWal {
                 object_key: object_key.clone(),
                 message: err.to_string(),

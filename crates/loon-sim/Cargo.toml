@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
 loon-api = { path = "../loon-api" }
 loon-core = { path = "../loon-core", features = ["inspection"] }
 loon-objectstore = { path = "../loon-objectstore" }
@@ -16,3 +19,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true
