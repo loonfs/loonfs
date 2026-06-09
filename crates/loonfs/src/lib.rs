@@ -4,8 +4,6 @@
 //! upload helpers, maintenance hooks, and optional object-store metrics. Use it
 //! when you want LoonFS in-process, or when building the reference server.
 
-#![forbid(unsafe_code)]
-
 mod trace;
 
 use std::collections::{HashMap, VecDeque};
@@ -73,8 +71,8 @@ pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 /// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
-#[derive(Debug, Error)]
 /// Runtime error.
+#[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
     Core(#[from] CoreError),
@@ -86,8 +84,8 @@ pub enum RuntimeError {
     RuntimeTask(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Configuration for an embedded runtime instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsConfig {
     /// Writer id used for namespace leases and commits.
     pub writer_id: String,
@@ -117,8 +115,8 @@ impl FsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Cache configuration for the embedded runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
     /// Enables verified-basis caching.
     pub basis_cache_enabled: bool,
@@ -165,10 +163,10 @@ impl Default for RuntimeCacheConfig {
     }
 }
 
-#[derive(Clone)]
 /// Embedded filesystem runtime.
 ///
 /// `Fs` is cheap to clone. Clones share caches and the underlying object store.
+#[derive(Clone)]
 pub struct Fs {
     inner: Arc<FsInner>,
 }
@@ -697,11 +695,11 @@ struct CachedControl<T> {
     state: T,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 /// Snapshot of runtime cache counters.
 ///
 /// These counters are diagnostic. They are useful for tuning cache limits and
 /// understanding read/write warmup behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeCacheStats {
     pub warm_basis_cache_hits: usize,
     pub warm_basis_cache_misses: usize,
@@ -933,8 +931,8 @@ impl RuntimeControlCache {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Current maintenance-related namespace status.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStatus {
     /// Namespace being inspected.
     pub namespace_id: NamespaceId,
@@ -950,8 +948,8 @@ pub struct NamespaceStatus {
     pub retention_floor_seq: ChangeSeq,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Options for one maintenance tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaintenanceTickOptions {
     /// Publish a checkpoint when the visible WAL tail reaches this many segments.
     pub max_wal_tail_segments: u64,
@@ -965,8 +963,8 @@ impl Default for MaintenanceTickOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Outcome of one maintenance tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaintenanceTickOutcome {
     /// No checkpoint was needed.
     NotNeeded,
@@ -981,23 +979,23 @@ pub enum MaintenanceTickOutcome {
     CheckpointPublishRaceLost { observed_head_seq: ChangeSeq },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Result of one maintenance tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintenanceTickResult {
     pub namespace_id: NamespaceId,
     pub status_before: NamespaceStatus,
     pub outcome: MaintenanceTickOutcome,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 /// Options for creating a namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CreateNamespaceOptions {
     /// Treat an existing namespace as success.
     pub allow_existing: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Options for writing a file path.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
     pub behavior: PutFileBehavior,
@@ -1014,15 +1012,15 @@ impl Default for PutFileOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 /// Options for creating a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateDirOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 /// Options for deleting a path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteOptions {
     /// Whether directory deletes may remove a subtree.
     pub recursive: bool,
@@ -1030,22 +1028,22 @@ pub struct DeleteOptions {
     pub commit_id: Option<CommitId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 /// Options for moving a path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MoveOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 /// Options for copying a file path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopyOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 /// Options for restoring a file revision by path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RestoreRevisionOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,

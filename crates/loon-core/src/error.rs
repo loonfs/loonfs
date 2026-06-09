@@ -21,8 +21,8 @@ pub type Error = CoreError;
 /// Result type used by `loon-core` entrypoints.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Broad error category for caller or operator action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// Fix the request before retrying.
     InvalidRequest,
@@ -42,8 +42,8 @@ pub enum ErrorKind {
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Stable machine-readable error reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     InvalidPath,
     InvalidNamespaceId,
@@ -74,11 +74,11 @@ pub enum ErrorCode {
     ServerError,
 }
 
-#[derive(Debug, Clone, Error)]
 /// Detailed core error.
 ///
 /// Most callers should branch on [`CoreError::kind`] or [`CoreError::code`]
 /// instead of matching every internal variant.
+#[derive(Debug, Clone, Error)]
 pub enum CoreError {
     #[error(transparent)]
     Basis(#[from] BasisLoadError),

@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 use std::mem::size_of;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Fully verified namespace view at one head.
 ///
 /// A basis contains enough metadata to answer normal path reads and validate
 /// mutations for the head it was reconstructed from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedNamespaceBasis {
     pub namespace_descriptor: NamespaceDescriptorState,
     pub content_store_id: ContentStoreId,
@@ -37,10 +37,10 @@ pub struct VerifiedNamespaceBasis {
     pub metadata_state: MetadataState,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Approximate size of a verified basis.
 ///
 /// Runtime caches use this as an eviction weight, not exact heap accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedNamespaceBasisWeight {
     pub rows: usize,
     pub decoded_bytes: usize,
@@ -86,8 +86,8 @@ fn wal_tip_decoded_bytes(pointer: Option<&loon_api::wire::control::WalSegmentPoi
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Lightweight namespace head status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
@@ -97,17 +97,17 @@ pub struct NamespaceHeadSummary {
     pub retention_floor_seq: ChangeSeq,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Opaque ETag probe for the namespace head object.
 ///
 /// This only proves that the durable head object identity still matches a
 /// previously reconstructed basis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceHeadEtagProbe {
     pub head_etag: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 /// Error while reconstructing a verified namespace basis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum BasisLoadError {
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),

@@ -563,9 +563,9 @@ pub struct FenceToken(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NameKey(String);
 
+/// Filesystem item kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Filesystem item kind.
 pub enum InodeKind {
     /// File with revision history.
     File,

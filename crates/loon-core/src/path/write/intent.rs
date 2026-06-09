@@ -1,8 +1,8 @@
 use loon_api::{v0::RenameMode, CommitId, ContentRef, RevisionNo};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 /// Behavior for path-based file put operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PutFileBehavior {
     /// Create the file only if the target path is absent.
     CreateOnly,
@@ -10,11 +10,11 @@ pub enum PutFileBehavior {
     ReplaceExisting,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// User-facing path mutation before it is planned against namespace state.
 ///
 /// Server and embedded publishers accept these intents, then resolve paths and
 /// preconditions immediately before publishing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathMutationIntent {
     /// Create one directory.
     CreateDir {

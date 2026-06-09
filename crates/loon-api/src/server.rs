@@ -1,11 +1,11 @@
 use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Authoritative metadata for one visible path.
 ///
 /// This is the result shape for stat/list style reads. File entries include
 /// revision and content summary fields; directory entries leave those empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoritativePathEntry {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
@@ -29,8 +29,8 @@ pub struct AuthoritativePathEntry {
     pub content_ref: Option<ContentRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// File bytes plus the metadata entry they came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoritativeFileBytes {
     /// Authoritative metadata for the file that was read.
     pub entry: AuthoritativePathEntry,

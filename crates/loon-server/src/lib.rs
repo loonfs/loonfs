@@ -1,4 +1,9 @@
-#![forbid(unsafe_code)]
+//! The LoonFS server.
+//!
+//! Hosts an embedded [`loonfs`] runtime behind the v0 HTTP API for
+//! remote-mode clients, with per-namespace write batching in front of the
+//! commit protocol. Embedded-mode callers skip this crate entirely and use
+//! `loonfs` directly.
 
 mod config;
 mod http;

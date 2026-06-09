@@ -57,11 +57,11 @@ impl<'de> Deserialize<'de> for ContentRefKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 /// Pointer to immutable file content.
 ///
 /// A `ContentRef` is safe to publish only after the referenced bytes are
 /// durable in the namespace's content store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentRef {
     /// Content strategy used by the referenced object.
     pub kind: ContentRefKind,

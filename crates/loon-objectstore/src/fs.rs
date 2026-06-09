@@ -1,9 +1,9 @@
-use crate::checksum;
 use crate::keyspace::validate_segments;
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
+use loon_api::sha256_digest;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File, OpenOptions};
@@ -49,9 +49,7 @@ impl LocalFsStore {
             Err(err) => return Err(io_error(err)),
         };
         let checksum_sha256 = if include_checksum {
-            Some(checksum::sha256_digest(
-                &fs::read(path).await.map_err(io_error)?,
-            ))
+            Some(sha256_digest(&fs::read(path).await.map_err(io_error)?))
         } else {
             None
         };
@@ -175,11 +173,8 @@ impl LocalFsStore {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).await.map_err(io_error)?;
 
-        let metadata = Self::metadata_from_fs_metadata(
-            &fs_metadata,
-            Some(checksum::sha256_digest(&bytes)),
-            &path,
-        )?;
+        let metadata =
+            Self::metadata_from_fs_metadata(&fs_metadata, Some(sha256_digest(&bytes)), &path)?;
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 

@@ -5,8 +5,6 @@
 //! pass a [`NamespacePath`] for filesystem operations and use explicit commit
 //! helpers when you need retry control.
 
-#![forbid(unsafe_code)]
-
 use http::Uri;
 use loon_api::{
     v0::RenameMode,
@@ -28,8 +26,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone, Deserialize)]
 /// Client configuration loaded from TOML or built by the caller.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClientConfig {
     /// Base URL for the LoonFS server.
     pub server_url: String,
@@ -37,29 +35,29 @@ pub struct ClientConfig {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
 /// Synchronous HTTP client for LoonFS.
+#[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
     auth_token: Option<String>,
     agent: ureq::Agent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Result of downloading a remote path to local storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetPathResult {
     pub destination: PathBuf,
     pub bytes_written: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Result of uploading a local path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PutPathResult {
     pub committed_seq: ChangeSeq,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// A path qualified by namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespacePath {
     /// Namespace id as text.
     pub namespace: String,
@@ -67,8 +65,8 @@ pub struct NamespacePath {
     pub absolute_path: String,
 }
 
-#[derive(Debug, Error)]
 /// Error returned by the blocking HTTP client.
+#[derive(Debug, Error)]
 pub enum ClientError {
     #[error("failed to read config: {0}")]
     ConfigIo(String),

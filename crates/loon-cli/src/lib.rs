@@ -4,7 +4,6 @@
 //! remote profiles that talk to a LoonFS server. It keeps command output stable
 //! for humans and scripts.
 
-#![forbid(unsafe_code)]
 #![allow(unreachable_pub)]
 // The CLI is a binary crate with library-style internal modules; visibility cleanup is separate.
 

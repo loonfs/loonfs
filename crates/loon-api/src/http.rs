@@ -3,8 +3,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// HTTP error body used by LoonFS APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     /// Stable machine-readable reason.
     pub code: String,
@@ -12,36 +12,36 @@ pub struct ApiError {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Request to create a namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateNamespaceRequest {
     /// Durable namespace id to create.
     pub namespace_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Request to fork a namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
     pub new_namespace_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Short namespace listing entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSummary {
     /// Durable namespace id.
     pub namespace_id: NamespaceId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Response for namespace listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListNamespacesResponse {
     /// Complete namespaces visible to the store.
     pub namespaces: Vec<NamespaceSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Result of a namespace-visible mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationResult {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
@@ -49,9 +49,9 @@ pub struct MutationResult {
     pub committed_seq: ChangeSeq,
 }
 
+/// Put behavior for path-oriented file writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Put behavior for path-oriented file writes.
 pub enum FilesystemPutBehavior {
     /// Fail if the path already exists.
     CreateOnly,
@@ -59,9 +59,9 @@ pub enum FilesystemPutBehavior {
     ReplaceExisting,
 }
 
+/// One path-oriented filesystem operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-/// One path-oriented filesystem operation.
 pub enum FilesystemOperation {
     /// Create one directory.
     CreateDir { path: String },
@@ -89,8 +89,8 @@ pub enum FilesystemOperation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Request wrapper for one path-oriented operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemOperationRequest {
     /// Caller-supplied idempotency key for this operation.
     pub commit_id: CommitId,
@@ -98,8 +98,8 @@ pub struct FilesystemOperationRequest {
     pub operation: FilesystemOperation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Response for one path-oriented operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemOperationResponse {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
@@ -107,8 +107,8 @@ pub struct FilesystemOperationResponse {
     pub committed_seq: ChangeSeq,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// One immutable file revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRevision {
     /// File inode that owns this revision.
     pub inode_id: InodeId,
@@ -120,8 +120,8 @@ pub struct FileRevision {
     pub content_ref: ContentRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Response for listing file revisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListFileRevisionsResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
@@ -133,8 +133,8 @@ pub struct ListFileRevisionsResponse {
     pub revisions: Vec<FileRevision>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Request to restore a file revision by inode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreFileRevisionRequest {
     /// Caller-supplied idempotency key.
     pub commit_id: CommitId,
@@ -142,8 +142,8 @@ pub struct RestoreFileRevisionRequest {
     pub base_revision_no: RevisionNo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Result of creating or reusing a checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateCheckpointResponse {
     /// Namespace that was checkpointed.
     pub namespace_id: NamespaceId,
@@ -159,8 +159,8 @@ pub struct CreateCheckpointResponse {
     pub latest_checkpoint_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Result of advancing the retention floor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvanceRetentionResponse {
     /// Namespace whose retention floor changed.
     pub namespace_id: NamespaceId,

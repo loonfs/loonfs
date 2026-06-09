@@ -1,4 +1,11 @@
-#![forbid(unsafe_code)]
+//! Wire types and durable-format codecs for LoonFS.
+//!
+//! Everything that crosses a process or storage boundary is defined here:
+//! validated identifier and path types at the crate root, the versioned HTTP
+//! protocol shapes in [`v0`], and the durable storage formats in [`wire`]
+//! (WAL segments, metadata SSTs, namespace manifests, and control objects).
+//! Other LoonFS crates depend on this one for vocabulary; it depends on none
+//! of them.
 
 mod content;
 mod control;
