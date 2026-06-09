@@ -47,7 +47,7 @@ JSON families keep their payload inline as raw JSON so manifests and control obj
 - **Additive within a version.** A writer may add new payload fields without bumping `format_version`. Readers must ignore unknown payload and envelope fields. This is the only same-version change allowed.
 - **Everything else bumps the version.** Renaming, removing, retyping, or re-tagging any field — or changing the payload encoding — requires bumping the owning family's `format_version`. Readers reject versions they do not support with a typed unsupported-version error; there is no silent fallback.
 - **Digest strings are self-describing.** Durable digest values carry their algorithm as a prefix (`sha256:<hex>`) so a future algorithm can be introduced without re-interpreting old values.
-- **Unknown content-ref kinds round-trip.** A reader that does not understand a `content_ref.kind` must preserve the original string when relaying or rewriting rows; it must not create new references with kinds it does not understand (see 050 §1.3).
+- **Unknown content-ref kinds round-trip.** A reader that does not understand a `content_ref.kind` must preserve the original string when relaying or rewriting rows; it must not create new references with kinds it does not understand (see spec 050 section 1.3).
 - **Every encoding is pinned by golden-byte fixtures** (`crates/loon-api/tests/golden_formats.rs`). An encoder change that alters durable bytes fails those tests; the failure message demands either reverting the change or bumping the format version and regenerating the fixtures.
 
 ## 2. Server requirements

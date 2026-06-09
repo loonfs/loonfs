@@ -20,8 +20,9 @@
 
 use loon_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
-    ControlObjectEnvelope, ControlObjectKind, HeadState, LeaseState, NamespaceDescriptorState,
-    NamespaceForkState, NamespaceGcPinState, ProgressState, UploadSessionState, WalSegmentPointer,
+    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, LeaseState,
+    NamespaceDescriptorState, NamespaceForkState, NamespaceGcPinState, ProgressState,
+    UploadSessionState, WalSegmentPointer,
 };
 use loon_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -641,6 +642,28 @@ fn wal_decode_tolerates_additive_payload_fields() {
 }
 
 #[test]
+fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
+    let envelope = ControlObjectEnvelope::from_state(
+        ControlObjectKind::NamespaceHead,
+        WRITER_VERSION,
+        sample_head_state(),
+    )
+    .expect("control envelope");
+    let encoded = encode_control_object(&envelope).expect("encode control object");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&encoded).expect("decode document");
+    document["payload"]["seq"] = serde_json::Value::from(999);
+    let tampered = serde_json::to_vec(&document).expect("encode tampered document");
+
+    let err = decode_control_object::<HeadState>(&tampered, ControlObjectKind::NamespaceHead)
+        .expect_err("tampered payload must be rejected");
+    assert!(
+        matches!(err, ControlCodecError::ChecksumMismatch { .. }),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn metadata_sst_decode_rejects_future_format_version_cleanly() {
     let document = unzstd(&encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("sst"));
     let bumped = with_cbor_document_entry(&document, "format_version", |value| {
@@ -662,6 +685,26 @@ fn metadata_sst_decode_rejects_future_format_version_cleanly() {
 }
 
 #[test]
+fn metadata_sst_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
+    let document = unzstd(&encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("sst"));
+    let tampered = with_cbor_document_entry(&document, "payload", |value| {
+        let bytes = match value {
+            ciborium::Value::Bytes(bytes) => bytes,
+            other => panic!("payload should be a CBOR byte string, got {other:?}"),
+        };
+        let last = bytes.last_mut().expect("payload is non-empty");
+        *last ^= 0xff;
+    });
+
+    let err = decode_metadata_sst_envelope_zstd(&rezstd(&tampered))
+        .expect_err("tampered payload must be rejected");
+    assert!(
+        matches!(err, MetadataSstCodecError::ChecksumMismatch { .. }),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
@@ -678,6 +721,22 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
                 supported: 6,
             }
         ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn namespace_manifest_decode_rejects_tampered_payload_as_checksum_mismatch() {
+    let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&encoded).expect("decode document");
+    document["payload"]["head_seq"] = serde_json::Value::from(999);
+    let tampered = serde_json::to_vec(&document).expect("encode tampered document");
+
+    let err =
+        decode_namespace_manifest_json(&tampered).expect_err("tampered payload must be rejected");
+    assert!(
+        matches!(err, NamespaceManifestCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
     );
 }
@@ -707,7 +766,7 @@ fn namespace_manifest_decode_tolerates_additive_payload_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-name pinning: spec 050 §5–6 durable delta and precondition names
+// Wire-name pinning: spec 050 sections 5-6 durable delta and precondition names
 // ---------------------------------------------------------------------------
 
 #[test]

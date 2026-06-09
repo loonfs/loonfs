@@ -25,7 +25,7 @@ Content staging is idempotent and has no effect on the visible tree. If the call
 
 ### 1.2 Basis reconstruction
 
-Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the current manifest (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
+Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in section 2.1: load the head, load the current manifest (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
 
 ### 1.3 Validation and logical commits
 
@@ -33,12 +33,12 @@ The server validates each commit request against the reconstructed state:
 
 1. Resolve any operation-local references needed to identify referenced content.
 2. Verify that all referenced content objects are already durable in object storage, and that `content_ref.kind`, digest, and size match. When provider-verified SHA-256 metadata is present, this validation may use metadata instead of downloading the whole object; otherwise it must read and hash the object bytes.
-3. Evaluate preconditions in order (see §6 for the precondition catalogue).
+3. Evaluate preconditions in order (see section 6 for the precondition catalogue).
 4. Resolve inode references and allocate new inode ids monotonically from the head's `next_inode_id`.
 
 If a request contains multiple operations, they are evaluated sequentially against ephemeral state advanced by earlier operations in the same request.
 
-Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in §1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
+Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in section 1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
 
 Content reference validation fails before metadata preconditions are evaluated when:
 

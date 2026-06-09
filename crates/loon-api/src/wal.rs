@@ -11,7 +11,7 @@ use thiserror::Error;
 
 /// Version 2: the durable document carries the payload as an opaque CBOR byte
 /// string checksummed over those exact bytes, and delta/precondition tags use
-/// the snake_case names from spec 050 §5–6. (Version 1 verified checksums by
+/// the snake_case names from spec 050 sections 5-6. (Version 1 verified checksums by
 /// re-encoding the decoded payload and stored Rust enum identifiers; v1
 /// objects are rejected with `UnsupportedFormatVersion`.)
 pub const WAL_FORMAT_VERSION: u32 = 2;

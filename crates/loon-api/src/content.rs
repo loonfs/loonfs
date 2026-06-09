@@ -9,7 +9,7 @@ use std::fmt;
 /// string, and re-serialize to that same string — so a reader that merely
 /// relays or rewrites rows it does not fully understand can never destroy a
 /// newer kind. Writers must not *create* references with an unsupported
-/// kind; commit validation rejects them (spec 050 §1.3).
+/// kind; commit validation rejects them (spec 050 section 1.3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentRefKind {
     /// Whole-file v0 content addressed by SHA-256.
