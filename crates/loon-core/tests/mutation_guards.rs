@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{executor::block_on, stream::BoxStream};
+use futures::stream::BoxStream;
 use loon_api::{
     sha256_digest,
     v0::{
@@ -44,6 +44,7 @@ use loon_objectstore::keys::{
 use loon_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,6 +60,10 @@ enum MetadataReadSource {
 struct MetadataRead<T> {
     value: T,
     source: MetadataReadSource,
+}
+
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
 }
 
 fn namespace_engine<'a, S: ObjectStore + ?Sized>(
@@ -602,7 +607,7 @@ fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
     }]
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -642,7 +647,7 @@ async fn stale_revision_precondition_is_rejected() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
@@ -684,7 +689,7 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         .is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -752,7 +757,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_validation_rejects_missing_inode() {
     let metadata_state =
         metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
@@ -781,7 +786,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_validation_rejects_non_file_target() {
     let metadata_state =
         metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
@@ -811,7 +816,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -880,7 +885,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -929,7 +934,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -986,7 +991,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -1028,7 +1033,7 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_overflow_is_rejected() {
     let mut deltas = wal_create_file(
         0,
@@ -1083,7 +1088,7 @@ async fn restore_revision_overflow_is_rejected() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1179,7 +1184,7 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
@@ -1210,7 +1215,7 @@ async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     assert_namespace_partial(&store, &namespace_id, &context);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn begin_upload_rejects_missing_and_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1232,7 +1237,7 @@ async fn begin_upload_rejects_missing_and_partial_namespace() {
     assert_eq!(partial_error.code(), ErrorCode::NamespacePartial);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
@@ -1268,7 +1273,7 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     assert_eq!(guarded_store.guarded_get_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn complete_upload_does_not_get_content_blob_after_staging() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1335,7 +1340,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_put_file_uses_checksum_metadata_for_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1366,7 +1371,7 @@ async fn path_put_file_uses_checksum_metadata_for_content_validation() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_planning_does_not_validate_content() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1399,7 +1404,7 @@ async fn path_planning_does_not_validate_content() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1436,7 +1441,7 @@ async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1486,7 +1491,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     assert_eq!(store.content_blob_get_count(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_driven_reads_fallback_without_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1516,7 +1521,7 @@ async fn query_driven_reads_fallback_without_manifest() {
     assert_eq!(list.value.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1636,7 +1641,7 @@ async fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay
     assert!(resolve_path_with_read_source(&store, &namespace_id, "/dead/leaf.txt").is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1679,7 +1684,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     assert_eq!(actual.value.size_bytes, Some(5));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1707,7 +1712,7 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1801,7 +1806,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1910,7 +1915,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn change_feed_validates_wal_chain_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1938,7 +1943,7 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2014,7 +2019,7 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2087,7 +2092,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2161,7 +2166,7 @@ async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2230,7 +2235,7 @@ async fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
     assert_eq!(basis.head.seq, ChangeSeq(4));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2280,7 +2285,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2317,7 +2322,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     assert_eq!(first, retry);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2381,7 +2386,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_commit_rejects_invalid_display_names() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2461,7 +2466,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_publisher_path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2540,7 +2545,7 @@ async fn direct_publisher_path_intents_cover_basic_mutations() {
     assert_eq!(copied_bytes.bytes, b"hello");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_publisher_uses_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2608,7 +2613,7 @@ async fn direct_publisher_uses_durable_path_commit_receipt_index() {
     assert_eq!(wal_keys.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_intents_in_one_batch_see_tentative_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2665,7 +2670,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
     assert_eq!(segment.payload.records.len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn namespace_descriptor_checksum_is_validated() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2698,7 +2703,7 @@ async fn namespace_descriptor_checksum_is_validated() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2972,7 +2977,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(corrupt_target.code(), ErrorCode::NamespaceCorrupt);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -3013,7 +3018,7 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -3071,7 +3076,7 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -3129,7 +3134,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -3185,7 +3190,7 @@ async fn fork_failure_after_target_manifest_before_fork_state_remains_partial() 
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -3233,7 +3238,7 @@ async fn fork_failure_after_target_manifest_artifacts_remains_partial() {
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_target_control_conflict_rechecks_complete_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -3285,7 +3290,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_revalidates_durable_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3371,7 +3376,7 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_only_commit_does_not_validate_content_store_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3413,7 +3418,7 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3446,7 +3451,7 @@ async fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3490,7 +3495,7 @@ async fn replace_file_prioritizes_missing_durable_content_over_stale_revision() 
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3529,7 +3534,7 @@ async fn restore_revision_missing_source_is_revision_not_found() {
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_resolves_same_request_source_before_durable_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3606,7 +3611,7 @@ async fn restore_revision_resolves_same_request_source_before_durable_content_va
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn move_path_into_occupied_target_is_path_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3643,7 +3648,7 @@ async fn move_path_into_occupied_target_is_path_conflict() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn move_path_directory_cycle_is_would_cycle() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3671,7 +3676,7 @@ async fn move_path_directory_cycle_is_would_cycle() {
     assert_eq!(error.code(), ErrorCode::WouldCycle);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3727,7 +3732,7 @@ async fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     assert_eq!(move_error.code(), ErrorCode::TombstoneConflict);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_dir_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3757,7 +3762,7 @@ async fn create_dir_path_creates_directory_without_auto_parents() {
     assert_eq!(missing_parent.code(), ErrorCode::PathNotFound);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3828,7 +3833,7 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     assert_eq!(stale_binding.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_rename_mode_is_named_bad_request_failure() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3876,7 +3881,7 @@ async fn unsupported_rename_mode_is_named_bad_request_failure() {
     assert_eq!(error.code(), ErrorCode::UnsupportedRenameMode);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn put_file_create_only_rejects_existing_target_without_force() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3905,7 +3910,7 @@ async fn put_file_create_only_rejects_existing_target_without_force() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3932,7 +3937,7 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     assert!(matches!(error, CoreError::DirectoryNotEmpty(path) if path == "/docs"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3967,7 +3972,7 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resolve_path_uses_nfc_casefold_name_policy() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3990,7 +3995,7 @@ async fn resolve_path_uses_nfc_casefold_name_policy() {
     assert_eq!(resolved.display_name, "Cafe\u{0301}.txt");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

@@ -629,19 +629,20 @@ mod tests {
             mode: PutMode,
         ) -> Result<ObjectMetadata, ObjectStoreError> {
             if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
-                let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
-                if state.blocks_remaining > 0 {
-                    state.blocks_remaining -= 1;
-                    state.entered += 1;
-                    self.gate.cvar.notify_all();
-                    while !state.released {
-                        state = self
-                            .gate
-                            .cvar
-                            .wait(state)
-                            .expect("head gate mutex poisoned");
+                let gate = self.gate.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut state = gate.state.lock().expect("head gate mutex poisoned");
+                    if state.blocks_remaining > 0 {
+                        state.blocks_remaining -= 1;
+                        state.entered += 1;
+                        gate.cvar.notify_all();
+                        while !state.released {
+                            state = gate.cvar.wait(state).expect("head gate mutex poisoned");
+                        }
                     }
-                }
+                })
+                .await
+                .expect("head CAS gate wait task panicked");
             }
             self.inner.put(key, bytes, mode).await
         }

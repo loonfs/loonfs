@@ -42,6 +42,7 @@ use loon_objectstore::keys::{content_blob, namespace_descriptor, upload_session}
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::Instrument;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 
@@ -409,11 +410,13 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
     }
-    let basis_result = {
-        let _span = tracing::info_span!("loon.phase", phase = "load_basis_for_publish").entered();
-        load_verified_namespace_basis(store, namespace_id)
-    };
-    let basis = match basis_result.await {
+    let basis = match load_verified_namespace_basis(store, namespace_id)
+        .instrument(tracing::info_span!(
+            "loon.phase",
+            phase = "load_basis_for_publish"
+        ))
+        .await
+    {
         Ok(basis) => basis,
         Err(error) => {
             return (0..candidates.len())
@@ -469,102 +472,111 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         batch_size,
         accepted_count = tracing::field::Empty
     );
-    let prepare_enter = prepare_span.enter();
-    for (index, candidate) in candidates.iter().enumerate() {
-        let candidate_request = {
-            let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
-            prepare_candidate_request(
+    async {
+        for (index, candidate) in candidates.iter().enumerate() {
+            let candidate_request = {
+                let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
+                prepare_candidate_request(
+                    store,
+                    namespace_id,
+                    basis,
+                    &current_head,
+                    &current_metadata_state,
+                    candidate,
+                    context,
+                    index,
+                    &mut outcomes,
+                    &mut in_batch_requests,
+                    &mut aliases,
+                )
+            };
+            let Some(candidate_request) = candidate_request else {
+                continue;
+            };
+            let validation = CommitValidationContext {
+                head: current_head.clone(),
+                lease: basis.lease.clone(),
+                now_ms: context.now_ms,
+                metadata_state: &current_metadata_state,
+            };
+            let request = candidate_request.request;
+            let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
+            if let Err(error) = validate_commit_content_references(
                 store,
-                namespace_id,
-                basis,
-                &current_head,
-                &current_metadata_state,
-                candidate,
-                context,
-                index,
-                &mut outcomes,
-                &mut in_batch_requests,
-                &mut aliases,
+                &basis.content_store_id,
+                &request,
+                &resolved_restore_content_refs,
+                &mut content_validation,
             )
-        };
-        let Some(candidate_request) = candidate_request else {
-            continue;
-        };
-        let validation = CommitValidationContext {
-            head: current_head.clone(),
-            lease: basis.lease.clone(),
-            now_ms: context.now_ms,
-            metadata_state: &current_metadata_state,
-        };
-        let request = candidate_request.request;
-        let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
-        if let Err(error) = validate_commit_content_references(
-            store,
-            &basis.content_store_id,
-            &request,
-            &resolved_restore_content_refs,
-            &mut content_validation,
-        )
-        .await
-        {
-            outcomes[index] = Some(Err(error));
-            continue;
-        }
-        let plan = {
-            let _span = tracing::info_span!("loon.phase", phase = "build_commit_plan").entered();
-            match build_commit_plan(&request, &validation) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    outcomes[index] = Some(Err(error.into()));
-                    continue;
-                }
-            }
-        };
-        let prepared = {
-            let _span =
-                tracing::info_span!("loon.phase", phase = "PreparedCommit::prepare").entered();
-            match PreparedCommit::prepare(request, plan.clone(), candidate_request.identity_source)
+            .await
             {
-                Ok(value) => value,
-                Err(error) => {
-                    outcomes[index] = Some(Err(CoreError::Store(format!(
-                        "commit preparation failed: {error}"
-                    ))));
-                    continue;
-                }
+                outcomes[index] = Some(Err(error));
+                continue;
             }
-        };
-        let materialized = {
-            let _span = tracing::info_span!("loon.phase", phase = "materialize_commit").entered();
-            materialize_commit(prepared)
-        };
-        let preview = {
-            let _span =
-                tracing::info_span!("loon.phase", phase = "wal_payload_from_materialized_commit")
+            let plan = {
+                let _span =
+                    tracing::info_span!("loon.phase", phase = "build_commit_plan").entered();
+                match build_commit_plan(&request, &validation) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error.into()));
+                        continue;
+                    }
+                }
+            };
+            let prepared = {
+                let _span =
+                    tracing::info_span!("loon.phase", phase = "PreparedCommit::prepare").entered();
+                match PreparedCommit::prepare(
+                    request,
+                    plan.clone(),
+                    candidate_request.identity_source,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(CoreError::Store(format!(
+                            "commit preparation failed: {error}"
+                        ))));
+                        continue;
+                    }
+                }
+            };
+            let materialized = {
+                let _span =
+                    tracing::info_span!("loon.phase", phase = "materialize_commit").entered();
+                materialize_commit(prepared)
+            };
+            let preview = {
+                let _span = tracing::info_span!(
+                    "loon.phase",
+                    phase = "wal_payload_from_materialized_commit"
+                )
+                .entered();
+                match wal_payload_from_materialized_commit(&materialized) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error.into()));
+                        continue;
+                    }
+                }
+            };
+            let applied = {
+                let _span = tracing::info_span!("loon.phase", phase = "apply_committed_wal_record")
                     .entered();
-            match wal_payload_from_materialized_commit(&materialized) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    outcomes[index] = Some(Err(error.into()));
-                    continue;
+                current_metadata_state.apply_committed_wal_record_mut(&preview)
+            };
+            match applied {
+                Ok(_) => {
+                    current_head.seq = plan.assigned_seq;
+                    current_head.next_inode_id = plan.resulting_next_inode_id;
+                    accepted.push((index, materialized));
                 }
+                Err(error) => outcomes[index] = Some(Err(error.into())),
             }
-        };
-        let applied = {
-            let _span =
-                tracing::info_span!("loon.phase", phase = "apply_committed_wal_record").entered();
-            current_metadata_state.apply_committed_wal_record_mut(&preview)
-        };
-        match applied {
-            Ok(_) => {
-                current_head.seq = plan.assigned_seq;
-                current_head.next_inode_id = plan.resulting_next_inode_id;
-                accepted.push((index, materialized));
-            }
-            Err(error) => outcomes[index] = Some(Err(error.into())),
         }
     }
-    drop(prepare_enter);
+    .instrument(prepare_span.clone())
+    .await;
     prepare_span.record(
         "accepted_count",
         u64::try_from(accepted.len()).unwrap_or(u64::MAX),

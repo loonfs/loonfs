@@ -18,6 +18,7 @@ use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::control::read_head_object;
 use crate::storage::content::write_immutable_object;
 use bytes::Bytes;
+use futures::future::try_join_all;
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
 };
@@ -39,9 +40,10 @@ use loon_objectstore::keys::{
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use thiserror::Error;
+use tracing::Instrument;
 
 // Manifest id allocation can race with other manifest publishers. Exhausting
 // this loop means the candidate id range was already occupied.
@@ -60,6 +62,8 @@ const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 4096;
 const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
+const MAX_MATERIALIZED_TABLE_FETCHES: usize = 8;
+const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 #[cfg(test)]
 const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
@@ -173,7 +177,7 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     table_cache: Option<&'a MetadataTableCache>,
     manifest_object_key: String,
     manifest: NamespaceManifestEnvelope,
-    segment_cache: RefCell<HashMap<String, Vec<MetadataRow>>>,
+    segment_cache: Mutex<HashMap<String, Vec<MetadataRow>>>,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -258,6 +262,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         output: MetadataTableScanOutput<'_>,
     ) -> Result<(), ManifestLoadError> {
         let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
+        let mut matching_descriptors = Vec::new();
         for descriptor in &table.segments {
             context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
@@ -270,9 +275,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             if !descriptor_may_contain_prefix(descriptor, prefix) {
                 continue;
             }
-            let segment_rows = self
-                .segment_rows(context, family, descriptor, output.cache_mode)
-                .await?;
+            matching_descriptors.push(descriptor);
+        }
+
+        let mut loaded_segments = Vec::new();
+        for chunk in matching_descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
+            loaded_segments.extend(
+                try_join_all(chunk.iter().map(|descriptor| {
+                    self.segment_rows(context, family, descriptor, output.cache_mode)
+                }))
+                .await?,
+            );
+        }
+
+        for segment_rows in loaded_segments {
             output.rows.extend(
                 segment_rows
                     .into_iter()
@@ -289,7 +305,12 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        if let Some(rows) = self.segment_cache.borrow().get(&descriptor.object_key) {
+        if let Some(rows) = self
+            .segment_cache
+            .lock()
+            .expect("manifest segment cache lock poisoned")
+            .get(&descriptor.object_key)
+        {
             return Ok(rows.clone());
         }
         let rows = load_manifest_segment_rows_with_cache(
@@ -302,7 +323,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         )
         .await?;
         self.segment_cache
-            .borrow_mut()
+            .lock()
+            .expect("manifest segment cache lock poisoned")
             .insert(descriptor.object_key.clone(), rows.clone());
         Ok(rows)
     }
@@ -498,10 +520,12 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     let checkpoint_id = generate_checkpoint_id();
     let mut saw_head_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
-        let basis = {
-            let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
-            load_verified_namespace_basis(store, namespace_id).await
-        }?;
+        let basis = load_verified_namespace_basis(store, namespace_id)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "scan_namespace_state"
+            ))
+            .await?;
         let head_seq = basis.head.seq;
         if let Some(current_manifest_id) = basis.head.current_manifest_id {
             let materialized =
@@ -879,18 +903,18 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "load_namespace_manifest",
-            key_class = "manifest_table"
-        )
-        .entered();
-        let Some(manifest_bytes) = store.get(&manifest_key, None).await.map_err(|err| {
-            ManifestLoadError::ReadManifest {
+        let Some(manifest_bytes) = store
+            .get(&manifest_key, None)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "load_namespace_manifest",
+                key_class = "manifest_table"
+            ))
+            .await
+            .map_err(|err| ManifestLoadError::ReadManifest {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
-            }
-        })?
+            })?
         else {
             return Err(ManifestLoadError::MissingManifest {
                 object_key: manifest_key.clone(),
@@ -910,7 +934,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         table_cache,
         manifest_object_key: manifest_key,
         manifest,
-        segment_cache: RefCell::new(HashMap::new()),
+        segment_cache: Mutex::new(HashMap::new()),
     };
     Ok(tables)
 }
@@ -966,20 +990,18 @@ async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     manifest_id: ManifestId,
     manifest_key: &str,
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
-    let _span = tracing::info_span!(
-        "loon.phase",
-        phase = "load_namespace_manifest",
-        key_class = "manifest_table"
-    )
-    .entered();
-    let Some(manifest_bytes) =
-        store
-            .get(manifest_key, None)
-            .await
-            .map_err(|err| ManifestLoadError::ReadManifest {
-                object_key: manifest_key.to_owned(),
-                message: err.to_string(),
-            })?
+    let Some(manifest_bytes) = store
+        .get(manifest_key, None)
+        .instrument(tracing::info_span!(
+            "loon.phase",
+            phase = "load_namespace_manifest",
+            key_class = "manifest_table"
+        ))
+        .await
+        .map_err(|err| ManifestLoadError::ReadManifest {
+            object_key: manifest_key.to_owned(),
+            message: err.to_string(),
+        })?
     else {
         return Ok(None);
     };
@@ -1096,27 +1118,41 @@ where
         }
 
         let segments = segment_manifest_rows(family, rows, segmentation);
-        let mut descriptors = Vec::with_capacity(segments.len());
+        let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
             let table_id = generate_metadata_table_id();
             let object_key = metadata_sst(namespace_id.as_str(), &table_id);
-            descriptors.push(
-                write_manifest_segment(
-                    store,
-                    MetadataSstWriteRequest {
-                        namespace_id,
-                        table_id,
-                        run_seq,
-                        level,
-                        family,
-                        segment_index,
-                        segment_key: segment_rows.segment_key,
-                        rows: segment_rows.rows,
-                        object_key,
-                        writer_version,
-                    },
+            requests.push(MetadataSstWriteRequest {
+                namespace_id,
+                table_id,
+                run_seq,
+                level,
+                family,
+                segment_index,
+                segment_key: segment_rows.segment_key,
+                rows: segment_rows.rows,
+                object_key,
+                writer_version,
+            });
+        }
+
+        let mut descriptors = Vec::with_capacity(requests.len());
+        let mut pending = requests.into_iter();
+        loop {
+            let chunk = pending
+                .by_ref()
+                .take(MAX_MAINTENANCE_TABLE_IO)
+                .collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            descriptors.extend(
+                try_join_all(
+                    chunk
+                        .into_iter()
+                        .map(|request| write_manifest_segment(store, request)),
                 )
                 .await?,
             );
@@ -1709,6 +1745,7 @@ where
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     for table in ordered_tables {
+        let mut descriptors = Vec::with_capacity(table.segments.len());
         for descriptor in &table.segments {
             context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
@@ -1718,7 +1755,20 @@ where
                     expected: expected_key,
                 });
             }
-            let rows = load_manifest_segment_rows(store, context, table.family, descriptor).await?;
+            descriptors.push(descriptor);
+        }
+
+        let mut loaded_segments = Vec::with_capacity(descriptors.len());
+        for chunk in descriptors.chunks(MAX_MAINTENANCE_TABLE_IO) {
+            loaded_segments.extend(
+                try_join_all(chunk.iter().map(|descriptor| {
+                    load_manifest_segment_rows(store, context, table.family, descriptor)
+                }))
+                .await?,
+            );
+        }
+
+        for (descriptor, rows) in descriptors.into_iter().zip(loaded_segments) {
             match table.family {
                 MetadataTableFamily::DirentryBinds => {
                     direntry_bind_rows.extend(rows.iter().cloned());
@@ -3186,6 +3236,9 @@ mod tests {
             max_rows_per_segment: 2,
             ..MetadataLsmPolicy::default()
         };
+        let basis_before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis before checkpoint");
 
         let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .await
@@ -3231,6 +3284,10 @@ mod tests {
                 previous_max_key = Some(descriptor.max_key.as_str());
             }
         }
+        assert!(metadata_states_equivalent(
+            &basis_before.metadata_state,
+            &materialized.metadata_state
+        ));
     }
 
     #[tokio::test]
@@ -3275,6 +3332,41 @@ mod tests {
         assert!(revisions.len() >= 8);
         assert_eq!(after.inserts, before.inserts);
         assert!(after.misses > before.misses);
+    }
+
+    #[tokio::test]
+    async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        for index in 0..8 {
+            let path = format!("/docs/file-{index}.txt");
+            write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .await
+                .expect("write file");
+        }
+        let policy = MetadataLsmPolicy {
+            max_rows_per_segment: 1,
+            ..MetadataLsmPolicy::default()
+        };
+        let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
+            .expect("manifest");
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let before = cache.stats();
+
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
+                .expect("load materialized manifest");
+        let after = cache.stats();
+
+        assert!(flatten_manifest_tables(base_run(&materialized.manifest).tables).len() > 1);
+        assert_eq!(after, before);
     }
 
     #[tokio::test]
