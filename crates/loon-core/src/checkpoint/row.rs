@@ -1,4 +1,4 @@
-use super::CHECKPOINT_TABLE_FAMILIES;
+use super::runs::CHECKPOINT_TABLE_FAMILIES;
 use crate::metadata::MetadataState;
 use loon_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loon_api::ChangeSeq;
