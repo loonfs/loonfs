@@ -63,6 +63,7 @@ const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 4096;
 const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
 const MAX_MATERIALIZED_TABLE_FETCHES: usize = 8;
+const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 #[cfg(test)]
 const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
@@ -1117,27 +1118,41 @@ where
         }
 
         let segments = segment_manifest_rows(family, rows, segmentation);
-        let mut descriptors = Vec::with_capacity(segments.len());
+        let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
             let table_id = generate_metadata_table_id();
             let object_key = metadata_sst(namespace_id.as_str(), &table_id);
-            descriptors.push(
-                write_manifest_segment(
-                    store,
-                    MetadataSstWriteRequest {
-                        namespace_id,
-                        table_id,
-                        run_seq,
-                        level,
-                        family,
-                        segment_index,
-                        segment_key: segment_rows.segment_key,
-                        rows: segment_rows.rows,
-                        object_key,
-                        writer_version,
-                    },
+            requests.push(MetadataSstWriteRequest {
+                namespace_id,
+                table_id,
+                run_seq,
+                level,
+                family,
+                segment_index,
+                segment_key: segment_rows.segment_key,
+                rows: segment_rows.rows,
+                object_key,
+                writer_version,
+            });
+        }
+
+        let mut descriptors = Vec::with_capacity(requests.len());
+        let mut pending = requests.into_iter();
+        loop {
+            let chunk = pending
+                .by_ref()
+                .take(MAX_MAINTENANCE_TABLE_IO)
+                .collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            descriptors.extend(
+                try_join_all(
+                    chunk
+                        .into_iter()
+                        .map(|request| write_manifest_segment(store, request)),
                 )
                 .await?,
             );
@@ -1730,6 +1745,7 @@ where
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     for table in ordered_tables {
+        let mut descriptors = Vec::with_capacity(table.segments.len());
         for descriptor in &table.segments {
             context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
@@ -1739,7 +1755,20 @@ where
                     expected: expected_key,
                 });
             }
-            let rows = load_manifest_segment_rows(store, context, table.family, descriptor).await?;
+            descriptors.push(descriptor);
+        }
+
+        let mut loaded_segments = Vec::with_capacity(descriptors.len());
+        for chunk in descriptors.chunks(MAX_MAINTENANCE_TABLE_IO) {
+            loaded_segments.extend(
+                try_join_all(chunk.iter().map(|descriptor| {
+                    load_manifest_segment_rows(store, context, table.family, descriptor)
+                }))
+                .await?,
+            );
+        }
+
+        for (descriptor, rows) in descriptors.into_iter().zip(loaded_segments) {
             match table.family {
                 MetadataTableFamily::DirentryBinds => {
                     direntry_bind_rows.extend(rows.iter().cloned());
@@ -3207,6 +3236,9 @@ mod tests {
             max_rows_per_segment: 2,
             ..MetadataLsmPolicy::default()
         };
+        let basis_before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis before checkpoint");
 
         let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .await
@@ -3252,6 +3284,10 @@ mod tests {
                 previous_max_key = Some(descriptor.max_key.as_str());
             }
         }
+        assert!(metadata_states_equivalent(
+            &basis_before.metadata_state,
+            &materialized.metadata_state
+        ));
     }
 
     #[tokio::test]
@@ -3296,6 +3332,41 @@ mod tests {
         assert!(revisions.len() >= 8);
         assert_eq!(after.inserts, before.inserts);
         assert!(after.misses > before.misses);
+    }
+
+    #[tokio::test]
+    async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        for index in 0..8 {
+            let path = format!("/docs/file-{index}.txt");
+            write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .await
+                .expect("write file");
+        }
+        let policy = MetadataLsmPolicy {
+            max_rows_per_segment: 1,
+            ..MetadataLsmPolicy::default()
+        };
+        let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
+            .expect("manifest");
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let before = cache.stats();
+
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
+                .expect("load materialized manifest");
+        let after = cache.stats();
+
+        assert!(flatten_manifest_tables(base_run(&materialized.manifest).tables).len() > 1);
+        assert_eq!(after, before);
     }
 
     #[tokio::test]
