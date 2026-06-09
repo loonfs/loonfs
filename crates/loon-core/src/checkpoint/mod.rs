@@ -18,6 +18,7 @@ use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::control::read_head_object;
 use crate::storage::content::write_immutable_object;
 use bytes::Bytes;
+use futures::future::try_join_all;
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
 };
@@ -61,6 +62,7 @@ const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 4096;
 const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
+const MAX_MATERIALIZED_TABLE_FETCHES: usize = 8;
 #[cfg(test)]
 const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
@@ -259,6 +261,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         output: MetadataTableScanOutput<'_>,
     ) -> Result<(), ManifestLoadError> {
         let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
+        let mut matching_descriptors = Vec::new();
         for descriptor in &table.segments {
             context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
@@ -271,9 +274,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             if !descriptor_may_contain_prefix(descriptor, prefix) {
                 continue;
             }
-            let segment_rows = self
-                .segment_rows(context, family, descriptor, output.cache_mode)
-                .await?;
+            matching_descriptors.push(descriptor);
+        }
+
+        let mut loaded_segments = Vec::new();
+        for chunk in matching_descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
+            loaded_segments.extend(
+                try_join_all(chunk.iter().map(|descriptor| {
+                    self.segment_rows(context, family, descriptor, output.cache_mode)
+                }))
+                .await?,
+            );
+        }
+
+        for segment_rows in loaded_segments {
             output.rows.extend(
                 segment_rows
                     .into_iter()

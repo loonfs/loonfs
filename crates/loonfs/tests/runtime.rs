@@ -1386,6 +1386,44 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
     assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_materialized_stat_and_list_share_async_store() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let fs = runtime(temp_dir.path(), "concurrent-materialized-read-test");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .await
+    .expect("put file");
+    fs.create_checkpoint(&namespace_id)
+        .await
+        .expect("checkpoint");
+
+    let (stat, list) = tokio::join!(
+        fs.stat_path(&namespace_id, "/docs/file.txt"),
+        fs.list_path(&namespace_id, "/docs")
+    );
+    let stat = stat.expect("stat file");
+    let list = list.expect("list docs");
+
+    assert_eq!(stat.absolute_path, "/docs/file.txt");
+    assert_eq!(stat.size_bytes, Some(4));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].absolute_path, "/docs/file.txt");
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.read_materialized_table_hits, 2);
+    assert_eq!(stats.read_full_basis_fallbacks, 0);
+}
+
 #[test]
 fn repeated_materialized_stat_uses_metadata_table_cache() {
     let temp_dir = tempdir().expect("tempdir");
