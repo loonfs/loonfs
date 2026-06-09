@@ -215,7 +215,7 @@ impl Backend for EmbeddedBackend {
         let ns_id = parse_namespace_id(namespace_id)?;
         self.block_on(
             self.fs
-                .create_namespace_async(&ns_id, CreateNamespaceOptions::default()),
+                .create_namespace(&ns_id, CreateNamespaceOptions::default()),
         )
     }
 
@@ -228,19 +228,19 @@ impl Backend for EmbeddedBackend {
         let new_namespace_id = parse_namespace_id(new_namespace_id)?;
         self.block_on(
             self.fs
-                .fork_namespace_async(&source_namespace_id, &new_namespace_id),
+                .fork_namespace(&source_namespace_id, &new_namespace_id),
         )
     }
 
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
-        self.block_on(self.fs.list_namespaces_async())
+        self.block_on(self.fs.list_namespaces())
     }
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.list_path_async(&ns_id, &spec.absolute_path),
+            self.fs.list_path(&ns_id, &spec.absolute_path),
         )
     }
 
@@ -248,7 +248,7 @@ impl Backend for EmbeddedBackend {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.stat_path_async(&ns_id, &spec.absolute_path),
+            self.fs.stat_path(&ns_id, &spec.absolute_path),
         )
     }
 
@@ -256,7 +256,7 @@ impl Backend for EmbeddedBackend {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         let result = self.block_on_scoped(
             &spec.namespace,
-            self.fs.read_file_bytes_async(&ns_id, &spec.absolute_path),
+            self.fs.read_file_bytes(&ns_id, &spec.absolute_path),
         )?;
         Ok(result.bytes)
     }
@@ -270,7 +270,7 @@ impl Backend for EmbeddedBackend {
         let result = self.block_on_scoped(
             &spec.namespace,
             self.fs
-                .read_file_revision_bytes_async(&ns_id, &spec.absolute_path, revision_no),
+                .read_file_revision_bytes(&ns_id, &spec.absolute_path, revision_no),
         )?;
         Ok(result.bytes)
     }
@@ -282,8 +282,7 @@ impl Backend for EmbeddedBackend {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs
-                .list_file_revisions_async(&ns_id, &spec.absolute_path),
+            self.fs.list_file_revisions(&ns_id, &spec.absolute_path),
         )
     }
 
@@ -302,7 +301,7 @@ impl Backend for EmbeddedBackend {
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.put_file_bytes_async(
+            self.fs.put_file_bytes(
                 &ns_id,
                 &spec.absolute_path,
                 bytes,
@@ -319,7 +318,7 @@ impl Backend for EmbeddedBackend {
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.delete_path_async(
+            self.fs.delete_path(
                 &ns_id,
                 &spec.absolute_path,
                 DeleteOptions {
@@ -335,7 +334,7 @@ impl Backend for EmbeddedBackend {
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.create_dir_async(
+            self.fs.create_dir(
                 &ns_id,
                 &spec.absolute_path,
                 CreateDirOptions {
@@ -354,7 +353,7 @@ impl Backend for EmbeddedBackend {
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &from.namespace,
-            self.fs.move_path_async(
+            self.fs.move_path(
                 &ns_id,
                 &from.absolute_path,
                 &to.absolute_path,
@@ -374,7 +373,7 @@ impl Backend for EmbeddedBackend {
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &from.namespace,
-            self.fs.copy_path_async(
+            self.fs.copy_path(
                 &ns_id,
                 &from.absolute_path,
                 &to.absolute_path,
@@ -394,7 +393,7 @@ impl Backend for EmbeddedBackend {
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.restore_file_revision_async(
+            self.fs.restore_file_revision(
                 &ns_id,
                 &spec.absolute_path,
                 source_revision_no,
@@ -679,7 +678,7 @@ mod tests {
                 target
                     .backend
                     .fs
-                    .list_changes_after_async(&namespace_id, ChangeSeq(0)),
+                    .list_changes_after(&namespace_id, ChangeSeq(0)),
             )
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);

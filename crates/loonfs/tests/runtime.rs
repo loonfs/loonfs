@@ -51,285 +51,297 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 trait FsTestExt {
-    fn create_namespace(
+    fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
     ) -> loonfs::Result<loonfs::NamespaceSummary>;
-    fn fork_namespace(
+    fn fork_namespace_blocking(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs::NamespaceSummary>;
-    fn list_namespaces(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>>;
-    fn namespace_status(&self, namespace_id: &NamespaceId) -> loonfs::Result<NamespaceStatus>;
-    fn maintenance_tick_namespace(
+    fn list_namespaces_blocking(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>>;
+    fn namespace_status_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<NamespaceStatus>;
+    fn maintenance_tick_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> loonfs::Result<MaintenanceTickResult>;
-    fn stat_path(
+    fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativePathEntry>;
-    fn list_path(
+    fn list_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>>;
-    fn read_file_bytes(
+    fn read_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativeFileBytes>;
-    fn put_file_bytes(
+    fn put_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<MutationResult>;
-    fn create_dir(
+    fn create_dir_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirOptions,
     ) -> loonfs::Result<MutationResult>;
-    fn delete_path(
+    fn delete_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
     ) -> loonfs::Result<MutationResult>;
-    fn move_path(
+    fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
         to_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<MutationResult>;
-    fn copy_path(
+    fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
         to_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<MutationResult>;
-    fn begin_upload(&self, namespace_id: &NamespaceId) -> loonfs::Result<BeginUploadResponse>;
-    fn upload_content(
+    fn begin_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<BeginUploadResponse>;
+    fn upload_content_blocking(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
         bytes: &[u8],
     ) -> loonfs::Result<UploadContentResponse>;
-    fn complete_upload(
+    fn complete_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
         request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse>;
-    fn commit_operations(
+    fn commit_operations_blocking(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<CommitResponse>;
-    fn commit_operations_batch(
+    fn commit_operations_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>>;
-    fn publish_namespace_mutations_batch(
+    fn publish_namespace_mutations_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<loonfs::Result<CommitResponse>>;
-    fn list_changes_after(
+    fn list_changes_after_blocking(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ChangesResponse>;
-    fn create_checkpoint(
+    fn create_checkpoint_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<CreateCheckpointResponse>;
-    fn advance_retention_floor(
+    fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<AdvanceRetentionResponse>;
 }
 
 impl FsTestExt for Fs {
-    fn create_namespace(
+    fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
     ) -> loonfs::Result<loonfs::NamespaceSummary> {
-        block_on(self.create_namespace_async(namespace_id, options))
+        block_on(self.create_namespace(namespace_id, options))
     }
 
-    fn fork_namespace(
+    fn fork_namespace_blocking(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs::NamespaceSummary> {
-        block_on(self.fork_namespace_async(source, target))
+        block_on(self.fork_namespace(source, target))
     }
 
-    fn list_namespaces(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>> {
-        block_on(self.list_namespaces_async())
+    fn list_namespaces_blocking(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>> {
+        block_on(self.list_namespaces())
     }
 
-    fn namespace_status(&self, namespace_id: &NamespaceId) -> loonfs::Result<NamespaceStatus> {
-        block_on(self.namespace_status_async(namespace_id))
+    fn namespace_status_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<NamespaceStatus> {
+        block_on(self.namespace_status(namespace_id))
     }
 
-    fn maintenance_tick_namespace(
+    fn maintenance_tick_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> loonfs::Result<MaintenanceTickResult> {
-        block_on(self.maintenance_tick_namespace_async(namespace_id, options))
+        block_on(self.maintenance_tick_namespace(namespace_id, options))
     }
 
-    fn stat_path(
+    fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativePathEntry> {
-        block_on(self.stat_path_async(namespace_id, absolute_path))
+        block_on(self.stat_path(namespace_id, absolute_path))
     }
 
-    fn list_path(
+    fn list_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
-        block_on(self.list_path_async(namespace_id, absolute_path))
+        block_on(self.list_path(namespace_id, absolute_path))
     }
 
-    fn read_file_bytes(
+    fn read_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativeFileBytes> {
-        block_on(self.read_file_bytes_async(namespace_id, absolute_path))
+        block_on(self.read_file_bytes(namespace_id, absolute_path))
     }
 
-    fn put_file_bytes(
+    fn put_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.put_file_bytes_async(namespace_id, absolute_path, bytes, options))
+        block_on(self.put_file_bytes(namespace_id, absolute_path, bytes, options))
     }
 
-    fn create_dir(
+    fn create_dir_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.create_dir_async(namespace_id, absolute_path, options))
+        block_on(self.create_dir(namespace_id, absolute_path, options))
     }
 
-    fn delete_path(
+    fn delete_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.delete_path_async(namespace_id, absolute_path, options))
+        block_on(self.delete_path(namespace_id, absolute_path, options))
     }
 
-    fn move_path(
+    fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
         to_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.move_path_async(namespace_id, from_path, to_path, options))
+        block_on(self.move_path(namespace_id, from_path, to_path, options))
     }
 
-    fn copy_path(
+    fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
         to_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.copy_path_async(namespace_id, from_path, to_path, options))
+        block_on(self.copy_path(namespace_id, from_path, to_path, options))
     }
 
-    fn begin_upload(&self, namespace_id: &NamespaceId) -> loonfs::Result<BeginUploadResponse> {
-        block_on(self.begin_upload_async(namespace_id))
+    fn begin_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<BeginUploadResponse> {
+        block_on(self.begin_upload(namespace_id))
     }
 
-    fn upload_content(
+    fn upload_content_blocking(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
         bytes: &[u8],
     ) -> loonfs::Result<UploadContentResponse> {
-        block_on(self.upload_content_async(namespace_id, upload_id, bytes))
+        block_on(self.upload_content(namespace_id, upload_id, bytes))
     }
 
-    fn complete_upload(
+    fn complete_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
         request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse> {
-        block_on(self.complete_upload_async(namespace_id, upload_id, request))
+        block_on(self.complete_upload(namespace_id, upload_id, request))
     }
 
-    fn commit_operations(
+    fn commit_operations_blocking(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<CommitResponse> {
-        block_on(self.commit_operations_async(namespace_id, request))
+        block_on(self.commit_operations(namespace_id, request))
     }
 
-    fn commit_operations_batch(
+    fn commit_operations_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>> {
-        block_on(self.commit_operations_batch_async(namespace_id, requests))
+        block_on(self.commit_operations_batch(namespace_id, requests))
     }
 
-    fn publish_namespace_mutations_batch(
+    fn publish_namespace_mutations_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<loonfs::Result<CommitResponse>> {
-        block_on(self.publish_namespace_mutations_batch_async(namespace_id, candidates))
+        block_on(self.publish_namespace_mutations_batch(namespace_id, candidates))
     }
 
-    fn list_changes_after(
+    fn list_changes_after_blocking(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ChangesResponse> {
-        block_on(self.list_changes_after_async(namespace_id, after_seq))
+        block_on(self.list_changes_after(namespace_id, after_seq))
     }
 
-    fn create_checkpoint(
+    fn create_checkpoint_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<CreateCheckpointResponse> {
-        block_on(self.create_checkpoint_async(namespace_id))
+        block_on(self.create_checkpoint(namespace_id))
     }
 
-    fn advance_retention_floor(
+    fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        block_on(self.advance_retention_floor_async(namespace_id))
+        block_on(self.advance_retention_floor(namespace_id))
     }
 }
 
@@ -437,7 +449,7 @@ fn builder_metrics_recorder_instruments_object_store() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace(), CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace(), CreateNamespaceOptions::default())
         .expect("create namespace");
 
     let samples = recorder.samples();
@@ -456,9 +468,9 @@ fn filesystem_operations_match_core_semantics() {
     let fs = runtime(temp_dir.path(), "filesystem-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -467,21 +479,23 @@ fn filesystem_operations_match_core_semantics() {
     .expect("put file");
 
     let stat = fs
-        .stat_path(&namespace_id, "/docs/hello.txt")
+        .stat_path_blocking(&namespace_id, "/docs/hello.txt")
         .expect("stat file");
     assert_eq!(stat.absolute_path, "/docs/hello.txt");
     assert_eq!(stat.size_bytes, Some(5));
 
-    let entries = fs.list_path(&namespace_id, "/docs").expect("list docs");
+    let entries = fs
+        .list_path_blocking(&namespace_id, "/docs")
+        .expect("list docs");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].absolute_path, "/docs/hello.txt");
 
     let read = fs
-        .read_file_bytes(&namespace_id, "/docs/hello.txt")
+        .read_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
         .expect("read file");
     assert_eq!(read.bytes, b"hello");
 
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"updated",
@@ -492,18 +506,18 @@ fn filesystem_operations_match_core_semantics() {
     )
     .expect("replace file");
     let read = fs
-        .read_file_bytes(&namespace_id, "/docs/hello.txt")
+        .read_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
         .expect("read replaced file");
     assert_eq!(read.bytes, b"updated");
 
-    fs.copy_path(
+    fs.copy_path_blocking(
         &namespace_id,
         "/docs/hello.txt",
         "/docs/copy.txt",
         CopyOptions::default(),
     )
     .expect("copy file");
-    fs.move_path(
+    fs.move_path_blocking(
         &namespace_id,
         "/docs/copy.txt",
         "/docs/moved.txt",
@@ -511,7 +525,7 @@ fn filesystem_operations_match_core_semantics() {
     )
     .expect("move file");
     assert_eq!(
-        fs.read_file_bytes(&namespace_id, "/docs/moved.txt")
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/moved.txt")
             .expect("read moved copy")
             .bytes,
         b"updated"
@@ -524,10 +538,11 @@ async fn async_runtime_methods_are_the_engine_boundary() {
     let fs = runtime(temp_dir.path(), "async-runtime-test");
     let namespace_id = namespace();
 
-    fs.create_namespace_async(&namespace_id, CreateNamespaceOptions::default())
+    Fs::create_namespace(&fs, &namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    fs.put_file_bytes_async(
+    Fs::put_file_bytes(
+        &fs,
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -536,8 +551,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
     .await
     .expect("put file");
 
-    let async_stat = fs
-        .stat_path_async(&namespace_id, "/docs/hello.txt")
+    let async_stat = Fs::stat_path(&fs, &namespace_id, "/docs/hello.txt")
         .await
         .expect("async stat");
 
@@ -561,24 +575,24 @@ fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
 
     raw_store.reset_wal_get_count();
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("first stat should load basis");
     assert_eq!(raw_store.wal_get_count(), 1);
 
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second stat should reuse cached basis");
     assert_eq!(raw_store.wal_get_count(), 1);
 
-    fs.create_dir(&namespace_id, "/other", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
         .expect("create other");
     raw_store.reset_wal_get_count();
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("stat after mutation should reload basis");
     assert!(raw_store.wal_get_count() > 0);
 }
@@ -602,23 +616,23 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .expect("build writer runtime");
 
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
 
     reader
-        .stat_path(&namespace_id, "/docs")
+        .stat_path_blocking(&namespace_id, "/docs")
         .expect("prime reader cache");
 
     writer
-        .create_dir(&namespace_id, "/docs/new", CreateDirOptions::default())
+        .create_dir_blocking(&namespace_id, "/docs/new", CreateDirOptions::default())
         .expect("advance head from another runtime");
 
     raw_store.reset_wal_get_count();
     let stat = reader
-        .stat_path(&namespace_id, "/docs/new")
+        .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("reader should observe external head advance");
     assert_eq!(stat.absolute_path, "/docs/new");
     assert_eq!(stat.authoritative_head_seq, ChangeSeq(2));
@@ -640,15 +654,15 @@ fn runtime_cache_can_be_disabled() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
 
     raw_store.reset_wal_get_count();
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("first stat should load basis");
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second stat should load basis again");
     assert_eq!(raw_store.wal_get_count(), 2);
 }
@@ -666,19 +680,20 @@ fn runtime_basis_cache_evicts_by_namespace_count() {
         .expect("build runtime");
     let first = NamespaceId::parse("first").expect("valid namespace id");
     let second = NamespaceId::parse("second").expect("valid namespace id");
-    fs.create_namespace(&first, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&first, CreateNamespaceOptions::default())
         .expect("create first namespace");
-    fs.create_namespace(&second, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
 
-    fs.stat_path(&first, "/").expect("cache first basis");
-    fs.stat_path(&second, "/")
+    fs.stat_path_blocking(&first, "/")
+        .expect("cache first basis");
+    fs.stat_path_blocking(&second, "/")
         .expect("cache second basis and evict first");
     let after_second = fs.runtime_cache_stats();
     assert_eq!(after_second.warm_basis_evictions, 1);
     assert_eq!(after_second.warm_basis_cached_rows, 1);
 
-    fs.stat_path(&first, "/")
+    fs.stat_path_blocking(&first, "/")
         .expect("first basis rehydrates after eviction");
     let after_reload = fs.runtime_cache_stats();
     assert_eq!(after_reload.warm_basis_cache_misses, 3);
@@ -699,13 +714,14 @@ fn runtime_basis_cache_evicts_by_row_budget() {
         .expect("build runtime");
     let first = NamespaceId::parse("row-one").expect("valid namespace id");
     let second = NamespaceId::parse("row-two").expect("valid namespace id");
-    fs.create_namespace(&first, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&first, CreateNamespaceOptions::default())
         .expect("create first namespace");
-    fs.create_namespace(&second, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
 
-    fs.stat_path(&first, "/").expect("cache first basis");
-    fs.stat_path(&second, "/")
+    fs.stat_path_blocking(&first, "/")
+        .expect("cache first basis");
+    fs.stat_path_blocking(&second, "/")
         .expect("cache second basis and evict first by rows");
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_evictions, 1);
@@ -727,10 +743,11 @@ fn runtime_basis_budget_includes_commit_engine_bases() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.stat_path(&namespace_id, "/").expect("cache read basis");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    fs.stat_path_blocking(&namespace_id, "/")
+        .expect("cache read basis");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("combined-budget-create-docs", "/docs")],
     ));
@@ -740,7 +757,7 @@ fn runtime_basis_budget_includes_commit_engine_bases() {
     assert!(stats.warm_basis_cached_rows <= 2);
 
     let misses_before = stats.warm_basis_cache_misses;
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("read still works after aggregate budget pruning");
     let stats = fs.runtime_cache_stats();
     assert!(stats.warm_basis_cache_misses > misses_before);
@@ -754,10 +771,10 @@ fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
     let first = NamespaceId::parse("byte-one").expect("valid namespace id");
     let second = NamespaceId::parse("byte-two").expect("valid namespace id");
     setup
-        .create_namespace(&first, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&first, CreateNamespaceOptions::default())
         .expect("create first namespace");
     setup
-        .create_namespace(&second, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
     let raw_store = store(temp_dir.path());
     let basis_weight = load_verified_namespace_basis(raw_store.as_ref(), &first)
@@ -774,8 +791,9 @@ fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
         .build()
         .expect("build runtime");
 
-    fs.stat_path(&first, "/").expect("cache first basis");
-    fs.stat_path(&second, "/")
+    fs.stat_path_blocking(&first, "/")
+        .expect("cache first basis");
+    fs.stat_path_blocking(&second, "/")
         .expect("cache second basis and evict first by bytes");
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_evictions, 1);
@@ -789,7 +807,7 @@ fn runtime_basis_cache_skips_oversized_basis() {
     let setup = runtime(temp_dir.path(), "basis-oversized-setup");
     let namespace_id = namespace();
     setup
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let raw_store = store(temp_dir.path());
     let basis_weight = load_verified_namespace_basis(raw_store.as_ref(), &namespace_id)
@@ -806,9 +824,9 @@ fn runtime_basis_cache_skips_oversized_basis() {
         .build()
         .expect("build runtime");
 
-    fs.stat_path(&namespace_id, "/")
+    fs.stat_path_blocking(&namespace_id, "/")
         .expect("first stat reconstructs oversized basis");
-    fs.stat_path(&namespace_id, "/")
+    fs.stat_path_blocking(&namespace_id, "/")
         .expect("second stat reconstructs oversized basis again");
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_cache_misses, 2);
@@ -840,15 +858,15 @@ fn runtime_publish_reuses_warm_basis_for_adjacent_batches() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("warm-create-docs", "/docs")],
     ));
 
     raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("warm-create-child", "/docs/child")],
     ));
@@ -865,7 +883,7 @@ fn runtime_publish_reuses_warm_basis_for_adjacent_batches() {
     assert_eq!(stats.publish_warm_basis_invalidations, 0);
 
     let stat = fs
-        .stat_path(&namespace_id, "/docs/child")
+        .stat_path_blocking(&namespace_id, "/docs/child")
         .expect("warm-published child is visible");
     assert_eq!(stat.authoritative_head_seq, ChangeSeq(2));
 }
@@ -889,18 +907,18 @@ fn runtime_publish_cold_loads_after_external_head_advance() {
         .expect("build second runtime");
 
     first
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("external-first", "/docs")],
     ));
     second
-        .create_dir(&namespace_id, "/other", CreateDirOptions::default())
+        .create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
         .expect("external runtime advances head");
 
     raw_store.reset_wal_get_count();
-    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("external-after", "/docs/child")],
     ));
@@ -935,18 +953,18 @@ fn runtime_publish_retries_warm_rejection_after_external_head_race() {
         .expect("build second runtime");
 
     first
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("race-prime", "/docs")],
     ));
     second
-        .create_dir(&namespace_id, "/a", CreateDirOptions::default())
+        .create_dir_blocking(&namespace_id, "/a", CreateDirOptions::default())
         .expect("external runtime creates /a");
 
     raw_store.reset_wal_get_count();
-    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![delete_candidate("race-delete-a", "/a")],
     ));
@@ -956,7 +974,7 @@ fn runtime_publish_retries_warm_rejection_after_external_head_race() {
     );
 
     assert_core_error_kind(
-        first.stat_path(&namespace_id, "/a"),
+        first.stat_path_blocking(&namespace_id, "/a"),
         ErrorCode::PathNotFound,
     );
     let stats = first.runtime_cache_stats();
@@ -981,15 +999,15 @@ fn runtime_publish_cache_disabled_replays_for_adjacent_batches() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("disabled-first", "/docs")],
     ));
 
     raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("disabled-second", "/docs/child")],
     ));
@@ -1018,16 +1036,16 @@ fn runtime_publish_stale_head_invalidates_warm_basis() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("stale-prime", "/docs")],
     ));
 
     raw_store.fail_head_cas();
     let stale = fs
-        .publish_namespace_mutations_batch(
+        .publish_namespace_mutations_batch_blocking(
             &namespace_id,
             vec![create_dir_candidate("stale-loses-cas", "/stale")],
         )
@@ -1039,7 +1057,7 @@ fn runtime_publish_stale_head_invalidates_warm_basis() {
 
     raw_store.allow_head_cas();
     raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![create_dir_candidate("stale-after", "/after")],
     ));
@@ -1069,22 +1087,22 @@ fn stale_head_write_error_invalidates_runtime_cache() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime basis cache");
 
     raw_store.fail_head_cas();
     assert_core_error_kind(
-        fs.create_dir(&namespace_id, "/stale", CreateDirOptions::default()),
+        fs.create_dir_blocking(&namespace_id, "/stale", CreateDirOptions::default()),
         ErrorCode::StaleHead,
     );
 
     raw_store.allow_head_cas();
     raw_store.reset_wal_get_count();
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("read after stale head should reload basis");
     assert!(raw_store.wal_get_count() > 0);
 }
@@ -1095,9 +1113,9 @@ fn delete_options_select_recursive_behavior() {
     let fs = runtime(temp_dir.path(), "delete-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -1106,14 +1124,14 @@ fn delete_options_select_recursive_behavior() {
     .expect("put file");
 
     let error = fs
-        .delete_path(&namespace_id, "/docs", DeleteOptions::default())
+        .delete_path_blocking(&namespace_id, "/docs", DeleteOptions::default())
         .expect_err("non-recursive delete should reject non-empty directory");
     assert!(matches!(
         error,
         RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::DirectoryNotEmpty
     ));
 
-    fs.delete_path(
+    fs.delete_path_blocking(
         &namespace_id,
         "/docs",
         DeleteOptions {
@@ -1123,7 +1141,7 @@ fn delete_options_select_recursive_behavior() {
     )
     .expect("recursive delete");
     let error = fs
-        .stat_path(&namespace_id, "/docs/hello.txt")
+        .stat_path_blocking(&namespace_id, "/docs/hello.txt")
         .expect_err("deleted file should not stat");
     assert!(matches!(
         error,
@@ -1138,26 +1156,27 @@ fn forked_namespace_shares_content_then_diverges() {
     let source = namespace();
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
 
-    fs.create_namespace(&source, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
         .expect("create source namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &source,
         "/docs/shared.txt",
         b"source",
         PutFileOptions::default(),
     )
     .expect("put source file");
-    fs.fork_namespace(&source, &clone).expect("fork namespace");
+    fs.fork_namespace_blocking(&source, &clone)
+        .expect("fork namespace");
 
     let source_entry = fs
-        .stat_path(&source, "/docs/shared.txt")
+        .stat_path_blocking(&source, "/docs/shared.txt")
         .expect("stat source");
     let clone_entry = fs
-        .stat_path(&clone, "/docs/shared.txt")
+        .stat_path_blocking(&clone, "/docs/shared.txt")
         .expect("stat clone");
     assert_eq!(source_entry.content_ref, clone_entry.content_ref);
 
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &clone,
         "/docs/shared.txt",
         b"clone",
@@ -1169,13 +1188,13 @@ fn forked_namespace_shares_content_then_diverges() {
     .expect("replace clone file");
 
     assert_eq!(
-        fs.read_file_bytes(&source, "/docs/shared.txt")
+        fs.read_file_bytes_blocking(&source, "/docs/shared.txt")
             .expect("read source")
             .bytes,
         b"source"
     );
     assert_eq!(
-        fs.read_file_bytes(&clone, "/docs/shared.txt")
+        fs.read_file_bytes_blocking(&clone, "/docs/shared.txt")
             .expect("read clone")
             .bytes,
         b"clone"
@@ -1188,14 +1207,16 @@ fn upload_flow_is_available_from_runtime() {
     let fs = runtime(temp_dir.path(), "upload-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = fs.begin_upload(&namespace_id).expect("begin upload");
+    let begin = fs
+        .begin_upload_blocking(&namespace_id)
+        .expect("begin upload");
     let staged = fs
-        .upload_content(&namespace_id, &begin.upload_id, b"uploaded")
+        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
         .expect("upload content");
     let staged_again = fs
-        .upload_content(&namespace_id, &begin.upload_id, b"uploaded")
+        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
         .expect("repeat upload content");
     assert_eq!(staged.content_ref, staged_again.content_ref);
 
@@ -1203,10 +1224,10 @@ fn upload_flow_is_available_from_runtime() {
         content_ref: staged.content_ref,
     };
     let completed = fs
-        .complete_upload(&namespace_id, &begin.upload_id, &request)
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
         .expect("complete upload");
     let completed_again = fs
-        .complete_upload(&namespace_id, &begin.upload_id, &request)
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
         .expect("repeat complete upload");
     assert_eq!(completed.content_ref, completed_again.content_ref);
 }
@@ -1222,13 +1243,15 @@ fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = fs.begin_upload(&namespace_id).expect("begin upload");
+    let begin = fs
+        .begin_upload_blocking(&namespace_id)
+        .expect("begin upload");
     let staged = fs
-        .upload_content(&namespace_id, &begin.upload_id, b"uploaded")
+        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
         .expect("upload content");
-    fs.complete_upload(
+    fs.complete_upload_blocking(
         &namespace_id,
         &begin.upload_id,
         &CompleteUploadRequest {
@@ -1238,7 +1261,7 @@ fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
     .expect("complete upload");
 
     raw_store.reset_content_blob_counters();
-    let responses = fs.publish_namespace_mutations_batch(
+    let responses = fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
@@ -1267,13 +1290,15 @@ fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call()
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = fs.begin_upload(&namespace_id).expect("begin upload");
+    let begin = fs
+        .begin_upload_blocking(&namespace_id)
+        .expect("begin upload");
     let staged = fs
-        .upload_content(&namespace_id, &begin.upload_id, b"uploaded")
+        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
         .expect("upload content");
-    fs.complete_upload(
+    fs.complete_upload_blocking(
         &namespace_id,
         &begin.upload_id,
         &CompleteUploadRequest {
@@ -1283,7 +1308,7 @@ fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call()
     .expect("complete upload");
 
     raw_store.reset_content_blob_counters();
-    let responses = fs.publish_namespace_mutations_batch(
+    let responses = fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
@@ -1306,13 +1331,15 @@ fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
     let namespace_id = namespace();
     let fs = runtime(temp_dir.path(), "read-fallback-test");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
 
-    fs.stat_path(&namespace_id, "/docs").expect("stat docs");
-    fs.list_path(&namespace_id, "/").expect("list root");
+    fs.stat_path_blocking(&namespace_id, "/docs")
+        .expect("stat docs");
+    fs.list_path_blocking(&namespace_id, "/")
+        .expect("list root");
 
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.read_full_basis_fallbacks, 2);
@@ -1330,21 +1357,22 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
         b"file",
         PutFileOptions::default(),
     )
     .expect("put file");
-    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint");
 
     raw_store.reset_content_blob_counters();
-    fs.stat_path(&namespace_id, "/docs/file.txt")
+    fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("stat materialized file");
-    fs.list_path(&namespace_id, "/docs")
+    fs.list_path_blocking(&namespace_id, "/docs")
         .expect("list materialized docs");
 
     let stats = fs.runtime_cache_stats();
@@ -1360,21 +1388,22 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
     let namespace_id = namespace();
     let fs = runtime(temp_dir.path(), "metadata-table-cache-test");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/file.txt",
         b"file",
         PutFileOptions::default(),
     )
     .expect("put file");
-    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint");
 
-    fs.stat_path(&namespace_id, "/docs/file.txt")
+    fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");
     let after_first = fs.runtime_cache_stats();
-    fs.stat_path(&namespace_id, "/docs/file.txt")
+    fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("second materialized stat");
     let after_second = fs.runtime_cache_stats();
 
@@ -1395,11 +1424,11 @@ fn put_file_bytes_uses_memory_proof_without_blob_validation_call() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
     raw_store.reset_content_blob_counters();
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/direct.txt",
         b"direct bytes",
@@ -1425,17 +1454,18 @@ fn begin_upload_validates_controls_without_replay_reads() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
         PutFileOptions::default(),
     )
     .expect("put file");
-    fs.create_checkpoint(&namespace_id).expect("checkpoint");
-    fs.put_file_bytes(
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint");
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"updated",
@@ -1447,8 +1477,10 @@ fn begin_upload_validates_controls_without_replay_reads() {
     .expect("replace file");
 
     raw_store.reset_control_get_counts();
-    fs.begin_upload(&namespace_id).expect("first begin upload");
-    fs.begin_upload(&namespace_id).expect("second begin upload");
+    fs.begin_upload_blocking(&namespace_id)
+        .expect("first begin upload");
+    fs.begin_upload_blocking(&namespace_id)
+        .expect("second begin upload");
 
     assert_eq!(raw_store.wal_get_count(), 0);
     assert_eq!(raw_store.manifest_get_count(), 0);
@@ -1468,18 +1500,18 @@ fn runtime_control_cache_reuses_head_for_basis_validation() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
 
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime basis cache");
 
     raw_store.reset_control_get_counts();
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("first cached basis validation reuses cached head state");
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second cached basis validation reuses cached head state");
 
     assert_eq!(raw_store.head_get_count(), 0);
@@ -1504,24 +1536,24 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
-    fs.create_namespace(&other_namespace, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&other_namespace, CreateNamespaceOptions::default())
         .expect("create other namespace");
-    fs.create_dir(&other_namespace, "/docs", CreateDirOptions::default())
+    fs.create_dir_blocking(&other_namespace, "/docs", CreateDirOptions::default())
         .expect("create other docs");
 
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime first namespace basis");
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime first namespace head cache");
 
     raw_store.reset_control_get_counts();
-    fs.stat_path(&other_namespace, "/docs")
+    fs.stat_path_blocking(&other_namespace, "/docs")
         .expect("load other namespace basis and evict first head cache");
-    fs.stat_path(&namespace_id, "/docs")
+    fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("reload first namespace basis and head cache");
 
     assert_eq!(raw_store.head_get_count(), 1);
@@ -1546,29 +1578,29 @@ fn runtime_control_cache_reloads_head_after_external_change() {
         .expect("build writer runtime");
 
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
     reader
-        .stat_path(&namespace_id, "/docs")
+        .stat_path_blocking(&namespace_id, "/docs")
         .expect("prime basis cache");
     raw_store.reset_control_get_counts();
     reader
-        .stat_path(&namespace_id, "/docs")
+        .stat_path_blocking(&namespace_id, "/docs")
         .expect("prime control cache");
     reader
-        .stat_path(&namespace_id, "/docs")
+        .stat_path_blocking(&namespace_id, "/docs")
         .expect("reuse unchanged control cache");
     assert_eq!(raw_store.head_get_count(), 0);
 
     writer
-        .create_dir(&namespace_id, "/docs/new", CreateDirOptions::default())
+        .create_dir_blocking(&namespace_id, "/docs/new", CreateDirOptions::default())
         .expect("advance head");
     raw_store.reset_control_get_counts();
     reader
-        .stat_path(&namespace_id, "/docs/new")
+        .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("reload changed head");
     assert!(raw_store.head_get_count() > 0);
 }
@@ -1584,15 +1616,21 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
         .expect("build runtime");
     let namespace_id = namespace();
 
-    assert_core_error_kind(fs.begin_upload(&namespace_id), ErrorCode::NamespaceNotFound);
+    assert_core_error_kind(
+        fs.begin_upload_blocking(&namespace_id),
+        ErrorCode::NamespaceNotFound,
+    );
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     raw_store
         .delete(&namespace_descriptor(namespace_id.as_str()))
         .expect("delete namespace descriptor");
 
-    assert_core_error_kind(fs.begin_upload(&namespace_id), ErrorCode::NamespacePartial);
+    assert_core_error_kind(
+        fs.begin_upload_blocking(&namespace_id),
+        ErrorCode::NamespacePartial,
+    );
 }
 
 #[test]
@@ -1606,7 +1644,7 @@ fn begin_upload_rejects_malformed_descriptors() {
         .expect("build runtime");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     raw_store
         .put_overwrite(
@@ -1614,10 +1652,13 @@ fn begin_upload_rejects_malformed_descriptors() {
             br#"{"not":"a namespace descriptor"}"#,
         )
         .expect("corrupt namespace descriptor");
-    assert_core_error_kind(fs.begin_upload(&namespace_id), ErrorCode::NamespaceCorrupt);
+    assert_core_error_kind(
+        fs.begin_upload_blocking(&namespace_id),
+        ErrorCode::NamespaceCorrupt,
+    );
 
     let content_bad = NamespaceId::parse("content-bad").expect("valid namespace id");
-    fs.create_namespace(&content_bad, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&content_bad, CreateNamespaceOptions::default())
         .expect("create content-bad namespace");
     for key in raw_store
         .list_prefix("content-stores/")
@@ -1629,7 +1670,10 @@ fn begin_upload_rejects_malformed_descriptors() {
             .put_overwrite(&key, br#"{"not":"a content store descriptor"}"#)
             .expect("corrupt content store descriptor");
     }
-    assert_core_error_kind(fs.begin_upload(&content_bad), ErrorCode::NamespaceCorrupt);
+    assert_core_error_kind(
+        fs.begin_upload_blocking(&content_bad),
+        ErrorCode::NamespaceCorrupt,
+    );
 }
 
 #[test]
@@ -1644,15 +1688,18 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
         .expect("build runtime");
 
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
-    fs.create_namespace(&head_bad, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
         .expect("create head-bad namespace");
     raw_store
         .put_overwrite(&namespace_head(head_bad.as_str()), br#"{"not":"a head"}"#)
         .expect("corrupt head");
-    assert_core_error_kind(fs.begin_upload(&head_bad), ErrorCode::NamespaceCorrupt);
+    assert_core_error_kind(
+        fs.begin_upload_blocking(&head_bad),
+        ErrorCode::NamespaceCorrupt,
+    );
 
     let lease_bad = NamespaceId::parse("lease-bad").expect("valid namespace id");
-    fs.create_namespace(&lease_bad, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&lease_bad, CreateNamespaceOptions::default())
         .expect("create lease-bad namespace");
     raw_store
         .put_overwrite(
@@ -1660,7 +1707,10 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
             br#"{"not":"a lease"}"#,
         )
         .expect("corrupt lease");
-    assert_core_error_kind(fs.begin_upload(&lease_bad), ErrorCode::NamespaceCorrupt);
+    assert_core_error_kind(
+        fs.begin_upload_blocking(&lease_bad),
+        ErrorCode::NamespaceCorrupt,
+    );
 }
 
 #[test]
@@ -1669,11 +1719,11 @@ fn explicit_commit_appears_in_change_feed() {
     let fs = runtime(temp_dir.path(), "commit-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let commit_id = CommitId::parse("explicit-create-dir").expect("valid commit id");
     let response = fs
-        .commit_operations(
+        .commit_operations_blocking(
             &namespace_id,
             CommitRequest {
                 commit_id: commit_id.clone(),
@@ -1689,7 +1739,7 @@ fn explicit_commit_appears_in_change_feed() {
         .expect("commit operation");
 
     let changes = fs
-        .list_changes_after(&namespace_id, ChangeSeq(0))
+        .list_changes_after_blocking(&namespace_id, ChangeSeq(0))
         .expect("list changes");
     assert_eq!(changes.through_seq, response.committed_seq);
     assert_eq!(changes.changes.len(), 1);
@@ -1702,10 +1752,10 @@ fn namespace_status_reports_wal_tail_segments() {
     let fs = runtime(temp_dir.path(), "status-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let status = fs
-        .namespace_status(&namespace_id)
+        .namespace_status_blocking(&namespace_id)
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
@@ -1713,7 +1763,7 @@ fn namespace_status_reports_wal_tail_segments() {
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -1722,7 +1772,7 @@ fn namespace_status_reports_wal_tail_segments() {
     .expect("put file");
 
     let status = fs
-        .namespace_status(&namespace_id)
+        .namespace_status_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
     assert_eq!(status.current_manifest_id, None);
@@ -1737,11 +1787,11 @@ fn namespace_status_and_tick_reject_missing_namespace() {
     let namespace_id = namespace();
 
     assert_core_error_kind(
-        fs.namespace_status(&namespace_id),
+        fs.namespace_status_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default()),
+        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default()),
         ErrorCode::NamespaceNotFound,
     );
 }
@@ -1757,18 +1807,18 @@ fn namespace_status_and_tick_reject_partial_namespace() {
         .expect("build runtime");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     raw_store
         .delete(&namespace_descriptor(namespace_id.as_str()))
         .expect("delete namespace descriptor");
 
     assert_core_error_kind(
-        fs.namespace_status(&namespace_id),
+        fs.namespace_status_blocking(&namespace_id),
         ErrorCode::NamespacePartial,
     );
     assert_core_error_kind(
-        fs.maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default()),
+        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default()),
         ErrorCode::NamespacePartial,
     );
 }
@@ -1779,9 +1829,9 @@ fn maintenance_tick_below_threshold_is_not_needed() {
     let fs = runtime(temp_dir.path(), "tick-not-needed-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -1790,7 +1840,7 @@ fn maintenance_tick_below_threshold_is_not_needed() {
     .expect("put file");
 
     let tick = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 2,
@@ -1808,9 +1858,9 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     let fs = runtime(temp_dir.path(), "tick-publish-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -1819,7 +1869,7 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     .expect("put file");
 
     let tick = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 1,
@@ -1835,7 +1885,7 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     );
 
     let status = fs
-        .namespace_status(&namespace_id)
+        .namespace_status_blocking(&namespace_id)
         .expect("status after checkpoint");
     assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(status.wal_tail_segments, 0);
@@ -1847,16 +1897,16 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
         PutFileOptions::default(),
     )
     .expect("put first file");
-    fs.maintenance_tick_namespace(
+    fs.maintenance_tick_namespace_blocking(
         &namespace_id,
         MaintenanceTickOptions {
             max_wal_tail_segments: 1,
@@ -1864,7 +1914,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     )
     .expect("first maintenance tick");
 
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/second.txt",
         b"second",
@@ -1872,7 +1922,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     )
     .expect("put second file");
     let tick = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 1,
@@ -1887,7 +1937,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     );
 
     let status = fs
-        .namespace_status(&namespace_id)
+        .namespace_status_blocking(&namespace_id)
         .expect("status after l0 checkpoint");
     assert_eq!(status.current_manifest_id, Some(ManifestId(2)));
     assert_eq!(status.wal_tail_segments, 0);
@@ -1918,9 +1968,9 @@ fn maintenance_tick_counts_segments_not_commits() {
     let fs = runtime(temp_dir.path(), "tick-segment-count-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let first_batch = fs.commit_operations_batch(
+    let first_batch = fs.commit_operations_batch_blocking(
         &namespace_id,
         vec![
             CommitRequest {
@@ -1948,13 +1998,13 @@ fn maintenance_tick_counts_segments_not_commits() {
     assert!(first_batch.iter().all(Result::is_ok));
 
     let status = fs
-        .namespace_status(&namespace_id)
+        .namespace_status_blocking(&namespace_id)
         .expect("status after first batch");
     assert_eq!(status.head_seq, ChangeSeq(2));
     assert_eq!(status.wal_tail_segments, 1);
 
     let tick = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 2,
@@ -1963,7 +2013,7 @@ fn maintenance_tick_counts_segments_not_commits() {
         .expect("maintenance tick");
     assert_eq!(tick.outcome, MaintenanceTickOutcome::NotNeeded);
 
-    fs.commit_operations(
+    fs.commit_operations_blocking(
         &namespace_id,
         CommitRequest {
             commit_id: CommitId::parse("create-c").expect("valid commit id"),
@@ -1979,7 +2029,7 @@ fn maintenance_tick_counts_segments_not_commits() {
     .expect("second segment commit");
 
     let tick = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 2,
@@ -2002,10 +2052,10 @@ fn maintenance_tick_rejects_zero_threshold() {
     let fs = runtime(temp_dir.path(), "tick-config-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let error = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 0,
@@ -2032,9 +2082,9 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
         .build()
         .expect("build runtime");
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -2044,7 +2094,7 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
 
     raw_store.fail_head_cas();
     let tick = fs
-        .maintenance_tick_namespace(
+        .maintenance_tick_namespace_blocking(
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 1,
@@ -2059,7 +2109,7 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
         }
     );
     let status = fs
-        .namespace_status(&namespace_id)
+        .namespace_status_blocking(&namespace_id)
         .expect("status after lost race");
     assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 1);
@@ -2071,9 +2121,9 @@ fn checkpoint_and_retention_hooks_are_available() {
     let fs = runtime(temp_dir.path(), "maintenance-test");
     let namespace_id = namespace();
 
-    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.put_file_bytes(
+    fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -2082,10 +2132,10 @@ fn checkpoint_and_retention_hooks_are_available() {
     .expect("put file");
 
     let checkpoint = fs
-        .create_checkpoint(&namespace_id)
+        .create_checkpoint_blocking(&namespace_id)
         .expect("create checkpoint");
     let retention = fs
-        .advance_retention_floor(&namespace_id)
+        .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
     assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
 }
@@ -2098,10 +2148,10 @@ fn separate_runtime_instances_share_object_store_state() {
     let namespace_id = namespace();
 
     writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .put_file_bytes(
+        .put_file_bytes_blocking(
             &namespace_id,
             "/docs/shared.txt",
             b"shared",
@@ -2109,11 +2159,11 @@ fn separate_runtime_instances_share_object_store_state() {
         )
         .expect("put file");
 
-    let namespaces = reader.list_namespaces().expect("list namespaces");
+    let namespaces = reader.list_namespaces_blocking().expect("list namespaces");
     assert_eq!(namespaces.len(), 1);
     assert_eq!(namespaces[0].namespace_id, namespace_id);
     let file = reader
-        .read_file_bytes(&namespace_id, "/docs/shared.txt")
+        .read_file_bytes_blocking(&namespace_id, "/docs/shared.txt")
         .expect("read shared file");
     assert_eq!(file.bytes, b"shared");
 }

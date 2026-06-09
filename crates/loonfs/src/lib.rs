@@ -1185,7 +1185,7 @@ impl Fs {
         .map_err(|error| RuntimeError::RuntimeTask(error.to_string()))?
     }
 
-    pub async fn create_namespace_async(
+    pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
@@ -1209,7 +1209,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn fork_namespace_async(
+    pub async fn fork_namespace(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
@@ -1238,7 +1238,7 @@ impl Fs {
         result
     }
 
-    pub async fn list_namespaces_async(&self) -> Result<Vec<NamespaceSummary>> {
+    pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
         self.run_engine_blocking(|fs| fs.list_namespaces_blocking())
             .await
     }
@@ -1247,10 +1247,7 @@ impl Fs {
         Ok(loon_core::list_namespaces(self.store())?)
     }
 
-    pub async fn namespace_status_async(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatus> {
+    pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
         let namespace_id = namespace_id.clone();
         self.run_engine_blocking(move |fs| fs.namespace_status_blocking(&namespace_id))
             .await
@@ -1279,7 +1276,7 @@ impl Fs {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn maintenance_tick_namespace_async(
+    pub async fn maintenance_tick_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
@@ -1363,7 +1360,7 @@ impl Fs {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub async fn stat_path_async(
+    pub async fn stat_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1410,7 +1407,7 @@ impl Fs {
         Ok(entry)
     }
 
-    pub async fn list_path_async(
+    pub async fn list_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1453,7 +1450,7 @@ impl Fs {
         Ok(entries)
     }
 
-    pub async fn read_file_bytes_async(
+    pub async fn read_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1478,7 +1475,7 @@ impl Fs {
         )?)
     }
 
-    pub async fn list_file_revisions_async(
+    pub async fn list_file_revisions(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1503,7 +1500,7 @@ impl Fs {
         )?)
     }
 
-    pub async fn list_file_revisions_for_inode_async(
+    pub async fn list_file_revisions_for_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -1529,7 +1526,7 @@ impl Fs {
             )?)
     }
 
-    pub async fn read_file_revision_bytes_async(
+    pub async fn read_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1557,7 +1554,7 @@ impl Fs {
         )?)
     }
 
-    pub async fn read_file_revision_bytes_for_inode_async(
+    pub async fn read_file_revision_bytes_for_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -1598,7 +1595,7 @@ impl Fs {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_bytes_async(
+    pub async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1652,7 +1649,7 @@ impl Fs {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_content_ref_async(
+    pub async fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1696,7 +1693,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn create_dir_async(
+    pub async fn create_dir(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1729,7 +1726,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn delete_path_async(
+    pub async fn delete_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1763,7 +1760,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn move_path_async(
+    pub async fn move_path(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -1800,7 +1797,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn copy_path_async(
+    pub async fn copy_path(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -1837,7 +1834,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn restore_file_revision_async(
+    pub async fn restore_file_revision(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1878,7 +1875,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn restore_file_revision_for_inode_async(
+    pub async fn restore_file_revision_for_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -1901,13 +1898,10 @@ impl Fs {
             message: None,
             annotations: None,
         };
-        self.commit_operations_async(namespace_id, request).await
+        self.commit_operations(namespace_id, request).await
     }
 
-    pub async fn begin_upload_async(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<BeginUploadResponse> {
+    pub async fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
         let namespace_id = namespace_id.clone();
         self.run_engine_blocking(move |fs| fs.begin_upload_blocking(&namespace_id))
             .await
@@ -1917,7 +1911,7 @@ impl Fs {
         Ok(self.namespace_engine(namespace_id).begin_upload()?)
     }
 
-    pub async fn upload_content_async(
+    pub async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
@@ -1944,7 +1938,7 @@ impl Fs {
             .upload_content(upload_id, bytes)?)
     }
 
-    pub async fn complete_upload_async(
+    pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
@@ -1970,12 +1964,12 @@ impl Fs {
             .complete_upload(upload_id, request)?)
     }
 
-    pub async fn commit_operations_async(
+    pub async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_namespace_mutations_batch_async(
+        self.publish_namespace_mutations_batch(
             namespace_id,
             vec![NamespaceMutationCandidate::Commit(request)],
         )
@@ -1989,12 +1983,12 @@ impl Fs {
         })
     }
 
-    pub async fn commit_operations_batch_async(
+    pub async fn commit_operations_batch(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<Result<CommitResponse>> {
-        self.publish_namespace_mutations_batch_async(
+        self.publish_namespace_mutations_batch(
             namespace_id,
             requests
                 .into_iter()
@@ -2004,7 +1998,7 @@ impl Fs {
         .await
     }
 
-    pub async fn publish_namespace_mutations_batch_async(
+    pub async fn publish_namespace_mutations_batch(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -2087,7 +2081,7 @@ impl Fs {
             .snapshot(self.inner.metadata_table_cache.stats())
     }
 
-    pub async fn list_changes_after_async(
+    pub async fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -2118,7 +2112,7 @@ impl Fs {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_checkpoint_async(
+    pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
@@ -2140,7 +2134,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub async fn advance_retention_floor_async(
+    pub async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {

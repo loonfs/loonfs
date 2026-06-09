@@ -229,7 +229,7 @@ async fn create_namespace(
     let namespace_id = parse_namespace_id(request.namespace_id)?;
     let summary = state
         .fs
-        .create_namespace_async(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(summary))
@@ -242,7 +242,7 @@ async fn list_namespaces_handler(
     authorize(&state.config, &headers)?;
     let namespaces = state
         .fs
-        .list_namespaces_async()
+        .list_namespaces()
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(ListNamespacesResponse { namespaces }))
@@ -259,7 +259,7 @@ async fn fork_namespace_handler(
     let new_namespace_id = parse_namespace_id(request.new_namespace_id)?;
     let summary = state
         .fs
-        .fork_namespace_async(&source_namespace_id, &new_namespace_id)
+        .fork_namespace(&source_namespace_id, &new_namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
     Ok(Json(summary))
@@ -276,7 +276,7 @@ async fn list_entries(
     let path = query.path;
     let entries = state
         .fs
-        .list_path_async(&namespace_id, &path)
+        .list_path(&namespace_id, &path)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entries))
@@ -293,7 +293,7 @@ async fn stat_entry(
     let path = query.path;
     let entry = state
         .fs
-        .stat_path_async(&namespace_id, &path)
+        .stat_path(&namespace_id, &path)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entry))
@@ -317,10 +317,10 @@ async fn get_content(
         Some(revision_no) => {
             state
                 .fs
-                .read_file_revision_bytes_async(&namespace_id, &path, revision_no)
+                .read_file_revision_bytes(&namespace_id, &path, revision_no)
                 .await
         }
-        None => state.fs.read_file_bytes_async(&namespace_id, &path).await,
+        None => state.fs.read_file_bytes(&namespace_id, &path).await,
     }
     .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, file.bytes).into_response())
@@ -337,7 +337,7 @@ async fn list_path_revisions(
     let path = query.path;
     let response = state
         .fs
-        .list_file_revisions_async(&namespace_id, &path)
+        .list_file_revisions(&namespace_id, &path)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -353,7 +353,7 @@ async fn list_inode_revisions(
     let inode_id = parse_inode_id(&inode_id)?;
     let response = state
         .fs
-        .list_file_revisions_for_inode_async(&namespace_id, inode_id)
+        .list_file_revisions_for_inode(&namespace_id, inode_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -370,7 +370,7 @@ async fn get_inode_revision_content(
     let revision_no = parse_revision_no(&revision_no)?;
     let bytes = state
         .fs
-        .read_file_revision_bytes_for_inode_async(&namespace_id, inode_id, revision_no)
+        .read_file_revision_bytes_for_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, bytes).into_response())
@@ -507,7 +507,7 @@ async fn begin_upload_handler(
     let namespace_id = parse_namespace_id(namespace)?;
     let response = state
         .fs
-        .begin_upload_async(&namespace_id)
+        .begin_upload(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -524,7 +524,7 @@ async fn upload_content_handler(
     let bytes = body.to_vec();
     let response = state
         .fs
-        .upload_content_async(&namespace_id, &upload_id, &bytes)
+        .upload_content(&namespace_id, &upload_id, &bytes)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -540,7 +540,7 @@ async fn complete_upload_handler(
     let namespace_id = parse_namespace_id(namespace)?;
     let response = state
         .fs
-        .complete_upload_async(&namespace_id, &upload_id, &request)
+        .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -573,7 +573,7 @@ async fn list_changes_handler(
     let after_seq = loon_api::ChangeSeq(query.after_seq);
     let response = state
         .fs
-        .list_changes_after_async(&namespace_id, after_seq)
+        .list_changes_after(&namespace_id, after_seq)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -588,7 +588,7 @@ async fn create_checkpoint_handler(
     let namespace_id = parse_namespace_id(namespace)?;
     let response = state
         .fs
-        .create_checkpoint_async(&namespace_id)
+        .create_checkpoint(&namespace_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -603,7 +603,7 @@ async fn advance_retention_handler(
     let namespace_id = parse_namespace_id(namespace)?;
     let response = state
         .fs
-        .advance_retention_floor_async(&namespace_id)
+        .advance_retention_floor(&namespace_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -898,10 +898,12 @@ mod tests {
                 .enable_all()
                 .build()
                 .expect("runtime")
-                .block_on(fs.create_namespace_async(
-                    &namespace_id("metrics"),
-                    CreateNamespaceOptions::default(),
-                ))
+                .block_on(
+                    fs.create_namespace(
+                        &namespace_id("metrics"),
+                        CreateNamespaceOptions::default(),
+                    ),
+                )
                 .expect("create namespace");
         }
 
@@ -916,10 +918,10 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let fs = test_runtime(store.clone(), "runtime-writer");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        fs.create_namespace_async(&namespace_id, CreateNamespaceOptions::default())
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace through runtime");
-        fs.put_file_bytes_async(
+        fs.put_file_bytes(
             &namespace_id,
             "/notes/hello.txt",
             b"hello from runtime",
@@ -968,7 +970,7 @@ mod tests {
         .expect("join blocking task");
 
         let file = fs
-            .read_file_bytes_async(
+            .read_file_bytes(
                 &NamespaceId::parse("demo").expect("valid namespace id"),
                 "/notes/from-http.txt",
             )

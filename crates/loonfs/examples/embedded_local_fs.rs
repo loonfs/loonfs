@@ -13,14 +13,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fs = Fs::builder(store).writer_id("embedded-example").build()?;
 
     let namespace_id = NamespaceId::parse("demo")?;
-    fs.create_namespace_async(
+    fs.create_namespace(
         &namespace_id,
         CreateNamespaceOptions {
             allow_existing: true,
         },
     )
     .await?;
-    fs.put_file_bytes_async(
+    fs.put_file_bytes(
         &namespace_id,
         "/hello.txt",
         b"hello from embedded LoonFS\n",
@@ -31,9 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let file = fs
-        .read_file_bytes_async(&namespace_id, "/hello.txt")
-        .await?;
+    let file = fs.read_file_bytes(&namespace_id, "/hello.txt").await?;
     println!("{}", String::from_utf8_lossy(&file.bytes));
     Ok(())
 }

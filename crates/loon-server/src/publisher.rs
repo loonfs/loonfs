@@ -317,7 +317,7 @@ impl NamespacePublisher {
                     .collect::<Vec<_>>();
                 results = self
                     .fs
-                    .publish_namespace_mutations_batch_async(&self.namespace_id, batch_candidates)
+                    .publish_namespace_mutations_batch(&self.namespace_id, batch_candidates)
                     .await
                     .into_iter()
                     .map(|result| result.map_err(runtime_error_to_core))
@@ -681,7 +681,7 @@ mod tests {
     }
 
     async fn create_namespace(fs: &Fs, namespace_id: &NamespaceId) {
-        fs.create_namespace_async(namespace_id, CreateNamespaceOptions::default())
+        fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("bootstrap");
     }
