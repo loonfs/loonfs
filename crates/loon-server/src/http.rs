@@ -715,14 +715,11 @@ impl ApiResponseError {
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
             }
-            error
-            @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
-                Self::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    &error.to_string(),
-                )
-            }
+            error @ RuntimeError::RuntimeTask(_) => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &error.to_string(),
+            ),
         }
     }
 
@@ -750,14 +747,11 @@ impl ApiResponseError {
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
             }
-            error
-            @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
-                Self::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    &error.to_string(),
-                )
-            }
+            error @ RuntimeError::RuntimeTask(_) => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &error.to_string(),
+            ),
         }
     }
 }
@@ -900,7 +894,14 @@ mod tests {
                 Some(metrics_path.clone().into_os_string()),
             )
             .expect("build fs");
-            fs.create_namespace(&namespace_id("metrics"), CreateNamespaceOptions::default())
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(fs.create_namespace_async(
+                    &namespace_id("metrics"),
+                    CreateNamespaceOptions::default(),
+                ))
                 .expect("create namespace");
         }
 

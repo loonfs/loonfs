@@ -12,12 +12,16 @@ use loon_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs::{
-    ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
+    ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, CopyOptions, CreateCheckpointResponse,
     CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
-    MaintenanceTickOptions, MaintenanceTickOutcome, ManifestId, MoveOptions, NamespaceId,
-    NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
+    MutationResult, NamespaceId, NamespaceMutationCandidate, NamespaceStatus, PathMutationIntent,
+    PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    TraceMode, TraceStoreKind, UploadContentResponse,
 };
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -36,6 +40,297 @@ fn runtime(root: &Path, writer_id: &str) -> Fs {
 
 fn namespace() -> NamespaceId {
     NamespaceId::parse("demo").expect("valid namespace id")
+}
+
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
+
+trait FsTestExt {
+    fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> loonfs::Result<loonfs::NamespaceSummary>;
+    fn fork_namespace(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> loonfs::Result<loonfs::NamespaceSummary>;
+    fn list_namespaces(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>>;
+    fn namespace_status(&self, namespace_id: &NamespaceId) -> loonfs::Result<NamespaceStatus>;
+    fn maintenance_tick_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> loonfs::Result<MaintenanceTickResult>;
+    fn stat_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativePathEntry>;
+    fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<Vec<AuthoritativePathEntry>>;
+    fn read_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativeFileBytes>;
+    fn put_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> loonfs::Result<MutationResult>;
+    fn create_dir(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirOptions,
+    ) -> loonfs::Result<MutationResult>;
+    fn delete_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: DeleteOptions,
+    ) -> loonfs::Result<MutationResult>;
+    fn move_path(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: MoveOptions,
+    ) -> loonfs::Result<MutationResult>;
+    fn copy_path(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: CopyOptions,
+    ) -> loonfs::Result<MutationResult>;
+    fn begin_upload(&self, namespace_id: &NamespaceId) -> loonfs::Result<BeginUploadResponse>;
+    fn upload_content(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        bytes: &[u8],
+    ) -> loonfs::Result<UploadContentResponse>;
+    fn complete_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        request: &CompleteUploadRequest,
+    ) -> loonfs::Result<CompleteUploadResponse>;
+    fn commit_operations(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> loonfs::Result<CommitResponse>;
+    fn commit_operations_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        requests: Vec<CommitRequest>,
+    ) -> Vec<loonfs::Result<CommitResponse>>;
+    fn publish_namespace_mutations_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<loonfs::Result<CommitResponse>>;
+    fn list_changes_after(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+    ) -> loonfs::Result<ChangesResponse>;
+    fn create_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<CreateCheckpointResponse>;
+    fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<AdvanceRetentionResponse>;
+}
+
+impl FsTestExt for Fs {
+    fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+        block_on(self.create_namespace_async(namespace_id, options))
+    }
+
+    fn fork_namespace(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+        block_on(self.fork_namespace_async(source, target))
+    }
+
+    fn list_namespaces(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>> {
+        block_on(self.list_namespaces_async())
+    }
+
+    fn namespace_status(&self, namespace_id: &NamespaceId) -> loonfs::Result<NamespaceStatus> {
+        block_on(self.namespace_status_async(namespace_id))
+    }
+
+    fn maintenance_tick_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> loonfs::Result<MaintenanceTickResult> {
+        block_on(self.maintenance_tick_namespace_async(namespace_id, options))
+    }
+
+    fn stat_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativePathEntry> {
+        block_on(self.stat_path_async(namespace_id, absolute_path))
+    }
+
+    fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
+        block_on(self.list_path_async(namespace_id, absolute_path))
+    }
+
+    fn read_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativeFileBytes> {
+        block_on(self.read_file_bytes_async(namespace_id, absolute_path))
+    }
+
+    fn put_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> loonfs::Result<MutationResult> {
+        block_on(self.put_file_bytes_async(namespace_id, absolute_path, bytes, options))
+    }
+
+    fn create_dir(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirOptions,
+    ) -> loonfs::Result<MutationResult> {
+        block_on(self.create_dir_async(namespace_id, absolute_path, options))
+    }
+
+    fn delete_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: DeleteOptions,
+    ) -> loonfs::Result<MutationResult> {
+        block_on(self.delete_path_async(namespace_id, absolute_path, options))
+    }
+
+    fn move_path(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: MoveOptions,
+    ) -> loonfs::Result<MutationResult> {
+        block_on(self.move_path_async(namespace_id, from_path, to_path, options))
+    }
+
+    fn copy_path(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: CopyOptions,
+    ) -> loonfs::Result<MutationResult> {
+        block_on(self.copy_path_async(namespace_id, from_path, to_path, options))
+    }
+
+    fn begin_upload(&self, namespace_id: &NamespaceId) -> loonfs::Result<BeginUploadResponse> {
+        block_on(self.begin_upload_async(namespace_id))
+    }
+
+    fn upload_content(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        bytes: &[u8],
+    ) -> loonfs::Result<UploadContentResponse> {
+        block_on(self.upload_content_async(namespace_id, upload_id, bytes))
+    }
+
+    fn complete_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        request: &CompleteUploadRequest,
+    ) -> loonfs::Result<CompleteUploadResponse> {
+        block_on(self.complete_upload_async(namespace_id, upload_id, request))
+    }
+
+    fn commit_operations(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(self.commit_operations_async(namespace_id, request))
+    }
+
+    fn commit_operations_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        requests: Vec<CommitRequest>,
+    ) -> Vec<loonfs::Result<CommitResponse>> {
+        block_on(self.commit_operations_batch_async(namespace_id, requests))
+    }
+
+    fn publish_namespace_mutations_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<loonfs::Result<CommitResponse>> {
+        block_on(self.publish_namespace_mutations_batch_async(namespace_id, candidates))
+    }
+
+    fn list_changes_after(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+    ) -> loonfs::Result<ChangesResponse> {
+        block_on(self.list_changes_after_async(namespace_id, after_seq))
+    }
+
+    fn create_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<CreateCheckpointResponse> {
+        block_on(self.create_checkpoint_async(namespace_id))
+    }
+
+    fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<AdvanceRetentionResponse> {
+        block_on(self.advance_retention_floor_async(namespace_id))
+    }
 }
 
 fn assert_config_error(result: loonfs::Result<Fs>, expected: &str) {
@@ -246,34 +541,10 @@ async fn async_runtime_methods_are_the_engine_boundary() {
         .await
         .expect("async stat");
 
-    let sync_fs = fs.clone();
-    let sync_namespace_id = namespace_id.clone();
-    let sync_stat = std::thread::spawn(move || {
-        sync_fs
-            .stat_path(&sync_namespace_id, "/docs/hello.txt")
-            .expect("sync facade stat from non-tokio thread")
-    })
-    .join()
-    .expect("join sync facade thread");
-
-    assert_eq!(async_stat, sync_stat);
+    assert_eq!(async_stat.absolute_path, "/docs/hello.txt");
+    assert_eq!(async_stat.size_bytes, Some(5));
     let stats = fs.runtime_cache_stats();
     assert!(stats.async_engine_calls >= 3);
-    assert!(stats.sync_facade_calls >= 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sync_runtime_facade_refuses_inside_tokio() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "nested-runtime-test");
-
-    match fs.list_namespaces() {
-        Err(RuntimeError::CannotBlockInsideAsyncRuntime) => {}
-        Err(error) => panic!("expected nested runtime error, got {error:?}"),
-        Ok(_) => panic!("expected nested runtime error"),
-    }
-
-    assert_eq!(fs.runtime_cache_stats().block_inside_tokio_errors, 1);
 }
 
 #[test]

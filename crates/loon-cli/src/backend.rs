@@ -11,6 +11,7 @@ use loonfs::{
     RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
     TraceStoreKind,
 };
+use std::future::Future;
 use std::sync::Arc;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
@@ -188,14 +189,34 @@ fn map_client_error(error: ClientError) -> CliError {
 
 pub struct EmbeddedBackend {
     fs: Fs,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl EmbeddedBackend {
+    fn block_on<T, F>(&self, future: F) -> Result<T, CliError>
+    where
+        F: Future<Output = loonfs::Result<T>>,
+    {
+        self.runtime.block_on(future).map_err(map_runtime_error)
+    }
+
+    fn block_on_scoped<T, F>(&self, namespace: &str, future: F) -> Result<T, CliError>
+    where
+        F: Future<Output = loonfs::Result<T>>,
+    {
+        self.runtime
+            .block_on(future)
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace, error))
+    }
 }
 
 impl Backend for EmbeddedBackend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
         let ns_id = parse_namespace_id(namespace_id)?;
-        self.fs
-            .create_namespace(&ns_id, CreateNamespaceOptions::default())
-            .map_err(map_runtime_error)
+        self.block_on(
+            self.fs
+                .create_namespace_async(&ns_id, CreateNamespaceOptions::default()),
+        )
     }
 
     fn fork_namespace(
@@ -205,35 +226,38 @@ impl Backend for EmbeddedBackend {
     ) -> Result<NamespaceSummary, CliError> {
         let source_namespace_id = parse_namespace_id(source)?;
         let new_namespace_id = parse_namespace_id(new_namespace_id)?;
-        self.fs
-            .fork_namespace(&source_namespace_id, &new_namespace_id)
-            .map_err(map_runtime_error)
+        self.block_on(
+            self.fs
+                .fork_namespace_async(&source_namespace_id, &new_namespace_id),
+        )
     }
 
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
-        self.fs.list_namespaces().map_err(map_runtime_error)
+        self.block_on(self.fs.list_namespaces_async())
     }
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        self.fs
-            .list_path(&ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs.list_path_async(&ns_id, &spec.absolute_path),
+        )
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        self.fs
-            .stat_path(&ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs.stat_path_async(&ns_id, &spec.absolute_path),
+        )
     }
 
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        let result = self
-            .fs
-            .read_file_bytes(&ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
+        let result = self.block_on_scoped(
+            &spec.namespace,
+            self.fs.read_file_bytes_async(&ns_id, &spec.absolute_path),
+        )?;
         Ok(result.bytes)
     }
 
@@ -243,10 +267,11 @@ impl Backend for EmbeddedBackend {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        let result = self
-            .fs
-            .read_file_revision_bytes(&ns_id, &spec.absolute_path, revision_no)
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
+        let result = self.block_on_scoped(
+            &spec.namespace,
+            self.fs
+                .read_file_revision_bytes_async(&ns_id, &spec.absolute_path, revision_no),
+        )?;
         Ok(result.bytes)
     }
 
@@ -255,9 +280,11 @@ impl Backend for EmbeddedBackend {
         spec: &NamespacePath,
     ) -> Result<ListFileRevisionsResponse, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        self.fs
-            .list_file_revisions(&ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs
+                .list_file_revisions_async(&ns_id, &spec.absolute_path),
+        )
     }
 
     fn put_file_bytes(
@@ -273,8 +300,9 @@ impl Backend for EmbeddedBackend {
             PutFileBehavior::CreateOnly
         };
         let commit_id = generated_commit_id();
-        self.fs
-            .put_file_bytes(
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs.put_file_bytes_async(
                 &ns_id,
                 &spec.absolute_path,
                 bytes,
@@ -282,37 +310,39 @@ impl Backend for EmbeddedBackend {
                     behavior,
                     commit_id: Some(commit_id),
                 },
-            )
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            ),
+        )
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        self.fs
-            .delete_path(
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs.delete_path_async(
                 &ns_id,
                 &spec.absolute_path,
                 DeleteOptions {
                     recursive: false,
                     commit_id: Some(commit_id),
                 },
-            )
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            ),
+        )
     }
 
     fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        self.fs
-            .create_dir(
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs.create_dir_async(
                 &ns_id,
                 &spec.absolute_path,
                 CreateDirOptions {
                     commit_id: Some(commit_id),
                 },
-            )
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            ),
+        )
     }
 
     fn move_path(
@@ -322,16 +352,17 @@ impl Backend for EmbeddedBackend {
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
-        self.fs
-            .move_path(
+        self.block_on_scoped(
+            &from.namespace,
+            self.fs.move_path_async(
                 &ns_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 MoveOptions {
                     commit_id: Some(commit_id),
                 },
-            )
-            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
+            ),
+        )
     }
 
     fn copy_path(
@@ -341,16 +372,17 @@ impl Backend for EmbeddedBackend {
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
-        self.fs
-            .copy_path(
+        self.block_on_scoped(
+            &from.namespace,
+            self.fs.copy_path_async(
                 &ns_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 CopyOptions {
                     commit_id: Some(commit_id),
                 },
-            )
-            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
+            ),
+        )
     }
 
     fn restore_file_revision(
@@ -360,16 +392,17 @@ impl Backend for EmbeddedBackend {
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        self.fs
-            .restore_file_revision(
+        self.block_on_scoped(
+            &spec.namespace,
+            self.fs.restore_file_revision_async(
                 &ns_id,
                 &spec.absolute_path,
                 source_revision_no,
                 RestoreRevisionOptions {
                     commit_id: Some(commit_id),
                 },
-            )
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            ),
+        )
     }
 }
 
@@ -386,9 +419,7 @@ fn map_runtime_error(error: RuntimeError) -> CliError {
         RuntimeError::Core(error) => map_core_error(error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
-        error @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
-            CliError::new("runtime_error", error.to_string())
-        }
+        RuntimeError::RuntimeTask(message) => CliError::new("runtime_error", message),
     }
 }
 
@@ -397,9 +428,7 @@ fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> C
         RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace, error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
-        error @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
-            CliError::new("runtime_error", error.to_string())
-        }
+        RuntimeError::RuntimeTask(message) => CliError::new("runtime_error", message),
     }
 }
 
@@ -532,7 +561,11 @@ impl EmbeddedTarget {
             },
         )
         .map_err(map_runtime_error)?;
-        let backend = EmbeddedBackend { fs };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| CliError::invalid_config(error.to_string()))?;
+        let backend = EmbeddedBackend { fs, runtime };
         Ok(Self { backend })
     }
 }
@@ -639,12 +672,14 @@ mod tests {
             )
             .expect("put file");
 
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let changes = target
             .backend
-            .fs
-            .list_changes_after(
-                &NamespaceId::parse("demo").expect("valid namespace id"),
-                ChangeSeq(0),
+            .block_on(
+                target
+                    .backend
+                    .fs
+                    .list_changes_after_async(&namespace_id, ChangeSeq(0)),
             )
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);

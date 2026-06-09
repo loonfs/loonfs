@@ -9,7 +9,6 @@
 mod trace;
 
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -78,8 +77,6 @@ pub enum RuntimeError {
     Bootstrap(#[from] BootstrapNamespaceError),
     #[error("invalid runtime config: {0}")]
     Config(String),
-    #[error("synchronous LoonFS calls cannot block inside an async runtime; use the async API")]
-    CannotBlockInsideAsyncRuntime,
     #[error("runtime task failed: {0}")]
     RuntimeTask(String),
 }
@@ -174,71 +171,12 @@ pub struct Fs {
 struct FsInner {
     store: SharedObjectStore,
     config: FsConfig,
-    sync_runtime: SyncRuntimeFacade,
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
     metadata_table_cache: Arc<MetadataTableCache>,
     uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     cache_stats: RuntimeCacheStatsInner,
-}
-
-struct SyncRuntimeFacade {
-    runtime: Mutex<Option<tokio::runtime::Runtime>>,
-}
-
-impl SyncRuntimeFacade {
-    fn new() -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| RuntimeError::Config(error.to_string()))?;
-        Ok(Self {
-            runtime: Mutex::new(Some(runtime)),
-        })
-    }
-
-    fn block_on_outside_tokio<T, F>(&self, stats: &RuntimeCacheStatsInner, future: F) -> Result<T>
-    where
-        F: Future<Output = Result<T>>,
-    {
-        self.block_on_value_outside_tokio(stats, future)?
-    }
-
-    fn block_on_value_outside_tokio<T, F>(
-        &self,
-        stats: &RuntimeCacheStatsInner,
-        future: F,
-    ) -> Result<T>
-    where
-        F: Future<Output = T>,
-    {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            stats
-                .block_inside_tokio_errors
-                .fetch_add(1, Ordering::SeqCst);
-            return Err(RuntimeError::CannotBlockInsideAsyncRuntime);
-        }
-        stats.sync_facade_calls.fetch_add(1, Ordering::SeqCst);
-        let runtime = self.runtime.lock().expect("sync runtime lock poisoned");
-        let runtime = runtime
-            .as_ref()
-            .expect("sync runtime should be available until drop");
-        Ok(runtime.block_on(future))
-    }
-}
-
-impl Drop for SyncRuntimeFacade {
-    fn drop(&mut self) {
-        if let Some(runtime) = self
-            .runtime
-            .get_mut()
-            .expect("sync runtime lock poisoned")
-            .take()
-        {
-            runtime.shutdown_background();
-        }
-    }
 }
 
 /// Builder for [`Fs`].
@@ -753,9 +691,7 @@ struct CachedControl<T> {
 /// These counters are diagnostic. They are useful for tuning cache limits and
 /// understanding read/write warmup behavior.
 pub struct RuntimeCacheStats {
-    pub sync_facade_calls: usize,
     pub async_engine_calls: usize,
-    pub block_inside_tokio_errors: usize,
     pub warm_basis_cache_hits: usize,
     pub warm_basis_cache_misses: usize,
     pub warm_basis_evictions: usize,
@@ -788,9 +724,7 @@ enum MetadataReadSource {
 
 #[derive(Debug, Default)]
 struct RuntimeCacheStatsInner {
-    sync_facade_calls: AtomicUsize,
     async_engine_calls: AtomicUsize,
-    block_inside_tokio_errors: AtomicUsize,
     warm_basis_cache_hits: AtomicUsize,
     warm_basis_cache_misses: AtomicUsize,
     warm_basis_evictions: AtomicUsize,
@@ -814,9 +748,7 @@ struct RuntimeCacheStatsInner {
 impl RuntimeCacheStatsInner {
     fn snapshot(&self, metadata_table_cache: MetadataTableCacheStats) -> RuntimeCacheStats {
         RuntimeCacheStats {
-            sync_facade_calls: self.sync_facade_calls.load(Ordering::SeqCst),
             async_engine_calls: self.async_engine_calls.load(Ordering::SeqCst),
-            block_inside_tokio_errors: self.block_inside_tokio_errors.load(Ordering::SeqCst),
             warm_basis_cache_hits: self.warm_basis_cache_hits.load(Ordering::SeqCst),
             warm_basis_cache_misses: self.warm_basis_cache_misses.load(Ordering::SeqCst),
             warm_basis_evictions: self.warm_basis_evictions.load(Ordering::SeqCst),
@@ -1212,7 +1144,6 @@ impl Fs {
             inner: Arc::new(FsInner {
                 store,
                 config,
-                sync_runtime: SyncRuntimeFacade::new()?,
                 basis_cache: Mutex::new(BasisCache::default()),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
@@ -1238,24 +1169,6 @@ impl Fs {
         span.record("store_kind", self.inner.config.trace_store_kind.as_str());
     }
 
-    fn block_on_sync<T, F>(&self, future: F) -> Result<T>
-    where
-        F: Future<Output = Result<T>>,
-    {
-        self.inner
-            .sync_runtime
-            .block_on_outside_tokio(&self.inner.cache_stats, future)
-    }
-
-    fn block_on_sync_value<T, F>(&self, future: F) -> Result<T>
-    where
-        F: Future<Output = T>,
-    {
-        self.inner
-            .sync_runtime
-            .block_on_value_outside_tokio(&self.inner.cache_stats, future)
-    }
-
     async fn run_engine_blocking<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -1270,14 +1183,6 @@ impl Fs {
         })
         .await
         .map_err(|error| RuntimeError::RuntimeTask(error.to_string()))?
-    }
-
-    pub fn create_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        options: CreateNamespaceOptions,
-    ) -> Result<NamespaceSummary> {
-        self.block_on_sync(self.create_namespace_async(namespace_id, options))
     }
 
     pub async fn create_namespace_async(
@@ -1302,14 +1207,6 @@ impl Fs {
             })
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    pub fn fork_namespace(
-        &self,
-        source: &NamespaceId,
-        target: &NamespaceId,
-    ) -> Result<NamespaceSummary> {
-        self.block_on_sync(self.fork_namespace_async(source, target))
     }
 
     pub async fn fork_namespace_async(
@@ -1341,10 +1238,6 @@ impl Fs {
         result
     }
 
-    pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
-        self.block_on_sync(self.list_namespaces_async())
-    }
-
     pub async fn list_namespaces_async(&self) -> Result<Vec<NamespaceSummary>> {
         self.run_engine_blocking(|fs| fs.list_namespaces_blocking())
             .await
@@ -1352,10 +1245,6 @@ impl Fs {
 
     fn list_namespaces_blocking(&self) -> Result<Vec<NamespaceSummary>> {
         Ok(loon_core::list_namespaces(self.store())?)
-    }
-
-    pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
-        self.block_on_sync(self.namespace_status_async(namespace_id))
     }
 
     pub async fn namespace_status_async(
@@ -1377,25 +1266,6 @@ impl Fs {
             wal_tail_segments: summary.wal_tail_segments,
             retention_floor_seq: summary.retention_floor_seq,
         })
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loon.compaction",
-        err,
-        skip_all,
-        fields(
-            operation = "compaction",
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub fn maintenance_tick_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        options: MaintenanceTickOptions,
-    ) -> Result<MaintenanceTickResult> {
-        self.block_on_sync(self.maintenance_tick_namespace_async(namespace_id, options))
     }
 
     #[tracing::instrument(
@@ -1493,26 +1363,6 @@ impl Fs {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub fn stat_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<AuthoritativePathEntry> {
-        self.block_on_sync(self.stat_path_async(namespace_id, absolute_path))
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loon.stat",
-        err,
-        skip_all,
-        fields(
-            operation = "stat",
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-            cache_path = tracing::field::Empty,
-        )
-    )]
     pub async fn stat_path_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1560,14 +1410,6 @@ impl Fs {
         Ok(entry)
     }
 
-    pub fn list_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<Vec<AuthoritativePathEntry>> {
-        self.block_on_sync(self.list_path_async(namespace_id, absolute_path))
-    }
-
     pub async fn list_path_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1611,14 +1453,6 @@ impl Fs {
         Ok(entries)
     }
 
-    pub fn read_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<AuthoritativeFileBytes> {
-        self.block_on_sync(self.read_file_bytes_async(namespace_id, absolute_path))
-    }
-
     pub async fn read_file_bytes_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1642,14 +1476,6 @@ impl Fs {
             absolute_path,
             loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
         )?)
-    }
-
-    pub fn list_file_revisions(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<ListFileRevisionsResponse> {
-        self.block_on_sync(self.list_file_revisions_async(namespace_id, absolute_path))
     }
 
     pub async fn list_file_revisions_async(
@@ -1677,14 +1503,6 @@ impl Fs {
         )?)
     }
 
-    pub fn list_file_revisions_for_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-    ) -> Result<ListFileRevisionsResponse> {
-        self.block_on_sync(self.list_file_revisions_for_inode_async(namespace_id, inode_id))
-    }
-
     pub async fn list_file_revisions_for_inode_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1709,19 +1527,6 @@ impl Fs {
                 inode_id,
                 loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )?)
-    }
-
-    pub fn read_file_revision_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        revision_no: RevisionNo,
-    ) -> Result<AuthoritativeFileBytes> {
-        self.block_on_sync(self.read_file_revision_bytes_async(
-            namespace_id,
-            absolute_path,
-            revision_no,
-        ))
     }
 
     pub async fn read_file_revision_bytes_async(
@@ -1752,19 +1557,6 @@ impl Fs {
         )?)
     }
 
-    pub fn read_file_revision_bytes_for_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Result<Vec<u8>> {
-        self.block_on_sync(self.read_file_revision_bytes_for_inode_async(
-            namespace_id,
-            inode_id,
-            revision_no,
-        ))
-    }
-
     pub async fn read_file_revision_bytes_for_inode_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1792,28 +1584,6 @@ impl Fs {
                 revision_no,
                 loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )?)
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loon.put",
-        err,
-        skip_all,
-        fields(
-            operation = "put",
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-            payload_class = tracing::field::Empty,
-        )
-    )]
-    pub fn put_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        bytes: &[u8],
-        options: PutFileOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.put_file_bytes_async(namespace_id, absolute_path, bytes, options))
     }
 
     #[tracing::instrument(
@@ -1882,33 +1652,6 @@ impl Fs {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub fn put_file_content_ref(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        content_ref: ContentRef,
-        options: PutFileOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.put_file_content_ref_async(
-            namespace_id,
-            absolute_path,
-            content_ref,
-            options,
-        ))
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loon.put",
-        err,
-        skip_all,
-        fields(
-            operation = "put",
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-            payload_class = tracing::field::Empty,
-        )
-    )]
     pub async fn put_file_content_ref_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1953,15 +1696,6 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub fn create_dir(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        options: CreateDirOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.create_dir_async(namespace_id, absolute_path, options))
-    }
-
     pub async fn create_dir_async(
         &self,
         namespace_id: &NamespaceId,
@@ -1993,15 +1727,6 @@ impl Fs {
             )
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    pub fn delete_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        options: DeleteOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.delete_path_async(namespace_id, absolute_path, options))
     }
 
     pub async fn delete_path_async(
@@ -2036,16 +1761,6 @@ impl Fs {
             )
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    pub fn move_path(
-        &self,
-        namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
-        options: MoveOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.move_path_async(namespace_id, from_path, to_path, options))
     }
 
     pub async fn move_path_async(
@@ -2085,16 +1800,6 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub fn copy_path(
-        &self,
-        namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
-        options: CopyOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.copy_path_async(namespace_id, from_path, to_path, options))
-    }
-
     pub async fn copy_path_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2130,21 +1835,6 @@ impl Fs {
             )
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    pub fn restore_file_revision(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        source_revision_no: RevisionNo,
-        options: RestoreRevisionOptions,
-    ) -> Result<MutationResult> {
-        self.block_on_sync(self.restore_file_revision_async(
-            namespace_id,
-            absolute_path,
-            source_revision_no,
-            options,
-        ))
     }
 
     pub async fn restore_file_revision_async(
@@ -2188,23 +1878,6 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub fn restore_file_revision_for_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
-        options: RestoreRevisionOptions,
-    ) -> Result<CommitResponse> {
-        self.block_on_sync(self.restore_file_revision_for_inode_async(
-            namespace_id,
-            inode_id,
-            source_revision_no,
-            base_revision_no,
-            options,
-        ))
-    }
-
     pub async fn restore_file_revision_for_inode_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2231,10 +1904,6 @@ impl Fs {
         self.commit_operations_async(namespace_id, request).await
     }
 
-    pub fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
-        self.block_on_sync(self.begin_upload_async(namespace_id))
-    }
-
     pub async fn begin_upload_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2246,15 +1915,6 @@ impl Fs {
 
     fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
         Ok(self.namespace_engine(namespace_id).begin_upload()?)
-    }
-
-    pub fn upload_content(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &str,
-        bytes: &[u8],
-    ) -> Result<UploadContentResponse> {
-        self.block_on_sync(self.upload_content_async(namespace_id, upload_id, bytes))
     }
 
     pub async fn upload_content_async(
@@ -2284,15 +1944,6 @@ impl Fs {
             .upload_content(upload_id, bytes)?)
     }
 
-    pub fn complete_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &str,
-        request: &CompleteUploadRequest,
-    ) -> Result<CompleteUploadResponse> {
-        self.block_on_sync(self.complete_upload_async(namespace_id, upload_id, request))
-    }
-
     pub async fn complete_upload_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2319,14 +1970,6 @@ impl Fs {
             .complete_upload(upload_id, request)?)
     }
 
-    pub fn commit_operations(
-        &self,
-        namespace_id: &NamespaceId,
-        request: CommitRequest,
-    ) -> Result<CommitResponse> {
-        self.block_on_sync(self.commit_operations_async(namespace_id, request))
-    }
-
     pub async fn commit_operations_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2346,18 +1989,6 @@ impl Fs {
         })
     }
 
-    pub fn commit_operations_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
-    ) -> Vec<Result<CommitResponse>> {
-        let result_count = requests.len();
-        match self.block_on_sync_value(self.commit_operations_batch_async(namespace_id, requests)) {
-            Ok(results) => results,
-            Err(error) => repeat_runtime_error(result_count, error),
-        }
-    }
-
     pub async fn commit_operations_batch_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2371,20 +2002,6 @@ impl Fs {
                 .collect(),
         )
         .await
-    }
-
-    pub fn publish_namespace_mutations_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<Result<CommitResponse>> {
-        let result_count = candidates.len();
-        match self.block_on_sync_value(
-            self.publish_namespace_mutations_batch_async(namespace_id, candidates),
-        ) {
-            Ok(results) => results,
-            Err(error) => repeat_runtime_error(result_count, error),
-        }
     }
 
     pub async fn publish_namespace_mutations_batch_async(
@@ -2470,14 +2087,6 @@ impl Fs {
             .snapshot(self.inner.metadata_table_cache.stats())
     }
 
-    pub fn list_changes_after(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-    ) -> Result<ChangesResponse> {
-        self.block_on_sync(self.list_changes_after_async(namespace_id, after_seq))
-    }
-
     pub async fn list_changes_after_async(
         &self,
         namespace_id: &NamespaceId,
@@ -2496,24 +2105,6 @@ impl Fs {
         Ok(self
             .namespace_engine(namespace_id)
             .list_changes_after(after_seq)?)
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loon.compaction",
-        err,
-        skip_all,
-        fields(
-            operation = "compaction",
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub fn create_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<CreateCheckpointResponse> {
-        self.block_on_sync(self.create_checkpoint_async(namespace_id))
     }
 
     #[tracing::instrument(
@@ -2547,13 +2138,6 @@ impl Fs {
             .create_checkpoint()
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
-    }
-
-    pub fn advance_retention_floor(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse> {
-        self.block_on_sync(self.advance_retention_floor_async(namespace_id))
     }
 
     pub async fn advance_retention_floor_async(
@@ -3072,9 +2656,6 @@ fn repeat_runtime_error<T>(count: usize, error: RuntimeError) -> Vec<Result<T>> 
             Err(match &error {
                 RuntimeError::Core(error) => RuntimeError::Core(error.clone()),
                 RuntimeError::Config(message) => RuntimeError::Config(message.clone()),
-                RuntimeError::CannotBlockInsideAsyncRuntime => {
-                    RuntimeError::CannotBlockInsideAsyncRuntime
-                }
                 RuntimeError::RuntimeTask(message) => RuntimeError::RuntimeTask(message.clone()),
                 RuntimeError::Bootstrap(_) => RuntimeError::RuntimeTask(message.clone()),
             })

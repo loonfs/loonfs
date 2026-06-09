@@ -461,9 +461,7 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
         RuntimeError::Core(error) => error,
         RuntimeError::Bootstrap(error) => CoreError::Store(error.to_string()),
         RuntimeError::Config(message) => CoreError::Store(message),
-        error @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
-            CoreError::Store(error.to_string())
-        }
+        RuntimeError::RuntimeTask(message) => CoreError::Store(message),
     }
 }
 
