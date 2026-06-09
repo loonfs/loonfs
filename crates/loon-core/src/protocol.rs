@@ -31,7 +31,8 @@ use loon_api::v0::{
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::wire::control::{
-    CompletedUpload, ControlObjectKind, HeadState, UploadSessionEnvelope, UploadSessionState,
+    decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind, HeadState,
+    UploadSessionEnvelope, UploadSessionState,
 };
 use loon_api::wire::wal::{WalCommitDelta, WalDelta};
 use loon_api::{
@@ -134,7 +135,8 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         state,
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let encoded = serde_json::to_vec(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+    let encoded =
+        encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
     let object_key = upload_session(namespace_id.as_str(), &upload_id);
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
@@ -252,7 +254,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         )
         .map_err(|err| CoreError::Store(err.to_string()))?;
         let encoded =
-            serde_json::to_vec(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
         let expected_etag = loaded
             .metadata
             .etag
@@ -324,7 +326,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         )
         .map_err(|err| CoreError::Store(err.to_string()))?;
         let encoded =
-            serde_json::to_vec(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
         let expected_etag = loaded
             .metadata
             .etag
@@ -1061,20 +1063,9 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
             upload_id: upload_id.to_owned(),
         })?;
     let envelope: UploadSessionEnvelope =
-        serde_json::from_slice(&encoded).map_err(|err| CoreError::Store(err.to_string()))?;
-    if envelope.kind != ControlObjectKind::UploadSession {
-        return Err(CoreError::Store(format!(
-            "unexpected upload session kind for `{object_key}`"
-        )));
-    }
-    if !envelope
-        .has_valid_payload_checksum()
-        .map_err(|err| CoreError::Store(err.to_string()))?
-    {
-        return Err(CoreError::Store(format!(
-            "upload session checksum mismatch for `{object_key}`"
-        )));
-    }
+        decode_control_object(&encoded, ControlObjectKind::UploadSession).map_err(|err| {
+            CoreError::Store(format!("invalid upload session `{object_key}`: {err}"))
+        })?;
     if envelope.state.namespace_id != *namespace_id {
         return Err(CoreError::Store(format!(
             "upload session namespace mismatch for `{object_key}`"

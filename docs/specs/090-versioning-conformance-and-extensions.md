@@ -14,6 +14,42 @@ A new version should be introduced only when an old implementation could misread
 
 The durable namespace descriptor and content-store descriptor are storage-format objects. The namespace descriptor is authoritative for the namespace-to-content-store relationship; a future catalog may index descriptors but must not replace their meaning.
 
+### 1.1 Durable envelope layout
+
+Every durable LoonFS object is an envelope document with the same leading fields, followed by the payload as an opaque sub-document:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | snake_case object kind string. |
+| `format_version` | Per-family format version (see table below). |
+| `writer_version` | Informational `crate/<version>` of the writer. Never used for decode decisions. |
+| `payload_checksum` | `sha256:<64 lowercase hex>` digest of the exact payload bytes as stored. |
+| `payload` | The payload: a raw JSON sub-document in JSON families, a CBOR byte string in CBOR families. |
+
+Two rules make these envelopes evolvable:
+
+1. **Checksums cover stored bytes, never a re-encoding.** Readers verify `payload_checksum` against the payload bytes exactly as stored, before decoding them. A checksum failure therefore always means corruption; version skew can never be misreported as corruption.
+2. **Readers probe before they decode.** Readers first decode only `kind` and `format_version`, so an object written with an unknown kind or an unsupported format version fails with a precise, typed error rather than a generic decode error.
+
+### 1.2 Format families and versions
+
+| Family | `kind` | Encoding | Current version |
+| --- | --- | --- | --- |
+| WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 2 |
+| Metadata SST | `metadata_sst` | CBOR envelope, zstd-compressed; CBOR payload | 5 |
+| Namespace manifest | `namespace_manifest` | JSON, uncompressed | 6 |
+| Control objects (head, lease, descriptors, fork state, GC pin, derived progress, upload session) | per-kind snake_case names | JSON, uncompressed | 2 (tracked per kind) |
+
+JSON families keep their payload inline as raw JSON so manifests and control objects stay directly readable with generic tooling; CBOR families carry the payload as a byte string. Control-object versions are tracked per kind so one kind's payload schema can change without invalidating the others.
+
+### 1.3 Evolution rules
+
+- **Additive within a version.** A writer may add new payload fields without bumping `format_version`. Readers must ignore unknown payload and envelope fields. This is the only same-version change allowed.
+- **Everything else bumps the version.** Renaming, removing, retyping, or re-tagging any field — or changing the payload encoding — requires bumping the owning family's `format_version`. Readers reject versions they do not support with a typed unsupported-version error; there is no silent fallback.
+- **Digest strings are self-describing.** Durable digest values carry their algorithm as a prefix (`sha256:<hex>`) so a future algorithm can be introduced without re-interpreting old values.
+- **Unknown content-ref kinds round-trip.** A reader that does not understand a `content_ref.kind` must preserve the original string when relaying or rewriting rows; it must not create new references with kinds it does not understand (see 050 §1.3).
+- **Every encoding is pinned by golden-byte fixtures** (`crates/loon-api/tests/golden_formats.rs`). An encoder change that alters durable bytes fails those tests; the failure message demands either reverting the change or bumping the format version and regenerating the fixtures.
+
 ## 2. Server requirements
 
 A conforming server must:

@@ -8,7 +8,9 @@ use loon_api::{
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     validate_checkpoint_id,
-    wire::control::{ControlObjectKind, LeaseStateEnvelope},
+    wire::control::{
+        decode_control_object, encode_control_object, ControlObjectKind, LeaseStateEnvelope,
+    },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
     InodeId, InodeKind, ManifestId, RevisionNo,
 };
@@ -1265,7 +1267,8 @@ fn force_expire_namespace_lease(
         .expect("read namespace lease")
         .expect("namespace lease exists");
     let mut envelope: LeaseStateEnvelope =
-        serde_json::from_slice(&bytes).expect("decode namespace lease");
+        decode_control_object(&bytes, ControlObjectKind::NamespaceLease)
+            .expect("decode namespace lease");
     envelope.state.lease_expires_at_ms = 0;
     let writer_version = envelope.writer_version;
     let envelope = LeaseStateEnvelope::from_state(
@@ -1274,7 +1277,7 @@ fn force_expire_namespace_lease(
         envelope.state,
     )
     .expect("encode expired namespace lease");
-    let bytes = serde_json::to_vec(&envelope).expect("serialize expired namespace lease");
+    let bytes = encode_control_object(&envelope).expect("serialize expired namespace lease");
     block_on(store.put_overwrite(&lease_key, Bytes::from(bytes)))
         .expect("write expired namespace lease");
 }

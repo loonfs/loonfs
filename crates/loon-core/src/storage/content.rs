@@ -57,7 +57,7 @@ impl ContentValidationTracker {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum DurableContentValidationError {
-    #[error("unsupported content ref kind `{kind:?}`")]
+    #[error("unsupported content ref kind `{kind}`")]
     UnsupportedContentRefKind { kind: ContentRefKind },
     #[error("invalid content digest `{digest}`: {message}")]
     InvalidDigest { digest: String, message: String },
@@ -119,7 +119,7 @@ fn content_object_key_for_ref(
 ) -> Result<String, DurableContentValidationError> {
     if content_ref.kind != ContentRefKind::WholeFileV0 {
         return Err(DurableContentValidationError::UnsupportedContentRefKind {
-            kind: content_ref.kind,
+            kind: content_ref.kind.clone(),
         });
     }
 
@@ -430,7 +430,7 @@ mod tests {
     async fn validate_whole_file_content_ref_rejects_unsupported_kind() {
         let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef {
-            kind: ContentRefKind::Unsupported,
+            kind: ContentRefKind::Unsupported("kind_from_the_future".to_owned()),
             digest: ContentRef::whole_file_v0(b"bytes").digest,
             size_bytes: 5,
         };

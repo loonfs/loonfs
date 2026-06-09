@@ -20,12 +20,12 @@ use crate::storage::content::write_immutable_object;
 use bytes::Bytes;
 use futures::future::try_join_all;
 use loon_api::wire::control::{
-    ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
+    decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
+    ProgressStateEnvelope,
 };
 use loon_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
-    encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json,
-    metadata_page_checksum_sha256, metadata_sst_payload_checksum_sha256, MetadataFileRef,
+    encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
     MetadataTableFamily, NamespaceCheckpointRecord, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
@@ -373,13 +373,13 @@ pub enum ManifestLoadError {
         actual: ManifestId,
     },
     #[error(
-        "namespace manifest conflict for `{object_key}` manifest `{manifest_id:?}`: expected payload checksum `{expected_payload_checksum_sha256}`, actual `{actual_payload_checksum_sha256}`"
+        "namespace manifest conflict for `{object_key}` manifest `{manifest_id:?}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
     )]
     ManifestConflict {
         object_key: String,
         manifest_id: ManifestId,
-        expected_payload_checksum_sha256: String,
-        actual_payload_checksum_sha256: String,
+        expected_payload_checksum: String,
+        actual_payload_checksum: String,
     },
     #[error("namespace manifest `{object_key}` is not verified")]
     ManifestNotVerified { object_key: String },
@@ -453,15 +453,6 @@ pub enum ManifestLoadError {
         object_key: String,
         page_index: u32,
         message: String,
-    },
-    #[error(
-        "manifest page checksum mismatch for `{object_key}` page {page_index}: expected `{expected}`, actual `{actual}`"
-    )]
-    PageChecksumMismatch {
-        object_key: String,
-        page_index: u32,
-        expected: String,
-        actual: String,
     },
     #[error(
         "metadata row key mismatch for `{object_key}` page {page_index} row {row_index}: expected `{expected}`, actual `{actual}`"
@@ -1224,11 +1215,7 @@ async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         row_count: envelope.payload.row_count,
         min_key: envelope.payload.min_key.clone(),
         max_key: envelope.payload.max_key.clone(),
-        payload_checksum_sha256: metadata_sst_payload_checksum_sha256(&envelope.payload)
-            .map_err(|err| CoreError::Store(err.to_string()))?,
-        page_checksums_sha256: envelope
-            .page_checksums_sha256()
-            .map_err(|err| CoreError::Store(err.to_string()))?,
+        payload_checksum: envelope.payload_checksum.clone(),
     })
 }
 
@@ -1345,15 +1332,15 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                     },
                 ));
             };
-            if existing.payload_checksum_sha256 == manifest.payload_checksum_sha256 {
+            if existing.payload_checksum == manifest.payload_checksum {
                 Ok(())
             } else {
                 Err(BasisLoadError::ManifestLoad(
                     ManifestLoadError::ManifestConflict {
                         object_key: manifest_key,
                         manifest_id: manifest.payload.manifest_id,
-                        expected_payload_checksum_sha256: manifest.payload_checksum_sha256.clone(),
-                        actual_payload_checksum_sha256: existing.payload_checksum_sha256,
+                        expected_payload_checksum: manifest.payload_checksum.clone(),
+                        actual_payload_checksum: existing.payload_checksum,
                     },
                 ))
             }
@@ -1453,7 +1440,7 @@ async fn compare_and_swap_head<S: ObjectStore + ?Sized>(
         next_head.clone(),
     )
     .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
-    let encoded = serde_json::to_vec(&envelope)
+    let encoded = encode_control_object(&envelope)
         .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
     store
         .compare_and_swap(object_key, expected_head_etag, Bytes::from(encoded))
@@ -1480,7 +1467,9 @@ async fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
             )));
         };
         let progress: ProgressStateEnvelope =
-            serde_json::from_slice(&bytes).map_err(|err| CoreError::Store(err.to_string()))?;
+            decode_control_object(&bytes, ControlObjectKind::NamespaceProgress).map_err(|err| {
+                CoreError::Store(format!("invalid derived progress `{object_key}`: {err}"))
+            })?;
         if progress.state.through_seq < target_floor {
             return Err(CoreError::CheckpointUnavailable(format!(
                 "required derived progress `{work_class_name}` only covers {:?} for namespace `{}`",
@@ -1816,7 +1805,7 @@ async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
     let expected_segment_seq = context.expected_segment_seq(descriptor)?;
     let cache_key = MetadataTableCacheKey {
-        table_digest: descriptor.payload_checksum_sha256.clone(),
+        table_digest: descriptor.payload_checksum.clone(),
         block_kind: MetadataTableBlockKind::SegmentPayload,
         block_offset: 0,
     };
@@ -1871,7 +1860,6 @@ async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
                     row_count: descriptor.row_count,
                     min_key: descriptor.min_key.clone(),
                     max_key: descriptor.max_key.clone(),
-                    page_checksums_sha256: descriptor.page_checksums_sha256.clone(),
                     decoded_byte_len: decoded_manifest_block_weight(family, &rows),
                 },
             );
@@ -1917,7 +1905,6 @@ fn validate_cached_manifest_block(
     if descriptor.row_count != block.row_count
         || descriptor.min_key != block.min_key
         || descriptor.max_key != block.max_key
-        || descriptor.page_checksums_sha256 != block.page_checksums_sha256
     {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
@@ -2101,41 +2088,23 @@ fn validate_manifest_segment(
         });
     }
 
-    let actual_payload_checksum =
-        metadata_sst_payload_checksum_sha256(&segment.payload).map_err(|err| {
-            ManifestLoadError::SegmentCodec {
-                object_key: descriptor.object_key.clone(),
-                message: err.to_string(),
-            }
-        })?;
-    if descriptor.payload_checksum_sha256 != actual_payload_checksum {
+    // The codec already verified `segment.payload_checksum` against the
+    // stored payload bytes; here the manifest's descriptor must agree, which
+    // binds this exact file to the manifest that references it.
+    if descriptor.payload_checksum != segment.payload_checksum {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: format!(
                 "payload checksum mismatch: expected `{}`, actual `{}`",
-                descriptor.payload_checksum_sha256, actual_payload_checksum
+                descriptor.payload_checksum, segment.payload_checksum
             ),
         });
     }
 
     let mut collected_rows = Vec::new();
-    let mut collected_page_checksums = Vec::new();
     for page in &segment.payload.pages {
-        let checksum =
-            metadata_page_checksum_sha256(page).map_err(|err| ManifestLoadError::SegmentCodec {
-                object_key: descriptor.object_key.clone(),
-                message: err.to_string(),
-            })?;
-        collected_page_checksums.push(checksum.clone());
-        validate_manifest_page(family, descriptor, page, &checksum)?;
+        validate_manifest_page(family, descriptor, page)?;
         collected_rows.extend(page.rows.iter().cloned());
-    }
-
-    if descriptor.page_checksums_sha256 != collected_page_checksums {
-        return Err(ManifestLoadError::SegmentDescriptorMismatch {
-            object_key: descriptor.object_key.clone(),
-            message: "page checksum descriptor mismatch".to_owned(),
-        });
     }
 
     if segment.payload.row_count != collected_rows.len() as u64 {
@@ -2183,7 +2152,6 @@ fn validate_manifest_page(
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     page: &MetadataPage,
-    checksum: &str,
 ) -> Result<(), ManifestLoadError> {
     if page.row_keys.len() != page.rows.len() {
         return Err(ManifestLoadError::PageShapeMismatch {
@@ -2194,20 +2162,6 @@ fn validate_manifest_page(
                 page.row_keys.len(),
                 page.rows.len()
             ),
-        });
-    }
-
-    let expected_checksum = descriptor
-        .page_checksums_sha256
-        .get(page.page_index as usize)
-        .cloned()
-        .unwrap_or_default();
-    if expected_checksum != *checksum {
-        return Err(ManifestLoadError::PageChecksumMismatch {
-            object_key: descriptor.object_key.clone(),
-            page_index: page.page_index,
-            expected: expected_checksum,
-            actual: checksum.to_owned(),
         });
     }
 
@@ -3795,10 +3749,7 @@ mod tests {
         descriptor.row_count = envelope.payload.row_count;
         descriptor.min_key = envelope.payload.min_key.clone();
         descriptor.max_key = envelope.payload.max_key.clone();
-        descriptor.payload_checksum_sha256 = envelope.payload_checksum_sha256.clone();
-        descriptor.page_checksums_sha256 = envelope
-            .page_checksums_sha256()
-            .expect("rewritten page checksums");
+        descriptor.payload_checksum = envelope.payload_checksum.clone();
     }
 
     fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
@@ -4038,19 +3989,16 @@ mod tests {
         match error {
             BasisLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
                 manifest_id,
-                expected_payload_checksum_sha256,
-                actual_payload_checksum_sha256,
+                expected_payload_checksum,
+                actual_payload_checksum,
                 ..
             }) => {
                 assert_eq!(manifest_id, ManifestId(1));
                 assert_eq!(
-                    expected_payload_checksum_sha256,
-                    conflicting_manifest.payload_checksum_sha256
+                    expected_payload_checksum,
+                    conflicting_manifest.payload_checksum
                 );
-                assert_eq!(
-                    actual_payload_checksum_sha256,
-                    manifest.payload_checksum_sha256
-                );
+                assert_eq!(actual_payload_checksum, manifest.payload_checksum);
             }
             other => panic!("unexpected error: {other:?}"),
         }

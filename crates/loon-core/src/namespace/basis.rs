@@ -81,7 +81,7 @@ fn wal_tip_decoded_bytes(pointer: Option<&loon_api::wire::control::WalSegmentPoi
             size_of::<loon_api::wire::control::WalSegmentPointer>()
                 + pointer.object_key.len()
                 + pointer.segment_id.len()
-                + pointer.payload_checksum_sha256.len()
+                + pointer.payload_checksum.len()
         })
         .unwrap_or(0)
 }

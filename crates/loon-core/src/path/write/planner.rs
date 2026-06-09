@@ -1,5 +1,7 @@
 use super::intent::{PathMutationIntent, PutFileBehavior};
-use crate::commit::{PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
+use crate::commit::{
+    fingerprint_sha256_hex, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN,
+};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
@@ -7,7 +9,6 @@ use crate::path::helpers::{
     final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
 };
 use crate::path::tombstone::reject_tombstoned_path_ancestor;
-use loon_api::wire::control::payload_checksum_sha256;
 use loon_api::wire::control::HeadState;
 use loon_api::wire::wal::WalDelta;
 use loon_api::{
@@ -111,7 +112,7 @@ fn path_intent_fingerprint(
         intent: &'a PathFingerprintInput,
     }
 
-    payload_checksum_sha256(&CanonicalPathIntent {
+    fingerprint_sha256_hex(&CanonicalPathIntent {
         domain: PATH_INTENT_FINGERPRINT_DOMAIN,
         intent: identity,
     })

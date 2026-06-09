@@ -209,7 +209,7 @@ mod tests {
         })
         .await;
         assert_wal_chain_corruption_rejected(|_object_key, _envelope, pointer| {
-            pointer.payload_checksum_sha256 = "sha256:not-the-payload".to_owned();
+            pointer.payload_checksum = "sha256:not-the-payload".to_owned();
         })
         .await;
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {

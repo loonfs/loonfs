@@ -11,9 +11,9 @@ use loon_api::{
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     wire::control::{
-        ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState, LeaseState,
-        NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkStateEnvelope,
-        NamespaceGcPinStateEnvelope,
+        decode_control_object, ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState,
+        LeaseState, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+        NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
     },
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
@@ -1116,11 +1116,10 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
     let descriptor: NamespaceDescriptorEnvelope =
-        serde_json::from_slice(&descriptor_bytes).expect("decode namespace descriptor");
-    assert_eq!(descriptor.kind, ControlObjectKind::NamespaceDescriptor);
+        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
+            .expect("decode namespace descriptor");
     assert_eq!(descriptor.state.namespace_id, namespace_id);
     assert_eq!(descriptor.state.content_store_id, basis.content_store_id);
-    assert!(descriptor.has_valid_payload_checksum().expect("checksum"));
     assert!(
         store
             .head(&namespace_fork_state(namespace_id.as_str()))
@@ -1136,19 +1135,15 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
         .await
         .expect("read content-store descriptor")
         .expect("content-store descriptor exists");
-    let content_descriptor: ContentStoreDescriptorEnvelope =
-        serde_json::from_slice(&content_descriptor_bytes).expect("decode content-store descriptor");
-    assert_eq!(
-        content_descriptor.kind,
-        ControlObjectKind::ContentStoreDescriptor
-    );
+    let content_descriptor: ContentStoreDescriptorEnvelope = decode_control_object(
+        &content_descriptor_bytes,
+        ControlObjectKind::ContentStoreDescriptor,
+    )
+    .expect("decode content-store descriptor");
     assert_eq!(
         content_descriptor.state.content_store_id,
         basis.content_store_id
     );
-    assert!(content_descriptor
-        .has_valid_payload_checksum()
-        .expect("checksum"));
 
     let content_store_descriptors = store
         .list_prefix("content-stores/")
@@ -2685,10 +2680,17 @@ async fn namespace_descriptor_checksum_is_validated() {
         .await
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
-    let mut descriptor: NamespaceDescriptorEnvelope =
-        serde_json::from_slice(&descriptor_bytes).expect("decode namespace descriptor");
-    descriptor.payload_checksum_sha256 = "not-the-payload-checksum".to_owned();
-    let corrupted = serde_json::to_vec(&descriptor).expect("encode corrupted descriptor");
+    let descriptor: NamespaceDescriptorEnvelope =
+        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
+            .expect("decode namespace descriptor");
+    // Corrupt the durable document at the byte level: swap the stored
+    // checksum for a syntactically valid but wrong digest.
+    let corrupted = String::from_utf8(descriptor_bytes.to_vec())
+        .expect("descriptor is utf8")
+        .replace(
+            &descriptor.payload_checksum,
+            &sha256_digest(b"not-the-payload"),
+        );
     store
         .put_overwrite(&descriptor_key, Bytes::from(corrupted))
         .await
@@ -2746,8 +2748,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("read fork state")
         .expect("fork state exists");
     let fork_state: NamespaceForkStateEnvelope =
-        serde_json::from_slice(&fork_state_bytes).expect("decode fork state");
-    assert_eq!(fork_state.kind, ControlObjectKind::NamespaceForkState);
+        decode_control_object(&fork_state_bytes, ControlObjectKind::NamespaceForkState)
+            .expect("decode fork state");
     assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
     assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
     assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
@@ -2755,7 +2757,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(fork_state.state.source_manifest_id, ManifestId(1));
     assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
     assert!(fork_state.state.created_at_ms > 0);
-    assert!(fork_state.has_valid_payload_checksum().expect("checksum"));
 
     let blobs_after = store
         .list_prefix(&format!(
@@ -2830,8 +2831,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("read source pin")
         .expect("source pin exists");
     let pin: NamespaceGcPinStateEnvelope =
-        serde_json::from_slice(&pin_bytes).expect("decode source pin");
-    assert_eq!(pin.kind, ControlObjectKind::NamespaceGcPinState);
+        decode_control_object(&pin_bytes, ControlObjectKind::NamespaceGcPinState)
+            .expect("decode source pin");
     assert_eq!(pin.state.source_namespace_id, source_namespace_id);
     assert_eq!(pin.state.target_namespace_id, clone_namespace_id);
     assert_eq!(
@@ -2840,16 +2841,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     );
     assert_eq!(pin.state.source_manifest_id, ManifestId(1));
     assert_eq!(pin.state.source_head_seq, ChangeSeq(1));
-    let referenced_metadata_files_debug = target_manifest
+    let referenced_metadata_files = target_manifest
         .payload
         .metadata_files
         .iter()
         .map(|metadata_file| metadata_file.object_key.clone())
         .collect::<Vec<_>>();
-    assert_eq!(
-        pin.state.referenced_metadata_files_debug,
-        referenced_metadata_files_debug
-    );
     assert!(store
         .head(&gc_pin(source_namespace_id.as_str(), &pin.state.pin_id))
         .await
@@ -2964,7 +2961,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         b"clone-after-fork"
     );
 
-    let referenced_sst = referenced_metadata_files_debug
+    let referenced_sst = referenced_metadata_files
         .first()
         .expect("fork should reference source metadata SST")
         .clone();
@@ -3271,7 +3268,8 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
                 ),
                 (
                     namespace_descriptor(clone_namespace_id.as_str()),
-                    serde_json::to_vec(&descriptor).expect("descriptor bytes"),
+                    loon_api::wire::control::encode_control_object(&descriptor)
+                        .expect("descriptor bytes"),
                 ),
             ],
         },

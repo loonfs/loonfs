@@ -326,8 +326,7 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
         ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
         ControlObjectLoadError::MissingObject { .. }
         | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceNotFound,
-        ControlObjectLoadError::KindMismatch { .. }
-        | ControlObjectLoadError::NamespaceMismatch { .. }
+        ControlObjectLoadError::NamespaceMismatch { .. }
         | ControlObjectLoadError::ContentStoreMismatch { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,

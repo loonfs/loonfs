@@ -1,13 +1,35 @@
 use super::api_adapter::{commit_op_from_v0, commit_precondition_from_v0};
 use super::{CommitOp, CommitRequest, Precondition};
 use loon_api::v0 as api_v0;
-use loon_api::wire::control::payload_checksum_sha256;
 use loon_api::NamespaceId;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use thiserror::Error;
 
 const CORE_COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.core.commit.semantic.v0";
 pub(crate) const PATH_INTENT_FINGERPRINT_DOMAIN: &str = "loonfs.path.intent.semantic.v0";
+
+/// Bare-hex SHA-256 over the canonical JSON encoding of a fingerprint
+/// preimage.
+///
+/// Fingerprints deliberately keep this legacy un-prefixed form: the stored
+/// values carry no algorithm or version tag yet, so any change to this
+/// function changes every persisted fingerprint and breaks cross-version
+/// retry idempotency. Re-canonicalizing fingerprints (tagging values,
+/// speccing the preimage) is tracked as its own format change.
+pub(crate) fn fingerprint_sha256_hex<T>(value: &T) -> Result<String, serde_json::Error>
+where
+    T: Serialize,
+{
+    let bytes = serde_json::to_vec(value)?;
+    let digest = Sha256::digest(&bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String should not fail");
+    }
+    Ok(encoded)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CoreCommitFingerprint(String);
@@ -110,7 +132,7 @@ fn core_commit_fingerprint_from_parts(
         annotations: &'a Option<api_v0::CommitAnnotations>,
     }
 
-    payload_checksum_sha256(&CanonicalCoreCommit {
+    fingerprint_sha256_hex(&CanonicalCoreCommit {
         domain: CORE_COMMIT_FINGERPRINT_DOMAIN,
         namespace_id,
         preconditions,

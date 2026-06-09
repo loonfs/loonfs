@@ -3,6 +3,7 @@
 mod content;
 mod control;
 mod digest;
+mod envelope;
 mod http;
 mod ids;
 mod manifest;
