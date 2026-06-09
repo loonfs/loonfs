@@ -9,6 +9,7 @@
 mod trace;
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -77,6 +78,10 @@ pub enum RuntimeError {
     Bootstrap(#[from] BootstrapNamespaceError),
     #[error("invalid runtime config: {0}")]
     Config(String),
+    #[error("synchronous LoonFS calls cannot block inside an async runtime; use the async API")]
+    CannotBlockInsideAsyncRuntime,
+    #[error("runtime task failed: {0}")]
+    RuntimeTask(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,12 +174,71 @@ pub struct Fs {
 struct FsInner {
     store: SharedObjectStore,
     config: FsConfig,
+    sync_runtime: SyncRuntimeFacade,
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
     metadata_table_cache: Arc<MetadataTableCache>,
     uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     cache_stats: RuntimeCacheStatsInner,
+}
+
+struct SyncRuntimeFacade {
+    runtime: Mutex<Option<tokio::runtime::Runtime>>,
+}
+
+impl SyncRuntimeFacade {
+    fn new() -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| RuntimeError::Config(error.to_string()))?;
+        Ok(Self {
+            runtime: Mutex::new(Some(runtime)),
+        })
+    }
+
+    fn block_on_outside_tokio<T, F>(&self, stats: &RuntimeCacheStatsInner, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        self.block_on_value_outside_tokio(stats, future)?
+    }
+
+    fn block_on_value_outside_tokio<T, F>(
+        &self,
+        stats: &RuntimeCacheStatsInner,
+        future: F,
+    ) -> Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            stats
+                .block_inside_tokio_errors
+                .fetch_add(1, Ordering::SeqCst);
+            return Err(RuntimeError::CannotBlockInsideAsyncRuntime);
+        }
+        stats.sync_facade_calls.fetch_add(1, Ordering::SeqCst);
+        let runtime = self.runtime.lock().expect("sync runtime lock poisoned");
+        let runtime = runtime
+            .as_ref()
+            .expect("sync runtime should be available until drop");
+        Ok(runtime.block_on(future))
+    }
+}
+
+impl Drop for SyncRuntimeFacade {
+    fn drop(&mut self) {
+        if let Some(runtime) = self
+            .runtime
+            .get_mut()
+            .expect("sync runtime lock poisoned")
+            .take()
+        {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 /// Builder for [`Fs`].
@@ -689,6 +753,9 @@ struct CachedControl<T> {
 /// These counters are diagnostic. They are useful for tuning cache limits and
 /// understanding read/write warmup behavior.
 pub struct RuntimeCacheStats {
+    pub sync_facade_calls: usize,
+    pub async_engine_calls: usize,
+    pub block_inside_tokio_errors: usize,
     pub warm_basis_cache_hits: usize,
     pub warm_basis_cache_misses: usize,
     pub warm_basis_evictions: usize,
@@ -721,6 +788,9 @@ enum MetadataReadSource {
 
 #[derive(Debug, Default)]
 struct RuntimeCacheStatsInner {
+    sync_facade_calls: AtomicUsize,
+    async_engine_calls: AtomicUsize,
+    block_inside_tokio_errors: AtomicUsize,
     warm_basis_cache_hits: AtomicUsize,
     warm_basis_cache_misses: AtomicUsize,
     warm_basis_evictions: AtomicUsize,
@@ -744,6 +814,9 @@ struct RuntimeCacheStatsInner {
 impl RuntimeCacheStatsInner {
     fn snapshot(&self, metadata_table_cache: MetadataTableCacheStats) -> RuntimeCacheStats {
         RuntimeCacheStats {
+            sync_facade_calls: self.sync_facade_calls.load(Ordering::SeqCst),
+            async_engine_calls: self.async_engine_calls.load(Ordering::SeqCst),
+            block_inside_tokio_errors: self.block_inside_tokio_errors.load(Ordering::SeqCst),
             warm_basis_cache_hits: self.warm_basis_cache_hits.load(Ordering::SeqCst),
             warm_basis_cache_misses: self.warm_basis_cache_misses.load(Ordering::SeqCst),
             warm_basis_evictions: self.warm_basis_evictions.load(Ordering::SeqCst),
@@ -775,6 +848,10 @@ impl RuntimeCacheStatsInner {
             metadata_table_cache_inserts: metadata_table_cache.inserts,
             metadata_table_cache_evictions: metadata_table_cache.evictions,
         }
+    }
+
+    fn record_async_engine_call(&self) {
+        self.async_engine_calls.fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_publish_result(&self, result: &NamespaceCommitEnginePublishResult) {
@@ -1135,6 +1212,7 @@ impl Fs {
             inner: Arc::new(FsInner {
                 store,
                 config,
+                sync_runtime: SyncRuntimeFacade::new()?,
                 basis_cache: Mutex::new(BasisCache::default()),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
@@ -1160,7 +1238,59 @@ impl Fs {
         span.record("store_kind", self.inner.config.trace_store_kind.as_str());
     }
 
+    fn block_on_sync<T, F>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        self.inner
+            .sync_runtime
+            .block_on_outside_tokio(&self.inner.cache_stats, future)
+    }
+
+    fn block_on_sync_value<T, F>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        self.inner
+            .sync_runtime
+            .block_on_value_outside_tokio(&self.inner.cache_stats, future)
+    }
+
+    async fn run_engine_blocking<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Fs) -> Result<T> + Send + 'static,
+    {
+        self.inner.cache_stats.record_async_engine_call();
+        let fs = self.clone();
+        let span = tracing::Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            operation(fs)
+        })
+        .await
+        .map_err(|error| RuntimeError::RuntimeTask(error.to_string()))?
+    }
+
     pub fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> Result<NamespaceSummary> {
+        self.block_on_sync(self.create_namespace_async(namespace_id, options))
+    }
+
+    pub async fn create_namespace_async(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> Result<NamespaceSummary> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| fs.create_namespace_blocking(&namespace_id, options))
+            .await
+    }
+
+    fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
@@ -1179,6 +1309,25 @@ impl Fs {
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> Result<NamespaceSummary> {
+        self.block_on_sync(self.fork_namespace_async(source, target))
+    }
+
+    pub async fn fork_namespace_async(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> Result<NamespaceSummary> {
+        let source = source.clone();
+        let target = target.clone();
+        self.run_engine_blocking(move |fs| fs.fork_namespace_blocking(&source, &target))
+            .await
+    }
+
+    fn fork_namespace_blocking(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> Result<NamespaceSummary> {
         let result = self
             .namespace_engine(source)
             .fork_namespace(target, loon_core::ForkOptions::default())
@@ -1193,10 +1342,32 @@ impl Fs {
     }
 
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
+        self.block_on_sync(self.list_namespaces_async())
+    }
+
+    pub async fn list_namespaces_async(&self) -> Result<Vec<NamespaceSummary>> {
+        self.run_engine_blocking(|fs| fs.list_namespaces_blocking())
+            .await
+    }
+
+    fn list_namespaces_blocking(&self) -> Result<Vec<NamespaceSummary>> {
         Ok(loon_core::list_namespaces(self.store())?)
     }
 
     pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
+        self.block_on_sync(self.namespace_status_async(namespace_id))
+    }
+
+    pub async fn namespace_status_async(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceStatus> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| fs.namespace_status_blocking(&namespace_id))
+            .await
+    }
+
+    fn namespace_status_blocking(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
         let summary = load_namespace_head_summary(self.store(), namespace_id)?;
         Ok(NamespaceStatus {
             namespace_id: summary.namespace_id,
@@ -1224,15 +1395,46 @@ impl Fs {
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> Result<MaintenanceTickResult> {
+        self.block_on_sync(self.maintenance_tick_namespace_async(namespace_id, options))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        err,
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn maintenance_tick_namespace_async(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> Result<MaintenanceTickResult> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| {
+            fs.maintenance_tick_namespace_blocking(&namespace_id, options)
+        })
+        .await
+    }
+
+    fn maintenance_tick_namespace_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> Result<MaintenanceTickResult> {
         if options.max_wal_tail_segments == 0 {
             return Err(RuntimeError::Config(
                 "max_wal_tail_segments must be greater than zero".to_owned(),
             ));
         }
 
-        let status_before = self.namespace_status(namespace_id)?;
+        let status_before = self.namespace_status_blocking(namespace_id)?;
         let observed_head_seq = status_before.head_seq;
         if status_before.wal_tail_segments < options.max_wal_tail_segments {
             return Ok(MaintenanceTickResult {
@@ -1242,7 +1444,7 @@ impl Fs {
             });
         }
 
-        let checkpoint = match self.create_checkpoint(namespace_id) {
+        let checkpoint = match self.create_checkpoint_blocking(namespace_id) {
             Ok(checkpoint) => checkpoint,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 return Ok(MaintenanceTickResult {
@@ -1296,8 +1498,39 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
+        self.block_on_sync(self.stat_path_async(namespace_id, absolute_path))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.stat",
+        err,
+        skip_all,
+        fields(
+            operation = "stat",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            cache_path = tracing::field::Empty,
+        )
+    )]
+    pub async fn stat_path_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| fs.stat_path_blocking(&namespace_id, &absolute_path))
+            .await
+    }
+
+    fn stat_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<AuthoritativePathEntry> {
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
         if head.state.current_manifest_id.is_some() {
@@ -1308,7 +1541,8 @@ impl Fs {
                     Some(Arc::clone(&self.inner.metadata_table_cache)),
                 ),
             )?;
-            span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
+            tracing::Span::current()
+                .record("cache_path", trace::CachePath::MaterializedTables.as_str());
             self.inner
                 .cache_stats
                 .record_metadata_read_source(MetadataReadSource::MaterializedTables);
@@ -1327,6 +1561,25 @@ impl Fs {
     }
 
     pub fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<Vec<AuthoritativePathEntry>> {
+        self.block_on_sync(self.list_path_async(namespace_id, absolute_path))
+    }
+
+    pub async fn list_path_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<Vec<AuthoritativePathEntry>> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| fs.list_path_blocking(&namespace_id, &absolute_path))
+            .await
+    }
+
+    fn list_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1363,6 +1616,27 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
+        self.block_on_sync(self.read_file_bytes_async(namespace_id, absolute_path))
+    }
+
+    pub async fn read_file_bytes_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<AuthoritativeFileBytes> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.read_file_bytes_blocking(&namespace_id, &absolute_path)
+        })
+        .await
+    }
+
+    fn read_file_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<AuthoritativeFileBytes> {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(self.namespace_engine(namespace_id).read_file(
             absolute_path,
@@ -1375,6 +1649,27 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<ListFileRevisionsResponse> {
+        self.block_on_sync(self.list_file_revisions_async(namespace_id, absolute_path))
+    }
+
+    pub async fn list_file_revisions_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<ListFileRevisionsResponse> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.list_file_revisions_blocking(&namespace_id, &absolute_path)
+        })
+        .await
+    }
+
+    fn list_file_revisions_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<ListFileRevisionsResponse> {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(self.namespace_engine(namespace_id).list_file_revisions(
             absolute_path,
@@ -1383,6 +1678,26 @@ impl Fs {
     }
 
     pub fn list_file_revisions_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<ListFileRevisionsResponse> {
+        self.block_on_sync(self.list_file_revisions_for_inode_async(namespace_id, inode_id))
+    }
+
+    pub async fn list_file_revisions_for_inode_async(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<ListFileRevisionsResponse> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| {
+            fs.list_file_revisions_for_inode_blocking(&namespace_id, inode_id)
+        })
+        .await
+    }
+
+    fn list_file_revisions_for_inode_blocking(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -1402,6 +1717,33 @@ impl Fs {
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
+        self.block_on_sync(self.read_file_revision_bytes_async(
+            namespace_id,
+            absolute_path,
+            revision_no,
+        ))
+    }
+
+    pub async fn read_file_revision_bytes_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<AuthoritativeFileBytes> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.read_file_revision_bytes_blocking(&namespace_id, &absolute_path, revision_no)
+        })
+        .await
+    }
+
+    fn read_file_revision_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<AuthoritativeFileBytes> {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(self.namespace_engine(namespace_id).read_file_revision(
             absolute_path,
@@ -1411,6 +1753,32 @@ impl Fs {
     }
 
     pub fn read_file_revision_bytes_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>> {
+        self.block_on_sync(self.read_file_revision_bytes_for_inode_async(
+            namespace_id,
+            inode_id,
+            revision_no,
+        ))
+    }
+
+    pub async fn read_file_revision_bytes_for_inode_async(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| {
+            fs.read_file_revision_bytes_for_inode_blocking(&namespace_id, inode_id, revision_no)
+        })
+        .await
+    }
+
+    fn read_file_revision_bytes_for_inode_blocking(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -1445,9 +1813,47 @@ impl Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        self.block_on_sync(self.put_file_bytes_async(namespace_id, absolute_path, bytes, options))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        err,
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub async fn put_file_bytes_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> Result<MutationResult> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", trace::payload_class(bytes.len()));
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        let bytes = bytes.to_vec();
+        self.run_engine_blocking(move |fs| {
+            fs.put_file_bytes_blocking(&namespace_id, &absolute_path, &bytes, options)
+        })
+        .await
+    }
+
+    fn put_file_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> Result<MutationResult> {
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = self
             .namespace_engine_with_store(namespace_id, store)
@@ -1483,12 +1889,54 @@ impl Fs {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        self.block_on_sync(self.put_file_content_ref_async(
+            namespace_id,
+            absolute_path,
+            content_ref,
+            options,
+        ))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        err,
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub async fn put_file_content_ref_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        content_ref: ContentRef,
+        options: PutFileOptions,
+    ) -> Result<MutationResult> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record(
             "payload_class",
             trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
         );
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.put_file_content_ref_blocking(&namespace_id, &absolute_path, content_ref, options)
+        })
+        .await
+    }
+
+    fn put_file_content_ref_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        content_ref: ContentRef,
+        options: PutFileOptions,
+    ) -> Result<MutationResult> {
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = self
             .namespace_engine_with_store(namespace_id, store)
@@ -1506,6 +1954,29 @@ impl Fs {
     }
 
     pub fn create_dir(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirOptions,
+    ) -> Result<MutationResult> {
+        self.block_on_sync(self.create_dir_async(namespace_id, absolute_path, options))
+    }
+
+    pub async fn create_dir_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirOptions,
+    ) -> Result<MutationResult> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.create_dir_blocking(&namespace_id, &absolute_path, options)
+        })
+        .await
+    }
+
+    fn create_dir_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1530,6 +2001,29 @@ impl Fs {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> Result<MutationResult> {
+        self.block_on_sync(self.delete_path_async(namespace_id, absolute_path, options))
+    }
+
+    pub async fn delete_path_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: DeleteOptions,
+    ) -> Result<MutationResult> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.delete_path_blocking(&namespace_id, &absolute_path, options)
+        })
+        .await
+    }
+
+    fn delete_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: DeleteOptions,
+    ) -> Result<MutationResult> {
         let result = self
             .namespace_engine(namespace_id)
             .delete_path(
@@ -1545,6 +2039,32 @@ impl Fs {
     }
 
     pub fn move_path(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: MoveOptions,
+    ) -> Result<MutationResult> {
+        self.block_on_sync(self.move_path_async(namespace_id, from_path, to_path, options))
+    }
+
+    pub async fn move_path_async(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: MoveOptions,
+    ) -> Result<MutationResult> {
+        let namespace_id = namespace_id.clone();
+        let from_path = from_path.to_owned();
+        let to_path = to_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.move_path_blocking(&namespace_id, &from_path, &to_path, options)
+        })
+        .await
+    }
+
+    fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -1572,6 +2092,32 @@ impl Fs {
         to_path: &str,
         options: CopyOptions,
     ) -> Result<MutationResult> {
+        self.block_on_sync(self.copy_path_async(namespace_id, from_path, to_path, options))
+    }
+
+    pub async fn copy_path_async(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: CopyOptions,
+    ) -> Result<MutationResult> {
+        let namespace_id = namespace_id.clone();
+        let from_path = from_path.to_owned();
+        let to_path = to_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.copy_path_blocking(&namespace_id, &from_path, &to_path, options)
+        })
+        .await
+    }
+
+    fn copy_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: CopyOptions,
+    ) -> Result<MutationResult> {
         let result = self
             .namespace_engine(namespace_id)
             .copy_path(
@@ -1587,6 +2133,41 @@ impl Fs {
     }
 
     pub fn restore_file_revision(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        source_revision_no: RevisionNo,
+        options: RestoreRevisionOptions,
+    ) -> Result<MutationResult> {
+        self.block_on_sync(self.restore_file_revision_async(
+            namespace_id,
+            absolute_path,
+            source_revision_no,
+            options,
+        ))
+    }
+
+    pub async fn restore_file_revision_async(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        source_revision_no: RevisionNo,
+        options: RestoreRevisionOptions,
+    ) -> Result<MutationResult> {
+        let namespace_id = namespace_id.clone();
+        let absolute_path = absolute_path.to_owned();
+        self.run_engine_blocking(move |fs| {
+            fs.restore_file_revision_blocking(
+                &namespace_id,
+                &absolute_path,
+                source_revision_no,
+                options,
+            )
+        })
+        .await
+    }
+
+    fn restore_file_revision_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -1615,6 +2196,23 @@ impl Fs {
         base_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
     ) -> Result<CommitResponse> {
+        self.block_on_sync(self.restore_file_revision_for_inode_async(
+            namespace_id,
+            inode_id,
+            source_revision_no,
+            base_revision_no,
+            options,
+        ))
+    }
+
+    pub async fn restore_file_revision_for_inode_async(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        base_revision_no: RevisionNo,
+        options: RestoreRevisionOptions,
+    ) -> Result<CommitResponse> {
         let commit_id = options.commit_id.unwrap_or_else(CommitId::generate);
         let request = CommitRequest {
             commit_id,
@@ -1630,14 +2228,51 @@ impl Fs {
             message: None,
             annotations: None,
         };
-        self.commit_operations(namespace_id, request)
+        self.commit_operations_async(namespace_id, request).await
     }
 
     pub fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
+        self.block_on_sync(self.begin_upload_async(namespace_id))
+    }
+
+    pub async fn begin_upload_async(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<BeginUploadResponse> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| fs.begin_upload_blocking(&namespace_id))
+            .await
+    }
+
+    fn begin_upload_blocking(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
         Ok(self.namespace_engine(namespace_id).begin_upload()?)
     }
 
     pub fn upload_content(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        bytes: &[u8],
+    ) -> Result<UploadContentResponse> {
+        self.block_on_sync(self.upload_content_async(namespace_id, upload_id, bytes))
+    }
+
+    pub async fn upload_content_async(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        bytes: &[u8],
+    ) -> Result<UploadContentResponse> {
+        let namespace_id = namespace_id.clone();
+        let upload_id = upload_id.to_owned();
+        let bytes = bytes.to_vec();
+        self.run_engine_blocking(move |fs| {
+            fs.upload_content_blocking(&namespace_id, &upload_id, &bytes)
+        })
+        .await
+    }
+
+    fn upload_content_blocking(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &str,
@@ -1655,6 +2290,30 @@ impl Fs {
         upload_id: &str,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
+        self.block_on_sync(self.complete_upload_async(namespace_id, upload_id, request))
+    }
+
+    pub async fn complete_upload_async(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        request: &CompleteUploadRequest,
+    ) -> Result<CompleteUploadResponse> {
+        let namespace_id = namespace_id.clone();
+        let upload_id = upload_id.to_owned();
+        let request = request.clone();
+        self.run_engine_blocking(move |fs| {
+            fs.complete_upload_blocking(&namespace_id, &upload_id, &request)
+        })
+        .await
+    }
+
+    fn complete_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &str,
+        request: &CompleteUploadRequest,
+    ) -> Result<CompleteUploadResponse> {
         Ok(self
             .namespace_engine(namespace_id)
             .complete_upload(upload_id, request)?)
@@ -1665,10 +2324,19 @@ impl Fs {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_namespace_mutations_batch(
+        self.block_on_sync(self.commit_operations_async(namespace_id, request))
+    }
+
+    pub async fn commit_operations_async(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> Result<CommitResponse> {
+        self.publish_namespace_mutations_batch_async(
             namespace_id,
             vec![NamespaceMutationCandidate::Commit(request)],
         )
+        .await
         .into_iter()
         .next()
         .unwrap_or_else(|| {
@@ -1683,16 +2351,61 @@ impl Fs {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<Result<CommitResponse>> {
-        self.publish_namespace_mutations_batch(
+        let result_count = requests.len();
+        match self.block_on_sync_value(self.commit_operations_batch_async(namespace_id, requests)) {
+            Ok(results) => results,
+            Err(error) => repeat_runtime_error(result_count, error),
+        }
+    }
+
+    pub async fn commit_operations_batch_async(
+        &self,
+        namespace_id: &NamespaceId,
+        requests: Vec<CommitRequest>,
+    ) -> Vec<Result<CommitResponse>> {
+        self.publish_namespace_mutations_batch_async(
             namespace_id,
             requests
                 .into_iter()
                 .map(NamespaceMutationCandidate::Commit)
                 .collect(),
         )
+        .await
     }
 
     pub fn publish_namespace_mutations_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<Result<CommitResponse>> {
+        let result_count = candidates.len();
+        match self.block_on_sync_value(
+            self.publish_namespace_mutations_batch_async(namespace_id, candidates),
+        ) {
+            Ok(results) => results,
+            Err(error) => repeat_runtime_error(result_count, error),
+        }
+    }
+
+    pub async fn publish_namespace_mutations_batch_async(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<Result<CommitResponse>> {
+        let result_count = candidates.len();
+        let namespace_id = namespace_id.clone();
+        match self
+            .run_engine_blocking(move |fs| {
+                Ok(fs.publish_namespace_mutations_batch_blocking(&namespace_id, candidates))
+            })
+            .await
+        {
+            Ok(results) => results,
+            Err(error) => repeat_runtime_error(result_count, error),
+        }
+    }
+
+    fn publish_namespace_mutations_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -1762,6 +2475,24 @@ impl Fs {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse> {
+        self.block_on_sync(self.list_changes_after_async(namespace_id, after_seq))
+    }
+
+    pub async fn list_changes_after_async(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+    ) -> Result<ChangesResponse> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| fs.list_changes_after_blocking(&namespace_id, after_seq))
+            .await
+    }
+
+    fn list_changes_after_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+    ) -> Result<ChangesResponse> {
         Ok(self
             .namespace_engine(namespace_id)
             .list_changes_after(after_seq)?)
@@ -1782,8 +2513,35 @@ impl Fs {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
+        self.block_on_sync(self.create_checkpoint_async(namespace_id))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        err,
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn create_checkpoint_async(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<CreateCheckpointResponse> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| fs.create_checkpoint_blocking(&namespace_id))
+            .await
+    }
+
+    fn create_checkpoint_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<CreateCheckpointResponse> {
         let result = self
             .namespace_engine(namespace_id)
             .create_checkpoint()
@@ -1792,6 +2550,22 @@ impl Fs {
     }
 
     pub fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<AdvanceRetentionResponse> {
+        self.block_on_sync(self.advance_retention_floor_async(namespace_id))
+    }
+
+    pub async fn advance_retention_floor_async(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<AdvanceRetentionResponse> {
+        let namespace_id = namespace_id.clone();
+        self.run_engine_blocking(move |fs| fs.advance_retention_floor_blocking(&namespace_id))
+            .await
+    }
+
+    fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
@@ -2289,6 +3063,23 @@ fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
         Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => true,
         _ => false,
     }
+}
+
+fn repeat_runtime_error<T>(count: usize, error: RuntimeError) -> Vec<Result<T>> {
+    let message = error.to_string();
+    (0..count)
+        .map(|_| {
+            Err(match &error {
+                RuntimeError::Core(error) => RuntimeError::Core(error.clone()),
+                RuntimeError::Config(message) => RuntimeError::Config(message.clone()),
+                RuntimeError::CannotBlockInsideAsyncRuntime => {
+                    RuntimeError::CannotBlockInsideAsyncRuntime
+                }
+                RuntimeError::RuntimeTask(message) => RuntimeError::RuntimeTask(message.clone()),
+                RuntimeError::Bootstrap(_) => RuntimeError::RuntimeTask(message.clone()),
+            })
+        })
+        .collect()
 }
 
 fn current_time_ms() -> u64 {

@@ -223,6 +223,59 @@ fn filesystem_operations_match_core_semantics() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_runtime_methods_are_the_engine_boundary() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "async-runtime-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace_async(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    fs.put_file_bytes_async(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .await
+    .expect("put file");
+
+    let async_stat = fs
+        .stat_path_async(&namespace_id, "/docs/hello.txt")
+        .await
+        .expect("async stat");
+
+    let sync_fs = fs.clone();
+    let sync_namespace_id = namespace_id.clone();
+    let sync_stat = std::thread::spawn(move || {
+        sync_fs
+            .stat_path(&sync_namespace_id, "/docs/hello.txt")
+            .expect("sync facade stat from non-tokio thread")
+    })
+    .join()
+    .expect("join sync facade thread");
+
+    assert_eq!(async_stat, sync_stat);
+    let stats = fs.runtime_cache_stats();
+    assert!(stats.async_engine_calls >= 3);
+    assert!(stats.sync_facade_calls >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_runtime_facade_refuses_inside_tokio() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "nested-runtime-test");
+
+    match fs.list_namespaces() {
+        Err(RuntimeError::CannotBlockInsideAsyncRuntime) => {}
+        Err(error) => panic!("expected nested runtime error, got {error:?}"),
+        Ok(_) => panic!("expected nested runtime error"),
+    }
+
+    assert_eq!(fs.runtime_cache_stats().block_inside_tokio_errors, 1);
+}
+
 #[test]
 fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
@@ -673,7 +726,11 @@ fn runtime_publish_cache_disabled_replays_for_adjacent_batches() {
         raw_store.wal_get_count() > 0,
         "cache-disabled publish path should still cold-load from WAL"
     );
-    assert_eq!(fs.runtime_cache_stats(), Default::default());
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.warm_basis_cache_hits, 0);
+    assert_eq!(stats.warm_basis_cache_misses, 0);
+    assert_eq!(stats.publish_warm_basis_hits, 0);
+    assert_eq!(stats.publish_warm_basis_misses, 0);
 }
 
 #[test]

@@ -386,6 +386,9 @@ fn map_runtime_error(error: RuntimeError) -> CliError {
         RuntimeError::Core(error) => map_core_error(error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
+        error @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
+            CliError::new("runtime_error", error.to_string())
+        }
     }
 }
 
@@ -394,6 +397,9 @@ fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> C
         RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace, error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
+        error @ (RuntimeError::CannotBlockInsideAsyncRuntime | RuntimeError::RuntimeTask(_)) => {
+            CliError::new("runtime_error", error.to_string())
+        }
     }
 }
 

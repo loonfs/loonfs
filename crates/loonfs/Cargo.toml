@@ -10,6 +10,7 @@ loon-api = { path = "../loon-api" }
 loon-core = { path = "../loon-core" }
 loon-objectstore = { path = "../loon-objectstore" }
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
