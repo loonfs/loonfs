@@ -23,6 +23,7 @@ pub use loon_api::v0::{
     CompleteUploadResponse, RenameMode, UploadContentResponse, UploadMode,
 };
 use loon_api::wire::control::HeadState;
+use loon_api::AbsolutePath;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
     ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FileRevision,
@@ -1483,21 +1484,22 @@ impl Fs {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", trace::payload_class(bytes.len()));
+        validate_runtime_mutation_path(absolute_path)?;
         let store = self.uploaded_content_proof_store(namespace_id);
-        let result = self
-            .namespace_engine_with_store(namespace_id, store)
-            .put_file(
-                absolute_path,
-                bytes,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    put_file_behavior: options.behavior,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
+        let stored = loon_core::content::store_bytes_as_content(&store, namespace_id, bytes)
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        let content_ref = stored?.content_ref;
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::PutFile {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                absolute_path: absolute_path.to_owned(),
+                content_ref,
+                behavior: options.behavior,
+            },
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -1525,21 +1527,16 @@ impl Fs {
             "payload_class",
             trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
         );
-        let store = self.uploaded_content_proof_store(namespace_id);
-        let result = self
-            .namespace_engine_with_store(namespace_id, store)
-            .put_file_content_ref(
-                absolute_path,
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::PutFile {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                absolute_path: absolute_path.to_owned(),
                 content_ref,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    put_file_behavior: options.behavior,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+                behavior: options.behavior,
+            },
+        )
+        .await
     }
 
     pub async fn create_dir(
@@ -1548,18 +1545,14 @@ impl Fs {
         absolute_path: &str,
         options: CreateDirOptions,
     ) -> Result<MutationResult> {
-        let result = self
-            .namespace_engine(namespace_id)
-            .create_dir(
-                absolute_path,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::CreateDir {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                absolute_path: absolute_path.to_owned(),
+            },
+        )
+        .await
     }
 
     pub async fn delete_path(
@@ -1568,19 +1561,15 @@ impl Fs {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> Result<MutationResult> {
-        let result = self
-            .namespace_engine(namespace_id)
-            .delete_path(
-                absolute_path,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    recursive_delete: options.recursive,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::DeletePath {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                absolute_path: absolute_path.to_owned(),
+                recursive: options.recursive,
+            },
+        )
+        .await
     }
 
     pub async fn move_path(
@@ -1590,19 +1579,16 @@ impl Fs {
         to_path: &str,
         options: MoveOptions,
     ) -> Result<MutationResult> {
-        let result = self
-            .namespace_engine(namespace_id)
-            .move_path(
-                from_path,
-                to_path,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::MovePath {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                from_path: from_path.to_owned(),
+                to_path: to_path.to_owned(),
+                mode: RenameMode::NoReplace,
+            },
+        )
+        .await
     }
 
     pub async fn copy_path(
@@ -1612,19 +1598,15 @@ impl Fs {
         to_path: &str,
         options: CopyOptions,
     ) -> Result<MutationResult> {
-        let result = self
-            .namespace_engine(namespace_id)
-            .copy_path(
-                from_path,
-                to_path,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::CopyFilePath {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                from_path: from_path.to_owned(),
+                to_path: to_path.to_owned(),
+            },
+        )
+        .await
     }
 
     pub async fn restore_file_revision(
@@ -1634,19 +1616,15 @@ impl Fs {
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
     ) -> Result<MutationResult> {
-        let result = self
-            .namespace_engine(namespace_id)
-            .restore_file_revision(
-                absolute_path,
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::RestoreRevision {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                absolute_path: absolute_path.to_owned(),
                 source_revision_no,
-                loon_core::WriteOptions {
-                    commit_id: options.commit_id,
-                    ..loon_core::WriteOptions::default()
-                },
-            )
-            .await
-            .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+            },
+        )
+        .await
     }
 
     pub async fn restore_file_revision_for_inode(
@@ -1736,6 +1714,28 @@ impl Fs {
                 .collect(),
         )
         .await
+    }
+
+    async fn publish_path_intent(
+        &self,
+        namespace_id: &NamespaceId,
+        intent: PathMutationIntent,
+    ) -> Result<MutationResult> {
+        let mut results = self
+            .publish_namespace_mutations_batch(
+                namespace_id,
+                vec![NamespaceMutationCandidate::Path(intent)],
+            )
+            .await;
+        let response = results.pop().unwrap_or_else(|| {
+            Err(RuntimeError::Core(CoreError::Store(
+                "empty path mutation batch".to_owned(),
+            )))
+        })?;
+        Ok(MutationResult {
+            namespace_id: response.namespace_id,
+            committed_seq: response.committed_seq,
+        })
     }
 
     pub async fn publish_namespace_mutations_batch(
@@ -2353,6 +2353,18 @@ fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
         Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => true,
         _ => false,
     }
+}
+
+fn validate_runtime_mutation_path(absolute_path: &str) -> Result<()> {
+    let path = AbsolutePath::parse(absolute_path).map_err(|error| {
+        RuntimeError::Core(CoreError::InvalidPath(
+            error.invalid_path_input().to_owned(),
+        ))
+    })?;
+    if path.is_root() {
+        return Err(RuntimeError::Core(CoreError::RootMutationForbidden));
+    }
+    Ok(())
 }
 
 fn current_time_ms() -> u64 {

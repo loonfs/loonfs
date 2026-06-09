@@ -583,19 +583,19 @@ fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
 
     raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first stat should load basis");
-    assert_eq!(raw_store.wal_get_count(), 1);
+        .expect("first stat should reuse write-promoted basis");
+    assert_eq!(raw_store.wal_get_count(), 0);
 
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second stat should reuse cached basis");
-    assert_eq!(raw_store.wal_get_count(), 1);
+    assert_eq!(raw_store.wal_get_count(), 0);
 
     fs.create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
         .expect("create other");
     raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("stat after mutation should reload basis");
-    assert!(raw_store.wal_get_count() > 0);
+        .expect("stat after local mutation should reuse advanced basis");
+    assert_eq!(raw_store.wal_get_count(), 0);
 }
 
 #[test]
