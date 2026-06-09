@@ -1,6 +1,9 @@
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use super::{AsyncObjectStore, ByteRange, ObjectBody, ObjectMetadata, PutMode};
 use crate::ObjectStoreError;
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct R2StoreConfig {
@@ -42,41 +45,48 @@ impl R2Store {
     }
 }
 
-impl ObjectStore for R2Store {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+#[async_trait]
+impl AsyncObjectStore for R2Store {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key)
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        self.inner.get(key, range)
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }

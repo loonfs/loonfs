@@ -1,4 +1,5 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::blocking::BlockingObjectStoreAdapter;
 use crate::fs::LocalFsStore;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -7,6 +8,7 @@ use crate::r2::{R2Store, R2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
 use crate::ObjectStoreError;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfiguredObjectStoreKind {
@@ -27,8 +29,8 @@ enum ConfiguredObjectStoreInner {
         store: LocalFsStore,
         key_prefix: Option<String>,
     },
-    AwsS3(AwsS3Store),
-    CloudflareR2(R2Store),
+    AwsS3(BlockingObjectStoreAdapter),
+    CloudflareR2(BlockingObjectStoreAdapter),
 }
 
 impl ConfiguredObjectStore {
@@ -46,16 +48,22 @@ impl ConfiguredObjectStore {
     }
 
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self, ObjectStoreError> {
+        let store = AwsS3Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::AwsS3,
-            inner: ConfiguredObjectStoreInner::AwsS3(AwsS3Store::new(config)?),
+            inner: ConfiguredObjectStoreInner::AwsS3(BlockingObjectStoreAdapter::new(Arc::new(
+                store,
+            ))?),
         })
     }
 
     pub fn cloudflare_r2(config: R2StoreConfig) -> Result<Self, ObjectStoreError> {
+        let store = R2Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::CloudflareR2,
-            inner: ConfiguredObjectStoreInner::CloudflareR2(R2Store::new(config)?),
+            inner: ConfiguredObjectStoreInner::CloudflareR2(BlockingObjectStoreAdapter::new(
+                Arc::new(store),
+            )?),
         })
     }
 

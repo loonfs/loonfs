@@ -5,7 +5,8 @@ use loonfs::{
 use std::sync::Arc;
 
 #[allow(clippy::print_stdout)]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This example intentionally prints the file content it just read.
     let root = std::env::temp_dir().join("loonfs-embedded-local-fs-example");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root)?);
@@ -17,7 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CreateNamespaceOptions {
             allow_existing: true,
         },
-    )?;
+    )
+    .await?;
     fs.put_file_bytes(
         &namespace_id,
         "/hello.txt",
@@ -26,9 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             behavior: PutFileBehavior::ReplaceExisting,
             commit_id: None,
         },
-    )?;
+    )
+    .await?;
 
-    let file = fs.read_file_bytes(&namespace_id, "/hello.txt")?;
+    let file = fs.read_file_bytes(&namespace_id, "/hello.txt").await?;
     println!("{}", String::from_utf8_lossy(&file.bytes));
     Ok(())
 }

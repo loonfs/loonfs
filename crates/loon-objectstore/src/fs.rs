@@ -1,7 +1,11 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::checksum;
 use crate::keyspace::validate_segments;
+use crate::AsyncObjectStore;
 use crate::ObjectStoreError;
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::{self, BoxStream};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -70,6 +74,7 @@ impl LocalFsStore {
 
         Ok(ObjectMetadata {
             etag: Some(format!("{:x}-{:x}", metadata.len(), modified_nanos)),
+            version: None,
             size_bytes: metadata.len(),
             checksum_sha256,
         })
@@ -225,8 +230,7 @@ impl ObjectStore for LocalFsStore {
                 Self::create_new_object(&path, bytes)?;
             }
             PutMode::CompareAndSwap { expected_etag } => {
-                let current = self
-                    .head(key)?
+                let current = <Self as ObjectStore>::head(self, key)?
                     .ok_or(ObjectStoreError::PreconditionFailed)?;
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
                     return Err(ObjectStoreError::PreconditionFailed);
@@ -267,6 +271,55 @@ impl ObjectStore for LocalFsStore {
         keys.retain(|key| key.starts_with(prefix));
         keys.sort();
         Ok(keys)
+    }
+}
+
+#[async_trait]
+impl AsyncObjectStore for LocalFsStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        <Self as ObjectStore>::head(self, key)
+    }
+
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        <Self as ObjectStore>::head_with_checksum(self, key)
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        <Self as ObjectStore>::get_with_metadata(self, key)
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        <Self as ObjectStore>::get(self, key, range).map(|maybe| maybe.map(Bytes::from))
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        <Self as ObjectStore>::put(self, key, &bytes, mode)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        <Self as ObjectStore>::delete(self, key)
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        match <Self as ObjectStore>::list_prefix(self, prefix) {
+            Ok(keys) => Box::pin(stream::iter(keys.into_iter().map(Ok))),
+            Err(err) => Box::pin(stream::once(async { Err(err) })),
+        }
     }
 }
 

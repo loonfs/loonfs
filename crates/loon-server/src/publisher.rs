@@ -315,18 +315,13 @@ impl NamespacePublisher {
                     .iter()
                     .map(|candidate| candidate.candidate.clone())
                     .collect::<Vec<_>>();
-                let namespace_id = self.namespace_id.clone();
-                let fs = self.fs.clone();
-                results = tokio::task::spawn_blocking(move || {
-                    fs.publish_namespace_mutations_batch(&namespace_id, batch_candidates)
-                        .into_iter()
-                        .map(|result| result.map_err(runtime_error_to_core))
-                        .collect()
-                })
-                .await
-                .unwrap_or_else(|err| {
-                    vec![Err(CoreError::Store(err.to_string())); candidates.len()]
-                });
+                results = self
+                    .fs
+                    .publish_namespace_mutations_batch(&self.namespace_id, batch_candidates)
+                    .await
+                    .into_iter()
+                    .map(|result| result.map_err(runtime_error_to_core))
+                    .collect();
                 if !results.iter().any(is_head_publish_stale) {
                     break;
                 }
@@ -466,6 +461,7 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
         RuntimeError::Core(error) => error,
         RuntimeError::Bootstrap(error) => CoreError::Store(error.to_string()),
         RuntimeError::Config(message) => CoreError::Store(message),
+        RuntimeError::RuntimeTask(message) => CoreError::Store(message),
     }
 }
 
@@ -684,8 +680,9 @@ mod tests {
         )
     }
 
-    fn create_namespace(fs: &Fs, namespace_id: &NamespaceId) {
+    async fn create_namespace(fs: &Fs, namespace_id: &NamespaceId) {
         fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
             .expect("bootstrap");
     }
 
@@ -771,7 +768,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
         let fs = test_fs(shared.clone(), &config);
-        create_namespace(&fs, &namespace_id);
+        create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
@@ -824,7 +821,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
         let fs = test_fs(shared.clone(), &config);
-        create_namespace(&fs, &namespace_id);
+        create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
@@ -865,7 +862,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
         let fs = test_fs(shared.clone(), &config);
-        create_namespace(&fs, &namespace_id);
+        create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
@@ -932,7 +929,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
         let fs = test_fs(shared.clone(), &config);
-        create_namespace(&fs, &namespace_id);
+        create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
@@ -981,7 +978,7 @@ mod tests {
         });
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store.clone(), &config);
-        create_namespace(&fs, &namespace_id);
+        create_namespace(&fs, &namespace_id).await;
         let registry = PublisherRegistry::new(fs);
 
         let request_a = CommitRequest {
@@ -1034,7 +1031,7 @@ mod tests {
         });
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store.clone(), &config);
-        create_namespace(&fs, &namespace_id);
+        create_namespace(&fs, &namespace_id).await;
         let content =
             store_bytes_as_content(store.as_ref(), &namespace_id, b"hello").expect("stage content");
         let registry = PublisherRegistry::new(fs);

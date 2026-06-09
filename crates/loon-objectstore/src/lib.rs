@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod blocking;
 mod checksum;
 mod configured;
 pub mod fs;
@@ -9,13 +10,19 @@ pub mod layout;
 pub mod metrics;
 pub mod probes;
 pub mod provider;
+mod provider_object_store;
 pub mod r2;
 pub mod s3;
 mod s3_compatible;
 
+pub use blocking::{BlockingObjectStore, BlockingObjectStoreAdapter};
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use object_store::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore as AsyncObjectStore, ObjectStoreError,
+    PutMode, SharedObjectStore,
 };
+pub use provider_object_store::{ProviderObjectStore, ProviderObjectStoreConfig};
 
-mod object_store;
+pub use blocking::BlockingObjectStore as ObjectStore;
+
+pub mod object_store;

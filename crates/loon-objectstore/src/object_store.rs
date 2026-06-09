@@ -1,6 +1,12 @@
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::{BoxStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::sync::Arc;
 use thiserror::Error;
+
+pub type SharedObjectStore = Arc<dyn ObjectStore>;
 
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,6 +16,8 @@ pub struct ObjectMetadata {
     /// This is suitable for immediate compare-and-swap on the same object key. It is not
     /// canonical content identity and callers must not derive provider-specific meaning from it.
     pub etag: Option<String>,
+    /// Provider version identifier when available.
+    pub version: Option<String>,
     pub size_bytes: u64,
     /// Provider-verified full-object SHA-256 when available, normalized as `sha256:<64hex>`.
     ///
@@ -63,36 +71,66 @@ pub enum ObjectStoreError {
     Transport(String),
 }
 
-pub trait ObjectStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.head(key)
-    }
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError>;
-    fn get(&self, key: &str, range: Option<ByteRange>)
-        -> Result<Option<Vec<u8>>, ObjectStoreError>;
-    fn put(
+#[async_trait]
+pub trait ObjectStore: Send + Sync + Debug + 'static {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
+
+    async fn head_with_checksum(
         &self,
         key: &str,
-        bytes: &[u8],
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError>;
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError>;
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError>;
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError>;
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError>;
 
-    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put(key, bytes, PutMode::Overwrite)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError>;
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>>;
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        let mut keys: Vec<String> = self.list_prefix_stream(prefix).try_collect().await?;
+        keys.sort();
+        Ok(keys)
     }
 
-    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put(key, bytes, PutMode::CreateIfAbsent)
+    async fn put_overwrite(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put(key, bytes, PutMode::Overwrite).await
     }
 
-    fn compare_and_swap(
+    async fn put_if_absent(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put(key, bytes, PutMode::CreateIfAbsent).await
+    }
+
+    async fn compare_and_swap(
         &self,
         key: &str,
         expected_etag: &str,
-        bytes: &[u8],
+        bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.put(
             key,
@@ -101,123 +139,6 @@ pub trait ObjectStore {
                 expected_etag: expected_etag.to_owned(),
             },
         )
-    }
-}
-
-impl<T> ObjectStore for &T
-where
-    T: ObjectStore + ?Sized,
-{
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        (*self).head(key)
-    }
-
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        (*self).head_with_checksum(key)
-    }
-
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        (*self).get_with_metadata(key)
-    }
-
-    fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        (*self).get(key, range)
-    }
-
-    fn put(
-        &self,
-        key: &str,
-        bytes: &[u8],
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        (*self).put(key, bytes, mode)
-    }
-
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        (*self).delete(key)
-    }
-
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        (*self).list_prefix(prefix)
-    }
-
-    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        (*self).put_overwrite(key, bytes)
-    }
-
-    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        (*self).put_if_absent(key, bytes)
-    }
-
-    fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: &[u8],
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        (*self).compare_and_swap(key, expected_etag, bytes)
-    }
-}
-
-impl<T> ObjectStore for Arc<T>
-where
-    T: ObjectStore + ?Sized,
-{
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.as_ref().head(key)
-    }
-
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.as_ref().head_with_checksum(key)
-    }
-
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.as_ref().get_with_metadata(key)
-    }
-
-    fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        self.as_ref().get(key, range)
-    }
-
-    fn put(
-        &self,
-        key: &str,
-        bytes: &[u8],
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.as_ref().put(key, bytes, mode)
-    }
-
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.as_ref().delete(key)
-    }
-
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.as_ref().list_prefix(prefix)
-    }
-
-    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.as_ref().put_overwrite(key, bytes)
-    }
-
-    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.as_ref().put_if_absent(key, bytes)
-    }
-
-    fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: &[u8],
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.as_ref().compare_and_swap(key, expected_etag, bytes)
+        .await
     }
 }

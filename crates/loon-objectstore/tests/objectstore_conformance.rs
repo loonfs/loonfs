@@ -11,6 +11,7 @@ use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
 use loon_objectstore::r2::{R2Store, R2StoreConfig};
 use loon_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
+use loon_objectstore::BlockingObjectStoreAdapter;
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ByteRange, ObjectStore};
 use provider_env::{
@@ -291,6 +292,8 @@ fn aws_s3_real_provider_conformance() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
+    let store = BlockingObjectStoreAdapter::new(std::sync::Arc::new(store))
+        .expect("create blocking adapter");
 
     assert_provider_conformance(&store);
 }
@@ -309,6 +312,8 @@ fn cloudflare_r2_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
+    let store = BlockingObjectStoreAdapter::new(std::sync::Arc::new(store))
+        .expect("create blocking adapter");
 
     assert_provider_conformance(&store);
 }
