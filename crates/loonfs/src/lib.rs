@@ -481,6 +481,7 @@ impl UploadedContentProofStore<'_> {
             .get(self.namespace_id, &digest)?;
         Some(ObjectMetadata {
             etag: None,
+            version: None,
             size_bytes: content_ref.size_bytes,
             checksum_sha256: Some(content_ref.digest),
         })

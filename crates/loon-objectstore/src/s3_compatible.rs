@@ -1,20 +1,13 @@
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
-use crate::checksum;
-use crate::keyspace::{
-    normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
+use crate::{
+    AsyncObjectStore, ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
+    ProviderObjectStoreConfig, PutMode,
 };
-use crate::ObjectStoreError;
-use aws_sdk_s3::config::{Credentials, Region};
-use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
-use aws_sdk_s3::Client;
-use http::header::{IF_MATCH, IF_NONE_MATCH};
-use http::HeaderValue;
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
+use object_store::aws::{AmazonS3Builder, Checksum};
 use std::fmt;
-use std::sync::OnceLock;
-use std::thread;
-use tokio::runtime::{Builder, Runtime};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct S3CompatibleConfig {
@@ -30,571 +23,138 @@ pub(crate) struct S3CompatibleConfig {
     pub sha256_checksum_metadata: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct S3CompatibleStore {
     provider_name: &'static str,
-    bucket: String,
-    key_prefix: Option<String>,
-    sha256_checksum_metadata: bool,
-    client_config: S3CompatibleConfig,
-    client: OnceLock<Client>,
-    runtime: BlockingRuntime,
+    inner: ProviderObjectStore,
 }
 
 impl fmt::Debug for S3CompatibleStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("S3CompatibleStore")
             .field("provider_name", &self.provider_name)
-            .field("bucket", &self.bucket)
-            .field("key_prefix", &self.key_prefix)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl S3CompatibleStore {
     pub(crate) fn new(config: S3CompatibleConfig) -> Result<Self, ObjectStoreError> {
-        if config.bucket.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
-                "bucket must not be empty".to_owned(),
-            ));
+        validate_config(&config)?;
+
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(config.bucket)
+            .with_region(config.region)
+            .with_access_key_id(config.access_key_id)
+            .with_secret_access_key(config.secret_access_key)
+            .with_virtual_hosted_style_request(!config.force_path_style);
+
+        if let Some(endpoint_url) = config.endpoint_url {
+            let allow_http = endpoint_url.starts_with("http://");
+            builder = builder
+                .with_endpoint(endpoint_url)
+                .with_allow_http(allow_http);
         }
-        if config.region.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
-                "region must not be empty".to_owned(),
-            ));
+        if let Some(session_token) = config.session_token {
+            builder = builder.with_token(session_token);
         }
-        if config.access_key_id.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
-                "access key id must not be empty".to_owned(),
-            ));
-        }
-        if config.secret_access_key.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
-                "secret access key must not be empty".to_owned(),
-            ));
+        if config.sha256_checksum_metadata {
+            builder = builder.with_checksum_algorithm(Checksum::SHA256);
         }
 
-        let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
+        let provider = builder
+            .build()
+            .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
+        let inner = ProviderObjectStore::new(
+            Arc::new(provider),
+            ProviderObjectStoreConfig {
+                key_prefix: config.key_prefix,
+                sha256_checksum_metadata: config.sha256_checksum_metadata,
+            },
+        )?;
+
         Ok(Self {
             provider_name: config.provider_name,
-            bucket: config.bucket.clone(),
-            key_prefix,
-            sha256_checksum_metadata: config.sha256_checksum_metadata,
-            client_config: config,
-            client: OnceLock::new(),
-            runtime: BlockingRuntime::new()?,
+            inner,
         })
     }
+}
 
-    fn client(&self) -> &Client {
-        self.client
-            .get_or_init(|| build_client(self.client_config.clone()))
+#[async_trait]
+impl AsyncObjectStore for S3CompatibleStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn scoped_key(&self, key: &str) -> Result<String, ObjectStoreError> {
-        scope_object_key(self.key_prefix.as_deref(), key)
-    }
-
-    fn scoped_list_prefix(&self, prefix: &str) -> Result<String, ObjectStoreError> {
-        scope_list_prefix(self.key_prefix.as_deref(), prefix)
-    }
-
-    fn run_async<F, T>(&self, future: F) -> Result<T, ObjectStoreError>
-    where
-        F: std::future::Future<Output = Result<T, ObjectStoreError>>,
-    {
-        self.runtime.block_on(future)
-    }
-
-    async fn head_scoped(
+    async fn head_with_checksum(
         &self,
-        scoped_key: &str,
-        include_checksum: bool,
+        key: &str,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let mut request = self
-            .client()
-            .head_object()
-            .bucket(&self.bucket)
-            .key(scoped_key);
-        let include_sha256_checksum = include_checksum && self.sha256_checksum_metadata;
-        if include_sha256_checksum {
-            request = request.checksum_mode(ChecksumMode::Enabled);
-        }
-
-        match request.send().await {
-            Ok(output) => {
-                let checksum_sha256 = if include_sha256_checksum {
-                    output
-                        .checksum_sha256()
-                        .map(checksum::sha256_digest_from_base64)
-                        .transpose()
-                        .map_err(ObjectStoreError::Transport)?
-                } else {
-                    None
-                };
-                Ok(Some(ObjectMetadata {
-                    etag: output.e_tag().map(ToOwned::to_owned),
-                    size_bytes: output.content_length().try_into().unwrap_or_default(),
-                    checksum_sha256,
-                }))
-            }
-            Err(err) if is_not_found(&err) => Ok(None),
-            Err(err) => Err(map_sdk_error(err)),
-        }
+        self.inner.head_with_checksum(key).await
     }
 
-    async fn put_scoped(
-        &self,
-        scoped_key: &str,
-        bytes: &[u8],
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let checksum_sha256 = self
-            .sha256_checksum_metadata
-            .then(|| checksum::sha256_base64(bytes));
-        let result = match &mode {
-            PutMode::Overwrite => {
-                let mut request = self
-                    .client()
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(scoped_key)
-                    .content_length(bytes.len() as i64);
-                if let Some(checksum) = checksum_sha256.as_deref() {
-                    request = request
-                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                        .checksum_sha256(checksum);
-                }
-                request.body(ByteStream::from(bytes.to_vec())).send().await
-            }
-            PutMode::CreateIfAbsent => {
-                let mut request = self
-                    .client()
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(scoped_key)
-                    .content_length(bytes.len() as i64);
-                if let Some(checksum) = checksum_sha256.as_deref() {
-                    request = request
-                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                        .checksum_sha256(checksum);
-                }
-                request
-                    .body(ByteStream::from(bytes.to_vec()))
-                    .customize()
-                    .await
-                    .map_err(map_sdk_error)?
-                    .mutate_request(|request| {
-                        request
-                            .headers_mut()
-                            .insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
-                    })
-                    .send()
-                    .await
-            }
-            PutMode::CompareAndSwap { expected_etag } => {
-                let if_match = HeaderValue::from_str(expected_etag).map_err(|err| {
-                    ObjectStoreError::Transport(format!(
-                        "invalid expected etag for If-Match header: {err}"
-                    ))
-                })?;
-
-                let mut request = self
-                    .client()
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(scoped_key)
-                    .content_length(bytes.len() as i64);
-                if let Some(checksum) = checksum_sha256.as_deref() {
-                    request = request
-                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                        .checksum_sha256(checksum);
-                }
-                request
-                    .body(ByteStream::from(bytes.to_vec()))
-                    .customize()
-                    .await
-                    .map_err(map_sdk_error)?
-                    .mutate_request(move |request| {
-                        request.headers_mut().insert(IF_MATCH, if_match.clone());
-                    })
-                    .send()
-                    .await
-            }
-        };
-
-        match result {
-            Ok(_) => {
-                let mut metadata = self.head_scoped(scoped_key, false).await?.ok_or_else(|| {
-                    ObjectStoreError::Transport(format!(
-                        "provider {} reported success for {} but object head is missing",
-                        self.provider_name, scoped_key
-                    ))
-                })?;
-                if self.sha256_checksum_metadata {
-                    metadata.checksum_sha256 = Some(checksum::sha256_digest(bytes));
-                }
-                Ok(metadata)
-            }
-            Err(err) if put_error_maps_to_precondition_failed(&mode, &err) => {
-                Err(ObjectStoreError::PreconditionFailed)
-            }
-            Err(err) => Err(map_sdk_error(err)),
-        }
-    }
-}
-
-struct BlockingRuntime(Option<Runtime>);
-
-impl BlockingRuntime {
-    fn new() -> Result<Self, ObjectStoreError> {
-        Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(Some)
-            .map(Self)
-            .map_err(|err| ObjectStoreError::Transport(err.to_string()))
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
     }
 
-    fn block_on<F, T>(&self, future: F) -> Result<T, ObjectStoreError>
-    where
-        F: std::future::Future<Output = Result<T, ObjectStoreError>>,
-    {
-        self.0
-            .as_ref()
-            .expect("blocking runtime available")
-            .block_on(future)
-    }
-}
-
-impl Drop for BlockingRuntime {
-    fn drop(&mut self) {
-        let Some(runtime) = self.0.take() else {
-            return;
-        };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            let _ = thread::spawn(move || drop(runtime)).join();
-        } else {
-            drop(runtime);
-        }
-    }
-}
-
-fn build_client(config: S3CompatibleConfig) -> Client {
-    let credentials = Credentials::new(
-        config.access_key_id,
-        config.secret_access_key,
-        config.session_token,
-        None,
-        "loondb-objectstore",
-    );
-    let mut builder = aws_sdk_s3::config::Builder::new()
-        .region(Region::new(config.region))
-        .credentials_provider(credentials)
-        .force_path_style(config.force_path_style);
-    if let Some(endpoint_url) = config.endpoint_url {
-        builder = builder.endpoint_url(endpoint_url);
-    }
-    Client::from_conf(builder.build())
-}
-
-impl ObjectStore for S3CompatibleStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let scoped_key = self.scoped_key(key)?;
-        self.run_async(async { self.head_scoped(&scoped_key, false).await })
-    }
-
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let scoped_key = self.scoped_key(key)?;
-        self.run_async(async { self.head_scoped(&scoped_key, true).await })
-    }
-
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let scoped_key = self.scoped_key(key)?;
-        self.run_async(async {
-            let mut request = self
-                .client()
-                .get_object()
-                .bucket(&self.bucket)
-                .key(&scoped_key);
-            if self.sha256_checksum_metadata {
-                request = request.checksum_mode(ChecksumMode::Enabled);
-            }
-
-            match request.send().await {
-                Ok(output) => {
-                    let checksum_sha256 = if self.sha256_checksum_metadata {
-                        output
-                            .checksum_sha256()
-                            .map(checksum::sha256_digest_from_base64)
-                            .transpose()
-                            .map_err(ObjectStoreError::Transport)?
-                    } else {
-                        None
-                    };
-                    let metadata = ObjectMetadata {
-                        etag: output.e_tag().map(ToOwned::to_owned),
-                        size_bytes: output.content_length().try_into().unwrap_or_default(),
-                        checksum_sha256,
-                    };
-                    let collected = output
-                        .body
-                        .collect()
-                        .await
-                        .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
-                    Ok(Some(ObjectBody {
-                        metadata,
-                        bytes: collected.into_bytes().to_vec(),
-                    }))
-                }
-                Err(err) if is_not_found(&err) => Ok(None),
-                Err(err) => Err(map_sdk_error(err)),
-            }
-        })
-    }
-
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-        let scoped_key = self.scoped_key(key)?;
-        self.run_async(async {
-            let range_header = match range {
-                None => None,
-                Some(range) => {
-                    let metadata = match self.head_scoped(&scoped_key, false).await? {
-                        Some(metadata) => metadata,
-                        None => return Ok(None),
-                    };
-                    if range.end_exclusive < range.start_inclusive
-                        || range.start_inclusive > metadata.size_bytes
-                    {
-                        return Err(ObjectStoreError::InvalidRange);
-                    }
-
-                    let bounded_end = range.end_exclusive.min(metadata.size_bytes);
-                    if bounded_end == range.start_inclusive {
-                        return Ok(Some(Vec::new()));
-                    }
-
-                    Some(format!(
-                        "bytes={}-{}",
-                        range.start_inclusive,
-                        bounded_end.saturating_sub(1)
-                    ))
-                }
-            };
-
-            let mut request = self
-                .client()
-                .get_object()
-                .bucket(&self.bucket)
-                .key(&scoped_key);
-            if let Some(range_header) = range_header {
-                request = request.range(range_header);
-            }
-
-            match request.send().await {
-                Ok(output) => {
-                    let collected = output
-                        .body
-                        .collect()
-                        .await
-                        .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
-                    Ok(Some(collected.into_bytes().to_vec()))
-                }
-                Err(err) if is_not_found(&err) => Ok(None),
-                Err(err) if is_invalid_range(&err) => Err(ObjectStoreError::InvalidRange),
-                Err(err) => Err(map_sdk_error(err)),
-            }
-        })
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let scoped_key = self.scoped_key(key)?;
-        self.run_async(async { self.put_scoped(&scoped_key, bytes, mode).await })
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        let scoped_key = self.scoped_key(key)?;
-        self.run_async(async {
-            match self
-                .client()
-                .delete_object()
-                .bucket(&self.bucket)
-                .key(&scoped_key)
-                .send()
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(err) if is_not_found(&err) => Ok(()),
-                Err(err) => Err(map_sdk_error(err)),
-            }
-        })
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        let scoped_prefix = self.scoped_list_prefix(prefix)?;
-        self.run_async(async {
-            let mut keys = Vec::new();
-            let mut continuation_token = None;
-
-            loop {
-                let mut request = self
-                    .client()
-                    .list_objects_v2()
-                    .bucket(&self.bucket)
-                    .prefix(&scoped_prefix);
-                if let Some(token) = continuation_token.as_deref() {
-                    request = request.continuation_token(token);
-                }
-
-                let output = request.send().await.map_err(map_sdk_error)?;
-                if let Some(objects) = output.contents() {
-                    for object in objects {
-                        if let Some(key) = object.key() {
-                            match self.key_prefix.as_deref() {
-                                Some(key_prefix) => {
-                                    if let Some(unscoped) =
-                                        unscope_listed_key(Some(key_prefix), key)
-                                    {
-                                        keys.push(unscoped);
-                                    }
-                                }
-                                None => keys.push(key.to_owned()),
-                            }
-                        }
-                    }
-                }
-
-                if !output.is_truncated() {
-                    break;
-                }
-                continuation_token = output.next_continuation_token().map(ToOwned::to_owned);
-            }
-
-            keys.sort();
-            Ok(keys)
-        })
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
-fn is_not_found<E, R>(err: &SdkError<E, R>) -> bool
-where
-    E: ProvideErrorMetadata,
-{
-    matches!(
-        service_error_code(err),
-        Some("NotFound" | "NoSuchKey" | "404")
-    )
-}
-
-fn is_invalid_range<E, R>(err: &SdkError<E, R>) -> bool
-where
-    E: ProvideErrorMetadata,
-{
-    matches!(service_error_code(err), Some("InvalidRange"))
-}
-
-fn is_precondition_failure<E, R>(err: &SdkError<E, R>) -> bool
-where
-    E: ProvideErrorMetadata,
-{
-    put_error_code_maps_to_precondition_failed(&PutMode::Overwrite, service_error_code(err))
-}
-
-fn service_error_code<E, R>(err: &SdkError<E, R>) -> Option<&str>
-where
-    E: ProvideErrorMetadata,
-{
-    err.code()
-}
-
-fn put_error_maps_to_precondition_failed<E, R>(mode: &PutMode, err: &SdkError<E, R>) -> bool
-where
-    E: ProvideErrorMetadata,
-{
-    put_error_code_maps_to_precondition_failed(mode, service_error_code(err))
-}
-
-fn put_error_code_maps_to_precondition_failed(mode: &PutMode, code: Option<&str>) -> bool {
-    matches!(
-        code,
-        Some("PreconditionFailed" | "ConditionalRequestConflict")
-    ) || (matches!(mode, PutMode::CompareAndSwap { .. })
-        && matches!(code, Some("NotFound" | "NoSuchKey" | "404")))
-}
-
-fn map_sdk_error<E, R>(err: SdkError<E, R>) -> ObjectStoreError
-where
-    E: ProvideErrorMetadata + fmt::Debug,
-    R: fmt::Debug,
-{
-    if is_precondition_failure(&err) {
-        return ObjectStoreError::PreconditionFailed;
+fn validate_config(config: &S3CompatibleConfig) -> Result<(), ObjectStoreError> {
+    if config.bucket.trim().is_empty() {
+        return Err(ObjectStoreError::Transport(
+            "bucket must not be empty".to_owned(),
+        ));
     }
-    if is_not_found(&err) {
-        return ObjectStoreError::NotFound;
+    if config.region.trim().is_empty() {
+        return Err(ObjectStoreError::Transport(
+            "region must not be empty".to_owned(),
+        ));
     }
-    if is_invalid_range(&err) {
-        return ObjectStoreError::InvalidRange;
+    if config.access_key_id.trim().is_empty() {
+        return Err(ObjectStoreError::Transport(
+            "access key id must not be empty".to_owned(),
+        ));
     }
-
-    let mut details = Vec::new();
-    if let Some(code) = err.code() {
-        details.push(format!("code={code}"));
+    if config.secret_access_key.trim().is_empty() {
+        return Err(ObjectStoreError::Transport(
+            "secret access key must not be empty".to_owned(),
+        ));
     }
-    if let Some(message) = err.message() {
-        details.push(format!("message={message}"));
-    }
-
-    let detail_suffix = if details.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", details.join(", "))
-    };
-
-    ObjectStoreError::Transport(format!("{err:?}{detail_suffix}"))
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        put_error_code_maps_to_precondition_failed, S3CompatibleConfig, S3CompatibleStore,
-    };
-    use crate::PutMode;
+    use super::{S3CompatibleConfig, S3CompatibleStore};
 
-    #[test]
-    fn compare_and_swap_maps_missing_object_codes_to_precondition_failed() {
-        let mode = PutMode::CompareAndSwap {
-            expected_etag: "etag".to_owned(),
-        };
-        for code in ["NotFound", "NoSuchKey", "404"] {
-            assert!(
-                put_error_code_maps_to_precondition_failed(&mode, Some(code)),
-                "expected CAS missing-object code {code} to map to PreconditionFailed"
-            );
-        }
-    }
-
-    #[test]
-    fn overwrite_does_not_map_missing_object_codes_to_precondition_failed() {
-        for code in ["NotFound", "NoSuchKey", "404"] {
-            assert!(
-                !put_error_code_maps_to_precondition_failed(&PutMode::Overwrite, Some(code)),
-                "did not expect overwrite missing-object code {code} to map to PreconditionFailed"
-            );
-        }
-    }
-
-    #[test]
-    fn store_reuses_one_runtime_across_calls() {
-        let store = S3CompatibleStore::new(S3CompatibleConfig {
+    fn test_config() -> S3CompatibleConfig {
+        S3CompatibleConfig {
             provider_name: "test-s3",
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
@@ -605,35 +165,20 @@ mod tests {
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
             sha256_checksum_metadata: true,
-        })
-        .expect("construct store");
-
-        let first = store
-            .run_async(async { Ok::<_, crate::ObjectStoreError>(1usize) })
-            .expect("first block_on");
-        let second = store
-            .run_async(async { Ok::<_, crate::ObjectStoreError>(2usize) })
-            .expect("second block_on");
-
-        assert_eq!((first, second), (1, 2));
+        }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn store_can_drop_inside_async_context() {
-        let store = S3CompatibleStore::new(S3CompatibleConfig {
-            provider_name: "test-s3",
-            bucket: "bucket".to_owned(),
-            region: "us-east-1".to_owned(),
-            endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
-            access_key_id: "access".to_owned(),
-            secret_access_key: "secret".to_owned(),
-            session_token: None,
-            key_prefix: Some("tenant-a".to_owned()),
-            force_path_style: true,
-            sha256_checksum_metadata: true,
-        })
-        .expect("construct store");
+    #[test]
+    fn s3_compatible_store_builds_without_hidden_runtime() {
+        let store = S3CompatibleStore::new(test_config()).expect("construct store");
+        let debug = format!("{store:?}");
+        assert!(debug.contains("test-s3"));
+    }
 
-        drop(store);
+    #[test]
+    fn s3_compatible_store_rejects_blank_credentials() {
+        let mut config = test_config();
+        config.access_key_id.clear();
+        assert!(S3CompatibleStore::new(config).is_err());
     }
 }
