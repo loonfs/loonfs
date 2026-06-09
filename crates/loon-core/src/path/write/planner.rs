@@ -37,12 +37,12 @@ impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
         Self { store }
     }
 
-    pub(crate) fn plan_against_basis(
+    pub(crate) async fn plan_against_basis(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let basis = load_verified_namespace_basis(self.store, namespace_id)?;
+        let basis = load_verified_namespace_basis(self.store, namespace_id).await?;
         self.plan_against_verified_basis(namespace_id, intent, &basis)
     }
 
@@ -794,7 +794,7 @@ mod tests {
         }
     }
 
-    fn setup_namespace() -> (
+    async fn setup_namespace() -> (
         tempfile::TempDir,
         LocalFsStore,
         NamespaceId,
@@ -804,23 +804,27 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         (temp_dir, store, namespace_id, context)
     }
 
-    fn plan_against_current_state(
+    async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> PlannedPathMutation {
-        let basis = load_verified_namespace_basis(store, namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(store, namespace_id)
+            .await
+            .expect("basis");
         PathPlanner::new(store)
             .plan_against_state(namespace_id, intent, &basis.head, &basis.metadata_state)
             .expect("plan")
     }
 
-    #[test]
-    fn path_intent_fingerprint_normalizes_paths() {
+    #[tokio::test]
+    async fn path_intent_fingerprint_normalizes_paths() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let left = path_intent_fingerprint_for_path_intent(
             &namespace_id,
@@ -842,8 +846,8 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    #[test]
-    fn path_intent_fingerprint_changes_when_logical_inputs_change() {
+    #[tokio::test]
+    async fn path_intent_fingerprint_changes_when_logical_inputs_change() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let baseline = path_intent_fingerprint_for_path_intent(
             &namespace_id,
@@ -865,8 +869,8 @@ mod tests {
         assert_ne!(baseline, changed);
     }
 
-    #[test]
-    fn path_intent_and_core_commit_fingerprints_use_distinct_domains() {
+    #[tokio::test]
+    async fn path_intent_and_core_commit_fingerprints_use_distinct_domains() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let path_fingerprint = path_intent_fingerprint_for_path_intent(
             &namespace_id,
@@ -894,9 +898,9 @@ mod tests {
         assert_ne!(path_fingerprint.as_str(), core_fingerprint.as_str());
     }
 
-    #[test]
-    fn create_dir_plan_contains_semantic_op_and_target_absence_precondition() {
-        let (_temp_dir, store, namespace_id, _context) = setup_namespace();
+    #[tokio::test]
+    async fn create_dir_plan_contains_semantic_op_and_target_absence_precondition() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
@@ -904,7 +908,8 @@ mod tests {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 absolute_path: "/docs".to_owned(),
             },
-        );
+        )
+        .await;
 
         assert_eq!(
             planned.commit_request.ops,
@@ -926,10 +931,12 @@ mod tests {
             )));
     }
 
-    #[test]
-    fn put_file_plan_auto_creates_missing_parent_directories() {
-        let (_temp_dir, store, namespace_id, _context) = setup_namespace();
-        let staged = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage");
+    #[tokio::test]
+    async fn put_file_plan_auto_creates_missing_parent_directories() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
+        let staged = store_bytes_as_content(&store, &namespace_id, b"hello")
+            .await
+            .expect("stage");
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
@@ -939,7 +946,8 @@ mod tests {
                 content_ref: staged.content_ref.clone(),
                 behavior: PutFileBehavior::CreateOnly,
             },
-        );
+        )
+        .await;
 
         assert_eq!(planned.commit_request.ops.len(), 3);
         assert!(matches!(
@@ -963,9 +971,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn move_path_plan_contains_binding_and_target_absence_preconditions() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace();
+    #[tokio::test]
+    async fn move_path_plan_contains_binding_and_target_absence_preconditions() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         put_file_bytes(
             &store,
             &namespace_id,
@@ -975,6 +983,7 @@ mod tests {
             &context,
             Some("seed-file"),
         )
+        .await
         .expect("seed file");
 
         let planned = plan_against_current_state(
@@ -986,7 +995,8 @@ mod tests {
                 to_path: "/docs/b.txt".to_owned(),
                 mode: RenameMode::NoReplace,
             },
-        );
+        )
+        .await;
 
         assert!(matches!(
             planned.commit_request.ops.as_slice(),
@@ -1011,8 +1021,8 @@ mod tests {
             )));
     }
 
-    #[test]
-    fn binding_is_precondition_reports_invalid_durable_name_key_as_namespace_corrupt() {
+    #[tokio::test]
+    async fn binding_is_precondition_reports_invalid_durable_name_key_as_namespace_corrupt() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let mut head = HeadState::initial(namespace_id);
         head.seq = ChangeSeq(1);
@@ -1060,9 +1070,9 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
 
-    #[test]
-    fn copy_file_plan_validates_source_revision_and_target_absence() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace();
+    #[tokio::test]
+    async fn copy_file_plan_validates_source_revision_and_target_absence() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         put_file_bytes(
             &store,
             &namespace_id,
@@ -1072,6 +1082,7 @@ mod tests {
             &context,
             Some("seed-copy-source"),
         )
+        .await
         .expect("seed file");
 
         let planned = plan_against_current_state(
@@ -1082,7 +1093,8 @@ mod tests {
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/copy.txt".to_owned(),
             },
-        );
+        )
+        .await;
 
         assert!(matches!(
             planned.commit_request.ops.as_slice(),
@@ -1109,9 +1121,9 @@ mod tests {
             )));
     }
 
-    #[test]
-    fn tombstoned_ancestor_blocks_descendant_planning() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace();
+    #[tokio::test]
+    async fn tombstoned_ancestor_blocks_descendant_planning() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         put_file_bytes(
             &store,
             &namespace_id,
@@ -1121,6 +1133,7 @@ mod tests {
             &context,
             Some("seed-dead-tree"),
         )
+        .await
         .expect("seed file");
         delete_path(
             &store,
@@ -1129,9 +1142,14 @@ mod tests {
             &context,
             Some("delete-dead-tree"),
         )
+        .await
         .expect("delete tree");
-        let staged = store_bytes_as_content(&store, &namespace_id, b"new").expect("stage");
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let staged = store_bytes_as_content(&store, &namespace_id, b"new")
+            .await
+            .expect("stage");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let error = PathPlanner::new(&store)
             .plan_against_state(
                 &namespace_id,

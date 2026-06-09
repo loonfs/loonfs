@@ -1,5 +1,5 @@
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
-use super::{AsyncObjectStore, ByteRange, ObjectBody, ObjectMetadata, PutMode};
+use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -42,7 +42,7 @@ impl AwsS3Store {
 }
 
 #[async_trait]
-impl AsyncObjectStore for AwsS3Store {
+impl ObjectStore for AwsS3Store {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }

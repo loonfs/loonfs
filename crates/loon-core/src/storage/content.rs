@@ -1,6 +1,7 @@
 use crate::error::CoreError;
 use crate::invariants::InvariantId;
 use crate::namespace::catalog::load_namespace_content_store_id;
+use bytes::Bytes;
 use loon_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, NamespaceId};
 use loon_objectstore::keys::content_blob;
 use loon_objectstore::{ObjectStore, ObjectStoreError};
@@ -38,7 +39,7 @@ pub(crate) struct ContentValidationTracker {
 }
 
 impl ContentValidationTracker {
-    pub(crate) fn ensure_validated<S: ObjectStore + ?Sized>(
+    pub(crate) async fn ensure_validated<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         content_store_id: &ContentStoreId,
@@ -48,7 +49,7 @@ impl ContentValidationTracker {
         if self.validated.contains(&key) {
             return Ok(());
         }
-        validate_durable_content_reference(store, content_store_id, content_ref)?;
+        validate_durable_content_reference(store, content_store_id, content_ref).await?;
         self.validated.insert(key);
         Ok(())
     }
@@ -86,27 +87,27 @@ pub(crate) enum ImmutableObjectWriteError {
     Store(String),
 }
 
-pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
+pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<ValidatedDurableContent, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    if let Some(validated) = validate_content_metadata(store, &object_key, content_ref)? {
+    if let Some(validated) = validate_content_metadata(store, &object_key, content_ref).await? {
         return Ok(validated);
     }
 
-    let bytes = load_required_object(store, &object_key)?;
+    let bytes = load_required_object(store, &object_key).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
 }
 
-pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
+pub async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<ReadDurableContent, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    let bytes = load_required_object(store, &object_key)?;
+    let bytes = load_required_object(store, &object_key).await?;
     let validated = validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
 
     Ok(ReadDurableContent { validated, bytes })
@@ -167,12 +168,12 @@ fn validate_loaded_content_bytes(
     })
 }
 
-fn validate_content_metadata<S: ObjectStore + ?Sized>(
+async fn validate_content_metadata<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     content_ref: &ContentRef,
 ) -> Result<Option<ValidatedDurableContent>, DurableContentValidationError> {
-    let metadata = match store.head_with_checksum(object_key) {
+    let metadata = match store.head_with_checksum(object_key).await {
         Ok(Some(metadata)) => metadata,
         Ok(None) => {
             return Err(DurableContentValidationError::MissingContentObject {
@@ -228,16 +229,16 @@ fn validate_content_metadata<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "write_content_blob", key_class = "content_blob")
 )]
-pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
+pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
-    write_immutable_object(store, &object_key, bytes)?;
+    write_immutable_object(store, &object_key, bytes).await?;
 
     Ok(StoredContent {
         content_store_id,
@@ -248,15 +249,18 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn write_immutable_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_bytes: &[u8],
 ) -> Result<(), ImmutableObjectWriteError> {
-    match store.put_if_absent(object_key, expected_bytes) {
+    match store
+        .put_if_absent(object_key, Bytes::copy_from_slice(expected_bytes))
+        .await
+    {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed) => {
-            if existing_object_matches_expected_bytes(store, object_key, expected_bytes)? {
+            if existing_object_matches_expected_bytes(store, object_key, expected_bytes).await? {
                 return Ok(());
             }
             Err(ImmutableObjectWriteError::Store(format!(
@@ -267,7 +271,7 @@ pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
     }
 }
 
-fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
+async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_bytes: &[u8],
@@ -276,6 +280,7 @@ fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
     let expected_digest = sha256_digest(expected_bytes);
     if let Some(metadata) = store
         .head_with_checksum(object_key)
+        .await
         .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
     {
         if metadata.size_bytes != expected_size {
@@ -288,6 +293,7 @@ fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
 
     let existing = store
         .get(object_key, None)
+        .await
         .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
         .ok_or_else(|| {
             ImmutableObjectWriteError::Store(format!(
@@ -297,12 +303,12 @@ fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
     Ok(existing == expected_bytes)
 }
 
-fn load_required_object<S: ObjectStore + ?Sized>(
+async fn load_required_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
 ) -> Result<Vec<u8>, DurableContentValidationError> {
-    match store.get(object_key, None) {
-        Ok(Some(bytes)) => Ok(bytes),
+    match store.get(object_key, None).await {
+        Ok(Some(bytes)) => Ok(bytes.to_vec()),
         Ok(None) => Err(DurableContentValidationError::MissingContentObject {
             object_key: object_key.to_owned(),
         }),
@@ -319,62 +325,69 @@ mod tests {
         read_durable_content_bytes, validate_durable_content_reference,
         DurableContentValidationError,
     };
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
     use loon_api::{ContentRef, ContentRefKind, ContentStoreId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::content_blob;
     use loon_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
-    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
-    #[test]
-    fn validate_whole_file_content_ref_success() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_success() {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"whole file bytes";
         let content_ref = ContentRef::whole_file_v0(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         let validated = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
             .expect("validate content ref");
         assert_eq!(validated.content_ref, content_ref);
         assert_eq!(validated.file_size_bytes, bytes.len() as u64);
         assert_eq!(validated.file_digest_sha256, content_ref.digest);
     }
 
-    #[test]
-    fn validate_whole_file_content_ref_falls_back_to_get_when_checksum_metadata_is_absent() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_falls_back_to_get_when_checksum_metadata_is_absent() {
         let (_temp_dir, inner, content_store_id) = test_store();
         let store = NoChecksumStore::new(inner);
         let bytes = b"whole file bytes";
         let content_ref = ContentRef::whole_file_v0(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         store.reset_content_blob_get_count();
         validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
             .expect("validate content ref");
         assert_eq!(store.content_blob_get_count(), 1);
     }
 
-    #[test]
-    fn validate_whole_file_content_ref_accepts_empty_files() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_accepts_empty_files() {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"";
         let content_ref = ContentRef::whole_file_v0(bytes);
-        put_content_object(&store, &content_store_id, &content_ref, bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+            .await
             .expect("read empty content ref");
         assert_eq!(read.bytes, bytes);
         assert_eq!(read.validated.file_size_bytes, 0);
     }
 
-    #[test]
-    fn validate_whole_file_content_ref_rejects_missing_object() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_rejects_missing_object() {
         let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef::whole_file_v0(b"missing");
 
         let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
             .expect_err("missing object");
         assert!(matches!(
             err,
@@ -382,14 +395,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn validate_whole_file_content_ref_rejects_size_mismatch() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_rejects_size_mismatch() {
         let (_temp_dir, store, content_store_id) = test_store();
         let mut content_ref = ContentRef::whole_file_v0(b"abc");
-        put_content_object(&store, &content_store_id, &content_ref, b"abc");
+        put_content_object(&store, &content_store_id, &content_ref, b"abc").await;
         content_ref.size_bytes += 1;
 
         let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
             .expect_err("size mismatch");
         assert!(matches!(
             err,
@@ -397,13 +411,14 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn validate_whole_file_content_ref_rejects_digest_mismatch() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_rejects_digest_mismatch() {
         let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef::whole_file_v0(b"expected");
-        put_content_object(&store, &content_store_id, &content_ref, b"mismatch");
+        put_content_object(&store, &content_store_id, &content_ref, b"mismatch").await;
 
         let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
             .expect_err("digest mismatch");
         assert!(matches!(
             err,
@@ -411,8 +426,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn validate_whole_file_content_ref_rejects_unsupported_kind() {
+    #[tokio::test]
+    async fn validate_whole_file_content_ref_rejects_unsupported_kind() {
         let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef {
             kind: ContentRefKind::Unsupported,
@@ -421,6 +436,7 @@ mod tests {
         };
 
         let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
             .expect_err("unsupported content ref kind");
         assert!(matches!(
             err,
@@ -436,7 +452,7 @@ mod tests {
         (temp_dir, store, content_store_id)
     }
 
-    fn put_content_object(
+    async fn put_content_object(
         store: &impl ObjectStore,
         content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
@@ -444,79 +460,88 @@ mod tests {
     ) {
         let key =
             content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
-        store.put_if_absent(&key, bytes).expect("put content");
+        store
+            .put_if_absent(&key, Bytes::copy_from_slice(bytes))
+            .await
+            .expect("put content");
     }
 
+    #[derive(Debug)]
     struct NoChecksumStore {
         inner: LocalFsStore,
-        content_blob_gets: Cell<usize>,
+        content_blob_gets: AtomicUsize,
     }
 
     impl NoChecksumStore {
         fn new(inner: LocalFsStore) -> Self {
             Self {
                 inner,
-                content_blob_gets: Cell::new(0),
+                content_blob_gets: AtomicUsize::new(0),
             }
         }
 
         fn content_blob_get_count(&self) -> usize {
-            self.content_blob_gets.get()
+            self.content_blob_gets.load(Ordering::Relaxed)
         }
 
         fn reset_content_blob_get_count(&self) {
-            self.content_blob_gets.set(0);
+            self.content_blob_gets.store(0, Ordering::Relaxed);
         }
     }
 
+    #[async_trait]
     impl ObjectStore for NoChecksumStore {
-        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            let mut metadata = self.inner.head(key)?;
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            let mut metadata = self.inner.head(key).await?;
             if let Some(metadata) = &mut metadata {
                 metadata.checksum_sha256 = None;
             }
             Ok(metadata)
         }
 
-        fn get(
+        async fn get(
             &self,
             key: &str,
             range: Option<ByteRange>,
-        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
             if key.starts_with("content-stores/") && key.contains("/blobs/") {
-                self.content_blob_gets
-                    .set(self.content_blob_gets.get().saturating_add(1));
+                self.content_blob_gets.fetch_add(1, Ordering::Relaxed);
             }
-            self.inner.get(key, range)
+            self.inner.get(key, range).await
         }
 
-        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
             if key.starts_with("content-stores/") && key.contains("/blobs/") {
-                self.content_blob_gets
-                    .set(self.content_blob_gets.get().saturating_add(1));
+                self.content_blob_gets.fetch_add(1, Ordering::Relaxed);
             }
-            let mut body = self.inner.get_with_metadata(key)?;
+            let mut body = self.inner.get_with_metadata(key).await?;
             if let Some(body) = &mut body {
                 body.metadata.checksum_sha256 = None;
             }
             Ok(body)
         }
 
-        fn put(
+        async fn put(
             &self,
             key: &str,
-            bytes: &[u8],
+            bytes: Bytes,
             mode: PutMode,
         ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode)
+            self.inner.put(key, bytes, mode).await
         }
 
-        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key)
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
         }
 
-        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-            self.inner.list_prefix(prefix)
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
         }
     }
 }

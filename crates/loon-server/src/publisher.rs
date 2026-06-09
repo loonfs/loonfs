@@ -518,6 +518,9 @@ mod tests {
 
     use super::*;
     use crate::config::{RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
     use loon_api::v0::{CommitOp, CommitRequest};
     use loon_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loon_api::{ChangeSeq, InodeId};
@@ -598,53 +601,61 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ObjectStore for BlockingHeadCasStore {
-        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key)
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
         }
 
-        fn get(
+        async fn get(
             &self,
             key: &str,
             range: Option<ByteRange>,
-        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-            self.inner.get(key, range)
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
         }
 
-        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key)
-        }
-
-        fn put(
+        async fn get_with_metadata(
             &self,
             key: &str,
-            bytes: &[u8],
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
             mode: PutMode,
         ) -> Result<ObjectMetadata, ObjectStoreError> {
             if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
-                let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
-                if state.blocks_remaining > 0 {
-                    state.blocks_remaining -= 1;
-                    state.entered += 1;
-                    self.gate.cvar.notify_all();
-                    while !state.released {
-                        state = self
-                            .gate
-                            .cvar
-                            .wait(state)
-                            .expect("head gate mutex poisoned");
+                let gate = self.gate.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut state = gate.state.lock().expect("head gate mutex poisoned");
+                    if state.blocks_remaining > 0 {
+                        state.blocks_remaining -= 1;
+                        state.entered += 1;
+                        gate.cvar.notify_all();
+                        while !state.released {
+                            state = gate.cvar.wait(state).expect("head gate mutex poisoned");
+                        }
                     }
-                }
+                })
+                .await
+                .expect("head CAS gate wait task panicked");
             }
-            self.inner.put(key, bytes, mode)
+            self.inner.put(key, bytes, mode).await
         }
 
-        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key)
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
         }
 
-        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-            self.inner.list_prefix(prefix)
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
         }
     }
 
@@ -809,6 +820,7 @@ mod tests {
 
         let wal_keys = shared
             .list_prefix("namespaces/demo/wal/")
+            .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 2);
     }
@@ -1009,7 +1021,10 @@ mod tests {
         assert_eq!(response_a.expect("response a").committed_seq, ChangeSeq(1));
         assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(2));
 
-        let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+        let wal_keys = store
+            .list_prefix("namespaces/demo/wal/")
+            .await
+            .expect("list wal");
         assert_eq!(wal_keys.len(), 1);
     }
 
@@ -1032,8 +1047,9 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store.clone(), &config);
         create_namespace(&fs, &namespace_id).await;
-        let content =
-            store_bytes_as_content(store.as_ref(), &namespace_id, b"hello").expect("stage content");
+        let content = store_bytes_as_content(store.as_ref(), &namespace_id, b"hello")
+            .await
+            .expect("stage content");
         let registry = PublisherRegistry::new(fs);
 
         let explicit = CommitRequest {
@@ -1066,10 +1082,14 @@ mod tests {
             ChangeSeq(2)
         );
 
-        let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+        let wal_keys = store
+            .list_prefix("namespaces/demo/wal/")
+            .await
+            .expect("list wal");
         assert_eq!(wal_keys.len(), 1);
         let wal_bytes = store
             .get(&wal_keys[0], None)
+            .await
             .expect("read wal")
             .expect("wal exists");
         let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");

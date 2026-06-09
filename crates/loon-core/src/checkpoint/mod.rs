@@ -17,6 +17,8 @@ use crate::metadata::{
 use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::control::read_head_object;
 use crate::storage::content::write_immutable_object;
+use bytes::Bytes;
+use futures::future::try_join_all;
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
 };
@@ -38,9 +40,10 @@ use loon_objectstore::keys::{
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use thiserror::Error;
+use tracing::Instrument;
 
 // Manifest id allocation can race with other manifest publishers. Exhausting
 // this loop means the candidate id range was already occupied.
@@ -59,6 +62,8 @@ const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 4096;
 const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
+const MAX_MATERIALIZED_TABLE_FETCHES: usize = 8;
+const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 #[cfg(test)]
 const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
@@ -172,7 +177,7 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     table_cache: Option<&'a MetadataTableCache>,
     manifest_object_key: String,
     manifest: NamespaceManifestEnvelope,
-    segment_cache: RefCell<HashMap<String, Vec<MetadataRow>>>,
+    segment_cache: Mutex<HashMap<String, Vec<MetadataRow>>>,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -180,18 +185,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         &self.manifest
     }
 
-    pub(crate) fn get(
+    pub(crate) async fn get(
         &self,
         family: MetadataTableFamily,
         key: &str,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         Ok(self
-            .scan_prefix_with_cache_mode(family, key, MetadataTableCacheMode::Populate)?
+            .scan_prefix_with_cache_mode(family, key, MetadataTableCacheMode::Populate)
+            .await?
             .into_iter()
             .find(|row| row.row_key_for_family(family) == key))
     }
 
-    pub(crate) fn scan_prefix(
+    pub(crate) async fn scan_prefix(
         &self,
         family: MetadataTableFamily,
         prefix: &str,
@@ -203,9 +209,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             MetadataTableCacheMode::ReadOnly
         };
         self.scan_prefix_with_cache_mode(family, prefix, cache_mode)
+            .await
     }
 
-    fn scan_prefix_with_cache_mode(
+    async fn scan_prefix_with_cache_mode(
         &self,
         family: MetadataTableFamily,
         prefix: &str,
@@ -227,7 +234,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                     rows: &mut rows,
                     cache_mode,
                 },
-            )?;
+            )
+            .await?;
         }
         Ok(rows)
     }
@@ -245,7 +253,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         Ok(count)
     }
 
-    fn scan_manifest_tables(
+    async fn scan_manifest_tables(
         &self,
         family: MetadataTableFamily,
         prefix: &str,
@@ -254,6 +262,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         output: MetadataTableScanOutput<'_>,
     ) -> Result<(), ManifestLoadError> {
         let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
+        let mut matching_descriptors = Vec::new();
         for descriptor in &table.segments {
             context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
@@ -266,7 +275,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             if !descriptor_may_contain_prefix(descriptor, prefix) {
                 continue;
             }
-            let segment_rows = self.segment_rows(context, family, descriptor, output.cache_mode)?;
+            matching_descriptors.push(descriptor);
+        }
+
+        let mut loaded_segments = Vec::new();
+        for chunk in matching_descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
+            loaded_segments.extend(
+                try_join_all(chunk.iter().map(|descriptor| {
+                    self.segment_rows(context, family, descriptor, output.cache_mode)
+                }))
+                .await?,
+            );
+        }
+
+        for segment_rows in loaded_segments {
             output.rows.extend(
                 segment_rows
                     .into_iter()
@@ -276,14 +298,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         Ok(())
     }
 
-    fn segment_rows(
+    async fn segment_rows(
         &self,
         context: MetadataTableLoadContext<'_>,
         family: MetadataTableFamily,
         descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        if let Some(rows) = self.segment_cache.borrow().get(&descriptor.object_key) {
+        if let Some(rows) = self
+            .segment_cache
+            .lock()
+            .expect("manifest segment cache lock poisoned")
+            .get(&descriptor.object_key)
+        {
             return Ok(rows.clone());
         }
         let rows = load_manifest_segment_rows_with_cache(
@@ -293,9 +320,11 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             family,
             descriptor,
             cache_mode,
-        )?;
+        )
+        .await?;
         self.segment_cache
-            .borrow_mut()
+            .lock()
+            .expect("manifest segment cache lock poisoned")
             .insert(descriptor.object_key.clone(), rows.clone());
         Ok(rows)
     }
@@ -467,15 +496,15 @@ impl ManifestLoadError {
     }
 }
 
-pub(crate) fn create_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<CreateCheckpointResponse, CoreError> {
-    create_checkpoint_with_policy(store, namespace_id, context, MetadataLsmPolicy::default())
+    create_checkpoint_with_policy(store, namespace_id, context, MetadataLsmPolicy::default()).await
 }
 
-pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -491,14 +520,17 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     let checkpoint_id = generate_checkpoint_id();
     let mut saw_head_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
-        let basis = {
-            let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
-            load_verified_namespace_basis(store, namespace_id)
-        }?;
+        let basis = load_verified_namespace_basis(store, namespace_id)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "scan_namespace_state"
+            ))
+            .await?;
         let head_seq = basis.head.seq;
         if let Some(current_manifest_id) = basis.head.current_manifest_id {
             let materialized =
                 load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                    .await
                     .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
             if materialized.manifest.payload.head_seq == head_seq {
                 if let Some(checkpoint) = checkpoint_record_for_manifest(&materialized.manifest) {
@@ -531,7 +563,9 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                 store,
                 namespace_id,
                 manifest_id,
-            ) {
+            )
+            .await
+            {
                 Ok(Some(materialized)) => {
                     if checkpoint_record_by_id(&materialized.manifest, &checkpoint_id).is_some() {
                         manifest_ready = true;
@@ -549,13 +583,15 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                         policy,
                         manifest_id,
                         Some(checkpoint_record),
-                    )?;
+                    )
+                    .await?;
                     let materialized = load_manifest_materialization_from_manifest(
                         store,
                         namespace_id,
                         &namespace_manifest(namespace_id.as_str(), manifest_id),
                         &manifest,
                     )
+                    .await
                     .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
                     if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
                         return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
@@ -568,7 +604,8 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                     // existing manifest has the same payload checksum. A
                     // same-id/different-payload conflict means another writer
                     // won this allocation slot, so try the next manifest id.
-                    match write_namespace_manifest(store, &manifest) {
+                    let write_result = write_namespace_manifest(store, &manifest).await;
+                    match write_result {
                         Ok(()) => {}
                         Err(BasisLoadError::ManifestLoad(
                             ManifestLoadError::ManifestConflict { .. },
@@ -591,6 +628,7 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
         }
 
         let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
+            .await
             .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
         let checkpoint = checkpoint_record_by_id(&materialized.manifest, &checkpoint_id)
             .ok_or_else(|| {
@@ -606,7 +644,9 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
             manifest_id,
             &checkpoint.checkpoint_id,
             &context.writer_version,
-        )? {
+        )
+        .await?
+        {
             ManifestPublicationOutcome::Published(resulting_head) => {
                 return Ok(CreateCheckpointResponse {
                     namespace_id: namespace_id.clone(),
@@ -660,7 +700,7 @@ fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId, CoreError> 
     skip_all,
     fields(phase = "project_manifest")
 )]
-fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
+async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     basis: &crate::namespace::basis::VerifiedNamespaceBasis,
@@ -673,6 +713,7 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
     let previous_manifest = match basis.head.current_manifest_id {
         Some(previous_id) => Some(
             load_verified_manifest_materialization(store, namespace_id, previous_id)
+                .await
                 .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?,
         ),
         _ => None,
@@ -690,14 +731,17 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
         Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
             let mut metadata_files = previous.manifest.payload.metadata_files.clone();
             if previous.manifest.payload.head_seq < head_seq {
-                metadata_files.extend(flatten_manifest_tables(build_manifest_l0_run_tables(
-                    store,
-                    namespace_id,
-                    head_seq,
-                    previous.manifest.payload.head_seq,
-                    &basis.metadata_state,
-                    writer_version,
-                )?));
+                metadata_files.extend(flatten_manifest_tables(
+                    build_manifest_l0_run_tables(
+                        store,
+                        namespace_id,
+                        head_seq,
+                        previous.manifest.payload.head_seq,
+                        &basis.metadata_state,
+                        writer_version,
+                    )
+                    .await?,
+                ));
             }
             (previous.manifest.payload.base_seq, metadata_files)
         }
@@ -710,7 +754,8 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
                 &basis.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
-            )?;
+            )
+            .await?;
             debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
             (head_seq, flatten_manifest_tables(run_tables))
         }
@@ -723,7 +768,8 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
                 &basis.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
-            )?;
+            )
+            .await?;
             (head_seq, flatten_manifest_tables(run_tables))
         }
     };
@@ -770,13 +816,14 @@ fn checkpoint_record_by_id<'a>(
         .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
 }
 
-pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
+pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse, CoreError> {
     for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
+            .await
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let head = loaded_head.envelope.state;
         let Some(current_manifest_id) = head.current_manifest_id else {
@@ -787,9 +834,10 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
         };
         let manifest =
             load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                .await
                 .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
         let target_floor = manifest.manifest.payload.head_seq;
-        ensure_required_retention_progress(store, namespace_id, target_floor)?;
+        ensure_required_retention_progress(store, namespace_id, target_floor).await?;
 
         if head.retention_floor_seq >= target_floor {
             return Ok(AdvanceRetentionResponse {
@@ -816,7 +864,9 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
             loaded_head.metadata.etag.as_deref(),
             &context.writer_version,
             &next_head,
-        ) {
+        )
+        .await
+        {
             Ok(()) => {
                 return Ok(AdvanceRetentionResponse {
                     namespace_id: namespace_id.clone(),
@@ -833,19 +883,19 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub(crate) fn load_verified_manifest_materialization<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_verified_manifest_materialization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
 ) -> Result<LoadedManifestMaterialization, ManifestLoadError> {
-    load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id)?.ok_or_else(
-        || ManifestLoadError::MissingManifest {
+    load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id)
+        .await?
+        .ok_or_else(|| ManifestLoadError::MissingManifest {
             object_key: namespace_manifest(namespace_id.as_str(), manifest_id),
-        },
-    )
+        })
 }
 
-pub(crate) fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Sized>(
+pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
@@ -853,19 +903,18 @@ pub(crate) fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Siz
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "load_namespace_manifest",
-            key_class = "manifest_table"
-        )
-        .entered();
-        let Some(manifest_bytes) =
-            store
-                .get(&manifest_key, None)
-                .map_err(|err| ManifestLoadError::ReadManifest {
-                    object_key: manifest_key.clone(),
-                    message: err.to_string(),
-                })?
+        let Some(manifest_bytes) = store
+            .get(&manifest_key, None)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "load_namespace_manifest",
+                key_class = "manifest_table"
+            ))
+            .await
+            .map_err(|err| ManifestLoadError::ReadManifest {
+                object_key: manifest_key.clone(),
+                message: err.to_string(),
+            })?
         else {
             return Err(ManifestLoadError::MissingManifest {
                 object_key: manifest_key.clone(),
@@ -885,7 +934,7 @@ pub(crate) fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Siz
         table_cache,
         manifest_object_key: manifest_key,
         manifest,
-        segment_cache: RefCell::new(HashMap::new()),
+        segment_cache: Mutex::new(HashMap::new()),
     };
     Ok(tables)
 }
@@ -910,7 +959,7 @@ pub(crate) fn manifest_basis_head(
     }
 }
 
-fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
+async fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
@@ -921,37 +970,38 @@ fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
         namespace_id,
         manifest_id,
         &manifest_key,
-    )?;
+    )
+    .await?;
     let Some(manifest) = manifest else {
         return Ok(None);
     };
     let metadata_state =
-        load_manifest_materialization_from_manifest(store, namespace_id, &manifest_key, &manifest)?;
+        load_manifest_materialization_from_manifest(store, namespace_id, &manifest_key, &manifest)
+            .await?;
     Ok(Some(LoadedManifestMaterialization {
         manifest,
         metadata_state,
     }))
 }
 
-fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
+async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
     manifest_key: &str,
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
-    let _span = tracing::info_span!(
-        "loon.phase",
-        phase = "load_namespace_manifest",
-        key_class = "manifest_table"
-    )
-    .entered();
-    let Some(manifest_bytes) =
-        store
-            .get(manifest_key, None)
-            .map_err(|err| ManifestLoadError::ReadManifest {
-                object_key: manifest_key.to_owned(),
-                message: err.to_string(),
-            })?
+    let Some(manifest_bytes) = store
+        .get(manifest_key, None)
+        .instrument(tracing::info_span!(
+            "loon.phase",
+            phase = "load_namespace_manifest",
+            key_class = "manifest_table"
+        ))
+        .await
+        .map_err(|err| ManifestLoadError::ReadManifest {
+            object_key: manifest_key.to_owned(),
+            message: err.to_string(),
+        })?
     else {
         return Ok(None);
     };
@@ -965,7 +1015,7 @@ fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     Ok(Some(manifest))
 }
 
-fn build_manifest_tables<S: ObjectStore + ?Sized>(
+async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
@@ -985,6 +1035,7 @@ fn build_manifest_tables<S: ObjectStore + ?Sized>(
             max_rows_per_segment,
         },
     )
+    .await
 }
 
 fn debug_assert_manifest_table_segments_do_not_overlap(tables: &[MetadataTableManifest]) {
@@ -1004,7 +1055,7 @@ fn debug_assert_manifest_table_segments_do_not_overlap(tables: &[MetadataTableMa
     }
 }
 
-fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
+async fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
@@ -1021,6 +1072,7 @@ fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
         |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
         MetadataTableSegmentation::Full,
     )
+    .await
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1041,7 +1093,7 @@ struct MetadataSstRows {
     skip_all,
     fields(phase = "write_manifest_tables", key_class = "manifest_table")
 )]
-fn build_manifest_tables_from_rows<S, RowsForFamily>(
+async fn build_manifest_tables_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
@@ -1066,27 +1118,44 @@ where
         }
 
         let segments = segment_manifest_rows(family, rows, segmentation);
-        let mut descriptors = Vec::with_capacity(segments.len());
+        let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
             let table_id = generate_metadata_table_id();
             let object_key = metadata_sst(namespace_id.as_str(), &table_id);
-            descriptors.push(write_manifest_segment(
-                store,
-                MetadataSstWriteRequest {
-                    namespace_id,
-                    table_id,
-                    run_seq,
-                    level,
-                    family,
-                    segment_index,
-                    segment_key: segment_rows.segment_key,
-                    rows: segment_rows.rows,
-                    object_key,
-                    writer_version,
-                },
-            )?);
+            requests.push(MetadataSstWriteRequest {
+                namespace_id,
+                table_id,
+                run_seq,
+                level,
+                family,
+                segment_index,
+                segment_key: segment_rows.segment_key,
+                rows: segment_rows.rows,
+                object_key,
+                writer_version,
+            });
+        }
+
+        let mut descriptors = Vec::with_capacity(requests.len());
+        let mut pending = requests.into_iter();
+        loop {
+            let chunk = pending
+                .by_ref()
+                .take(MAX_MAINTENANCE_TABLE_IO)
+                .collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            descriptors.extend(
+                try_join_all(
+                    chunk
+                        .into_iter()
+                        .map(|request| write_manifest_segment(store, request)),
+                )
+                .await?,
+            );
         }
         tables.push(MetadataTableManifest {
             family,
@@ -1109,7 +1178,7 @@ struct MetadataSstWriteRequest<'a> {
     writer_version: &'a str,
 }
 
-fn write_manifest_segment<S: ObjectStore + ?Sized>(
+async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSstWriteRequest<'_>,
 ) -> Result<MetadataFileRef, CoreError> {
@@ -1142,7 +1211,7 @@ fn write_manifest_segment<S: ObjectStore + ?Sized>(
         .map_err(|err| CoreError::Store(err.to_string()))?;
     let encoded = encode_metadata_sst_envelope_zstd(&envelope)
         .map_err(|err| CoreError::Store(err.to_string()))?;
-    write_immutable_object(store, &request.object_key, &encoded)?;
+    write_immutable_object(store, &request.object_key, &encoded).await?;
     Ok(MetadataFileRef {
         owner_namespace_id: request.namespace_id.clone(),
         table_id: request.table_id,
@@ -1241,7 +1310,7 @@ fn manifest_row_parent_inode_id(row: &MetadataRow) -> Option<InodeId> {
     skip_all,
     fields(phase = "write_namespace_manifest", key_class = "manifest_table")
 )]
-pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
+pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), BasisLoadError> {
@@ -1255,7 +1324,10 @@ pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
             message: err.to_string(),
         })
     })?;
-    match store.put_if_absent(&manifest_key, &manifest_bytes) {
+    match store
+        .put_if_absent(&manifest_key, Bytes::from(manifest_bytes))
+        .await
+    {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
             let Some(existing) = load_namespace_manifest_envelope_if_present(
@@ -1264,6 +1336,7 @@ pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                 manifest.payload.manifest_id,
                 &manifest_key,
             )
+            .await
             .map_err(BasisLoadError::ManifestLoad)?
             else {
                 return Err(BasisLoadError::ManifestLoad(
@@ -1301,7 +1374,7 @@ pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "publish_compacted_head", key_class = "namespace_head")
 )]
-fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
+async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
@@ -1310,6 +1383,7 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
 ) -> Result<ManifestPublicationOutcome, CoreError> {
     for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
+            .await
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let current_head = loaded_head.envelope.state;
         if current_head.current_manifest_id >= Some(manifest_id) {
@@ -1321,6 +1395,7 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             })?;
             let current_manifest =
                 load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                    .await
                     .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
             if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
                 return Ok(ManifestPublicationOutcome::Published(current_head));
@@ -1350,7 +1425,9 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             loaded_head.metadata.etag.as_deref(),
             writer_version,
             &next_head,
-        ) {
+        )
+        .await
+        {
             Ok(()) => return Ok(ManifestPublicationOutcome::Published(next_head)),
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
             Err(error) => return Err(CoreError::Store(error.to_string())),
@@ -1360,7 +1437,7 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     Ok(ManifestPublicationOutcome::HeadCasRaceLost)
 }
 
-fn compare_and_swap_head<S: ObjectStore + ?Sized>(
+async fn compare_and_swap_head<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_head_etag: Option<&str>,
@@ -1379,11 +1456,12 @@ fn compare_and_swap_head<S: ObjectStore + ?Sized>(
     let encoded = serde_json::to_vec(&envelope)
         .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
     store
-        .compare_and_swap(object_key, expected_head_etag, &encoded)
+        .compare_and_swap(object_key, expected_head_etag, Bytes::from(encoded))
+        .await
         .map(|_| ())
 }
 
-fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
+async fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     target_floor: ChangeSeq,
@@ -1393,6 +1471,7 @@ fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
         let work_class_name = work_class.as_str();
         let Some(bytes) = store
             .get(&object_key, None)
+            .await
             .map_err(|err| CoreError::Store(err.to_string()))?
         else {
             return Err(CoreError::CheckpointUnavailable(format!(
@@ -1572,7 +1651,7 @@ fn validate_manifest_materialization_ranges(
     skip_all,
     fields(phase = "load_manifest_tables", key_class = "manifest_table")
 )]
-fn load_manifest_materialization_from_manifest<S: ObjectStore + ?Sized>(
+async fn load_manifest_materialization_from_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_object_key: &str,
@@ -1592,7 +1671,8 @@ fn load_manifest_materialization_from_manifest<S: ObjectStore + ?Sized>(
             },
             &run.tables,
             &mut metadata_state,
-        )?;
+        )
+        .await?;
     }
 
     Ok(metadata_state.finish())
@@ -1651,7 +1731,7 @@ fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
     )
 }
 
-fn append_manifest_tables_to_metadata<S>(
+async fn append_manifest_tables_to_metadata<S>(
     store: &S,
     _namespace_id: &NamespaceId,
     context: MetadataTableLoadContext<'_>,
@@ -1665,6 +1745,7 @@ where
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     for table in ordered_tables {
+        let mut descriptors = Vec::with_capacity(table.segments.len());
         for descriptor in &table.segments {
             context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
@@ -1674,7 +1755,20 @@ where
                     expected: expected_key,
                 });
             }
-            let rows = load_manifest_segment_rows(store, context, table.family, descriptor)?;
+            descriptors.push(descriptor);
+        }
+
+        let mut loaded_segments = Vec::with_capacity(descriptors.len());
+        for chunk in descriptors.chunks(MAX_MAINTENANCE_TABLE_IO) {
+            loaded_segments.extend(
+                try_join_all(chunk.iter().map(|descriptor| {
+                    load_manifest_segment_rows(store, context, table.family, descriptor)
+                }))
+                .await?,
+            );
+        }
+
+        for (descriptor, rows) in descriptors.into_iter().zip(loaded_segments) {
             match table.family {
                 MetadataTableFamily::DirentryBinds => {
                     direntry_bind_rows.extend(rows.iter().cloned());
@@ -1695,7 +1789,7 @@ where
     )
 }
 
-fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
+async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
     context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
@@ -1709,9 +1803,10 @@ fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
         descriptor,
         MetadataTableCacheMode::Bypass,
     )
+    .await
 }
 
-fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
+async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     context: MetadataTableLoadContext<'_>,
@@ -1738,13 +1833,13 @@ fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
         }
     }
 
-    let Some(bytes) =
-        store
-            .get(&descriptor.object_key, None)
-            .map_err(|err| ManifestLoadError::ReadSegment {
-                object_key: descriptor.object_key.clone(),
-                message: err.to_string(),
-            })?
+    let Some(bytes) = store
+        .get(&descriptor.object_key, None)
+        .await
+        .map_err(|err| ManifestLoadError::ReadSegment {
+            object_key: descriptor.object_key.clone(),
+            message: err.to_string(),
+        })?
     else {
         return Err(ManifestLoadError::MissingSegment {
             object_key: descriptor.object_key.clone(),
@@ -2337,6 +2432,9 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
     use crate::{MutationContext, PutFileBehavior};
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
     use loon_api::wire::manifest::{
         encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
         MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
@@ -2353,13 +2451,15 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
 
-    #[test]
-    fn manifest_round_trip_uses_manifest_basis_for_mixed_namespace() {
+    #[tokio::test]
+    async fn manifest_round_trip_uses_manifest_basis_for_mixed_namespace() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2368,6 +2468,7 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
         write_file_bytes(
             &store,
@@ -2377,6 +2478,7 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write second");
         put_file_bytes(
             &store,
@@ -2387,11 +2489,18 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("replace");
 
-        let before = load_verified_namespace_basis(&store, &namespace_id).expect("basis before");
-        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
-        let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
+        let before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis before");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        let after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis after");
 
         assert_eq!(
             after.head.current_manifest_id,
@@ -2404,13 +2513,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn manifest_round_trip_preserves_direntry_unbind_rows() {
+    #[tokio::test]
+    async fn manifest_round_trip_preserves_direntry_unbind_rows() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2419,6 +2530,7 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
         move_path(
             &store,
@@ -2428,12 +2540,19 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("move hello");
 
-        let before = load_verified_namespace_basis(&store, &namespace_id).expect("basis before");
+        let before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis before");
         assert_eq!(before.metadata_state.direntry_unbinds().len(), 1);
-        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
-        let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        let after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis after");
 
         assert_eq!(
             after.metadata_state.direntry_unbinds(),
@@ -2445,19 +2564,26 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn manifest_round_trip_supports_empty_namespace() {
+    #[tokio::test]
+    async fn manifest_round_trip_supports_empty_namespace() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
-        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
+                .await
                 .expect("load namespace manifest");
         assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
         let checkpoint = &materialized.manifest.payload.checkpoints[0];
@@ -2466,13 +2592,15 @@ mod tests {
         assert_eq!(checkpoint.manifest_id, ManifestId(0));
     }
 
-    #[test]
-    fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
+    #[tokio::test]
+    async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2481,22 +2609,26 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
-        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
 
         let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
         store
-            .put_overwrite(&manifest_key, br#"{"bad":"json"}"#)
+            .put_overwrite(&manifest_key, Bytes::from_static(br#"{"bad":"json"}"#))
+            .await
             .expect("corrupt manifest");
 
-        match load_verified_namespace_basis(&store, &namespace_id) {
+        match load_verified_namespace_basis(&store, &namespace_id).await {
             Err(BasisLoadError::ManifestLoad(ManifestLoadError::ManifestCodec { .. })) => {}
             other => panic!("expected manifest codec manifest load error, got {other:?}"),
         }
     }
 
-    #[test]
-    fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
+    #[tokio::test]
+    async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
@@ -2506,7 +2638,9 @@ mod tests {
             manifest_key,
             br#"{"bad":"json"}"#.to_vec(),
         );
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2515,28 +2649,33 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        match create_checkpoint(&store, &namespace_id, &context) {
+        match create_checkpoint(&store, &namespace_id, &context).await {
             Err(CoreError::Basis(BasisLoadError::ManifestLoad(
                 ManifestLoadError::ManifestCodec { .. },
             ))) => {}
             other => panic!("expected manifest codec manifest load error, got {other:?}"),
         }
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         assert_eq!(basis.head.current_manifest_id, None);
     }
 
-    #[test]
-    fn retention_advancement_requires_published_checkpoint_and_updates_floor_only() {
+    #[tokio::test]
+    async fn retention_advancement_requires_published_checkpoint_and_updates_floor_only() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
-        match advance_retention_floor(&store, &namespace_id, &context) {
+        match advance_retention_floor(&store, &namespace_id, &context).await {
             Err(CoreError::CheckpointUnavailable(_)) => {}
             other => panic!("expected manifest unavailable, got {other:?}"),
         }
@@ -2549,34 +2688,44 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
-        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
-        let advanced =
-            advance_retention_floor(&store, &namespace_id, &context).expect("advance retention");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        let advanced = advance_retention_floor(&store, &namespace_id, &context)
+            .await
+            .expect("advance retention");
         assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         assert_eq!(basis.head.retention_floor_seq, ChangeSeq(1));
         assert_eq!(
             store
                 .list_prefix(&format!("namespaces/{}/wal/", namespace_id.as_str()))
+                .await
                 .expect("list wal")
                 .len(),
             1
         );
         assert!(store
             .head(&namespace_manifest(namespace_id.as_str(), ManifestId(1)))
+            .await
             .expect("manifest head")
             .is_some());
     }
 
-    #[test]
-    fn manifest_materialization_uses_written_segments() {
+    #[tokio::test]
+    async fn manifest_materialization_uses_written_segments() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2585,13 +2734,19 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
-        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
 
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
+                .await
                 .expect("load materialized manifest");
-        let current = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let current = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let basis_head = manifest_basis_head(&current.head, &materialized.manifest);
         assert_eq!(basis_head.seq, ChangeSeq(1));
         assert!(metadata_states_equivalent(
@@ -2606,16 +2761,22 @@ mod tests {
         .into_iter()
         .next()
         .expect("revision segment");
-        assert!(store.head(&segment_key).expect("head segment").is_some());
+        assert!(store
+            .head(&segment_key)
+            .await
+            .expect("head segment")
+            .is_some());
     }
 
-    #[test]
-    fn manifest_l0_run_materialization_matches_full_basis() {
+    #[tokio::test]
+    async fn manifest_l0_run_materialization_matches_full_basis() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2624,10 +2785,14 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
-        let first = create_checkpoint(&store, &namespace_id, &context).expect("first checkpoint");
+        let first = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("first checkpoint");
         let first_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+                .await
                 .expect("load first manifest");
 
         write_file_bytes(
@@ -2638,11 +2803,17 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write second");
-        let second = create_checkpoint(&store, &namespace_id, &context).expect("second checkpoint");
-        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let second = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("second checkpoint");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let second_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+                .await
                 .expect("load second manifest");
 
         assert_eq!(
@@ -2672,13 +2843,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn manifest_l0_run_missing_table_fails_load() {
+    #[tokio::test]
+    async fn manifest_l0_run_missing_table_fails_load() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2687,8 +2860,11 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
-        create_checkpoint(&store, &namespace_id, &context).expect("first checkpoint");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("first checkpoint");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2697,10 +2873,14 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write second");
-        let second = create_checkpoint(&store, &namespace_id, &context).expect("second checkpoint");
+        let second = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("second checkpoint");
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+                .await
                 .expect("load materialized manifest");
         let deleted_key = l0_runs(&materialized.manifest)[0]
             .tables
@@ -2710,9 +2890,11 @@ mod tests {
             .expect("l0 run segment")
             .object_key
             .clone();
-        store.delete(&deleted_key).expect("delete l0 segment");
+        store.delete(&deleted_key).await.expect("delete l0 segment");
 
-        match load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id) {
+        match load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+            .await
+        {
             Err(ManifestLoadError::MissingSegment { object_key }) => {
                 assert_eq!(object_key, deleted_key);
             }
@@ -2720,16 +2902,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_materialization_rejects_off_pattern_table_keys() {
+    #[tokio::test]
+    async fn manifest_materialization_rejects_off_pattern_table_keys() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-        let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1);
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
         let first_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, manifest_id(first))
+                .await
                 .expect("load first manifest");
         let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(first));
         let mut bad_base_manifest = first_materialized.manifest.clone();
@@ -2756,16 +2941,19 @@ mod tests {
             &namespace_id,
             &manifest_key,
             &bad_base_manifest,
-        ) {
+        )
+        .await
+        {
             Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
                 assert_eq!(expected, expected_base_key);
             }
             other => panic!("expected base table key mismatch, got {other:?}"),
         }
 
-        let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2);
+        let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2).await;
         let second_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, manifest_id(second))
+                .await
                 .expect("load second manifest");
         let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(second));
         let mut bad_l0_manifest = second_materialized.manifest.clone();
@@ -2792,7 +2980,9 @@ mod tests {
             &namespace_id,
             &manifest_key,
             &bad_l0_manifest,
-        ) {
+        )
+        .await
+        {
             Err(ManifestLoadError::SegmentObjectKeyMismatch { expected, .. }) => {
                 assert_eq!(expected, expected_l0_key);
             }
@@ -2800,14 +2990,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_run_rejects_rows_after_run_seq() {
+    #[tokio::test]
+    async fn manifest_run_rejects_rows_after_run_seq() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-        let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1);
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2816,8 +3008,11 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write second file");
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let malformed_run_tables = build_manifest_tables_from_rows(
             &store,
             &namespace_id,
@@ -2827,6 +3022,7 @@ mod tests {
             |family| manifest_rows_for_family(&basis.metadata_state, family),
             MetadataTableSegmentation::Full,
         )
+        .await
         .expect("write malformed run tables");
         let metadata_ssts = build_manifest_tables_from_rows(
             &store,
@@ -2839,6 +3035,7 @@ mod tests {
             },
             MetadataTableSegmentation::Full,
         )
+        .await
         .expect("write empty metadata run tables");
         let mut metadata_files = flatten_manifest_tables(malformed_run_tables);
         metadata_files.extend(flatten_manifest_tables(metadata_ssts));
@@ -2868,7 +3065,9 @@ mod tests {
             &namespace_id,
             &namespace_manifest(namespace_id.as_str(), manifest_id(basis.head.seq)),
             &manifest,
-        ) {
+        )
+        .await
+        {
             Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
                 assert!(message.contains("after expected max"));
             }
@@ -2876,20 +3075,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_l0_runs_chain_across_successive_manifests() {
+    #[tokio::test]
+    async fn manifest_l0_runs_chain_across_successive_manifests() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
         for index in 1..=4 {
-            write_file_and_checkpoint(&store, &namespace_id, &context, index);
+            write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
         }
 
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
+                .await
                 .expect("load chained manifest");
         assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(1));
         let l0_runs = l0_runs(&materialized.manifest);
@@ -2901,8 +3103,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn metadata_lsm_policy_default_matches_l0_run_cap() {
+    #[tokio::test]
+    async fn metadata_lsm_policy_default_matches_l0_run_cap() {
         assert_eq!(
             MetadataLsmPolicy::default().max_l0_runs,
             MAX_CHECKPOINT_L0_RUNS
@@ -2913,8 +3115,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
+    #[tokio::test]
+    async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2923,21 +3125,28 @@ mod tests {
             max_l0_runs: 2,
             ..MetadataLsmPolicy::default()
         };
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
         for index in 1..=4 {
-            write_file_and_checkpoint_with_policy(&store, &namespace_id, &context, index, policy);
+            write_file_and_checkpoint_with_policy(&store, &namespace_id, &context, index, policy)
+                .await;
         }
 
         let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(3))
+            .await
             .expect("load capped manifest");
         assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
         assert_eq!(l0_runs(&capped.manifest).len(), 2);
 
         let compacted =
             load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
+                .await
                 .expect("load compacted manifest");
-        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         assert_eq!(compacted.manifest.payload.base_seq, ChangeSeq(4));
         assert!(l0_runs(&compacted.manifest).is_empty());
         assert_eq!(
@@ -2950,13 +3159,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
+    #[tokio::test]
+    async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -2965,11 +3176,15 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let manifest = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint");
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
                 .expect("load manifest");
         let mut manifest = materialized.manifest;
         let descriptor = manifest
@@ -2992,36 +3207,45 @@ mod tests {
         let manifest_bytes =
             encode_namespace_manifest_json(&updated_manifest).expect("encode manifest");
         store
-            .put_overwrite(&manifest_key, &manifest_bytes)
+            .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
+            .await
             .expect("overwrite manifest");
 
-        match load_verified_manifest_materialization(&store, &namespace_id, manifest_id) {
+        match load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await {
             Err(ManifestLoadError::SegmentKeyMismatch { .. }) => {}
             other => panic!("expected segment key mismatch, got {other:?}"),
         }
     }
 
-    #[test]
-    fn manifest_base_run_tables_have_sorted_segment_coverage() {
+    #[tokio::test]
+    async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         for index in 0..6 {
             let path = format!("/docs/file-{index}.txt");
             write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .await
                 .expect("write file");
         }
         let policy = MetadataLsmPolicy {
             max_rows_per_segment: 2,
             ..MetadataLsmPolicy::default()
         };
+        let basis_before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis before checkpoint");
 
         let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("manifest");
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
                 .expect("load manifest");
 
         let base = base_run(&materialized.manifest);
@@ -3060,18 +3284,25 @@ mod tests {
                 previous_max_key = Some(descriptor.max_key.as_str());
             }
         }
+        assert!(metadata_states_equivalent(
+            &basis_before.metadata_state,
+            &materialized.metadata_state
+        ));
     }
 
-    #[test]
-    fn large_table_scan_does_not_insert_metadata_cache_blocks() {
+    #[tokio::test]
+    async fn large_table_scan_does_not_insert_metadata_cache_blocks() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         for index in 0..8 {
             let path = format!("/docs/file-{index}.txt");
             write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .await
                 .expect("write file");
         }
         let policy = MetadataLsmPolicy {
@@ -3079,6 +3310,7 @@ mod tests {
             ..MetadataLsmPolicy::default()
         };
         let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("manifest");
         let cache = super::MetadataTableCache::new(Default::default());
         let tables = super::load_verified_manifest_tables_with_cache(
@@ -3087,11 +3319,13 @@ mod tests {
             &namespace_id,
             manifest.manifest_id,
         )
+        .await
         .expect("load tables");
 
         let before = cache.stats();
         let revisions = tables
             .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+            .await
             .expect("scan revisions");
         let after = cache.stats();
 
@@ -3100,13 +3334,50 @@ mod tests {
         assert!(after.misses > before.misses);
     }
 
-    #[test]
-    fn metadata_cache_budget_counts_decoded_blocks() {
+    #[tokio::test]
+    async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        for index in 0..8 {
+            let path = format!("/docs/file-{index}.txt");
+            write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .await
+                .expect("write file");
+        }
+        let policy = MetadataLsmPolicy {
+            max_rows_per_segment: 1,
+            ..MetadataLsmPolicy::default()
+        };
+        let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
+            .expect("manifest");
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let before = cache.stats();
+
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
+                .expect("load materialized manifest");
+        let after = cache.stats();
+
+        assert!(flatten_manifest_tables(base_run(&materialized.manifest).tables).len() > 1);
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn metadata_cache_budget_counts_decoded_blocks() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3115,8 +3386,11 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write file");
-        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let manifest = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint");
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
             enabled: true,
             max_blocks: 256,
@@ -3128,11 +3402,13 @@ mod tests {
             &namespace_id,
             manifest.manifest_id,
         )
+        .await
         .expect("load tables");
 
         let key = "inode-00000000000000000001";
         assert!(tables
             .get(ApiMetadataTableFamily::Inodes, key)
+            .await
             .expect("get inode")
             .is_some());
 
@@ -3141,8 +3417,8 @@ mod tests {
         assert!(stats.evictions > 0);
     }
 
-    #[test]
-    fn whole_run_compaction_rewrites_base_segments() {
+    #[tokio::test]
+    async fn whole_run_compaction_rewrites_base_segments() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3151,7 +3427,9 @@ mod tests {
             max_l0_runs: 1,
             max_rows_per_segment: 2,
         };
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3160,6 +3438,7 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hot");
         write_file_bytes(
             &store,
@@ -3169,12 +3448,15 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write cold");
 
         let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("first checkpoint");
         let first_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+                .await
                 .expect("load first manifest");
         let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
 
@@ -3186,8 +3468,10 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hot l0");
         create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("l0 checkpoint");
         write_file_bytes(
             &store,
@@ -3197,13 +3481,18 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hot compact");
         let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("compacted checkpoint");
         let compacted_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
+                .await
                 .expect("load compacted manifest");
-        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
         let compacted_run_prefix = format!(
             "namespaces/{}/compacted/metadata/tbl_",
@@ -3233,8 +3522,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
+    #[tokio::test]
+    async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3243,17 +3532,22 @@ mod tests {
             max_l0_runs: 1,
             max_rows_per_segment: 2,
         };
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         for index in 0..6 {
             let path = format!("/docs/file-{index}.txt");
             write_file_bytes(&store, &namespace_id, &path, b"initial\n", &context, None)
+                .await
                 .expect("write initial file");
         }
 
         let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("first checkpoint");
         let first_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+                .await
                 .expect("load first manifest");
         let revision_keys_before = base_segment_object_keys_for_family(
             &first_materialized.manifest,
@@ -3269,8 +3563,10 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write l0 revision");
         create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("l0 checkpoint");
         write_file_bytes(
             &store,
@@ -3280,17 +3576,22 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write compaction revision");
         let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .await
             .expect("compacted checkpoint");
         let compacted_materialized =
             load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
+                .await
                 .expect("load compacted manifest");
         let revision_keys_after = base_segment_object_keys_for_family(
             &compacted_materialized.manifest,
             ApiMetadataTableFamily::Revisions,
         );
-        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
 
         assert!(l0_runs(&compacted_materialized.manifest).is_empty());
         assert_eq!(
@@ -3307,13 +3608,15 @@ mod tests {
         assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
     }
 
-    #[test]
-    fn manifest_writes_and_validates_direntry_child_bind_index() {
+    #[tokio::test]
+    async fn manifest_writes_and_validates_direntry_child_bind_index() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3322,11 +3625,15 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let manifest = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint");
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
                 .expect("load manifest");
         let base = base_run(&materialized.manifest);
         let child_table = base
@@ -3342,8 +3649,13 @@ mod tests {
             .starts_with("direntry-child-000000000000000000"));
 
         let deleted_key = child_segment.object_key.clone();
-        store.delete(&deleted_key).expect("delete child index");
-        match load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id) {
+        store
+            .delete(&deleted_key)
+            .await
+            .expect("delete child index");
+        match load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+            .await
+        {
             Err(ManifestLoadError::MissingSegment { object_key }) => {
                 assert_eq!(object_key, deleted_key);
             }
@@ -3351,13 +3663,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() {
+    #[tokio::test]
+    async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3366,6 +3680,7 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
         write_file_bytes(
             &store,
@@ -3375,11 +3690,15 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write other");
 
-        let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let manifest = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint");
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+                .await
                 .expect("load manifest before corruption");
         let mut manifest = materialized.manifest;
         let mut child_index_rows = manifest_rows_for_family(
@@ -3408,7 +3727,8 @@ mod tests {
             child_descriptor,
             child_index_rows,
             &context.writer_version,
-        );
+        )
+        .await;
 
         let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
         let writer_version = manifest.writer_version.clone();
@@ -3419,17 +3739,16 @@ mod tests {
         let manifest_bytes =
             encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
         store
-            .put_overwrite(&manifest_key, &manifest_bytes)
+            .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
+            .await
             .expect("overwrite manifest");
 
-        assert_child_index_mismatch(load_verified_manifest_materialization(
-            &store,
-            &namespace_id,
-            manifest_id,
-        ));
+        assert_child_index_mismatch(
+            load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+        );
     }
 
-    fn rewrite_manifest_segment(
+    async fn rewrite_manifest_segment(
         store: &LocalFsStore,
         _namespace_id: &NamespaceId,
         run_seq: ChangeSeq,
@@ -3469,7 +3788,8 @@ mod tests {
         let encoded =
             encode_metadata_sst_envelope_zstd(&envelope).expect("encode rewritten segment");
         store
-            .put_overwrite(&descriptor.object_key, &encoded)
+            .put_overwrite(&descriptor.object_key, Bytes::from(encoded))
+            .await
             .expect("overwrite segment");
 
         descriptor.row_count = envelope.payload.row_count;
@@ -3548,25 +3868,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
+    #[tokio::test]
+    async fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
         for index in 1..=10 {
-            write_file_and_checkpoint(&store, &namespace_id, &context, index);
+            write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
         }
 
         let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(9))
+            .await
             .expect("load capped manifest");
         assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
         assert_eq!(l0_runs(&capped.manifest).len(), MAX_CHECKPOINT_L0_RUNS);
 
         let collapsed =
             load_verified_manifest_materialization(&store, &namespace_id, ManifestId(10))
+                .await
                 .expect("load collapsed manifest");
         assert_eq!(collapsed.manifest.payload.base_seq, ChangeSeq(10));
         assert!(l0_runs(&collapsed.manifest).is_empty());
@@ -3576,13 +3900,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unreferenced_manifest_run_is_ignored_by_basis_load() {
+    #[tokio::test]
+    async fn unreferenced_manifest_run_is_ignored_by_basis_load() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3591,8 +3917,11 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
-        let first = create_checkpoint(&store, &namespace_id, &context).expect("first checkpoint");
+        let first = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("first checkpoint");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3601,9 +3930,12 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write second");
 
-        let basis_before = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let orphan_manifest = build_namespace_manifest_for_basis(
             &store,
             &namespace_id,
@@ -3613,10 +3945,15 @@ mod tests {
             ManifestId(2),
             None,
         )
+        .await
         .expect("build orphan manifest");
-        write_namespace_manifest(&store, &orphan_manifest).expect("write orphan manifest");
+        write_namespace_manifest(&store, &orphan_manifest)
+            .await
+            .expect("write orphan manifest");
 
-        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         assert_eq!(
             basis_after.head.current_manifest_id,
             Some(first.manifest_id)
@@ -3628,15 +3965,19 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
+    #[tokio::test]
+    async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let manifest = build_namespace_manifest_for_basis(
             &store,
             &namespace_id,
@@ -3646,21 +3987,30 @@ mod tests {
             ManifestId(1),
             None,
         )
+        .await
         .expect("build manifest");
 
-        write_namespace_manifest(&store, &manifest).expect("first manifest write");
-        write_namespace_manifest(&store, &manifest).expect("same manifest write is idempotent");
+        write_namespace_manifest(&store, &manifest)
+            .await
+            .expect("first manifest write");
+        write_namespace_manifest(&store, &manifest)
+            .await
+            .expect("same manifest write is idempotent");
     }
 
-    #[test]
-    fn write_namespace_manifest_conflict_different_payload_is_error() {
+    #[tokio::test]
+    async fn write_namespace_manifest_conflict_different_payload_is_error() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let manifest = build_namespace_manifest_for_basis(
             &store,
             &namespace_id,
@@ -3670,6 +4020,7 @@ mod tests {
             ManifestId(1),
             None,
         )
+        .await
         .expect("build manifest");
         let mut conflicting_payload = manifest.payload.clone();
         conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
@@ -3677,8 +4028,11 @@ mod tests {
             NamespaceManifestEnvelope::from_payload(&context.writer_version, conflicting_payload)
                 .expect("build conflicting manifest");
 
-        write_namespace_manifest(&store, &manifest).expect("first manifest write");
+        write_namespace_manifest(&store, &manifest)
+            .await
+            .expect("first manifest write");
         let error = write_namespace_manifest(&store, &conflicting_manifest)
+            .await
             .expect_err("different same-id manifest must conflict");
 
         match error {
@@ -3702,13 +4056,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
+    #[tokio::test]
+    async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         let raw_store = LocalFsStore::new(temp_dir.path()).expect("raw store");
-        bootstrap_namespace(&raw_store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&raw_store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &raw_store,
             &namespace_id,
@@ -3717,9 +4073,12 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        let basis = load_verified_namespace_basis(&raw_store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&raw_store, &namespace_id)
+            .await
+            .expect("basis");
         let conflicting = build_namespace_manifest_for_basis(
             &raw_store,
             &namespace_id,
@@ -3729,6 +4088,7 @@ mod tests {
             ManifestId(1),
             None,
         )
+        .await
         .expect("build conflicting manifest");
         let mut conflicting_payload = conflicting.payload;
         conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
@@ -3749,24 +4109,30 @@ mod tests {
             &context,
             MetadataLsmPolicy::default(),
         )
+        .await
         .expect("create checkpoint should retry allocation");
 
         assert_eq!(checkpoint.manifest_id, ManifestId(2));
         let retried =
             load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+                .await
                 .expect("load retried manifest");
         assert!(checkpoint_record_by_id(&retried.manifest, &checkpoint.checkpoint_id).is_some());
-        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         assert_eq!(basis_after.head.current_manifest_id, Some(ManifestId(2)));
     }
 
-    #[test]
-    fn create_checkpoint_adds_record_when_current_manifest_exists_without_it() {
+    #[tokio::test]
+    async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3775,9 +4141,12 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let manifest_without_checkpoint = build_namespace_manifest_for_basis(
             &store,
             &namespace_id,
@@ -3787,9 +4156,12 @@ mod tests {
             ManifestId(1),
             None,
         )
+        .await
         .expect("build manifest");
         let original_files = manifest_without_checkpoint.payload.metadata_files.clone();
-        write_namespace_manifest(&store, &manifest_without_checkpoint).expect("write manifest");
+        write_namespace_manifest(&store, &manifest_without_checkpoint)
+            .await
+            .expect("write manifest");
         publish_current_manifest_id(
             &store,
             &namespace_id,
@@ -3797,6 +4169,7 @@ mod tests {
             "chk_00000000000000000000000000000099",
             &context.writer_version,
         )
+        .await
         .expect("publish manifest without checkpoint");
 
         let checkpoint = create_checkpoint_with_policy(
@@ -3805,11 +4178,13 @@ mod tests {
             &context,
             MetadataLsmPolicy::default(),
         )
+        .await
         .expect("create checkpoint");
 
         assert_eq!(checkpoint.manifest_id, ManifestId(2));
         let materialized =
             load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+                .await
                 .expect("load new manifest");
         assert_eq!(materialized.manifest.payload.metadata_files, original_files);
         assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
@@ -3823,13 +4198,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
+    #[tokio::test]
+    async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3838,9 +4215,12 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let manifest = build_namespace_manifest_for_basis(
             &store,
             &namespace_id,
@@ -3850,6 +4230,7 @@ mod tests {
             ManifestId(1),
             None,
         )
+        .await
         .expect("build manifest without checkpoint");
         assert!(manifest.payload.checkpoints.is_empty());
         let mut newer_live_head = basis.head.clone();
@@ -3865,13 +4246,15 @@ mod tests {
         assert_ne!(reconstructed.head_commit_id, newer_live_head.head_commit_id);
     }
 
-    #[test]
-    fn current_manifest_advance_without_checkpoint_record_is_not_success() {
+    #[tokio::test]
+    async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -3880,9 +4263,12 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write hello");
 
-        let basis_before = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let basis_before = load_verified_namespace_basis(&store, &namespace_id)
+            .await
+            .expect("basis");
         let tables = build_manifest_tables(
             &store,
             &namespace_id,
@@ -3892,6 +4278,7 @@ mod tests {
             &context.writer_version,
             MetadataLsmPolicy::default().max_rows_per_segment,
         )
+        .await
         .expect("build metadata tables");
         let manifest = NamespaceManifestEnvelope::from_payload(
             &context.writer_version,
@@ -3913,7 +4300,9 @@ mod tests {
             },
         )
         .expect("build manifest");
-        write_namespace_manifest(&store, &manifest).expect("write manifest");
+        write_namespace_manifest(&store, &manifest)
+            .await
+            .expect("write manifest");
 
         write_file_bytes(
             &store,
@@ -3923,9 +4312,11 @@ mod tests {
             &context,
             None,
         )
+        .await
         .expect("write second");
-        let later_checkpoint =
-            create_checkpoint(&store, &namespace_id, &context).expect("later checkpoint");
+        let later_checkpoint = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("later checkpoint");
         assert!(later_checkpoint.manifest_id > ManifestId(basis_before.head.seq.0));
 
         let checkpoint_id = "chk_00000000000000000000000000000099";
@@ -3936,6 +4327,7 @@ mod tests {
             checkpoint_id,
             &context.writer_version,
         )
+        .await
         .expect("manifest publication check should classify current manifest");
 
         assert_eq!(
@@ -3946,8 +4338,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn current_manifest_cas_retry_exhaustion_reports_head_race() {
+    #[tokio::test]
+    async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
@@ -3955,7 +4347,9 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_head(namespace_id.as_str()),
         );
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
 
         store.fail_head_cas();
         let outcome = publish_current_manifest_id(
@@ -3965,6 +4359,7 @@ mod tests {
             "chk_00000000000000000000000000000000",
             &context.writer_version,
         )
+        .await
         .expect("current manifest publication should report CAS race");
 
         assert_eq!(outcome, ManifestPublicationOutcome::HeadCasRaceLost);
@@ -3983,7 +4378,7 @@ mod tests {
         ManifestId(seq.0)
     }
 
-    fn write_file_and_checkpoint(
+    async fn write_file_and_checkpoint(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         context: &MutationContext,
@@ -3992,13 +4387,15 @@ mod tests {
         let path = format!("/docs/file-{index}.txt");
         let bytes = format!("file {index}\n");
         write_file_bytes(store, namespace_id, &path, bytes.as_bytes(), context, None)
+            .await
             .expect("write file");
         create_checkpoint(store, namespace_id, context)
+            .await
             .expect("create checkpoint")
             .checkpoint_seq
     }
 
-    fn write_file_and_checkpoint_with_policy(
+    async fn write_file_and_checkpoint_with_policy(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         context: &MutationContext,
@@ -4008,12 +4405,15 @@ mod tests {
         let path = format!("/docs/file-{index}.txt");
         let bytes = format!("file {index}\n");
         write_file_bytes(store, namespace_id, &path, bytes.as_bytes(), context, None)
+            .await
             .expect("write file");
         create_checkpoint_with_policy(store, namespace_id, context, policy)
+            .await
             .expect("create checkpoint")
             .checkpoint_seq
     }
 
+    #[derive(Debug)]
     struct HeadCasFailureStore {
         inner: LocalFsStore,
         head_key: String,
@@ -4037,27 +4437,31 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ObjectStore for HeadCasFailureStore {
-        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key)
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
         }
 
-        fn get(
+        async fn get(
             &self,
             key: &str,
             range: Option<ByteRange>,
-        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-            self.inner.get(key, range)
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
         }
 
-        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key)
-        }
-
-        fn put(
+        async fn get_with_metadata(
             &self,
             key: &str,
-            bytes: &[u8],
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
             mode: PutMode,
         ) -> Result<ObjectMetadata, ObjectStoreError> {
             if key == self.head_key
@@ -4069,18 +4473,22 @@ mod tests {
             {
                 return Err(ObjectStoreError::PreconditionFailed);
             }
-            self.inner.put(key, bytes, mode)
+            self.inner.put(key, bytes, mode).await
         }
 
-        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key)
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
         }
 
-        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-            self.inner.list_prefix(prefix)
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
         }
     }
 
+    #[derive(Debug)]
     struct ConflictOnManifestCreateStore {
         inner: LocalFsStore,
         manifest_key: String,
@@ -4099,49 +4507,64 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ObjectStore for ConflictOnManifestCreateStore {
-        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key)
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
         }
 
-        fn get(
+        async fn get(
             &self,
             key: &str,
             range: Option<ByteRange>,
-        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-            self.inner.get(key, range)
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
         }
 
-        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key)
-        }
-
-        fn put(
+        async fn get_with_metadata(
             &self,
             key: &str,
-            bytes: &[u8],
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
             mode: PutMode,
         ) -> Result<ObjectMetadata, ObjectStoreError> {
             if key == self.manifest_key && matches!(&mode, PutMode::CreateIfAbsent) {
-                let mut injected = self
-                    .injected
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if !*injected {
-                    *injected = true;
-                    self.inner.put_overwrite(key, &self.replacement_bytes)?;
+                let should_inject = {
+                    let mut injected = self
+                        .injected
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let should_inject = !*injected;
+                    if should_inject {
+                        *injected = true;
+                    }
+                    should_inject
+                };
+                if should_inject {
+                    self.inner
+                        .put_overwrite(key, Bytes::copy_from_slice(&self.replacement_bytes))
+                        .await?;
                     return Err(ObjectStoreError::Conflict);
                 }
             }
-            self.inner.put(key, bytes, mode)
+            self.inner.put(key, bytes, mode).await
         }
 
-        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key)
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
         }
 
-        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-            self.inner.list_prefix(prefix)
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
         }
     }
 }

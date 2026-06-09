@@ -99,7 +99,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Creates the namespace if it does not already exist.
     ///
     /// Use this before normal reads and writes for a new namespace.
-    pub fn bootstrap_namespace(
+    pub async fn bootstrap_namespace(
         &self,
         options: BootstrapOptions,
     ) -> Result<NamespaceSummary, BootstrapNamespaceError> {
@@ -109,12 +109,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.mutation_context(),
             options.allow_existing,
         )
+        .await
     }
 
     /// Creates a new namespace at the current head of this namespace.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    pub fn fork_namespace(
+    pub async fn fork_namespace(
         &self,
         target: &NamespaceId,
         _options: ForkOptions,
@@ -125,15 +126,16 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             target,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Lists complete namespaces visible in the object store.
-    pub fn list_namespaces(&self) -> CoreResult<Vec<NamespaceSummary>> {
-        catalog::list_namespaces(&self.store)
+    pub async fn list_namespaces(&self) -> CoreResult<Vec<NamespaceSummary>> {
+        catalog::list_namespaces(&self.store).await
     }
 
     /// Resolves one absolute path to the authoritative entry at the current head.
-    pub fn resolve_path(
+    pub async fn resolve_path(
         &self,
         path: impl AsRef<str>,
         options: ReadOptions,
@@ -145,7 +147,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                     &self.store,
                     &self.namespace_id,
                     path,
-                )? {
+                )
+                .await?
+                {
                     return Ok(entry);
                 }
             }
@@ -157,19 +161,20 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                         head,
                         path,
                         table_cache.as_deref(),
-                    )?
+                    )
+                    .await?
                 {
                     return Ok(entry);
                 }
             }
             ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
         }
-        let basis = self.basis_for_read_options(options)?;
+        let basis = self.basis_for_read_options(options).await?;
         crate::path::query::resolve_path_from_basis(&basis, path)
     }
 
     /// Lists the children of a directory path.
-    pub fn list_path(
+    pub async fn list_path(
         &self,
         path: impl AsRef<str>,
         options: ReadOptions,
@@ -181,7 +186,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                     &self.store,
                     &self.namespace_id,
                     path,
-                )? {
+                )
+                .await?
+                {
                     return Ok(entries);
                 }
             }
@@ -193,14 +200,15 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                         head,
                         path,
                         table_cache.as_deref(),
-                    )?
+                    )
+                    .await?
                 {
                     return Ok(entries);
                 }
             }
             ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
         }
-        let basis = self.basis_for_read_options(options)?;
+        let basis = self.basis_for_read_options(options).await?;
         crate::path::query::list_path_from_basis(&basis, path)
     }
 
@@ -208,72 +216,74 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ///
     /// Content bytes are validated against the file's `content_ref` before they
     /// are returned.
-    pub fn read_file(
+    pub async fn read_file(
         &self,
         path: impl AsRef<str>,
         options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        let basis = self.basis_for_read_options(options)?;
-        crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path.as_ref())
+        let basis = self.basis_for_read_options(options).await?;
+        crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path.as_ref()).await
     }
 
     /// Lists retained revisions for the file currently visible at `path`.
-    pub fn list_file_revisions(
+    pub async fn list_file_revisions(
         &self,
         path: impl AsRef<str>,
         options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        let basis = self.basis_for_read_options(options)?;
+        let basis = self.basis_for_read_options(options).await?;
         crate::path::query::list_file_revisions_from_basis(&basis, path.as_ref())
     }
 
     /// Lists retained revisions for a file inode, independent of its current path.
-    pub fn list_file_revisions_for_inode(
+    pub async fn list_file_revisions_for_inode(
         &self,
         inode_id: InodeId,
         options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        let basis = self.basis_for_read_options(options)?;
+        let basis = self.basis_for_read_options(options).await?;
         crate::path::query::list_file_revisions_for_inode_from_basis(&basis, inode_id)
     }
 
     /// Reads a retained revision for the file currently visible at `path`.
-    pub fn read_file_revision(
+    pub async fn read_file_revision(
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
         options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        let basis = self.basis_for_read_options(options)?;
+        let basis = self.basis_for_read_options(options).await?;
         crate::path::query::read_file_revision_bytes_from_basis(
             &self.store,
             &basis,
             path.as_ref(),
             revision_no,
         )
+        .await
     }
 
     /// Reads a retained revision by stable inode id.
-    pub fn read_file_revision_for_inode(
+    pub async fn read_file_revision_for_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
         options: ReadOptions,
     ) -> CoreResult<Vec<u8>> {
-        let basis = self.basis_for_read_options(options)?;
+        let basis = self.basis_for_read_options(options).await?;
         crate::path::query::read_file_revision_bytes_for_inode_from_basis(
             &self.store,
             &basis,
             inode_id,
             revision_no,
         )
+        .await
     }
 
     /// Writes file bytes to a path.
     ///
     /// The bytes become durable content first. Metadata is published only after
     /// that content is safe to reference.
-    pub fn put_file(
+    pub async fn put_file(
         &self,
         path: impl AsRef<str>,
         bytes: impl AsRef<[u8]>,
@@ -291,12 +301,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 .as_ref()
                 .map(|commit_id| commit_id.as_str()),
         )
+        .await
     }
 
     /// Publishes a file revision that points at an already-durable content ref.
     ///
     /// Use this when the caller staged content separately.
-    pub fn put_file_content_ref(
+    pub async fn put_file_content_ref(
         &self,
         path: impl AsRef<str>,
         content_ref: ContentRef,
@@ -314,10 +325,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 .as_ref()
                 .map(|commit_id| commit_id.as_str()),
         )
+        .await
     }
 
     /// Creates a directory at an absolute path.
-    pub fn create_dir(
+    pub async fn create_dir(
         &self,
         path: impl AsRef<str>,
         options: WriteOptions,
@@ -332,10 +344,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 .as_ref()
                 .map(|commit_id| commit_id.as_str()),
         )
+        .await
     }
 
     /// Deletes a file or directory path.
-    pub fn delete_path(
+    pub async fn delete_path(
         &self,
         path: impl AsRef<str>,
         options: WriteOptions,
@@ -352,6 +365,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 &self.mutation_context(),
                 commit_id,
             )
+            .await
         } else {
             crate::path::write::ops::delete_path_non_recursive(
                 &self.store,
@@ -360,11 +374,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 &self.mutation_context(),
                 commit_id,
             )
+            .await
         }
     }
 
     /// Moves a path within the same namespace.
-    pub fn move_path(
+    pub async fn move_path(
         &self,
         source: impl AsRef<str>,
         dest: impl AsRef<str>,
@@ -381,10 +396,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 .as_ref()
                 .map(|commit_id| commit_id.as_str()),
         )
+        .await
     }
 
     /// Copies a file path within the same namespace.
-    pub fn copy_path(
+    pub async fn copy_path(
         &self,
         source: impl AsRef<str>,
         dest: impl AsRef<str>,
@@ -401,10 +417,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 .as_ref()
                 .map(|commit_id| commit_id.as_str()),
         )
+        .await
     }
 
     /// Restores a prior file revision by appending a new current revision.
-    pub fn restore_file_revision(
+    pub async fn restore_file_revision(
         &self,
         path: impl AsRef<str>,
         source_revision_no: RevisionNo,
@@ -421,13 +438,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 .as_ref()
                 .map(|commit_id| commit_id.as_str()),
         )
+        .await
     }
 
     /// Submits one explicit semantic commit request.
     ///
     /// This is the lower-level surface used by clients that need their own
     /// commit ids, preconditions, and operation lists.
-    pub fn commit_operations(
+    pub async fn commit_operations(
         &self,
         request: CommitRequest,
         _options: CommitOptions,
@@ -438,10 +456,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             request,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Submits explicit semantic commit requests as one publication attempt.
-    pub fn commit_operations_batch(
+    pub async fn commit_operations_batch(
         &self,
         requests: Vec<CommitRequest>,
         _options: CommitOptions,
@@ -452,13 +471,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             requests,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Publishes already-classified namespace mutation candidates.
     ///
     /// Server code uses this to batch path intents and explicit commits through
     /// one namespace publisher.
-    pub fn publish_namespace_mutations_batch(
+    pub async fn publish_namespace_mutations_batch(
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<CoreResult<CommitResponse>> {
@@ -468,20 +488,22 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             candidates,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Reads committed changes after `after_seq`.
-    pub fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
-        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq)
+    pub async fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
+        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq).await
     }
 
     /// Starts a durable upload session for this namespace.
-    pub fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
+    pub async fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
         crate::protocol::begin_upload(&self.store, &self.namespace_id, &self.mutation_context())
+            .await
     }
 
     /// Uploads whole-file content into an upload session.
-    pub fn upload_content(
+    pub async fn upload_content(
         &self,
         upload_id: &str,
         bytes: &[u8],
@@ -493,10 +515,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             bytes,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Completes an upload session when the expected content ref matches.
-    pub fn complete_upload(
+    pub async fn complete_upload(
         &self,
         upload_id: &str,
         request: &CompleteUploadRequest,
@@ -508,6 +531,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             request,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Creates or reuses a checkpoint for the current namespace head.
@@ -515,24 +539,26 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// A checkpoint pins a manifest version for retention/provenance. If the
     /// current head has no manifest yet, this first publishes one for the
     /// current durable namespace state; it is not a request to compact metadata.
-    pub fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
+    pub async fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
         crate::checkpoint::create_checkpoint(
             &self.store,
             &self.namespace_id,
             &self.mutation_context(),
         )
+        .await
     }
 
     /// Advances the retention floor when a verified checkpoint makes it safe.
-    pub fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
+    pub async fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
         crate::checkpoint::advance_retention_floor(
             &self.store,
             &self.namespace_id,
             &self.mutation_context(),
         )
+        .await
     }
 
-    fn basis_for_read_options(
+    async fn basis_for_read_options(
         &self,
         options: ReadOptions,
     ) -> CoreResult<Arc<VerifiedNamespaceBasis>> {
@@ -541,7 +567,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             ReadSource::PreferMaterialized
             | ReadSource::FullBasis
             | ReadSource::MaterializedTablesAtHead { .. } => Ok(Arc::new(
-                load_verified_namespace_basis(&self.store, &self.namespace_id)?,
+                load_verified_namespace_basis(&self.store, &self.namespace_id).await?,
             )),
         }
     }

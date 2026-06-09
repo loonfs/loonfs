@@ -1,6 +1,7 @@
 use crate::context::MutationContext;
 use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::{next_takeover_head, HeadFenceTakeoverError};
+use bytes::Bytes;
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
 };
@@ -52,7 +53,7 @@ pub enum LeaseAcquireError {
     RetryExhausted { attempts: usize },
 }
 
-pub(crate) fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
+pub(crate) async fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     params: &MutationContext,
@@ -65,10 +66,12 @@ pub(crate) fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
     }
 
     for _attempt in 0..MAX_LEASE_ACQUIRE_ATTEMPTS {
-        let loaded_head =
-            read_head_object(store, namespace_id).map_err(LeaseAcquireError::LoadHead)?;
-        let loaded_lease =
-            read_lease_object(store, namespace_id).map_err(LeaseAcquireError::LoadLease)?;
+        let loaded_head = read_head_object(store, namespace_id)
+            .await
+            .map_err(LeaseAcquireError::LoadHead)?;
+        let loaded_lease = read_lease_object(store, namespace_id)
+            .await
+            .map_err(LeaseAcquireError::LoadLease)?;
         let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
             LeaseAcquireError::MissingHeadEtag {
                 object_key: loaded_head.object_key.clone(),
@@ -110,7 +113,9 @@ pub(crate) fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
                 &lease_etag,
                 &params.writer_version,
                 renewed,
-            ) {
+            )
+            .await
+            {
                 Ok(()) => return Ok(()),
                 Err(CasOutcome::Retryable) => continue,
                 Err(CasOutcome::Fatal(message)) => {
@@ -127,7 +132,9 @@ pub(crate) fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
                 &head_etag,
                 &params.writer_version,
                 takeover_head,
-            ) {
+            )
+            .await
+            {
                 Ok(()) => continue,
                 Err(CasOutcome::Retryable) => continue,
                 Err(CasOutcome::Fatal(message)) => {
@@ -149,7 +156,9 @@ pub(crate) fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
                 &lease_etag,
                 &params.writer_version,
                 reacquired,
-            ) {
+            )
+            .await
+            {
                 Ok(()) => return Ok(()),
                 Err(CasOutcome::Retryable) => continue,
                 Err(CasOutcome::Fatal(message)) => {
@@ -185,7 +194,7 @@ fn desired_lease_state(
     }
 }
 
-fn compare_and_swap_head<S: ObjectStore + ?Sized>(
+async fn compare_and_swap_head<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_etag: &str,
@@ -197,12 +206,13 @@ fn compare_and_swap_head<S: ObjectStore + ?Sized>(
             .map_err(|err| CasOutcome::Fatal(err.to_string()))?;
     let bytes = serde_json::to_vec(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
     store
-        .compare_and_swap(object_key, expected_etag, &bytes)
+        .compare_and_swap(object_key, expected_etag, Bytes::from(bytes))
+        .await
         .map(|_| ())
         .map_err(map_cas_error)
 }
 
-fn compare_and_swap_lease<S: ObjectStore + ?Sized>(
+async fn compare_and_swap_lease<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_etag: &str,
@@ -217,7 +227,8 @@ fn compare_and_swap_lease<S: ObjectStore + ?Sized>(
     .map_err(|err| CasOutcome::Fatal(err.to_string()))?;
     let bytes = serde_json::to_vec(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
     store
-        .compare_and_swap(object_key, expected_etag, &bytes)
+        .compare_and_swap(object_key, expected_etag, Bytes::from(bytes))
+        .await
         .map(|_| ())
         .map_err(map_cas_error)
 }
@@ -249,31 +260,41 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::{read_head_object, read_lease_object};
     use crate::protocol::commit_operations;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
     use loon_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
     use loon_api::{ChangeSeq, CommitId, InodeId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_lease;
-    use loon_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
+    use loon_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
     use tempfile::tempdir;
 
-    #[test]
-    fn same_holder_renewal_extends_expiry_without_advancing_fence() {
+    #[tokio::test]
+    async fn same_holder_renewal_extends_expiry_without_advancing_fence() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = namespace_id();
         let initial = context("writer-a", 1_000);
-        bootstrap_namespace(&store, &namespace_id, &initial, false).expect("bootstrap");
-        let before = read_lease_object(&store, &namespace_id).expect("read lease before");
+        bootstrap_namespace(&store, &namespace_id, &initial, false)
+            .await
+            .expect("bootstrap");
+        let before = read_lease_object(&store, &namespace_id)
+            .await
+            .expect("read lease before");
 
         let renewed_context = context("writer-a", 1_500);
         acquire_or_renew_namespace_lease(&store, &namespace_id, &renewed_context)
+            .await
             .expect("renew lease");
 
         let head = read_head_object(&store, &namespace_id)
+            .await
             .expect("read head")
             .envelope
             .state;
         let renewed = read_lease_object(&store, &namespace_id)
+            .await
             .expect("read renewed lease")
             .envelope
             .state;
@@ -283,29 +304,42 @@ mod tests {
         assert!(renewed.lease_expires_at_ms > before.envelope.state.lease_expires_at_ms);
     }
 
-    #[test]
-    fn expired_lease_takeover_rewrites_existing_lease_and_advances_fence() {
+    #[tokio::test]
+    async fn expired_lease_takeover_rewrites_existing_lease_and_advances_fence() {
         let temp_dir = tempdir().expect("tempdir");
         let store = DeleteRejectingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = namespace_id();
         let initial = context("writer-a", 1_000);
-        bootstrap_namespace(&store, &namespace_id, &initial, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &initial, false)
+            .await
+            .expect("bootstrap");
         let lease_key = namespace_lease(namespace_id.as_str());
-        assert!(store.head(&lease_key).expect("lease head before").is_some());
+        assert!(store
+            .head(&lease_key)
+            .await
+            .expect("lease head before")
+            .is_some());
 
         let takeover_context = context("writer-b", 3_001);
         acquire_or_renew_namespace_lease(&store, &namespace_id, &takeover_context)
+            .await
             .expect("take over expired lease");
 
         let head = read_head_object(&store, &namespace_id)
+            .await
             .expect("read head")
             .envelope
             .state;
         let lease = read_lease_object(&store, &namespace_id)
+            .await
             .expect("read lease")
             .envelope
             .state;
-        assert!(store.head(&lease_key).expect("lease head after").is_some());
+        assert!(store
+            .head(&lease_key)
+            .await
+            .expect("lease head after")
+            .is_some());
         assert_eq!(head.active_fence_token, FenceToken(1));
         assert_eq!(lease.fence_token, FenceToken(1));
         assert_eq!(lease.holder_id, "writer-b");
@@ -317,13 +351,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn previous_writer_cannot_publish_while_newer_lease_is_valid() {
+    #[tokio::test]
+    async fn previous_writer_cannot_publish_while_newer_lease_is_valid() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = namespace_id();
         let writer_a = context("writer-a", 1_000);
-        bootstrap_namespace(&store, &namespace_id, &writer_a, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, &writer_a, false)
+            .await
+            .expect("bootstrap");
 
         let writer_b = context("writer-b", 3_001);
         commit_operations(
@@ -332,6 +368,7 @@ mod tests {
             create_dir_request("writer-b-create", "from-b"),
             &writer_b,
         )
+        .await
         .expect("writer b commit after takeover");
 
         let writer_a_retry = context("writer-a", 3_002);
@@ -341,14 +378,17 @@ mod tests {
             create_dir_request("writer-a-stale", "from-a"),
             &writer_a_retry,
         )
+        .await
         .expect_err("previous writer should be fenced out");
         assert_eq!(error.code(), ErrorCode::LeaseConflict);
 
         let head = read_head_object(&store, &namespace_id)
+            .await
             .expect("read head")
             .envelope
             .state;
         let lease = read_lease_object(&store, &namespace_id)
+            .await
             .expect("read lease")
             .envelope
             .state;
@@ -384,6 +424,7 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
     struct DeleteRejectingStore {
         inner: LocalFsStore,
     }
@@ -394,38 +435,45 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ObjectStore for DeleteRejectingStore {
-        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key)
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
         }
 
-        fn get(
+        async fn get(
             &self,
             key: &str,
             range: Option<ByteRange>,
-        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
-            self.inner.get(key, range)
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
         }
 
-        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key)
-        }
-
-        fn put(
+        async fn get_with_metadata(
             &self,
             key: &str,
-            bytes: &[u8],
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode)
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
         }
 
-        fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
             panic!("lease acquisition must not delete live namespace objects")
         }
 
-        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-            self.inner.list_prefix(prefix)
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
         }
     }
 }

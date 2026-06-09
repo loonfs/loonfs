@@ -8,7 +8,7 @@ use loon_api::{
 };
 use loon_objectstore::ObjectStore;
 
-pub(crate) fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
@@ -24,7 +24,7 @@ pub(crate) fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
         .content_ref
         .clone()
         .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-    let read = read_durable_content_bytes(store, &basis.content_store_id, &content_ref)?;
+    let read = read_durable_content_bytes(store, &basis.content_store_id, &content_ref).await?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
@@ -84,7 +84,7 @@ pub(crate) fn list_file_revisions_for_inode_from_basis(
     })
 }
 
-pub(crate) fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
@@ -101,21 +101,23 @@ pub(crate) fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
     entry.revision_no = Some(revision.revision_no);
     entry.size_bytes = Some(revision.content_ref.size_bytes);
     entry.content_ref = Some(revision.content_ref.clone());
-    let read = read_durable_content_bytes(store, &basis.content_store_id, &revision.content_ref)?;
+    let read =
+        read_durable_content_bytes(store, &basis.content_store_id, &revision.content_ref).await?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
     })
 }
 
-pub(crate) fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
     basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
     let revision = revision_for_inode(basis, inode_id, revision_no)?;
-    let read = read_durable_content_bytes(store, &basis.content_store_id, &revision.content_ref)?;
+    let read =
+        read_durable_content_bytes(store, &basis.content_store_id, &revision.content_ref).await?;
     Ok(read.bytes)
 }
 

@@ -1,5 +1,4 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
-use crate::blocking::BlockingObjectStoreAdapter;
 use crate::fs::LocalFsStore;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -7,8 +6,10 @@ use crate::keyspace::{
 use crate::r2::{R2Store, R2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
 use crate::ObjectStoreError;
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfiguredObjectStoreKind {
@@ -29,8 +30,8 @@ enum ConfiguredObjectStoreInner {
         store: LocalFsStore,
         key_prefix: Option<String>,
     },
-    AwsS3(BlockingObjectStoreAdapter),
-    CloudflareR2(BlockingObjectStoreAdapter),
+    AwsS3(AwsS3Store),
+    CloudflareR2(R2Store),
 }
 
 impl ConfiguredObjectStore {
@@ -51,9 +52,7 @@ impl ConfiguredObjectStore {
         let store = AwsS3Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::AwsS3,
-            inner: ConfiguredObjectStoreInner::AwsS3(BlockingObjectStoreAdapter::new(Arc::new(
-                store,
-            ))?),
+            inner: ConfiguredObjectStoreInner::AwsS3(store),
         })
     }
 
@@ -61,9 +60,7 @@ impl ConfiguredObjectStore {
         let store = R2Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::CloudflareR2,
-            inner: ConfiguredObjectStoreInner::CloudflareR2(BlockingObjectStoreAdapter::new(
-                Arc::new(store),
-            )?),
+            inner: ConfiguredObjectStoreInner::CloudflareR2(store),
         })
     }
 
@@ -72,91 +69,121 @@ impl ConfiguredObjectStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for ConfiguredObjectStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store.head(&scope_object_key(key_prefix.as_deref(), key)?)
+                store
+                    .head(&scope_object_key(key_prefix.as_deref(), key)?)
+                    .await
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.head(key),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head(key),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.head(key).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head(key).await,
         }
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store.head_with_checksum(&scope_object_key(key_prefix.as_deref(), key)?)
+                store
+                    .head_with_checksum(&scope_object_key(key_prefix.as_deref(), key)?)
+                    .await
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.head_with_checksum(key),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head_with_checksum(key),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.head_with_checksum(key).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head_with_checksum(key).await,
         }
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store.get_with_metadata(&scope_object_key(key_prefix.as_deref(), key)?)
+                store
+                    .get_with_metadata(&scope_object_key(key_prefix.as_deref(), key)?)
+                    .await
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.get_with_metadata(key),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get_with_metadata(key),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.get_with_metadata(key).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get_with_metadata(key).await,
         }
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store.get(&scope_object_key(key_prefix.as_deref(), key)?, range)
+                store
+                    .get(&scope_object_key(key_prefix.as_deref(), key)?, range)
+                    .await
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.get(key, range),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get(key, range),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.get(key, range).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get(key, range).await,
         }
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store.put(&scope_object_key(key_prefix.as_deref(), key)?, bytes, mode)
+                store
+                    .put(&scope_object_key(key_prefix.as_deref(), key)?, bytes, mode)
+                    .await
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.put(key, bytes, mode),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.put(key, bytes, mode),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.put(key, bytes, mode).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.put(key, bytes, mode).await,
         }
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store.delete(&scope_object_key(key_prefix.as_deref(), key)?)
+                store
+                    .delete(&scope_object_key(key_prefix.as_deref(), key)?)
+                    .await
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.delete(key),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.delete(key),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.delete(key).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.delete(key).await,
         }
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                let listed =
-                    store.list_prefix(&scope_list_prefix(key_prefix.as_deref(), prefix)?)?;
-                Ok(match key_prefix.as_deref() {
-                    Some(scoped_prefix) => listed
-                        .into_iter()
-                        .filter_map(|key| unscope_listed_key(Some(scoped_prefix), &key))
-                        .collect(),
-                    None => listed,
-                })
+                let scoped_prefix = match scope_list_prefix(key_prefix.as_deref(), prefix) {
+                    Ok(prefix) => prefix,
+                    Err(err) => return stream::once(async { Err(err) }).boxed(),
+                };
+                let key_prefix = key_prefix.clone();
+                store
+                    .list_prefix_stream(&scoped_prefix)
+                    .filter_map(move |result| {
+                        let key_prefix = key_prefix.clone();
+                        async move {
+                            match result {
+                                Ok(key) => match key_prefix.as_deref() {
+                                    Some(prefix) => unscope_listed_key(Some(prefix), &key).map(Ok),
+                                    None => Some(Ok(key)),
+                                },
+                                Err(err) => Some(Err(err)),
+                            }
+                        }
+                    })
+                    .boxed()
             }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.list_prefix(prefix),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.list_prefix(prefix),
+            ConfiguredObjectStoreInner::AwsS3(store) => store.list_prefix_stream(prefix),
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.list_prefix_stream(prefix),
         }
     }
 }
@@ -170,29 +197,33 @@ mod tests {
     use crate::s3::AwsS3StoreConfig;
     use crate::ObjectStore;
     use crate::ObjectStoreError;
+    use bytes::Bytes;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn configured_local_fs_scopes_optional_key_prefix() {
+    #[tokio::test]
+    async fn configured_local_fs_scopes_optional_key_prefix() {
         let temp_dir = unique_temp_dir("configured-store-local");
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
             .expect("construct configured local fs store");
         let head_key = namespace_head("ns-1");
 
         store
-            .put_overwrite(&head_key, br#"{"ok":true}"#)
+            .put_overwrite(&head_key, Bytes::from_static(br#"{"ok":true}"#))
+            .await
             .expect("write scoped object");
 
         let raw_store = LocalFsStore::new(&temp_dir).expect("open raw store");
         assert!(raw_store
             .head(&format!("tenant-a/{head_key}"))
+            .await
             .expect("head raw scoped object")
             .is_some());
         assert_eq!(
             store
                 .list_prefix("namespaces/ns-1/")
+                .await
                 .expect("list scoped prefix"),
             vec![head_key]
         );
@@ -229,14 +260,15 @@ mod tests {
         assert_eq!(r2.kind(), ConfiguredObjectStoreKind::CloudflareR2);
     }
 
-    #[test]
-    fn configured_local_fs_preserves_invalid_key_errors() {
+    #[tokio::test]
+    async fn configured_local_fs_preserves_invalid_key_errors() {
         let temp_dir = unique_temp_dir("configured-store-invalid-key");
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
             .expect("construct configured local fs store");
 
         let error = store
-            .put_overwrite("../head.json", br#"{"ok":true}"#)
+            .put_overwrite("../head.json", Bytes::from_static(br#"{"ok":true}"#))
+            .await
             .expect_err("traversal key should be rejected");
         assert!(matches!(error, ObjectStoreError::InvalidKey(_)));
     }

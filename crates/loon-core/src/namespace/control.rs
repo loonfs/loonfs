@@ -123,13 +123,13 @@ pub enum ControlObjectLoadError {
     Store(String),
 }
 
-pub(crate) fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_descriptor(expected_namespace.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: NamespaceDescriptorEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -144,12 +144,12 @@ pub(crate) fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) fn read_content_store_descriptor_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_content_store_descriptor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_content_store: &ContentStoreId,
 ) -> Result<LoadedContentStoreDescriptorObject, ControlObjectLoadError> {
     let object_key = content_store_descriptor(expected_content_store.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: ContentStoreDescriptorEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -164,13 +164,13 @@ pub(crate) fn read_content_store_descriptor_object<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) fn read_head_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_head(expected_namespace.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: HeadStateEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -185,13 +185,13 @@ pub(crate) fn read_head_object<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_lease_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedLeaseObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_lease(expected_namespace.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: LeaseStateEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -206,11 +206,11 @@ pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorControl, ControlObjectLoadError> {
-    let loaded = read_namespace_descriptor_object(store, expected_namespace)?;
+    let loaded = read_namespace_descriptor_object(store, expected_namespace).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedNamespaceDescriptorControl {
         object_key: loaded.object_key,
@@ -219,11 +219,11 @@ pub fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
+pub async fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_content_store: &ContentStoreId,
 ) -> Result<LoadedContentStoreDescriptorControl, ControlObjectLoadError> {
-    let loaded = read_content_store_descriptor_object(store, expected_content_store)?;
+    let loaded = read_content_store_descriptor_object(store, expected_content_store).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedContentStoreDescriptorControl {
         object_key: loaded.object_key,
@@ -232,11 +232,11 @@ pub fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn load_namespace_head_control<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedHeadControl, ControlObjectLoadError> {
-    let loaded = read_head_object(store, expected_namespace)?;
+    let loaded = read_head_object(store, expected_namespace).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedHeadControl {
         object_key: loaded.object_key,
@@ -245,11 +245,11 @@ pub fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn load_namespace_lease_control<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_lease_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedLeaseControl, ControlObjectLoadError> {
-    let loaded = read_lease_object(store, expected_namespace)?;
+    let loaded = read_lease_object(store, expected_namespace).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedLeaseControl {
         object_key: loaded.object_key,
@@ -268,12 +268,13 @@ fn control_identity(
     Ok(ControlObjectIdentity { etag })
 }
 
-fn read_control_object_bytes<S: ObjectStore + ?Sized>(
+async fn read_control_object_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
 ) -> Result<(ObjectMetadata, Vec<u8>), ControlObjectLoadError> {
     let body = store
         .get_with_metadata(object_key)
+        .await
         .map_err(map_store_load_error)?
         .ok_or_else(|| ControlObjectLoadError::MissingObject {
             object_key: object_key.to_owned(),

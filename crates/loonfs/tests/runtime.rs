@@ -1,6 +1,9 @@
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use loon_api::wire::manifest::decode_namespace_manifest_json;
 use loon_core::cache::load_verified_namespace_basis;
 use loon_objectstore::fs::LocalFsStore;
@@ -557,8 +560,6 @@ async fn async_runtime_methods_are_the_engine_boundary() {
 
     assert_eq!(async_stat.absolute_path, "/docs/hello.txt");
     assert_eq!(async_stat.size_bytes, Some(5));
-    let stats = fs.runtime_cache_stats();
-    assert!(stats.async_engine_calls >= 3);
 }
 
 #[test]
@@ -582,19 +583,19 @@ fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
 
     raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first stat should load basis");
-    assert_eq!(raw_store.wal_get_count(), 1);
+        .expect("first stat should reuse write-promoted basis");
+    assert_eq!(raw_store.wal_get_count(), 0);
 
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second stat should reuse cached basis");
-    assert_eq!(raw_store.wal_get_count(), 1);
+    assert_eq!(raw_store.wal_get_count(), 0);
 
     fs.create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
         .expect("create other");
     raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("stat after mutation should reload basis");
-    assert!(raw_store.wal_get_count() > 0);
+        .expect("stat after local mutation should reuse advanced basis");
+    assert_eq!(raw_store.wal_get_count(), 0);
 }
 
 #[test]
@@ -777,7 +778,7 @@ fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
         .create_namespace_blocking(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
     let raw_store = store(temp_dir.path());
-    let basis_weight = load_verified_namespace_basis(raw_store.as_ref(), &first)
+    let basis_weight = block_on(load_verified_namespace_basis(raw_store.as_ref(), &first))
         .expect("load basis")
         .weight();
     assert!(basis_weight.decoded_bytes > 1);
@@ -810,9 +811,12 @@ fn runtime_basis_cache_skips_oversized_basis() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let raw_store = store(temp_dir.path());
-    let basis_weight = load_verified_namespace_basis(raw_store.as_ref(), &namespace_id)
-        .expect("load basis")
-        .weight();
+    let basis_weight = block_on(load_verified_namespace_basis(
+        raw_store.as_ref(),
+        &namespace_id,
+    ))
+    .expect("load basis")
+    .weight();
     assert!(basis_weight.decoded_bytes > 1);
 
     let fs = Fs::builder(raw_store)
@@ -1382,6 +1386,44 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
     assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_materialized_stat_and_list_share_async_store() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let fs = runtime(temp_dir.path(), "concurrent-materialized-read-test");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .await
+    .expect("put file");
+    fs.create_checkpoint(&namespace_id)
+        .await
+        .expect("checkpoint");
+
+    let (stat, list) = tokio::join!(
+        fs.stat_path(&namespace_id, "/docs/file.txt"),
+        fs.list_path(&namespace_id, "/docs")
+    );
+    let stat = stat.expect("stat file");
+    let list = list.expect("list docs");
+
+    assert_eq!(stat.absolute_path, "/docs/file.txt");
+    assert_eq!(stat.size_bytes, Some(4));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].absolute_path, "/docs/file.txt");
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.read_materialized_table_hits, 2);
+    assert_eq!(stats.read_full_basis_fallbacks, 0);
+}
+
 #[test]
 fn repeated_materialized_stat_uses_metadata_table_cache() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1623,8 +1665,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    raw_store
-        .delete(&namespace_descriptor(namespace_id.as_str()))
+    block_on(raw_store.delete(&namespace_descriptor(namespace_id.as_str())))
         .expect("delete namespace descriptor");
 
     assert_core_error_kind(
@@ -1646,12 +1687,11 @@ fn begin_upload_rejects_malformed_descriptors() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    raw_store
-        .put_overwrite(
-            &namespace_descriptor(namespace_id.as_str()),
-            br#"{"not":"a namespace descriptor"}"#,
-        )
-        .expect("corrupt namespace descriptor");
+    block_on(raw_store.put_overwrite(
+        &namespace_descriptor(namespace_id.as_str()),
+        Bytes::from_static(br#"{"not":"a namespace descriptor"}"#),
+    ))
+    .expect("corrupt namespace descriptor");
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
         ErrorCode::NamespaceCorrupt,
@@ -1660,15 +1700,16 @@ fn begin_upload_rejects_malformed_descriptors() {
     let content_bad = NamespaceId::parse("content-bad").expect("valid namespace id");
     fs.create_namespace_blocking(&content_bad, CreateNamespaceOptions::default())
         .expect("create content-bad namespace");
-    for key in raw_store
-        .list_prefix("content-stores/")
+    for key in block_on(raw_store.list_prefix("content-stores/"))
         .expect("list content stores")
         .into_iter()
         .filter(|key| key.ends_with("/descriptor.json"))
     {
-        raw_store
-            .put_overwrite(&key, br#"{"not":"a content store descriptor"}"#)
-            .expect("corrupt content store descriptor");
+        block_on(raw_store.put_overwrite(
+            &key,
+            Bytes::from_static(br#"{"not":"a content store descriptor"}"#),
+        ))
+        .expect("corrupt content store descriptor");
     }
     assert_core_error_kind(
         fs.begin_upload_blocking(&content_bad),
@@ -1690,9 +1731,11 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
     fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
         .expect("create head-bad namespace");
-    raw_store
-        .put_overwrite(&namespace_head(head_bad.as_str()), br#"{"not":"a head"}"#)
-        .expect("corrupt head");
+    block_on(raw_store.put_overwrite(
+        &namespace_head(head_bad.as_str()),
+        Bytes::from_static(br#"{"not":"a head"}"#),
+    ))
+    .expect("corrupt head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&head_bad),
         ErrorCode::NamespaceCorrupt,
@@ -1701,12 +1744,11 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     let lease_bad = NamespaceId::parse("lease-bad").expect("valid namespace id");
     fs.create_namespace_blocking(&lease_bad, CreateNamespaceOptions::default())
         .expect("create lease-bad namespace");
-    raw_store
-        .put_overwrite(
-            &namespace_lease(lease_bad.as_str()),
-            br#"{"not":"a lease"}"#,
-        )
-        .expect("corrupt lease");
+    block_on(raw_store.put_overwrite(
+        &namespace_lease(lease_bad.as_str()),
+        Bytes::from_static(br#"{"not":"a lease"}"#),
+    ))
+    .expect("corrupt lease");
     assert_core_error_kind(
         fs.begin_upload_blocking(&lease_bad),
         ErrorCode::NamespaceCorrupt,
@@ -1809,8 +1851,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    raw_store
-        .delete(&namespace_descriptor(namespace_id.as_str()))
+    block_on(raw_store.delete(&namespace_descriptor(namespace_id.as_str())))
         .expect("delete namespace descriptor");
 
     assert_core_error_kind(
@@ -1944,8 +1985,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
     let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(2));
-    let manifest_bytes = raw_store
-        .get(&manifest_key, None)
+    let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
@@ -2225,16 +2265,17 @@ impl HeadCasFailureStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for HeadCasFailureStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         if key.starts_with(&self.wal_prefix) {
             self.wal_get_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -2244,10 +2285,10 @@ impl ObjectStore for HeadCasFailureStore {
         if key == self.head_key {
             self.head_get_count.fetch_add(1, Ordering::SeqCst);
         }
-        self.inner.get(key, range)
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         if key.starts_with(&self.wal_prefix) {
             self.wal_get_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -2257,13 +2298,13 @@ impl ObjectStore for HeadCasFailureStore {
         if key == self.head_key {
             self.head_get_count.fetch_add(1, Ordering::SeqCst);
         }
-        self.inner.get_with_metadata(key)
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         if key == self.head_key
@@ -2272,15 +2313,18 @@ impl ObjectStore for HeadCasFailureStore {
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }
 
@@ -2314,51 +2358,58 @@ impl ContentBlobGetCountingStore {
     }
 }
 
+#[async_trait]
 impl ObjectStore for ContentBlobGetCountingStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key)
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         if key.starts_with("content-stores/") && key.contains("/blobs/") {
             self.content_blob_checksum_heads
                 .fetch_add(1, Ordering::SeqCst);
         }
-        self.inner.head_with_checksum(key)
+        self.inner.head_with_checksum(key).await
     }
 
-    fn get(
+    async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
         if key.starts_with("content-stores/") && key.contains("/blobs/") {
             self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
         }
-        self.inner.get(key, range)
+        self.inner.get(key, range).await
     }
 
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         if key.starts_with("content-stores/") && key.contains("/blobs/") {
             self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
         }
-        self.inner.get_with_metadata(key)
+        self.inner.get_with_metadata(key).await
     }
 
-    fn put(
+    async fn put(
         &self,
         key: &str,
-        bytes: &[u8],
+        bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode)
+        self.inner.put(key, bytes, mode).await
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key)
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
     }
 
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        self.inner.list_prefix(prefix)
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
     }
 }

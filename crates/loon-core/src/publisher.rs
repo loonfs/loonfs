@@ -167,7 +167,7 @@ impl NamespaceCommitEngine {
         self.basis.as_ref().map(CachedVerifiedBasis::weight)
     }
 
-    pub fn publish_batch<S: ObjectStore + ?Sized>(
+    pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -182,7 +182,9 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        if let Err(error) = acquire_or_renew_namespace_lease(store, &self.namespace_id, context) {
+        if let Err(error) =
+            acquire_or_renew_namespace_lease(store, &self.namespace_id, context).await
+        {
             self.invalidate();
             return NamespaceCommitEnginePublishResult {
                 results: repeated_error(candidate_count, CoreError::Lease(error)),
@@ -191,7 +193,7 @@ impl NamespaceCommitEngine {
             };
         }
 
-        let (basis, basis_reuse_event) = match self.basis_for_publish(store) {
+        let (basis, basis_reuse_event) = match self.basis_for_publish(store).await {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate();
@@ -209,10 +211,11 @@ impl NamespaceCommitEngine {
             &candidates,
             context,
             &basis,
-        );
+        )
+        .await;
         if should_retry_reused_warm_rejection(basis_reuse_event, &published) {
             self.invalidate();
-            let cold_basis = match load_verified_namespace_basis(store, &self.namespace_id) {
+            let cold_basis = match load_verified_namespace_basis(store, &self.namespace_id).await {
                 Ok(value) => value,
                 Err(error) => {
                     return NamespaceCommitEnginePublishResult {
@@ -228,7 +231,8 @@ impl NamespaceCommitEngine {
                 &candidates,
                 context,
                 &cold_basis,
-            );
+            )
+            .await;
             return self.finish_publish_result(retried, BasisReuseEvent::InvalidatedThenColdLoaded);
         }
         self.finish_publish_result(published, basis_reuse_event)
@@ -261,18 +265,18 @@ impl NamespaceCommitEngine {
         }
     }
 
-    fn basis_for_publish<S: ObjectStore + ?Sized>(
+    async fn basis_for_publish<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
     ) -> Result<(VerifiedNamespaceBasis, BasisReuseEvent), BasisLoadError> {
         let mut invalidated = false;
         if let Some(cached) = self.basis.clone() {
-            match probe_namespace_head_etag(store, &self.namespace_id) {
+            match probe_namespace_head_etag(store, &self.namespace_id).await {
                 Ok(probe) if cached.matches_head_etag_probe(&probe) => {
                     // A matching ETag does not make the cache authoritative; it
                     // only proves the durable head object is unchanged since
                     // this basis was reconstructed and verified.
-                    match load_namespace_lease_control(store, &self.namespace_id) {
+                    match load_namespace_lease_control(store, &self.namespace_id).await {
                         Ok(lease) => {
                             let basis = cached.basis_to_reuse_with_refreshed_lease(lease.state);
                             return Ok((basis, BasisReuseEvent::ReusedAfterHeadEtagMatch));
@@ -290,7 +294,7 @@ impl NamespaceCommitEngine {
             }
         }
 
-        let basis = load_verified_namespace_basis(store, &self.namespace_id)?;
+        let basis = load_verified_namespace_basis(store, &self.namespace_id).await?;
         let event = if invalidated {
             BasisReuseEvent::InvalidatedThenColdLoaded
         } else {
@@ -325,15 +329,17 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         Self { store }
     }
 
-    pub fn plan_path_intent(
+    pub async fn plan_path_intent(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        PathPlanner::new(self.store).plan_against_basis(namespace_id, intent)
+        PathPlanner::new(self.store)
+            .plan_against_basis(namespace_id, intent)
+            .await
     }
 
-    pub fn submit_path_intent(
+    pub async fn submit_path_intent(
         &self,
         namespace_id: &NamespaceId,
         intent: PathMutationIntent,
@@ -349,7 +355,8 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
                 namespace_id,
                 vec![NamespaceMutationCandidate::Path(intent.clone())],
                 context,
-            );
+            )
+            .await;
             let result = results
                 .pop()
                 .unwrap_or_else(|| Err(CoreError::Store("empty path mutation batch".to_owned())));
@@ -372,33 +379,36 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         }))
     }
 
-    pub fn submit_commit_request(
+    pub async fn submit_commit_request(
         &self,
         namespace_id: &NamespaceId,
         request: ApiCommitRequest,
         context: &MutationContext,
     ) -> Result<ApiCommitResponse, CoreError> {
-        crate::protocol::commit_operations(self.store, namespace_id, request, context)
+        crate::protocol::commit_operations(self.store, namespace_id, request, context).await
     }
 
-    pub fn submit_commit_batch(
+    pub async fn submit_commit_batch(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<ApiCommitRequest>,
         context: &MutationContext,
     ) -> Vec<Result<ApiCommitResponse, CoreError>> {
-        crate::protocol::commit_operations_batch(self.store, namespace_id, requests, context)
+        crate::protocol::commit_operations_batch(self.store, namespace_id, requests, context).await
     }
 }
 
-pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    engine.publish_batch(store, candidates, context).results
+    engine
+        .publish_batch(store, candidates, context)
+        .await
+        .results
 }
 
 #[cfg(test)]

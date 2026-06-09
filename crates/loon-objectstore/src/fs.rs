@@ -1,16 +1,14 @@
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::checksum;
 use crate::keyspace::validate_segments;
-use crate::AsyncObjectStore;
-use crate::ObjectStoreError;
+use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{self, BoxStream};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use futures::stream::{self, BoxStream, StreamExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub struct LocalFsStore {
@@ -21,7 +19,7 @@ pub struct LocalFsStore {
 impl LocalFsStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, ObjectStoreError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(io_error)?;
+        std::fs::create_dir_all(&root).map_err(io_error)?;
         Ok(Self {
             root,
             write_lock: Mutex::new(()),
@@ -41,20 +39,27 @@ impl LocalFsStore {
         Ok(path)
     }
 
-    fn metadata_for_path(
+    async fn metadata_for_path(
         path: &Path,
         include_checksum: bool,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let metadata = fs::metadata(path).map_err(io_error)?;
-        let checksum_sha256 = include_checksum
-            .then(|| fs::read(path).map(|bytes| checksum::sha256_digest(&bytes)))
-            .transpose()
-            .map_err(io_error)?;
-        Self::metadata_from_fs_metadata(&metadata, checksum_sha256, path)
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let metadata = match fs::metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_error(err)),
+        };
+        let checksum_sha256 = if include_checksum {
+            Some(checksum::sha256_digest(
+                &fs::read(path).await.map_err(io_error)?,
+            ))
+        } else {
+            None
+        };
+        Self::metadata_from_fs_metadata(&metadata, checksum_sha256, path).map(Some)
     }
 
     fn metadata_from_fs_metadata(
-        metadata: &fs::Metadata,
+        metadata: &std::fs::Metadata,
         checksum_sha256: Option<String>,
         path: &Path,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
@@ -80,93 +85,95 @@ impl LocalFsStore {
         })
     }
 
-    fn create_new_object(path: &Path, bytes: &[u8]) -> Result<(), ObjectStoreError> {
-        ensure_parent_dir(path)?;
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+    async fn create_new_object(path: &Path, bytes: &[u8]) -> Result<(), ObjectStoreError> {
+        ensure_parent_dir(path).await?;
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
             Ok(file) => file,
             Err(err) => return Err(map_create_error(err)),
         };
 
-        let result = (|| {
-            file.write_all(bytes).map_err(io_error)?;
-            file.sync_all().map_err(io_error)
-        })();
+        let result: Result<(), ObjectStoreError> = async {
+            file.write_all(bytes).await.map_err(io_error)?;
+            file.sync_all().await.map_err(io_error)
+        }
+        .await;
 
         if result.is_err() {
-            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(path).await;
         }
 
         result
     }
 
-    fn replace_object(path: &Path, bytes: &[u8]) -> Result<(), ObjectStoreError> {
-        ensure_parent_dir(path)?;
+    async fn replace_object(path: &Path, bytes: &[u8]) -> Result<(), ObjectStoreError> {
+        ensure_parent_dir(path).await?;
         let temp_path = temp_path(path);
 
-        let result = (|| {
+        let result: Result<(), ObjectStoreError> = async {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp_path)
+                .await
                 .map_err(io_error)?;
-            file.write_all(bytes).map_err(io_error)?;
-            file.sync_all().map_err(io_error)?;
+            file.write_all(bytes).await.map_err(io_error)?;
+            file.sync_all().await.map_err(io_error)?;
 
-            match fs::rename(&temp_path, path) {
+            match fs::rename(&temp_path, path).await {
                 Ok(()) => Ok(()),
                 Err(rename_error)
-                    if path.exists()
+                    if fs::try_exists(path).await.unwrap_or(false)
                         && matches!(
                             rename_error.kind(),
                             std::io::ErrorKind::AlreadyExists
                                 | std::io::ErrorKind::PermissionDenied
                         ) =>
                 {
-                    fs::remove_file(path).map_err(io_error)?;
-                    fs::rename(&temp_path, path).map_err(io_error)
+                    fs::remove_file(path).await.map_err(io_error)?;
+                    fs::rename(&temp_path, path).await.map_err(io_error)
                 }
                 Err(rename_error) => Err(io_error(rename_error)),
             }
-        })();
+        }
+        .await;
 
         if result.is_err() {
-            let _ = fs::remove_file(&temp_path);
+            let _ = fs::remove_file(&temp_path).await;
         }
 
         result
     }
 }
 
-impl ObjectStore for LocalFsStore {
-    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+impl LocalFsStore {
+    async fn head_object(
+        &self,
+        key: &str,
+        include_checksum: bool,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        Self::metadata_for_path(&path, false).map(Some)
+        Self::metadata_for_path(&path, include_checksum).await
     }
 
-    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn get_with_metadata_object(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        Self::metadata_for_path(&path, true).map(Some)
-    }
-
-    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let path = self.resolve_key(key)?;
-        let mut file = match File::open(&path) {
+        let mut file = match File::open(&path).await {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(err)),
         };
-        let fs_metadata = file.metadata().map_err(io_error)?;
+        let fs_metadata = file.metadata().await.map_err(io_error)?;
 
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
+        file.read_to_end(&mut bytes).await.map_err(io_error)?;
 
         let metadata = Self::metadata_from_fs_metadata(
             &fs_metadata,
@@ -176,20 +183,20 @@ impl ObjectStore for LocalFsStore {
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
-    fn get(
+    async fn get_object(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
-        let mut file = match File::open(&path) {
+        let mut file = match File::open(&path).await {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(err)),
         };
 
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
+        file.read_to_end(&mut bytes).await.map_err(io_error)?;
 
         match range {
             None => Ok(Some(bytes)),
@@ -209,86 +216,69 @@ impl ObjectStore for LocalFsStore {
         }
     }
 
-    fn put(
+    async fn put_object(
         &self,
         key: &str,
         bytes: &[u8],
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let path = self.resolve_key(key)?;
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self.write_lock.lock().await;
 
         match mode {
-            PutMode::Overwrite => Self::replace_object(&path, bytes)?,
+            PutMode::Overwrite => Self::replace_object(&path, bytes).await?,
             PutMode::CreateIfAbsent => {
-                if path.exists() {
+                if fs::try_exists(&path).await.map_err(io_error)? {
                     return Err(ObjectStoreError::PreconditionFailed);
                 }
-                Self::create_new_object(&path, bytes)?;
+                Self::create_new_object(&path, bytes).await?;
             }
             PutMode::CompareAndSwap { expected_etag } => {
-                let current = <Self as ObjectStore>::head(self, key)?
+                let current = Self::metadata_for_path(&path, false)
+                    .await?
                     .ok_or(ObjectStoreError::PreconditionFailed)?;
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
                     return Err(ObjectStoreError::PreconditionFailed);
                 }
-                Self::replace_object(&path, bytes)?;
+                Self::replace_object(&path, bytes).await?;
             }
         }
 
         Self::metadata_for_path(&path, true)
+            .await?
+            .ok_or_else(|| ObjectStoreError::Transport(format!("object disappeared: {key}")))
     }
 
-    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete_object(&self, key: &str) -> Result<(), ObjectStoreError> {
         let path = self.resolve_key(key)?;
-        let _guard = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self.write_lock.lock().await;
 
-        match fs::remove_file(&path) {
+        match fs::remove_file(&path).await {
             Ok(()) => {
-                prune_empty_parent_dirs(path.parent(), &self.root)?;
+                prune_empty_parent_dirs(path.parent(), &self.root).await?;
                 Ok(())
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(io_error(err)),
         }
     }
-
-    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        validate_segments(prefix, true)?;
-
-        if !self.root.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut keys = Vec::new();
-        collect_keys(&self.root, &self.root, &mut keys)?;
-        keys.retain(|key| key.starts_with(prefix));
-        keys.sort();
-        Ok(keys)
-    }
 }
 
 #[async_trait]
-impl AsyncObjectStore for LocalFsStore {
+impl ObjectStore for LocalFsStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        <Self as ObjectStore>::head(self, key)
+        self.head_object(key, false).await
     }
 
     async fn head_with_checksum(
         &self,
         key: &str,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        <Self as ObjectStore>::head_with_checksum(self, key)
+        self.head_object(key, true).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        <Self as ObjectStore>::get_with_metadata(self, key)
+        self.get_with_metadata_object(key).await
     }
 
     async fn get(
@@ -296,7 +286,9 @@ impl AsyncObjectStore for LocalFsStore {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Bytes>, ObjectStoreError> {
-        <Self as ObjectStore>::get(self, key, range).map(|maybe| maybe.map(Bytes::from))
+        self.get_object(key, range)
+            .await
+            .map(|maybe| maybe.map(Bytes::from))
     }
 
     async fn put(
@@ -305,55 +297,80 @@ impl AsyncObjectStore for LocalFsStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        <Self as ObjectStore>::put(self, key, &bytes, mode)
+        self.put_object(key, &bytes, mode).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        <Self as ObjectStore>::delete(self, key)
+        self.delete_object(key).await
     }
 
     fn list_prefix_stream(
         &self,
         prefix: &str,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        match <Self as ObjectStore>::list_prefix(self, prefix) {
-            Ok(keys) => Box::pin(stream::iter(keys.into_iter().map(Ok))),
-            Err(err) => Box::pin(stream::once(async { Err(err) })),
-        }
+        let root = self.root.clone();
+        let prefix = prefix.to_owned();
+        Box::pin(
+            stream::once(async move { list_prefix_for_root(root, prefix).await }).flat_map(
+                |result| match result {
+                    Ok(keys) => stream::iter(keys.into_iter().map(Ok)).boxed(),
+                    Err(err) => stream::once(async { Err(err) }).boxed(),
+                },
+            ),
+        )
     }
 }
 
-fn ensure_parent_dir(path: &Path) -> Result<(), ObjectStoreError> {
+async fn list_prefix_for_root(
+    root: PathBuf,
+    prefix: String,
+) -> Result<Vec<String>, ObjectStoreError> {
+    validate_segments(&prefix, true)?;
+
+    if !fs::try_exists(&root).await.map_err(io_error)? {
+        return Ok(Vec::new());
+    }
+
+    let mut keys = collect_keys(root).await?;
+    keys.retain(|key| key.starts_with(&prefix));
+    keys.sort();
+    Ok(keys)
+}
+
+async fn ensure_parent_dir(path: &Path) -> Result<(), ObjectStoreError> {
     match path.parent() {
-        Some(parent) => fs::create_dir_all(parent).map_err(io_error),
+        Some(parent) => fs::create_dir_all(parent).await.map_err(io_error),
         None => Err(ObjectStoreError::InvalidKey(path.display().to_string())),
     }
 }
 
-fn collect_keys(
-    root: &Path,
-    current: &Path,
-    keys: &mut Vec<String>,
-) -> Result<(), ObjectStoreError> {
-    let mut entries = fs::read_dir(current)
-        .map_err(io_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(io_error)?;
-    entries.sort_by_key(|entry| entry.path());
+async fn collect_keys(root: PathBuf) -> Result<Vec<String>, ObjectStoreError> {
+    let mut keys = Vec::new();
+    let mut dirs = vec![root.clone()];
 
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_keys(root, &path, keys)?;
-            continue;
+    while let Some(current) = dirs.pop() {
+        let mut entries = Vec::new();
+        let mut reader = fs::read_dir(&current).await.map_err(io_error)?;
+        while let Some(entry) = reader.next_entry().await.map_err(io_error)? {
+            entries.push(entry.path());
         }
+        entries.sort();
 
-        if path.is_file() {
-            keys.push(relative_key(root, &path)?);
+        for path in entries.into_iter().rev() {
+            let metadata = fs::metadata(&path).await.map_err(io_error)?;
+            if metadata.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+
+            if metadata.is_file() {
+                keys.push(relative_key(&root, &path)?);
+            }
         }
     }
 
-    Ok(())
+    keys.sort();
+    Ok(keys)
 }
 
 fn relative_key(root: &Path, path: &Path) -> Result<String, ObjectStoreError> {
@@ -379,7 +396,7 @@ fn relative_key(root: &Path, path: &Path) -> Result<String, ObjectStoreError> {
     Ok(parts.join("/"))
 }
 
-fn prune_empty_parent_dirs(
+async fn prune_empty_parent_dirs(
     mut current: Option<&Path>,
     root: &Path,
 ) -> Result<(), ObjectStoreError> {
@@ -388,7 +405,7 @@ fn prune_empty_parent_dirs(
             break;
         }
 
-        match fs::remove_dir(dir) {
+        match fs::remove_dir(dir).await {
             Ok(()) => current = dir.parent(),
             Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
@@ -431,46 +448,66 @@ mod tests {
     use super::LocalFsStore;
     use super::{ObjectStore, PutMode};
     use crate::keys::{namespace_head, namespace_lease};
+    use bytes::Bytes;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn overwrite_refreshes_head_and_visible_bytes() {
+    #[tokio::test]
+    async fn overwrite_refreshes_head_and_visible_bytes() {
         let temp_dir = TestDir::new("overwrite");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = namespace_head("ns-1");
 
         let first = store
-            .put(&key, br#"{"seq":1}"#, PutMode::Overwrite)
+            .put(
+                &key,
+                Bytes::from_static(br#"{"seq":1}"#),
+                PutMode::Overwrite,
+            )
+            .await
             .expect("seed first object");
         let second = store
-            .put(&key, br#"{"seq":2}"#, PutMode::Overwrite)
+            .put(
+                &key,
+                Bytes::from_static(br#"{"seq":2}"#),
+                PutMode::Overwrite,
+            )
+            .await
             .expect("overwrite object");
 
         assert_eq!(
-            store.get(&key, None).expect("get object"),
-            Some(br#"{"seq":2}"#.to_vec())
+            store.get(&key, None).await.expect("get object"),
+            Some(Bytes::from_static(br#"{"seq":2}"#))
         );
-        let head = store.head(&key).expect("head object").expect("head exists");
+        let head = store
+            .head(&key)
+            .await
+            .expect("head object")
+            .expect("head exists");
         assert_eq!(head.etag, second.etag);
         assert_eq!(head.size_bytes, second.size_bytes);
         assert_ne!(first, second);
     }
 
-    #[test]
-    fn delete_is_idempotent_and_head_reflects_removal() {
+    #[tokio::test]
+    async fn delete_is_idempotent_and_head_reflects_removal() {
         let temp_dir = TestDir::new("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = namespace_lease("ns-1");
 
         store
-            .put_if_absent(&key, br#"{"holder":"writer-a"}"#)
+            .put_if_absent(&key, Bytes::from_static(br#"{"holder":"writer-a"}"#))
+            .await
             .expect("seed lease object");
-        assert!(store.head(&key).expect("head before delete").is_some());
-        store.delete(&key).expect("delete existing object");
-        store.delete(&key).expect("delete missing object");
-        assert_eq!(store.head(&key).expect("head after delete"), None);
+        assert!(store
+            .head(&key)
+            .await
+            .expect("head before delete")
+            .is_some());
+        store.delete(&key).await.expect("delete existing object");
+        store.delete(&key).await.expect("delete missing object");
+        assert_eq!(store.head(&key).await.expect("head after delete"), None);
     }
 
     struct TestDir {

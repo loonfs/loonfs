@@ -14,16 +14,13 @@ pub(super) fn normalized_commit_id(commit_id: Option<&str>) -> Result<CommitId, 
         .map_err(CoreError::from)
 }
 
-pub(super) fn submit_path_intent<S: ObjectStore + ?Sized>(
+pub(super) async fn submit_path_intent<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
 ) -> Result<MutationResult, CoreError> {
-    DirectObjectStorePublisher::new(store).submit_path_intent(
-        namespace_id,
-        intent,
-        context,
-        PublishOptions::default(),
-    )
+    DirectObjectStorePublisher::new(store)
+        .submit_path_intent(namespace_id, intent, context, PublishOptions::default())
+        .await
 }

@@ -18,8 +18,10 @@ use loon_objectstore::ObjectStore;
 use thiserror::Error;
 
 /// Lists complete namespaces in the object store.
-pub fn list_namespaces<S: ObjectStore + ?Sized>(store: &S) -> crate::Result<Vec<NamespaceSummary>> {
-    catalog::list_namespaces(store)
+pub async fn list_namespaces<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> crate::Result<Vec<NamespaceSummary>> {
+    catalog::list_namespaces(store).await
 }
 
 /// Returns true when the head and lease agree on the active writer fence.

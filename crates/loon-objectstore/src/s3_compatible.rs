@@ -1,5 +1,5 @@
 use crate::{
-    AsyncObjectStore, ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig, PutMode,
 };
 use async_trait::async_trait;
@@ -80,7 +80,7 @@ impl S3CompatibleStore {
 }
 
 #[async_trait]
-impl AsyncObjectStore for S3CompatibleStore {
+impl ObjectStore for S3CompatibleStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }

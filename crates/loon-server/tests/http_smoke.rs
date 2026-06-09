@@ -1,6 +1,7 @@
 #![allow(clippy::panic, clippy::disallowed_methods)]
 // Smoke tests use explicit polling and panic-heavy match assertions for readable diagnostics.
 
+use bytes::Bytes;
 use loon_api::{
     v0::{
         CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
@@ -17,10 +18,19 @@ use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loon_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
+
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(future)
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_round_trip_supports_namespace_create_and_file_read_write() {
@@ -1042,12 +1052,11 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
-        store
-            .put_overwrite(
-                &namespace_manifest(namespace, ManifestId(1)),
-                br#"{"bad":"json"}"#,
-            )
-            .expect("corrupt manifest");
+        block_on(store.put_overwrite(
+            &namespace_manifest(namespace, ManifestId(1)),
+            Bytes::from_static(br#"{"bad":"json"}"#),
+        ))
+        .expect("corrupt manifest");
 
         match client.stat_path(&target) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
@@ -1252,8 +1261,7 @@ fn force_expire_namespace_lease(
     let store =
         ConfiguredObjectStore::local_fs(store_root, key_prefix).expect("construct test store");
     let lease_key = namespace_lease(namespace);
-    let bytes = store
-        .get(&lease_key, None)
+    let bytes = block_on(store.get(&lease_key, None))
         .expect("read namespace lease")
         .expect("namespace lease exists");
     let mut envelope: LeaseStateEnvelope =
@@ -1267,8 +1275,7 @@ fn force_expire_namespace_lease(
     )
     .expect("encode expired namespace lease");
     let bytes = serde_json::to_vec(&envelope).expect("serialize expired namespace lease");
-    store
-        .put_overwrite(&lease_key, &bytes)
+    block_on(store.put_overwrite(&lease_key, Bytes::from(bytes)))
         .expect("write expired namespace lease");
 }
 

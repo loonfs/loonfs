@@ -1,6 +1,7 @@
 use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan};
 use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;
+use bytes::Bytes;
 use loon_api::wire::control::{ControlObjectKind, HeadState, HeadStateEnvelope};
 use loon_api::ChangeSeq;
 use loon_objectstore::keys::namespace_head;
@@ -110,7 +111,7 @@ pub fn prepare_commit_head_publish(
     })
 }
 
-pub fn publish_commit_head<S: ObjectStore + ?Sized>(
+pub async fn publish_commit_head<S: ObjectStore + ?Sized>(
     store: &S,
     expected_head_etag: &str,
     prepared: &PreparedCommitHeadPublish,
@@ -123,8 +124,9 @@ pub fn publish_commit_head<S: ObjectStore + ?Sized>(
         .compare_and_swap(
             &prepared.object_key,
             expected_head_etag,
-            &prepared.encoded_bytes,
+            Bytes::copy_from_slice(&prepared.encoded_bytes),
         )
+        .await
         .map_err(map_object_store_error)
 }
 
