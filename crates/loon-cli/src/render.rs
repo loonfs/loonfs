@@ -21,7 +21,7 @@ where
     error: Option<&'a CliError>,
 }
 
-pub fn render_success(output: &CommandOutput, json_mode: bool) -> io::Result<()> {
+pub(crate) fn render_success(output: &CommandOutput, json_mode: bool) -> io::Result<()> {
     if json_mode {
         let body = json_success(output)?;
         let mut stdout = io::stdout().lock();
@@ -47,7 +47,7 @@ pub fn render_success(output: &CommandOutput, json_mode: bool) -> io::Result<()>
     Ok(())
 }
 
-pub fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Result<()> {
+pub(crate) fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
     if json_mode {
         let body = json_error(failure)?;
@@ -60,7 +60,7 @@ pub fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Result<()>
     Ok(())
 }
 
-pub fn json_success(output: &CommandOutput) -> io::Result<String> {
+pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
         CommandData::StreamBytes(_) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -78,7 +78,7 @@ pub fn json_success(output: &CommandOutput) -> io::Result<String> {
     }
 }
 
-pub fn json_error(failure: &CommandFailure) -> io::Result<String> {
+pub(crate) fn json_error(failure: &CommandFailure) -> io::Result<String> {
     serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
         kind: failure.kind.as_str(),
         format_version: FORMAT_VERSION,
@@ -90,7 +90,7 @@ pub fn json_error(failure: &CommandFailure) -> io::Result<String> {
     .map_err(io::Error::other)
 }
 
-pub fn human_success(output: &CommandOutput) -> String {
+pub(crate) fn human_success(output: &CommandOutput) -> String {
     match &output.data {
         CommandData::Profile(profile) => {
             let rendered = toml::to_string_pretty(profile)

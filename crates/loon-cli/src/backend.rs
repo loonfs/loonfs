@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
-pub trait Backend {
+pub(crate) trait Backend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError>;
     fn fork_namespace(
         &self,
@@ -63,7 +63,7 @@ pub trait Backend {
 
 // --- Remote backend (HTTP via loon-client) ---
 
-pub struct RemoteBackend {
+pub(crate) struct RemoteBackend {
     client: Client,
 }
 
@@ -187,7 +187,7 @@ fn map_client_error(error: ClientError) -> CliError {
 
 // --- Embedded backend (embedded/direct mode uses the shared loonfs runtime) ---
 
-pub struct EmbeddedBackend {
+pub(crate) struct EmbeddedBackend {
     fs: Fs,
     runtime: tokio::runtime::Runtime,
 }
@@ -480,21 +480,21 @@ fn default_writer_id() -> String {
 
 // --- Target resolution ---
 
-pub enum ResolvedTarget {
+pub(crate) enum ResolvedTarget {
     Embedded(Box<EmbeddedTarget>),
     Remote(RemoteTarget),
 }
 
-pub struct EmbeddedTarget {
+pub(crate) struct EmbeddedTarget {
     backend: EmbeddedBackend,
 }
 
-pub struct RemoteTarget {
+pub(crate) struct RemoteTarget {
     backend: RemoteBackend,
 }
 
 impl ResolvedTarget {
-    pub fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
+    pub(crate) fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
                 store,
@@ -520,14 +520,14 @@ impl ResolvedTarget {
         }
     }
 
-    pub fn mode_str(&self) -> &'static str {
+    pub(crate) fn mode_str(&self) -> &'static str {
         match self {
             ResolvedTarget::Embedded(_) => "embedded",
             ResolvedTarget::Remote(_) => "remote",
         }
     }
 
-    pub fn backend(&self) -> &dyn Backend {
+    pub(crate) fn backend(&self) -> &dyn Backend {
         match self {
             ResolvedTarget::Embedded(target) => &target.backend,
             ResolvedTarget::Remote(target) => &target.backend,

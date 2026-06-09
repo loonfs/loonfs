@@ -5,14 +5,14 @@ use crate::profiles::ProfileSummary;
 use loon_api::{AuthoritativePathEntry, FileRevision, NamespaceSummary};
 use serde::Serialize;
 
-pub struct CommandOutput {
+pub(crate) struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub data: CommandData,
 }
 
-pub struct CommandFailure {
+pub(crate) struct CommandFailure {
     pub kind: CommandKind,
     pub profile: Option<String>,
     pub mode: Option<String>,
@@ -21,7 +21,7 @@ pub struct CommandFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum CommandData {
+pub(crate) enum CommandData {
     Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),
     ProfileList {

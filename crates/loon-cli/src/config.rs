@@ -10,10 +10,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_VERSION: u32 = 1;
+pub(crate) const CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CliConfig {
+pub(crate) struct CliConfig {
     pub config_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
@@ -23,7 +23,7 @@ pub struct CliConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
-pub enum ProfileConfig {
+pub(crate) enum ProfileConfig {
     Embedded {
         store: StoreConfig,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,7 +46,7 @@ pub enum ProfileConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum StoreConfig {
+pub(crate) enum StoreConfig {
     LocalFs {
         root: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,7 +78,7 @@ pub enum StoreConfig {
 }
 
 impl CliConfig {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             config_version: CONFIG_VERSION,
             default_profile: None,
@@ -86,7 +86,7 @@ impl CliConfig {
         }
     }
 
-    pub fn validate(&self) -> Result<(), CliError> {
+    pub(crate) fn validate(&self) -> Result<(), CliError> {
         if self.config_version != CONFIG_VERSION {
             return Err(CliError::invalid_config(format!(
                 "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
@@ -108,7 +108,7 @@ impl CliConfig {
         Ok(())
     }
 
-    pub fn redacted(&self) -> Self {
+    pub(crate) fn redacted(&self) -> Self {
         CliConfig {
             config_version: self.config_version,
             default_profile: self.default_profile.clone(),
@@ -128,14 +128,14 @@ impl Default for CliConfig {
 }
 
 impl ProfileConfig {
-    pub fn mode_str(&self) -> &'static str {
+    pub(crate) fn mode_str(&self) -> &'static str {
         match self {
             ProfileConfig::Embedded { .. } => "embedded",
             ProfileConfig::Remote { .. } => "remote",
         }
     }
 
-    pub fn store_kind_str(&self) -> Option<&'static str> {
+    pub(crate) fn store_kind_str(&self) -> Option<&'static str> {
         match self {
             ProfileConfig::Embedded { store, .. } => Some(store.kind_str()),
             ProfileConfig::Remote { .. } => None,
@@ -178,7 +178,7 @@ impl ProfileConfig {
         }
     }
 
-    pub fn redacted(&self) -> Self {
+    pub(crate) fn redacted(&self) -> Self {
         match self {
             ProfileConfig::Embedded {
                 store,
@@ -207,7 +207,7 @@ impl ProfileConfig {
 }
 
 impl StoreConfig {
-    pub fn kind_str(&self) -> &'static str {
+    pub(crate) fn kind_str(&self) -> &'static str {
         match self {
             StoreConfig::LocalFs { .. } => "local-fs",
             StoreConfig::AwsS3 { .. } => "aws-s3",
@@ -215,7 +215,7 @@ impl StoreConfig {
         }
     }
 
-    pub fn object_store(&self) -> Result<ConfiguredObjectStore, CliError> {
+    pub(crate) fn object_store(&self) -> Result<ConfiguredObjectStore, CliError> {
         match self {
             StoreConfig::LocalFs { root, key_prefix } => {
                 ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())
@@ -338,7 +338,7 @@ impl StoreConfig {
     }
 }
 
-pub fn default_config_path() -> Result<PathBuf, CliError> {
+pub(crate) fn default_config_path() -> Result<PathBuf, CliError> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?;
@@ -367,7 +367,7 @@ fn store_field(profile_name: &str, field: &str) -> String {
     format!("{profile_name}.store.{field}")
 }
 
-pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
+pub(crate) fn load_config(path: &Path) -> Result<CliConfig, CliError> {
     let bytes = fs::read(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             CliError::invalid_config(format!("config file does not exist: {}", path.display()))
@@ -383,18 +383,18 @@ pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
     Ok(config)
 }
 
-pub fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, CliError> {
+pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, CliError> {
     if !path.exists() {
         return Ok(None);
     }
     load_config(path).map(Some)
 }
 
-pub fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError> {
+pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError> {
     Ok(load_config_if_exists(path)?.unwrap_or_default())
 }
 
-pub fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliError> {
+pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliError> {
     config.validate()?;
     let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
