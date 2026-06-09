@@ -39,9 +39,10 @@ use loon_objectstore::keys::{
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use thiserror::Error;
+use tracing::Instrument;
 
 // Manifest id allocation can race with other manifest publishers. Exhausting
 // this loop means the candidate id range was already occupied.
@@ -173,7 +174,7 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     table_cache: Option<&'a MetadataTableCache>,
     manifest_object_key: String,
     manifest: NamespaceManifestEnvelope,
-    segment_cache: RefCell<HashMap<String, Vec<MetadataRow>>>,
+    segment_cache: Mutex<HashMap<String, Vec<MetadataRow>>>,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -289,7 +290,12 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        if let Some(rows) = self.segment_cache.borrow().get(&descriptor.object_key) {
+        if let Some(rows) = self
+            .segment_cache
+            .lock()
+            .expect("manifest segment cache lock poisoned")
+            .get(&descriptor.object_key)
+        {
             return Ok(rows.clone());
         }
         let rows = load_manifest_segment_rows_with_cache(
@@ -302,7 +308,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         )
         .await?;
         self.segment_cache
-            .borrow_mut()
+            .lock()
+            .expect("manifest segment cache lock poisoned")
             .insert(descriptor.object_key.clone(), rows.clone());
         Ok(rows)
     }
@@ -498,10 +505,12 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     let checkpoint_id = generate_checkpoint_id();
     let mut saw_head_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
-        let basis = {
-            let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
-            load_verified_namespace_basis(store, namespace_id).await
-        }?;
+        let basis = load_verified_namespace_basis(store, namespace_id)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "scan_namespace_state"
+            ))
+            .await?;
         let head_seq = basis.head.seq;
         if let Some(current_manifest_id) = basis.head.current_manifest_id {
             let materialized =
@@ -879,18 +888,18 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "load_namespace_manifest",
-            key_class = "manifest_table"
-        )
-        .entered();
-        let Some(manifest_bytes) = store.get(&manifest_key, None).await.map_err(|err| {
-            ManifestLoadError::ReadManifest {
+        let Some(manifest_bytes) = store
+            .get(&manifest_key, None)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "load_namespace_manifest",
+                key_class = "manifest_table"
+            ))
+            .await
+            .map_err(|err| ManifestLoadError::ReadManifest {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
-            }
-        })?
+            })?
         else {
             return Err(ManifestLoadError::MissingManifest {
                 object_key: manifest_key.clone(),
@@ -910,7 +919,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         table_cache,
         manifest_object_key: manifest_key,
         manifest,
-        segment_cache: RefCell::new(HashMap::new()),
+        segment_cache: Mutex::new(HashMap::new()),
     };
     Ok(tables)
 }
@@ -966,20 +975,18 @@ async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     manifest_id: ManifestId,
     manifest_key: &str,
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
-    let _span = tracing::info_span!(
-        "loon.phase",
-        phase = "load_namespace_manifest",
-        key_class = "manifest_table"
-    )
-    .entered();
-    let Some(manifest_bytes) =
-        store
-            .get(manifest_key, None)
-            .await
-            .map_err(|err| ManifestLoadError::ReadManifest {
-                object_key: manifest_key.to_owned(),
-                message: err.to_string(),
-            })?
+    let Some(manifest_bytes) = store
+        .get(manifest_key, None)
+        .instrument(tracing::info_span!(
+            "loon.phase",
+            phase = "load_namespace_manifest",
+            key_class = "manifest_table"
+        ))
+        .await
+        .map_err(|err| ManifestLoadError::ReadManifest {
+            object_key: manifest_key.to_owned(),
+            message: err.to_string(),
+        })?
     else {
         return Ok(None);
     };

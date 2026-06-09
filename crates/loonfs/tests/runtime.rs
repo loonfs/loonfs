@@ -560,8 +560,6 @@ async fn async_runtime_methods_are_the_engine_boundary() {
 
     assert_eq!(async_stat.absolute_path, "/docs/hello.txt");
     assert_eq!(async_stat.size_bytes, Some(5));
-    let stats = fs.runtime_cache_stats();
-    assert!(stats.async_engine_calls >= 3);
 }
 
 #[test]
