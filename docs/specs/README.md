@@ -31,7 +31,6 @@ The specification is two normative documents plus supporting material, all in th
 | `glossary.md` | Orientation | Shared vocabulary for every other document. |
 | `architecture.md` | Orientation | How the durable pieces and the runtime fit together. |
 | `object-storage-providers.md` | Non-normative reference | Provider limits and performance data points that inform the design. |
-| `catalog.md` | Reserved | Placeholder for a future cross-store discovery specification. |
 
 Two sorting questions place every future addition: behavior another implementation must interpret from bytes or metadata belongs in the format spec; a client-visible operation whose shape should be uniform belongs in the API spec inside a profile or named feature. How work gets done — queues, schedulers, caches — is implementation freedom and belongs in no specification document.
 

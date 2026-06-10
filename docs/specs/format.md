@@ -6,12 +6,9 @@ and the consistency and durability invariants. Any implementation that reads
 and writes a store according to this document is format-conformant, whether or
 not it exposes any API surface.
 
-The companion documents are:
-
-- `api.md` — the LoonFS API specification: profiles, capability discovery,
-  the standard error contract, and the HTTP binding. Normative where
-  implemented.
-- `catalog.md` — a reserved companion document for cross-store discovery.
+The companion document is `api.md` — the LoonFS API specification: profiles,
+capability discovery, the standard error contract, and the HTTP binding;
+normative where implemented.
 
 Nothing in this document depends on how work is scheduled or which API surface
 a deployment exposes.
@@ -997,8 +994,7 @@ codes.
 
 The durable namespace descriptor and content-store descriptor are
 storage-format objects. The namespace descriptor is authoritative for the
-namespace-to-content-store relationship; a future catalog may index
-descriptors but must not replace their meaning.
+namespace-to-content-store relationship.
 
 ### 4.1 Durable envelope layout
 

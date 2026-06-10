@@ -11,7 +11,6 @@ The companion documents are:
 - `format.md` — the durable format. Mandatory for every implementation.
 - `operation-statefulness.md` — when an operation is single-request versus
   control-object-backed. Normative where implemented, like this document.
-- `catalog.md` — a reserved companion document for cross-store discovery.
 
 The same client codebase works against an embedded engine and a hosted
 server: both expose the same operations, advertise their capabilities the
@@ -825,6 +824,5 @@ mutation path.
 
 New client-visible operations arrive as profile ops or named features here;
 new durable state arrives in `format.md`; new scheduling machinery is
-implementation freedom. Cross-store discovery (naming authority, search,
-ownership, quotas) is reserved for the future `catalog.md`; nothing in this
-document assumes or precludes it.
+implementation freedom. Cross-store discovery — naming authority, search,
+ownership, quotas — is out of scope for this specification.
