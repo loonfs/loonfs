@@ -190,6 +190,19 @@ impl Client {
         self.request_json::<(), NamespaceStatusResponse>(self.agent.get(&url), None)
     }
 
+    /// Deletes a namespace. Registered as feature
+    /// `core.namespaces.delete`; no v0 deployment supports it, so gate on
+    /// [`Client::capabilities`] and expect a `not_supported` error carrying
+    /// that feature key today.
+    pub fn delete_namespace(&self, namespace: &str) -> Result<(), ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/namespaces/{namespace}", self.base_url);
+        self.authenticated(self.agent.delete(&url))
+            .call()
+            .map_err(|err| self.map_error(err))?;
+        Ok(())
+    }
+
     pub fn fork_namespace(
         &self,
         source_namespace: &str,

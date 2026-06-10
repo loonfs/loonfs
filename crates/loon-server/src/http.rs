@@ -22,6 +22,7 @@ use loonfs::{
     payload_class, BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, Fs,
     JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PathMutationIntent,
     PutFileBehavior, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    FEATURE_NAMESPACES_DELETE,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -79,7 +80,10 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
             "/v0/namespaces",
             post(create_namespace).get(list_namespaces_handler),
         )
-        .route("/v0/namespaces/:namespace", get(namespace_status_handler))
+        .route(
+            "/v0/namespaces/:namespace",
+            get(namespace_status_handler).delete(delete_namespace_handler),
+        )
         .route(
             "/v0/namespaces/:namespace/forks",
             post(fork_namespace_handler),
@@ -228,6 +232,21 @@ async fn config_handler(
 ) -> Result<Json<loon_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     Ok(Json(state.fs.capabilities()))
+}
+
+/// Namespace deletion is a registered feature no v0 deployment implements
+/// (API spec, "Feature registry"). Conformance still requires the route to
+/// exist and answer with `not_supported` plus its feature key, so clients
+/// reconcile against the capability document instead of guessing from a 404.
+async fn delete_namespace_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<()>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    Err(ApiResponseError::not_supported(
+        FEATURE_NAMESPACES_DELETE,
+        "this deployment does not support namespace deletion",
+    ))
 }
 
 async fn create_namespace(
@@ -703,6 +722,17 @@ impl ApiResponseError {
             body: ApiError {
                 code: code.as_str().to_owned(),
                 feature: None,
+                message: message.to_owned(),
+            },
+        }
+    }
+
+    fn not_supported(feature: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            body: ApiError {
+                code: ErrorCode::NotSupported.as_str().to_owned(),
+                feature: Some(feature.to_owned()),
                 message: message.to_owned(),
             },
         }

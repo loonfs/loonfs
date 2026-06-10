@@ -35,6 +35,44 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_namespace_answers_not_supported_with_its_feature_key() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-test",
+        "http-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let error = harness
+            .client
+            .delete_namespace("demo")
+            .expect_err("namespace deletion is unimplemented");
+        match error {
+            ClientError::Api {
+                status,
+                code,
+                feature,
+                ..
+            } => {
+                assert_eq!(status, 501);
+                assert_eq!(code, "not_supported");
+                assert_eq!(feature.as_deref(), Some("core.namespaces.delete"));
+            }
+            other => panic!("expected not_supported api error, got {other:?}"),
+        }
+
+        // The error and the capability document tell the same story.
+        let capabilities = harness.client.capabilities().expect("fetch capabilities");
+        assert!(!capabilities.supports("core.namespaces.delete"));
+    })
+    .await
+    .expect("blocking task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_endpoint_advertises_capabilities() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
