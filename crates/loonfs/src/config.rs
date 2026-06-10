@@ -89,8 +89,6 @@ impl Default for RuntimeCacheConfig {
     }
 }
 
-/// Embedded filesystem runtime.
-
 pub(crate) fn default_writer_version() -> String {
     format!("loonfs/{}", env!("CARGO_PKG_VERSION"))
 }
