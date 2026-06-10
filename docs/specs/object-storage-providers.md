@@ -1,14 +1,14 @@
-# 096. Object Storage Provider Reference
+# LoonFS Object Storage Provider Reference
 
-This reference collects useful provider limits and performance data points for LoonFS design work. It is a quick engineering reference, useful for high-level design discussions, but not a substitute for provider conformance tests.
+This document is a non-normative reference. It collects useful provider limits and performance data points for LoonFS design work. It is a quick engineering reference, useful for high-level design discussions, but not a substitute for provider conformance tests.
 
-## 096.1. Frequently Used Data Points
+## 1. Frequently Used Data Points
 
 - Do not assume any CAS object can be updated faster than **once per second**. GCS documents one write per second to the same object name; R2 documents one concurrent write per second to the same object key.[^1][^2]
 - `ETag` cannot be assumed to be a portable content hash, and is not consistent across providers, especially for multipart uploads.
 - GET HEAD is usually around 30ms, and a full GET of a small object (with content) should be assumed to be ~200ms. GET HEAD (or GET if-none-match) is a useful acceleration for evaluating control objects. 
 
-## 096.2. Provider Matrix
+## 2. Provider Matrix
 
 | Feature | AWS S3 | Google Cloud Storage | Cloudflare R2 | Azure Blob Storage | S3-Compatible |
 | ----- | ----- | ----- | ----- | ----- | ----- |
@@ -21,13 +21,13 @@ This reference collects useful provider limits and performance data points for L
 | **Request scale, partitions, throughput** | At least 3,500 write-class requests/s and 5,500 GET/HEAD requests/s per partitioned prefix; unlimited prefixes; scaling is gradual and may return 503 Slow Down. AWS also cites up to 100 Gb/s from a single EC2 instance and aggregate multi-Tb/s workloads.[^9] | Initial bucket scale is about 1,000 writes/s and 5,000 reads/s, then auto-scales. Ramp no faster than roughly doubling every 20 minutes. Sequential names can hotspot; random prefixes improve initial fanout. Internet egress default quota is commonly 200 Gbps per region, subject to account history and quotas.[^19][^20] | Public r2.dev buckets are test-only and may throttle at hundreds of req/s; production should use custom domains or direct APIs. Cloudflare REST management API is not for high-throughput object I/O; use S3-compatible or Workers APIs.[^32] | Standard GPv2/blob accounts: default max request rate 40,000 req/s in many listed regions, 20,000 elsewhere; ingress commonly 60/25 Gbps and egress 200/50 Gbps by region, increaseable by request. Partition hot spots can cause 503/500; use distribution and backoff.[^44][^45] | Vendor-specific. Run compatibility and load tests before relying on any numbers. |
 | **Published GET/HEAD latency** | AWS publishes rough general S3 small-object / first-byte latencies of about 100-200 ms.[^10] | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | Need to benchmark to verify. |
 
-## 096.3. LoonFS Design Implications
+## 3. LoonFS Design Implications
 
 1. **WAL/head flush cadence:** a 1 update per second is the single key CAS ceiling for GCS and R2. For more throughput, write immutable segment objects and update multiple sharded heads or a batched manifest.
 2. **Immutable content path:** content-addressed or monotonic keys can scale through multipart upload and distributed prefixes. 
 4. **Checksums:** LoonFS should own end-to-end integrity. Provider checksums help validate transport/storage, but ETag/checksum semantics diverge sharply across providers and multipart modes.
 
-## 096.4. Sources
+## 4. Sources
 
 [^1]: Google Cloud Storage, "Quotas & limits": [https://cloud.google.com/storage/quotas](https://cloud.google.com/storage/quotas)
 

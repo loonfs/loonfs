@@ -1,4 +1,4 @@
-# Glossary
+# LoonFS Glossary
 
 | Term | Meaning |
 | --- | --- |

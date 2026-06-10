@@ -11,8 +11,6 @@ The companion documents are:
 - `api.md` — the LoonFS API specification: profiles, capability discovery,
   the standard error contract, and the HTTP binding. Normative where
   implemented.
-- `implementation-notes.md` — non-normative guidance for implementers:
-  scheduling, caching, batching, and multi-tenancy patterns.
 - `catalog.md` — a reserved companion document for cross-store discovery.
 
 Nothing in this document depends on how work is scheduled or which API surface
@@ -60,9 +58,10 @@ The required durable object families and standard key patterns are:
 | **Derived progress** | Mutable | Record how far one background work class has processed namespace history. | `namespaces/{namespace_id}/derived/{work_class}/progress.json` |
 
 These key shapes are part of the interoperable storage contract.
-Implementations may keep additional private control-plane objects outside the
-key families above (see `implementation-notes.md`); private objects must not
-collide with the spec'd families and are not interoperable state.
+Implementations may keep additional private control-plane objects — queues,
+scheduler state, coordination records — outside the key families above;
+private objects must not collide with the spec'd families and are not
+interoperable state.
 
 Namespace object keys are built through the central object layout API in
 `loon-objectstore`. The namespace root remains `namespaces/{namespace_id}/`;
@@ -1103,8 +1102,7 @@ Maintenance keeps read cost bounded, retention safe, and durable state clean.
 Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. An embedded engine where an operator
 triggers maintenance manually and a server that runs the same work invisibly
-are equally conformant (see `api.md` for the optional maintenance plane and
-`implementation-notes.md` for scheduling approaches).
+are equally conformant (see `api.md` for the optional maintenance plane).
 
 It does not matter *who* performs maintenance; the invariants below bind every
 implementation. Maintenance never creates a second source of truth for the

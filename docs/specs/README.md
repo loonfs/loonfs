@@ -21,17 +21,19 @@ LoonFS can be exposed as:
 
 This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
 
-The specification is organized as three documents with distinct normative force:
+The specification is two normative documents plus supporting material, all in this folder:
 
 | Document | Force | Contents |
 | --- | --- | --- |
 | `format.md` | Normative, mandatory | The durable format: object-store contract, storage model, write/read protocol, encodings and versioning, namespace features, maintenance invariants. |
 | `api.md` | Normative where implemented | Profiles (functional planes), capability discovery, the standard error contract, and the representative HTTP binding. |
-| `implementation-notes.md` | Non-normative | Scheduling, caching, batching, and multi-tenancy guidance. |
+| `operation-statefulness.md` | Normative where implemented | When an operation is single-request versus control-object-backed, and the client/server responsibility split. |
+| `glossary.md` | Orientation | Shared vocabulary for every other document. |
+| `architecture.md` | Orientation | How the durable pieces and the runtime fit together. |
+| `object-storage-providers.md` | Non-normative reference | Provider limits and performance data points that inform the design. |
+| `catalog.md` | Reserved | Placeholder for a future cross-store discovery specification. |
 
-`catalog.md` is reserved for a future cross-store discovery specification.
-
-Three sorting questions place every future addition: behavior another implementation must interpret from bytes or metadata belongs in the format spec; a client-visible operation whose shape should be uniform belongs in the API spec inside a profile or named feature; how work gets done belongs in implementation notes, or nowhere.
+Two sorting questions place every future addition: behavior another implementation must interpret from bytes or metadata belongs in the format spec; a client-visible operation whose shape should be uniform belongs in the API spec inside a profile or named feature. How work gets done — queues, schedulers, caches — is implementation freedom and belongs in no specification document.
 
 ## 2. Design goals
 
@@ -97,10 +99,10 @@ Those choices are implementation-specific and do not change the filesystem model
 
 Readers should start with:
 
-1. the glossary (`010-glossary.md`)
-2. the architecture overview (`020-architecture-overview.md`)
+1. the glossary (`glossary.md`)
+2. the architecture overview (`architecture.md`)
 3. the format specification (`format.md`)
 4. the API specification (`api.md`)
 
-Implementers of servers or engines should additionally read
-`implementation-notes.md`.
+The operation statefulness matrix and the provider reference support design
+work around those two specifications.

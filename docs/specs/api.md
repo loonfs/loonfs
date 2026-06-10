@@ -9,7 +9,8 @@ expose must have the shape specified here.
 The companion documents are:
 
 - `format.md` — the durable format. Mandatory for every implementation.
-- `implementation-notes.md` — non-normative guidance for implementers.
+- `operation-statefulness.md` — when an operation is single-request versus
+  control-object-backed. Normative where implemented, like this document.
 - `catalog.md` — a reserved companion document for cross-store discovery.
 
 The same client codebase works against an embedded engine and a hosted
@@ -47,7 +48,7 @@ Notes:
   identity that feature keys reference.
 - No queue or job-scheduling semantics exist in this document. `admin/v0`
   exposes *trigger* and *status* shapes only; how work is scheduled is
-  implementation freedom (`implementation-notes.md`).
+  implementation freedom.
 
 ### 1.1 Where new behavior belongs
 
@@ -57,8 +58,8 @@ Three sorting questions place every future addition:
    It belongs in `format.md`, and it is mandatory.
 2. Is it a client-visible operation whose shape should be uniform wherever it
    exists? It belongs here, inside a profile or as a named feature.
-3. Is it about *how* work gets done — queues, schedulers, caches? It belongs
-   in `implementation-notes.md`, or nowhere.
+3. Is it about *how* work gets done — queues, schedulers, caches? That is
+   implementation freedom and belongs in no specification document.
 
 ## 2. Capability discovery
 
@@ -793,7 +794,7 @@ to an implementation or deployment.
 
 The following table summarizes the core split. For more detailed
 command-oriented guidance, see
-[Appendix 095: Operation Statefulness Matrix](../appendices/095-operation-statefulness-matrix.md).
+[the operation statefulness matrix](operation-statefulness.md).
 
 | Operation | Usual shape | Typical server-side state |
 | --- | --- | --- |

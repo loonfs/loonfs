@@ -24,7 +24,7 @@ The durable source of truth is object storage. Everything else is either compute
 Before touching `loon-server`, `loon-core`, `loon-objectstore`, or `loon-client`, read:
 
 - `README.md`
-- `docs/specs/020-architecture-overview.md`
+- `docs/specs/architecture.md`
 - `docs/specs/format.md`
 - `docs/specs/api.md`
 
@@ -62,8 +62,7 @@ Every randomized failure must print:
 ## 5. What belongs where
 
 - `README.md`: active product and operator guide
-- `docs/specs/`: authoritative contracts and examples
-- `docs/appendices/`: supporting matrices and reference material
+- `docs/specs/`: authoritative contracts, orientation docs, and reference material (`docs/specs/README.md` is the index)
 - `crates/loon-model/`: pure reference model for metadata replay and semantic comparison
 - `crates/loon-core/`: canonical implementation of metadata rules and replay
 - `crates/loon-objectstore/`: provider contract, keys, and conformance behavior

@@ -1,19 +1,19 @@
-## 095. Operation Statefulness Matrix
+# LoonFS Operation Statefulness Matrix
 
-This section defines when a LoonFS operation is a single-request operation and when it uses a control object. It also defines the split of responsibility between the client and server for common filesystem operations. Recursive `put` and recursive `cp` may also be coordinated by implementation-specific helpers, but those helpers are outside the core interoperable model.
+This document defines when a LoonFS operation is a single-request operation and when it uses a control object. It also defines the split of responsibility between the client and server for common filesystem operations. It supplements the API specification (`api.md`) and, like it, is normative where implemented. Recursive `put` and recursive `cp` may also be coordinated by implementation-specific helpers, but those helpers are outside the core interoperable model.
 
-### 095.1. Purpose
+## 1. Purpose
 
 LoonFS supports both one-shot operations and long-running operations. One-shot operations are fully described by a single request and normally do not require durable control-plane state. Long-running operations may span multiple requests, may require a stable snapshot or destination binding, and may need resumability across client or server restarts.
 
-This section standardizes:
+This document standardizes:
 
 - which classes of operations may use server-side control-plane objects;
 - which classes of operations are normally single-request operations;
 - which part of each operation is authoritative on the server; and
 - which part of each operation is maintained by the client.
 
-### 095.2. Definitions
+## 2. Definitions
 
 For the purposes of this specification:
 
@@ -25,7 +25,7 @@ For the purposes of this specification:
 | **Authoritative operation state** | The state that determines the correctness, visibility, and resumability of an operation. |
 | **Transfer progress** | Non-authoritative progress information such as completed bytes, completed files, local temporary outputs, or user-interface counters. |
 
-### 095.3. Normative rules
+## 3. Normative rules
 
 1. A LoonFS operation **MAY** be a single-request operation only when all of the following are true:
    - the operation is fully described by one request;
@@ -51,7 +51,7 @@ For the purposes of this specification:
 
 6. Implementation-specific coordinators **MAY** exist, but they **MUST NOT** redefine logical commit boundaries or change-feed semantics.
 
-### 095.4. Operation statefulness matrix
+## 4. Operation statefulness matrix
 
 | Operation | Typical execution shape | Typical server-side control-plane object | Long-lived server state required? | Server is authoritative for | Client is authoritative for |
 | --- | --- | --- | --- | --- | --- |
@@ -62,7 +62,7 @@ For the purposes of this specification:
 | `cp remote -> local` | Alias for `get` or `get -r` | same as `get` | same as `get` | same as `get` | same as `get` |
 | `cp local -> remote` | Alias for `put` or `put -r` | same as `put` | same as `put` | same as `put` | same as `put` |
 
-### 095.5. Client and server split for common commands
+## 5. Client and server split for common commands
 
 The following table is the normative split of responsibility for the primary filesystem commands.
 
@@ -73,7 +73,7 @@ The following table is the normative split of responsibility for the primary fil
 | `put <file>` (resumable) | if an `UploadHandle` is used, create or validate it; bind the destination; validate durable content and commit the final publish | read the local file; hash it; upload content; track upload progress; submit the final commit request |
 | `cp <file>` (same server) | resolve source and destination; authorize both sides; create the copied resource; publish the metadata change | submit the request; retry if appropriate |
 
-### 095.6. When raw paths cease to identify the operation
+## 6. When raw paths cease to identify the operation
 
 LoonFS accepts path-oriented input because user intent is naturally expressed by path. However, long-running operations require a more stable identity than a raw path string.
 
@@ -82,7 +82,7 @@ LoonFS accepts path-oriented input because user intent is naturally expressed by
 | `get <file>` | the request itself | none required |
 | `put <file>` (resumable) | `begin_put` only | server-issued `UploadHandle`, if used |
 
-### 095.7. Control-plane durability guidance
+## 7. Control-plane durability guidance
 
 1. A control object **MUST** be durably recorded if losing it on restart would change correctness, visibility, retention safety, or promised resumability.
 
@@ -92,7 +92,7 @@ LoonFS accepts path-oriented input because user intent is naturally expressed by
 
 4. Control objects and any implementation-specific coordinators **MUST** remain outside namespace-visible metadata. Their existence is authoritative for orchestration, not for filesystem history.
 
-### 095.8. Recommended defaults
+## 8. Recommended defaults
 
 A conforming implementation SHOULD use the following defaults unless a stronger mode is explicitly requested:
 
