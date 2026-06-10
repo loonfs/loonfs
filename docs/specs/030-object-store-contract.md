@@ -14,7 +14,7 @@ A conforming object-store layer must provide the following behavior.
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
 | **Full-object reads with identity metadata** | Mutable control-object readers must receive object bytes and the opaque compare token for those same bytes from one read operation, so one observation's payload cannot be paired with another observation's compare token. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
-| **Prefix enumeration** | Manifest discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. |
+| **Prefix enumeration** | Manifest discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. Listings return keys in ascending lexicographic order; the conformance probes assert this. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
 | **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
 
@@ -34,6 +34,9 @@ The required durable object families and standard key patterns are:
 | **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, and checkpoint records that pin manifest versions. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
 | **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
+| **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+| **Conflict artifacts** | Immutable | Preserve rejected-write context for later inspection. | `namespaces/{namespace_id}/conflicts/{conflict_id}.json` |
+| **Derived progress** | Mutable | Record how far one background work class has processed namespace history. | `namespaces/{namespace_id}/derived/{work_class}/progress.json` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
@@ -62,6 +65,7 @@ derived indexes, compaction control, and garbage collection:
 | **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
 | **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions}.boundary` |
 | **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
+| **Queue shards** | Reserved for shared background-work queues. | `queue/shards/{shard_index}.json` (ten-digit zero-padded index) |
 
 GC boundary files are sequenced cleanup cursors for manifest and compaction
 streams. WAL and metadata SST deletion is reachability-driven from the live
@@ -75,7 +79,7 @@ LoonFS uses distinct naming conventions for distinct surfaces:
 - Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`, `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`, `chk_f3d6b97a7d394ddf84b621ddf36e5071`, and `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
 - Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
-- Namespace IDs are human/operator slugs. They use the durable slug grammar: 1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first character lowercase ASCII letter or digit, and remaining characters lowercase ASCII letters, digits, `.`, `_`, or `-`. Prefer lowercase kebab-case within that grammar.
+- Namespace IDs are human/operator slugs. They use the durable slug grammar: 1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first character lowercase ASCII letter or digit, and remaining characters lowercase ASCII letters, digits, `.`, `_`, or `-`. Prefer lowercase kebab-case within that grammar. The `loonfs-` prefix is reserved for LoonFS system use (for example, object-store doctor probes write under `loonfs-doctor-*`); implementations must reject it for user namespaces.
 
 Namespace IDs are durable storage identities. A `namespace_id` must not be reused after namespace destruction; future user-facing display names or aliases may be reused only by mapping them to a new namespace ID.
 
@@ -93,7 +97,7 @@ The metadata log has five important rules.
 2. A WAL segment stores one or more logical commits with contiguous `seq` values.
 3. Distinct client commit requests remain distinct logical commits even when they are stored in the same WAL segment.
 4. The visible WAL chain must be deterministically recoverable from the head plus referenced segment metadata. A head field such as `wal_tip_segment_id`, together with segment metadata such as `segment_id`, `start_seq`, `end_seq`, `base_head_seq`, and `prev_visible_segment_id`, is one conforming shape. Equivalent semantics are acceptable.
-5. `segment_id` must be unique and never reused within a namespace incarnation. It should be generated from at least 128 bits of randomness or an equivalent collision-resistant source, not derived only from the sequence range.
+5. `segment_id` must be unique and never reused within a namespace incarnation. It should be generated from a collision-resistant source with at least 120 bits of randomness (for example, a version-4 UUID's 122 random bits), not derived only from the sequence range.
 6. Orphan WAL segments are permitted and harmless when a writer loses the head compare-and-swap.
 
 ## 6. Immutable content rules

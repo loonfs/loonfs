@@ -3,14 +3,14 @@ use crate::error::CliError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileSummary {
+pub(crate) struct ProfileSummary {
     pub name: String,
     pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_kind: Option<String>,
 }
 
-pub fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
+pub(crate) fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
     let Some(config) = config else {
         return Vec::new();
     };
@@ -25,7 +25,7 @@ pub fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
         .collect()
 }
 
-pub fn show_profile(
+pub(crate) fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
 ) -> Result<(String, ProfileConfig), CliError> {
@@ -43,7 +43,7 @@ pub fn show_profile(
     Ok((name.to_owned(), profile.redacted()))
 }
 
-pub fn add_profile(
+pub(crate) fn add_profile(
     config: &mut CliConfig,
     name: &str,
     profile: ProfileConfig,
@@ -61,7 +61,7 @@ pub fn add_profile(
     Ok((name.to_owned(), redacted))
 }
 
-pub fn update_profile(
+pub(crate) fn update_profile(
     config: &mut CliConfig,
     name: &str,
     profile: ProfileConfig,
@@ -74,7 +74,10 @@ pub fn update_profile(
     Ok((name.to_owned(), redacted))
 }
 
-pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSummary, CliError> {
+pub(crate) fn remove_profile(
+    config: &mut CliConfig,
+    name: &str,
+) -> Result<ProfileSummary, CliError> {
     let removed = config
         .profiles
         .remove(name)
@@ -89,7 +92,7 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
     })
 }
 
-pub fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
+pub(crate) fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
     if !config.profiles.contains_key(name) {
         return Err(CliError::profile_not_found(name));
     }
@@ -97,7 +100,7 @@ pub fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), Cl
     Ok(())
 }
 
-pub fn resolve_profile<'a>(
+pub(crate) fn resolve_profile<'a>(
     config: &'a CliConfig,
     explicit_name: Option<&'a str>,
 ) -> Result<(&'a str, &'a ProfileConfig), CliError> {
@@ -115,7 +118,7 @@ pub fn resolve_profile<'a>(
     Ok((name, profile))
 }
 
-pub fn default_namespace(profile: &ProfileConfig) -> Option<&str> {
+pub(crate) fn default_namespace(profile: &ProfileConfig) -> Option<&str> {
     match profile {
         ProfileConfig::Embedded {
             default_namespace, ..
@@ -126,7 +129,7 @@ pub fn default_namespace(profile: &ProfileConfig) -> Option<&str> {
     }
 }
 
-pub fn set_default_namespace(
+pub(crate) fn set_default_namespace(
     config: &mut CliConfig,
     profile_name: &str,
     namespace: &str,

@@ -187,7 +187,7 @@ mod tests {
             derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
             "namespaces/ns-1/derived/manifest-builder/progress.json"
         );
-        assert_eq!(queue_shard(17), "queue/shards/00017.json");
+        assert_eq!(queue_shard(17), "queue/shards/0000000017.json");
         assert_eq!(
             content_blob(
                 "cs_00000000000000000000000000000001",

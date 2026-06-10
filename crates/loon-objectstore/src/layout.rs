@@ -300,8 +300,10 @@ impl ObjectLayout {
     }
 
     pub fn queue_shard(&self, shard_index: u32) -> QueueShardKey {
+        // Ten digits cover the full `u32` range so shard keys always sort
+        // lexicographically in index order.
         QueueShardKey(ObjectKey::new(format!(
-            "queue/shards/{shard_index:05}.json"
+            "queue/shards/{shard_index:010}.json"
         )))
     }
 }
@@ -513,7 +515,10 @@ mod tests {
                 .as_str(),
             "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
         );
-        assert_eq!(layout.queue_shard(17).as_str(), "queue/shards/00017.json");
+        assert_eq!(
+            layout.queue_shard(17).as_str(),
+            "queue/shards/0000000017.json"
+        );
         assert_eq!(
             layout
                 .content_blob(

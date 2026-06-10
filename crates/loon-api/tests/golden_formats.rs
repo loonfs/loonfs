@@ -216,8 +216,9 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                 seq: ChangeSeq(2),
                 apply_after_seq: ChangeSeq(1),
                 commit_id: commit_id(),
-                semantic_commit_fingerprint_sha256:
-                    "0000000000000000000000000000000000000000000000000000000000000042".to_owned(),
+                semantic_commit_fingerprint:
+                    "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
+                        .to_owned(),
                 writer_id: "writer-a".to_owned(),
                 writer_fence_token: FenceToken(3),
                 message: Some("golden commit".to_owned()),
@@ -272,8 +273,9 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
         },
         MetadataRow::CommitReceipt {
             commit_id: commit_id(),
-            semantic_commit_fingerprint_sha256:
-                "0000000000000000000000000000000000000000000000000000000000000042".to_owned(),
+            semantic_commit_fingerprint:
+                "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
+                    .to_owned(),
             committed_seq: ChangeSeq(2),
             results: vec![CommitOpResult::CreateDir {
                 op_index: 0,
@@ -385,12 +387,12 @@ fn wal_segment_document_matches_golden_bytes() {
     let encoded = encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("encode wal");
     // Compare the decompressed document: zstd frames may differ across zstd
     // versions, the document bytes (which the checksum covers) may not.
-    assert_matches_golden("wal_segment.v2.cbor", &unzstd(&encoded));
+    assert_matches_golden("wal_segment.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
 fn wal_segment_golden_decodes_to_sample() {
-    let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden("wal_segment.v2.cbor")))
+    let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
         .expect("decode golden wal segment");
     assert_eq!(decoded, sample_wal_envelope());
 }
@@ -398,12 +400,12 @@ fn wal_segment_golden_decodes_to_sample() {
 #[test]
 fn metadata_sst_document_matches_golden_bytes() {
     let encoded = encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("encode sst");
-    assert_matches_golden("metadata_sst.v5.cbor", &unzstd(&encoded));
+    assert_matches_golden("metadata_sst.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
 fn metadata_sst_golden_decodes_to_sample() {
-    let decoded = decode_metadata_sst_envelope_zstd(&rezstd(&read_golden("metadata_sst.v5.cbor")))
+    let decoded = decode_metadata_sst_envelope_zstd(&rezstd(&read_golden("metadata_sst.v1.cbor")))
         .expect("decode golden metadata sst");
     assert_eq!(decoded, sample_sst_envelope());
 }
@@ -411,12 +413,12 @@ fn metadata_sst_golden_decodes_to_sample() {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v6.json", &encoded);
+    assert_matches_golden("namespace_manifest.v1.json", &encoded);
 }
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v6.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -440,12 +442,12 @@ where
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
-        "control_namespace_head.v2.json",
+        "control_namespace_head.v1.json",
         ControlObjectKind::NamespaceHead,
         sample_head_state(),
     );
     check_control_golden(
-        "control_namespace_lease.v2.json",
+        "control_namespace_lease.v1.json",
         ControlObjectKind::NamespaceLease,
         LeaseState {
             namespace_id: namespace_id(),
@@ -455,7 +457,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_namespace_descriptor.v2.json",
+        "control_namespace_descriptor.v1.json",
         ControlObjectKind::NamespaceDescriptor,
         NamespaceDescriptorState {
             namespace_id: namespace_id(),
@@ -463,14 +465,14 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_content_store_descriptor.v2.json",
+        "control_content_store_descriptor.v1.json",
         ControlObjectKind::ContentStoreDescriptor,
         ContentStoreDescriptorState {
             content_store_id: content_store_id(),
         },
     );
     check_control_golden(
-        "control_namespace_fork_state.v2.json",
+        "control_namespace_fork_state.v1.json",
         ControlObjectKind::NamespaceForkState,
         NamespaceForkState {
             namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
@@ -483,7 +485,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_namespace_gc_pin_state.v2.json",
+        "control_namespace_gc_pin_state.v1.json",
         ControlObjectKind::NamespaceGcPinState,
         NamespaceGcPinState {
             pin_id: "pin_0123456789abcdef0123456789abcdef".to_owned(),
@@ -496,7 +498,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_namespace_progress.v2.json",
+        "control_namespace_progress.v1.json",
         ControlObjectKind::NamespaceProgress,
         ProgressState {
             namespace_id: namespace_id(),
@@ -505,7 +507,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -550,7 +552,7 @@ fn with_cbor_document_entry(
 fn wal_decode_rejects_future_format_version_cleanly() {
     let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
     let bumped = with_cbor_document_entry(&document, "format_version", |value| {
-        *value = ciborium::Value::from(3);
+        *value = ciborium::Value::from(2);
     });
 
     let err = decode_wal_segment_envelope_zstd(&rezstd(&bumped))
@@ -559,8 +561,8 @@ fn wal_decode_rejects_future_format_version_cleanly() {
         matches!(
             err,
             WalCodecError::UnsupportedFormatVersion {
-                found: 3,
-                supported: 2,
+                found: 2,
+                supported: 1,
             }
         ),
         "unexpected error: {err}"
@@ -667,7 +669,7 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 fn metadata_sst_decode_rejects_future_format_version_cleanly() {
     let document = unzstd(&encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("sst"));
     let bumped = with_cbor_document_entry(&document, "format_version", |value| {
-        *value = ciborium::Value::from(6);
+        *value = ciborium::Value::from(2);
     });
 
     let err = decode_metadata_sst_envelope_zstd(&rezstd(&bumped))
@@ -676,8 +678,8 @@ fn metadata_sst_decode_rejects_future_format_version_cleanly() {
         matches!(
             err,
             MetadataSstCodecError::UnsupportedFormatVersion {
-                found: 6,
-                supported: 5,
+                found: 2,
+                supported: 1,
             }
         ),
         "unexpected error: {err}"
@@ -709,7 +711,7 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["format_version"] = serde_json::Value::from(7);
+    document["format_version"] = serde_json::Value::from(2);
     let bumped = serde_json::to_vec(&document).expect("encode document");
 
     let err = decode_namespace_manifest_json(&bumped).expect_err("future version must be rejected");
@@ -717,8 +719,8 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
         matches!(
             err,
             NamespaceManifestCodecError::UnsupportedFormatVersion {
-                found: 7,
-                supported: 6,
+                found: 2,
+                supported: 1,
             }
         ),
         "unexpected error: {err}"

@@ -40,21 +40,19 @@ impl ControlObjectKind {
     ///
     /// Versions are tracked per kind so one kind's payload schema can make a
     /// breaking change without invalidating every other control object.
-    /// Version 2 (all kinds): the durable document carries the payload as a
-    /// raw JSON fragment checksummed over its exact bytes. (Version 1
-    /// verified checksums by re-encoding the decoded payload; v1 objects are
-    /// rejected with `UnsupportedFormatVersion`.)
+    /// Version 1 (all kinds): a JSON envelope document carrying the payload
+    /// as a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
-            Self::NamespaceDescriptor => 2,
-            Self::ContentStoreDescriptor => 2,
-            Self::NamespaceHead => 2,
-            Self::NamespaceLease => 2,
-            Self::NamespaceForkState => 2,
-            Self::NamespaceGcPinState => 2,
-            Self::NamespaceProgress => 2,
-            Self::UploadSession => 2,
-            Self::QueueShard => 2,
+            Self::NamespaceDescriptor => 1,
+            Self::ContentStoreDescriptor => 1,
+            Self::NamespaceHead => 1,
+            Self::NamespaceLease => 1,
+            Self::NamespaceForkState => 1,
+            Self::NamespaceGcPinState => 1,
+            Self::NamespaceProgress => 1,
+            Self::UploadSession => 1,
+            Self::QueueShard => 1,
         }
     }
 

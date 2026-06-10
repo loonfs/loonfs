@@ -6,11 +6,11 @@ mod output;
 mod profile;
 mod profile_config;
 
-pub use self::output::{CommandData, CommandFailure, CommandOutput};
+pub(crate) use self::output::{CommandData, CommandFailure, CommandOutput};
 
 use crate::args::{Cli, Command, RuntimeBehavior};
 
-pub fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, CommandFailure> {
+pub(crate) fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, CommandFailure> {
     let kind = cli.kind();
     if runtime.json && !kind.supports_json() {
         return Err(CommandFailure {

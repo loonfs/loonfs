@@ -192,7 +192,7 @@ mod tests {
                     apply_after_seq: ChangeSeq(seq.0.saturating_sub(1)),
                     commit_id: CommitId::try_new(format!("publish-record-{index}"))
                         .expect("valid commit id"),
-                    semantic_commit_fingerprint_sha256: format!("fingerprint-{index}"),
+                    semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     writer_id: "writer-a".to_owned(),
                     writer_fence_token: FenceToken(1),
                     message: None,

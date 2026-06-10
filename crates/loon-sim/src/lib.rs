@@ -1,4 +1,10 @@
-#![forbid(unsafe_code)]
+//! Deterministic simulation primitives for LoonFS tests.
+//!
+//! Seeded randomness ([`rng`]), a virtual clock ([`clock`]), and a
+//! fault-injecting object store ([`fault_store`]) that can lose put
+//! responses, serve stale reads and compare-and-swaps, hide recent objects
+//! from listings, and corrupt bytes — plus the trace and replay plumbing
+//! ([`trace`], [`replay`]) to reproduce any failing seed exactly.
 
 pub mod clock;
 pub mod failure;

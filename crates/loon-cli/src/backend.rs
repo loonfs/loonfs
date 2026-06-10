@@ -2,7 +2,7 @@ use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use loon_api::{
     AuthoritativePathEntry, CommitId, ListFileRevisionsResponse, MutationResult, NamespaceId,
-    NamespaceSummary, RevisionNo,
+    NamespaceStatusResponse, NamespaceSummary, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs::{
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
-pub trait Backend {
+pub(crate) trait Backend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError>;
     fn fork_namespace(
         &self,
@@ -24,6 +24,7 @@ pub trait Backend {
         new_namespace_id: &str,
     ) -> Result<NamespaceSummary, CliError>;
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError>;
+    fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError>;
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError>;
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError>;
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError>;
@@ -63,7 +64,7 @@ pub trait Backend {
 
 // --- Remote backend (HTTP via loon-client) ---
 
-pub struct RemoteBackend {
+pub(crate) struct RemoteBackend {
     client: Client,
 }
 
@@ -88,8 +89,18 @@ impl Backend for RemoteBackend {
         self.client.list_namespaces().map_err(map_client_error)
     }
 
+    fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError> {
+        self.client
+            .namespace_status(namespace_id)
+            .map_err(map_client_error)
+    }
+
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
-        self.client.list_path(spec).map_err(map_client_error)
+        Ok(self
+            .client
+            .list_path(spec)
+            .map_err(map_client_error)?
+            .entries)
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {
@@ -187,7 +198,7 @@ fn map_client_error(error: ClientError) -> CliError {
 
 // --- Embedded backend (embedded/direct mode uses the shared loonfs runtime) ---
 
-pub struct EmbeddedBackend {
+pub(crate) struct EmbeddedBackend {
     fs: Fs,
     runtime: tokio::runtime::Runtime,
 }
@@ -212,10 +223,10 @@ impl EmbeddedBackend {
 
 impl Backend for EmbeddedBackend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
-        let ns_id = parse_namespace_id(namespace_id)?;
+        let namespace_id = parse_namespace_id(namespace_id)?;
         self.block_on(
             self.fs
-                .create_namespace(&ns_id, CreateNamespaceOptions::default()),
+                .create_namespace(&namespace_id, CreateNamespaceOptions::default()),
         )
     }
 
@@ -236,27 +247,40 @@ impl Backend for EmbeddedBackend {
         self.block_on(self.fs.list_namespaces())
     }
 
+    fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        let status = self.block_on_scoped(namespace_id, self.fs.namespace_status(&parsed))?;
+        Ok(NamespaceStatusResponse {
+            namespace_id: status.namespace_id,
+            head_seq: status.head_seq,
+            current_manifest_id: status.current_manifest_id,
+            latest_checkpoint_id: status.latest_checkpoint_id,
+            wal_tail_segments: status.wal_tail_segments,
+            retention_floor_seq: status.retention_floor_seq,
+        })
+    }
+
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.list_path(&ns_id, &spec.absolute_path),
+            self.fs.list_path(&namespace_id, &spec.absolute_path),
         )
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.stat_path(&ns_id, &spec.absolute_path),
+            self.fs.stat_path(&namespace_id, &spec.absolute_path),
         )
     }
 
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let result = self.block_on_scoped(
             &spec.namespace,
-            self.fs.read_file_bytes(&ns_id, &spec.absolute_path),
+            self.fs.read_file_bytes(&namespace_id, &spec.absolute_path),
         )?;
         Ok(result.bytes)
     }
@@ -266,11 +290,11 @@ impl Backend for EmbeddedBackend {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let result = self.block_on_scoped(
             &spec.namespace,
             self.fs
-                .read_file_revision_bytes(&ns_id, &spec.absolute_path, revision_no),
+                .read_file_revision_bytes(&namespace_id, &spec.absolute_path, revision_no),
         )?;
         Ok(result.bytes)
     }
@@ -279,10 +303,11 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
     ) -> Result<ListFileRevisionsResponse, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.list_file_revisions(&ns_id, &spec.absolute_path),
+            self.fs
+                .list_file_revisions(&namespace_id, &spec.absolute_path),
         )
     }
 
@@ -292,7 +317,7 @@ impl Backend for EmbeddedBackend {
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let behavior = if force {
             PutFileBehavior::ReplaceExisting
         } else {
@@ -302,7 +327,7 @@ impl Backend for EmbeddedBackend {
         self.block_on_scoped(
             &spec.namespace,
             self.fs.put_file_bytes(
-                &ns_id,
+                &namespace_id,
                 &spec.absolute_path,
                 bytes,
                 PutFileOptions {
@@ -314,12 +339,12 @@ impl Backend for EmbeddedBackend {
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
             self.fs.delete_path(
-                &ns_id,
+                &namespace_id,
                 &spec.absolute_path,
                 DeleteOptions {
                     recursive: false,
@@ -330,12 +355,12 @@ impl Backend for EmbeddedBackend {
     }
 
     fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
             self.fs.create_dir(
-                &ns_id,
+                &namespace_id,
                 &spec.absolute_path,
                 CreateDirOptions {
                     commit_id: Some(commit_id),
@@ -349,12 +374,12 @@ impl Backend for EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = parse_namespace_id(&from.namespace)?;
+        let namespace_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &from.namespace,
             self.fs.move_path(
-                &ns_id,
+                &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 MoveOptions {
@@ -369,12 +394,12 @@ impl Backend for EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = parse_namespace_id(&from.namespace)?;
+        let namespace_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &from.namespace,
             self.fs.copy_path(
-                &ns_id,
+                &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 CopyOptions {
@@ -389,12 +414,12 @@ impl Backend for EmbeddedBackend {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
             self.fs.restore_file_revision(
-                &ns_id,
+                &namespace_id,
                 &spec.absolute_path,
                 source_revision_no,
                 RestoreRevisionOptions {
@@ -480,21 +505,21 @@ fn default_writer_id() -> String {
 
 // --- Target resolution ---
 
-pub enum ResolvedTarget {
+pub(crate) enum ResolvedTarget {
     Embedded(Box<EmbeddedTarget>),
     Remote(RemoteTarget),
 }
 
-pub struct EmbeddedTarget {
+pub(crate) struct EmbeddedTarget {
     backend: EmbeddedBackend,
 }
 
-pub struct RemoteTarget {
+pub(crate) struct RemoteTarget {
     backend: RemoteBackend,
 }
 
 impl ResolvedTarget {
-    pub fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
+    pub(crate) fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
                 store,
@@ -520,14 +545,14 @@ impl ResolvedTarget {
         }
     }
 
-    pub fn mode_str(&self) -> &'static str {
+    pub(crate) fn mode_str(&self) -> &'static str {
         match self {
             ResolvedTarget::Embedded(_) => "embedded",
             ResolvedTarget::Remote(_) => "remote",
         }
     }
 
-    pub fn backend(&self) -> &dyn Backend {
+    pub(crate) fn backend(&self) -> &dyn Backend {
         match self {
             ResolvedTarget::Embedded(target) => &target.backend,
             ResolvedTarget::Remote(target) => &target.backend,

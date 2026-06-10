@@ -1,9 +1,17 @@
-#![forbid(unsafe_code)]
+//! Wire types and durable-format codecs for LoonFS.
+//!
+//! Everything that crosses a process or storage boundary is defined here:
+//! validated identifier and path types at the crate root, the versioned HTTP
+//! protocol shapes in [`v0`], and the durable storage formats in [`wire`]
+//! (WAL segments, metadata SSTs, namespace manifests, and control objects).
+//! Other LoonFS crates depend on this one for vocabulary; it depends on none
+//! of them.
 
 mod content;
 mod control;
 mod digest;
 mod envelope;
+mod error;
 mod http;
 mod ids;
 mod manifest;
@@ -29,23 +37,24 @@ pub mod wire {
 
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
+pub use error::{ErrorCode, ErrorKind};
 pub use http::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FileRevision, FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, ListFileRevisionsResponse, ListNamespacesResponse,
-    MutationResult, NamespaceSummary, RestoreFileRevisionRequest,
+    MutationResult, NamespaceStatusResponse, NamespaceSummary, RestoreFileRevisionRequest,
 };
 pub use ids::{
     generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
     generate_wal_segment_id, generated_id, validate_checkpoint_id, validate_gc_pin_id,
     validate_generated_id, validate_metadata_table_id, validate_upload_id, validate_wal_segment_id,
-    ChangeSeq, CommitId, CommitIdValidationError, ConflictDisposition, ContentStoreId, FenceToken,
-    GeneratedIdValidationError, Identity, InodeId, InodeKind, ManifestId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo,
+    ChangeSeq, CommitId, CommitIdValidationError, ContentStoreId, FenceToken,
+    GeneratedIdValidationError, InodeId, InodeKind, ManifestId, NameKey, NameKeyValidationError,
+    NamespaceId, NamespaceIdValidationError, RevisionNo,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
-pub use server::{AuthoritativeFileBytes, AuthoritativePathEntry};
+pub use server::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 
 #[cfg(test)]
 mod tests {

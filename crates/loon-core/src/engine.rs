@@ -22,12 +22,12 @@ use thiserror::Error;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
-#[derive(Debug)]
 /// A namespace-scoped core API.
 ///
 /// `NamespaceEngine` owns an object store handle plus the writer identity used
 /// for mutations. It is the main entrypoint for direct reads, path writes,
 /// explicit commits, uploads, checkpoints, and retention work.
+#[derive(Debug)]
 pub struct NamespaceEngine<S> {
     store: S,
     namespace_id: NamespaceId,
@@ -582,11 +582,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 }
 
-#[derive(Debug)]
 /// Builder for [`NamespaceEngine`].
 ///
 /// The builder keeps construction explicit: choose a namespace, choose the
 /// writer identity, then build the engine.
+#[derive(Debug)]
 pub struct NamespaceEngineBuilder<S> {
     store: S,
     namespace_id: Option<NamespaceId>,
@@ -669,8 +669,8 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
     }
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
 /// Error returned when a [`NamespaceEngine`] cannot be built.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum NamespaceEngineBuildError {
     /// A namespace id was not supplied.
     #[error("namespace is required")]

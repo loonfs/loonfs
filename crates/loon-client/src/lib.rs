@@ -5,8 +5,6 @@
 //! pass a [`NamespacePath`] for filesystem operations and use explicit commit
 //! helpers when you need retry control.
 
-#![forbid(unsafe_code)]
-
 use http::Uri;
 use loon_api::{
     v0::RenameMode,
@@ -18,8 +16,8 @@ use loon_api::{
     ApiError, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
-    ListNamespacesResponse, MutationResult, NamespaceId, NamespaceSummary,
-    RestoreFileRevisionRequest, RevisionNo,
+    ListNamespacesResponse, ListPathEntriesResponse, MutationResult, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -28,8 +26,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone, Deserialize)]
 /// Client configuration loaded from TOML or built by the caller.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClientConfig {
     /// Base URL for the LoonFS server.
     pub server_url: String,
@@ -37,29 +35,29 @@ pub struct ClientConfig {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
 /// Synchronous HTTP client for LoonFS.
+#[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
     auth_token: Option<String>,
     agent: ureq::Agent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Result of downloading a remote path to local storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetPathResult {
     pub destination: PathBuf,
     pub bytes_written: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Result of uploading a local path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PutPathResult {
     pub committed_seq: ChangeSeq,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// A path qualified by namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespacePath {
     /// Namespace id as text.
     pub namespace: String,
@@ -67,8 +65,8 @@ pub struct NamespacePath {
     pub absolute_path: String,
 }
 
-#[derive(Debug, Error)]
 /// Error returned by the blocking HTTP client.
+#[derive(Debug, Error)]
 pub enum ClientError {
     #[error("failed to read config: {0}")]
     ConfigIo(String),
@@ -152,6 +150,15 @@ impl Client {
             .namespaces)
     }
 
+    pub fn namespace_status(
+        &self,
+        namespace: &str,
+    ) -> Result<NamespaceStatusResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/namespaces/{namespace}", self.base_url);
+        self.request_json::<(), NamespaceStatusResponse>(self.agent.get(&url), None)
+    }
+
     pub fn fork_namespace(
         &self,
         source_namespace: &str,
@@ -169,10 +176,7 @@ impl Client {
         )
     }
 
-    pub fn list_path(
-        &self,
-        spec: &NamespacePath,
-    ) -> Result<Vec<AuthoritativePathEntry>, ClientError> {
+    pub fn list_path(&self, spec: &NamespacePath) -> Result<ListPathEntriesResponse, ClientError> {
         let namespace = namespace_url_segment(&spec.namespace)?;
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/list?path={}",
@@ -180,7 +184,7 @@ impl Client {
             namespace,
             urlencoding::encode(&spec.absolute_path)
         );
-        self.request_json::<(), Vec<AuthoritativePathEntry>>(self.agent.get(&url), None)
+        self.request_json::<(), ListPathEntriesResponse>(self.agent.get(&url), None)
     }
 
     pub fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, ClientError> {
@@ -664,7 +668,7 @@ impl Client {
     fn get_directory(&self, spec: &NamespacePath, destination: &Path) -> Result<u64, ClientError> {
         fs::create_dir_all(destination).map_err(|err| ClientError::Io(err.to_string()))?;
         let mut bytes_written = 0;
-        for entry in self.list_path(spec)? {
+        for entry in self.list_path(spec)?.entries {
             let child_spec = NamespacePath {
                 namespace: spec.namespace.clone(),
                 absolute_path: entry.absolute_path.clone(),

@@ -55,7 +55,10 @@ mod tests {
         };
 
         let json = replay.to_json_pretty().expect("serialize replay seed");
-        assert_eq!(ReplaySeed::from_json_str(&json).unwrap(), replay);
+        assert_eq!(
+            ReplaySeed::from_json_str(&json).expect("deserialize replay seed"),
+            replay
+        );
     }
 
     #[test]
