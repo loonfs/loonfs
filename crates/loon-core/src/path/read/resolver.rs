@@ -48,7 +48,7 @@ pub(super) fn build_authoritative_path_entry(
         absolute_path: resolved.absolute_path.clone(),
         inode_id: resolved.inode_id,
         inode_kind: resolved.inode_kind.clone(),
-        authoritative_head_seq: head_seq,
+        head_seq,
         parent_inode_id: resolved.parent_inode_id,
         display_name: resolved.display_name.clone(),
         revision_no: revision.as_ref().map(|revision| revision.revision_no),

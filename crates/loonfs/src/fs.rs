@@ -15,11 +15,11 @@ use crate::{
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
-    ErrorCode, FsConfig, InodeId, ListFileRevisionsResponse, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
-    NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
-    RenameMode, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
-    UploadContentResponse,
+    ErrorCode, FsConfig, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
+    MutationResult, NamespaceId, NamespaceStatus, NamespaceSummary, ObjectStore,
+    ObjectStoreMetricsRecorder, PutFileOptions, RenameMode, RestoreRevisionOptions, RevisionNo,
+    RuntimeCacheConfig, RuntimeCacheStats, UploadContentResponse,
 };
 use crate::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::{Result, RuntimeError, SharedObjectStore};
@@ -386,9 +386,27 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<Vec<AuthoritativePathEntry>> {
+        Ok(self
+            .list_path_entries(namespace_id, absolute_path)
+            .await?
+            .entries)
+    }
+
+    /// Lists a directory together with the head the listing was read from.
+    ///
+    /// The envelope and every entry come from one consistent head, so an
+    /// empty directory still reports which state answered the question.
+    pub async fn list_path_entries(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<ListPathEntriesResponse> {
+        let listed_path = AbsolutePath::parse(absolute_path)
+            .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
-        if head.state.current_manifest_id.is_some() {
+        let head_seq = head.state.seq;
+        let entries = if head.state.current_manifest_id.is_some() {
             let entries = engine
                 .list_path(
                     absolute_path,
@@ -401,20 +419,26 @@ impl Fs {
             self.inner
                 .cache_stats
                 .record_metadata_read_source(MetadataReadSource::MaterializedTables);
-            return Ok(entries);
-        }
-
-        let basis = self.basis_for_read_at_head(namespace_id, &head).await?;
-        let entries = engine
-            .list_path(
-                absolute_path,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
-            )
-            .await?;
-        self.inner
-            .cache_stats
-            .record_metadata_read_source(MetadataReadSource::FullBasisFallback);
-        Ok(entries)
+            entries
+        } else {
+            let basis = self.basis_for_read_at_head(namespace_id, &head).await?;
+            let entries = engine
+                .list_path(
+                    absolute_path,
+                    loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                )
+                .await?;
+            self.inner
+                .cache_stats
+                .record_metadata_read_source(MetadataReadSource::FullBasisFallback);
+            entries
+        };
+        Ok(ListPathEntriesResponse {
+            namespace_id: namespace_id.clone(),
+            absolute_path: listed_path.as_str().to_owned(),
+            head_seq,
+            entries,
+        })
     }
 
     pub async fn read_file_bytes(

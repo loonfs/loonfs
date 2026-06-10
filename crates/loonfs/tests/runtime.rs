@@ -636,7 +636,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("reader should observe external head advance");
     assert_eq!(stat.absolute_path, "/docs/new");
-    assert_eq!(stat.authoritative_head_seq, ChangeSeq(2));
+    assert_eq!(stat.head_seq, ChangeSeq(2));
     assert!(raw_store.wal_get_count() > 0);
 }
 
@@ -889,7 +889,7 @@ fn runtime_publish_reuses_warm_basis_for_adjacent_batches() {
     let stat = fs
         .stat_path_blocking(&namespace_id, "/docs/child")
         .expect("warm-published child is visible");
-    assert_eq!(stat.authoritative_head_seq, ChangeSeq(2));
+    assert_eq!(stat.head_seq, ChangeSeq(2));
 }
 
 #[test]

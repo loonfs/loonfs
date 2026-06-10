@@ -21,58 +21,7 @@ pub type Error = CoreError;
 /// Result type used by `loon-core` entrypoints.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Broad error category for caller or operator action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    /// Fix the request before retrying.
-    InvalidRequest,
-    /// The requested object does not exist. Refresh state or choose another target.
-    NotFound,
-    /// The create target already exists. Pick another id or treat this as idempotent.
-    AlreadyExists,
-    /// The request raced with current namespace state. Re-read and retry if desired.
-    Conflict,
-    /// A caller-supplied precondition was false. Re-plan against fresh state.
-    PreconditionFailed,
-    /// The system is temporarily unavailable. Back off and retry.
-    Unavailable,
-    /// Durable state is malformed. Treat this as operator or repair work.
-    DataCorruption,
-    /// LoonFS hit an internal failure. Capture details and report it.
-    Internal,
-}
-
-/// Stable machine-readable error reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCode {
-    InvalidPath,
-    InvalidNamespaceId,
-    InvalidCommitId,
-    InvalidUploadId,
-    NamespaceNotFound,
-    NamespaceExists,
-    NamespacePartial,
-    PathNotFound,
-    RevisionNotFound,
-    PathConflict,
-    DirectoryNotEmpty,
-    StaleHead,
-    StaleRevision,
-    TombstoneConflict,
-    LeaseConflict,
-    WouldCycle,
-    UnsupportedRenameMode,
-    CommitIdReuseConflict,
-    CommitQueueFull,
-    CheckpointUnavailable,
-    UploadNotFound,
-    UploadAlreadyCompleted,
-    UploadContentConflict,
-    InvalidUploadContent,
-    RebootstrapRequired,
-    NamespaceCorrupt,
-    ServerError,
-}
+pub use loon_api::{ErrorCode, ErrorKind};
 
 /// Detailed core error.
 ///
@@ -253,71 +202,6 @@ impl CoreError {
 
     pub fn message(&self) -> String {
         self.to_string()
-    }
-}
-
-impl ErrorCode {
-    pub fn kind(self) -> ErrorKind {
-        match self {
-            ErrorCode::InvalidPath
-            | ErrorCode::InvalidNamespaceId
-            | ErrorCode::InvalidCommitId
-            | ErrorCode::InvalidUploadId
-            | ErrorCode::UnsupportedRenameMode
-            | ErrorCode::InvalidUploadContent => ErrorKind::InvalidRequest,
-            ErrorCode::NamespaceNotFound
-            | ErrorCode::PathNotFound
-            | ErrorCode::RevisionNotFound
-            | ErrorCode::UploadNotFound => ErrorKind::NotFound,
-            ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
-            ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
-            ErrorCode::CommitQueueFull | ErrorCode::CheckpointUnavailable => ErrorKind::Unavailable,
-            ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
-            ErrorCode::ServerError => ErrorKind::Internal,
-            ErrorCode::NamespacePartial
-            | ErrorCode::PathConflict
-            | ErrorCode::DirectoryNotEmpty
-            | ErrorCode::StaleHead
-            | ErrorCode::TombstoneConflict
-            | ErrorCode::LeaseConflict
-            | ErrorCode::WouldCycle
-            | ErrorCode::CommitIdReuseConflict
-            | ErrorCode::UploadAlreadyCompleted
-            | ErrorCode::UploadContentConflict
-            | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ErrorCode::InvalidPath => "invalid_path",
-            ErrorCode::InvalidNamespaceId => "invalid_namespace_id",
-            ErrorCode::InvalidCommitId => "invalid_commit_id",
-            ErrorCode::InvalidUploadId => "invalid_upload_id",
-            ErrorCode::NamespaceNotFound => "namespace_not_found",
-            ErrorCode::NamespaceExists => "namespace_exists",
-            ErrorCode::NamespacePartial => "namespace_partial",
-            ErrorCode::PathNotFound => "path_not_found",
-            ErrorCode::RevisionNotFound => "revision_not_found",
-            ErrorCode::PathConflict => "path_conflict",
-            ErrorCode::DirectoryNotEmpty => "directory_not_empty",
-            ErrorCode::StaleHead => "stale_head",
-            ErrorCode::StaleRevision => "stale_revision",
-            ErrorCode::TombstoneConflict => "tombstone_conflict",
-            ErrorCode::LeaseConflict => "lease_conflict",
-            ErrorCode::WouldCycle => "would_cycle",
-            ErrorCode::UnsupportedRenameMode => "unsupported_rename_mode",
-            ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
-            ErrorCode::CommitQueueFull => "commit_queue_full",
-            ErrorCode::CheckpointUnavailable => "checkpoint_unavailable",
-            ErrorCode::UploadNotFound => "upload_not_found",
-            ErrorCode::UploadAlreadyCompleted => "upload_already_completed",
-            ErrorCode::UploadContentConflict => "upload_content_conflict",
-            ErrorCode::InvalidUploadContent => "invalid_upload_content",
-            ErrorCode::RebootstrapRequired => "rebootstrap_required",
-            ErrorCode::NamespaceCorrupt => "namespace_corrupt",
-            ErrorCode::ServerError => "server_error",
-        }
     }
 }
 
