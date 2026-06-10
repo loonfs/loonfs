@@ -240,6 +240,7 @@ fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
             crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
         },
         BasisLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
+        BasisLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
     }
 }
 

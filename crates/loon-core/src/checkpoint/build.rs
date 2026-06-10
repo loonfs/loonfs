@@ -43,10 +43,10 @@ pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
 }
 
 pub(super) fn debug_assert_manifest_table_segments_do_not_overlap(
-    tables: &[MetadataTableManifest],
+    _tables: &[MetadataTableManifest],
 ) {
     #[cfg(debug_assertions)]
-    for table in tables {
+    for table in _tables {
         let mut previous_max_key: Option<&str> = None;
         for descriptor in &table.segments {
             if let Some(previous) = previous_max_key {
