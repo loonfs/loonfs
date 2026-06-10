@@ -24,8 +24,9 @@ pub use loon_api::v0::{
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
     ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FileRevision,
-    FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse, ManifestId,
-    MutationResult, NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo,
+    FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ManifestId, MutationResult, NameKey, NamePolicy, NamespaceId,
+    NamespaceSummary, RevisionNo,
 };
 pub use loon_core::cache::MetadataTableCacheConfig;
 pub use loon_core::publish::{NamespaceMutationCandidate, PathMutationIntent};

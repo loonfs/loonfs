@@ -582,19 +582,6 @@ pub enum InodeKind {
     Dir,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConflictDisposition {
-    KeepRequestedName,
-    RenameLoser { deterministic_suffix: String },
-    ConflictCopy { deterministic_suffix: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Identity {
-    pub namespace_id: NamespaceId,
-    pub inode_id: InodeId,
-}
-
 impl fmt::Display for NamespaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

@@ -5,7 +5,6 @@ use crate::args::{
     NamespaceListArgs, NamespaceUseArgs,
 };
 use crate::config::save_config;
-use crate::error::CliError;
 use crate::profiles::{default_namespace, set_default_namespace};
 use crate::resolve::{load_cli_config, resolve_target_profile, resolve_target_profile_from_config};
 

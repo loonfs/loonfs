@@ -12,6 +12,8 @@ A stable spec needs explicit versioning in three places.
 
 A new version should be introduced only when an old implementation could misread or misapply a new feature.
 
+For the protocol binding, spec 060 §3.9 is the registry of stable error codes and their HTTP statuses, and the rule that clients must ignore unknown JSON response fields and tolerate unknown error codes.
+
 The durable namespace descriptor and content-store descriptor are storage-format objects. The namespace descriptor is authoritative for the namespace-to-content-store relationship; a future catalog may index descriptors but must not replace their meaning.
 
 ### 1.1 Durable envelope layout

@@ -96,7 +96,11 @@ impl Backend for RemoteBackend {
     }
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
-        self.client.list_path(spec).map_err(map_client_error)
+        Ok(self
+            .client
+            .list_path(spec)
+            .map_err(map_client_error)?
+            .entries)
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {

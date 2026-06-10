@@ -91,7 +91,7 @@ Namespace creation uses the namespace id directly. v0 has no namespace aliases o
 
 The field name `namespace_id` is intentional API compatibility surface. Fork creation uses `new_namespace_id` for the target namespace. Route placeholders such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are only path parameter names for the same namespace id value; v0 does not accept or emit a namespace `name` alias.
 
-A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
+A few representative requests and responses are shown below. These examples are illustrative, not exhaustive. Responses may gain fields within v0; clients must ignore JSON fields they do not recognize.
 
 ### 3.0 `GET /v0/namespaces/{ns}`
 
@@ -110,13 +110,17 @@ The namespace status read answers "does this namespace exist, and where is its h
 
 ### 3.1 `GET /filesystem/stat`
 
+The response is one authoritative path entry. Enum values are snake_case per the durable naming rules (spec 030 §4).
+
 ```json
 {
   "namespace_id": "demo",
   "absolute_path": "/docs/report.txt",
   "inode_id": 42,
-  "inode_kind": "FILE",
+  "inode_kind": "file",
   "head_seq": 418,
+  "parent_inode_id": 7,
+  "display_name": "report.txt",
   "revision_no": 7,
   "size_bytes": 19482,
   "content_ref": {
@@ -129,6 +133,8 @@ The namespace status read answers "does this namespace exist, and where is its h
 
 ### 3.2 `GET /filesystem/list`
 
+The envelope names the listed path and the head the listing was read from, so an empty directory still reports which state it observed and the response can grow (for example, pagination cursors) without reshaping `entries`. Entries are full path entries with the same shape as `stat` (directory entries leave the file-only fields out).
+
 ```json
 {
   "namespace_id": "demo",
@@ -136,16 +142,29 @@ The namespace status read answers "does this namespace exist, and where is its h
   "head_seq": 418,
   "entries": [
     {
-      "display_name": "report.txt",
+      "namespace_id": "demo",
       "absolute_path": "/docs/report.txt",
       "inode_id": 42,
-      "inode_kind": "FILE"
+      "inode_kind": "file",
+      "head_seq": 418,
+      "parent_inode_id": 7,
+      "display_name": "report.txt",
+      "revision_no": 7,
+      "size_bytes": 19482,
+      "content_ref": {
+        "kind": "whole_file_v0",
+        "digest": "sha256:42d...",
+        "size_bytes": 19482
+      }
     },
     {
-      "display_name": "slides",
+      "namespace_id": "demo",
       "absolute_path": "/docs/slides",
       "inode_id": 43,
-      "inode_kind": "DIR"
+      "inode_kind": "dir",
+      "head_seq": 418,
+      "parent_inode_id": 7,
+      "display_name": "slides"
     }
   ]
 }
@@ -401,6 +420,56 @@ Representative response:
 ```
 
 The server forks from the source namespace's current head. The new namespace shares the source namespace's content store and starts with independent future namespace metadata. The fork records provenance and a source-side GC pin for the source checkpoint/manifest pair so source-owned immutable metadata files remain available while the target manifest references them.
+
+### 3.9 Error responses
+
+Every error response is a JSON body with two fields:
+
+```json
+{
+  "code": "path_not_found",
+  "message": "path not found `/docs/missing.txt`"
+}
+```
+
+`code` is the stable machine contract; `message` is human-readable and may change between releases. Clients must branch on `code`, must tolerate codes they do not recognize, and must not parse `message`. The registry (`ErrorCode` in `loon-api`) is:
+
+| Code | HTTP status | Meaning |
+| --- | --- | --- |
+| `invalid_path` | 400 | The supplied path is not a valid absolute path. |
+| `invalid_namespace_id` | 400 | The namespace id violates the slug grammar (spec 030 §4). |
+| `invalid_commit_id` | 400 | The commit id violates the id grammar. |
+| `invalid_upload_id` | 400 | The upload id violates the generated-id grammar. |
+| `invalid_inode_id` | 400 | The inode id path parameter is not a valid integer id. |
+| `invalid_revision_no` | 400 | The revision number parameter is not a valid integer. |
+| `invalid_config` | 400 | The request or server configuration is invalid. |
+| `unauthorized` | 401 | Missing or wrong credentials. |
+| `namespace_not_found` | 404 | The namespace does not exist. |
+| `path_not_found` | 404 | No visible entry at the path. |
+| `revision_not_found` | 404 | The file has no such revision. |
+| `upload_not_found` | 404 | No upload session with this id. |
+| `namespace_exists` | 409 | The create target already exists. |
+| `namespace_partial` | 409 | The namespace is partially initialized and unusable. |
+| `path_conflict` | 409 | The destination path is already bound. |
+| `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
+| `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
+| `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
+| `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
+| `lease_conflict` | 409 | Another writer holds the namespace lease. |
+| `would_cycle` | 409 | The rename would create a directory cycle. |
+| `unsupported_rename_mode` | 400 | The requested rename mode is not supported. |
+| `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
+| `upload_already_completed` | 409 | The upload session is already completed. |
+| `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
+| `invalid_upload_content` | 400 | The staged or referenced content is invalid. |
+| `rebootstrap_required` | 409 | The change cursor is older than the retention floor. |
+| `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is not yet available; retry. |
+| `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
+| `namespace_corrupt` | 500 | Durable namespace state failed validation. |
+| `server_error` | 500 | Unclassified internal failure. |
+
+Precondition failures surface as `409` resource-state conflicts (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) rather than `412`: v0 treats them as conflicts with current namespace state, not HTTP conditional-request failures.
 
 ## 4. Client profiles
 
