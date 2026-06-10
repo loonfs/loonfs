@@ -193,6 +193,7 @@ fn map_client_error(error: ClientError) -> CliError {
         ClientError::Http(message) | ClientError::Json(message) => CliError::client_error(message),
         ClientError::Api { code, message, .. } => CliError::new(code, message),
         ClientError::Io(message) => CliError::new("io_error", format!("i/o error: {message}")),
+        other => CliError::client_error(other.to_string()),
     }
 }
 
@@ -444,6 +445,7 @@ fn map_runtime_error(error: RuntimeError) -> CliError {
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => CliError::new("runtime_error", message),
+        other => CliError::new("runtime_error", other.to_string()),
     }
 }
 
@@ -453,6 +455,7 @@ fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> C
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => CliError::new("runtime_error", message),
+        other => CliError::new("runtime_error", other.to_string()),
     }
 }
 

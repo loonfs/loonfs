@@ -2,6 +2,7 @@ use std::fmt;
 
 /// Broad error category for caller or operator action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// Fix the request before retrying.
     InvalidRequest,
@@ -40,6 +41,7 @@ pub enum ErrorKind {
 /// permanent once released: the API spec documents each code's meaning and HTTP
 /// status, and clients must tolerate codes they do not recognize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorCode {
     InvalidPath,
     InvalidNamespaceId,

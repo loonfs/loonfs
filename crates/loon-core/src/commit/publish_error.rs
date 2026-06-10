@@ -2,6 +2,7 @@ use loon_api::{ChangeSeq, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CommitHeadPublishError {
     EmptyWriterVersion,
     EmptyExpectedHeadEtag,

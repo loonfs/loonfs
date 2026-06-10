@@ -780,7 +780,7 @@ impl ApiResponseError {
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
             }
-            error @ RuntimeError::RuntimeTask(_) => Self::new(
+            error => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::ServerError,
                 &error.to_string(),
@@ -812,7 +812,7 @@ impl ApiResponseError {
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
             }
-            error @ RuntimeError::RuntimeTask(_) => Self::new(
+            error => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::ServerError,
                 &error.to_string(),
@@ -858,6 +858,11 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::UploadAlreadyCompleted
         | ErrorCode::UploadContentConflict
         | ErrorCode::RebootstrapRequired => StatusCode::CONFLICT,
+        // A code without an explicit arm serves as 500 until someone decides
+        // its real status. The spec-table test below fails on any code whose
+        // served status disagrees with the api.md registry, so new codes
+        // cannot ship on this default silently.
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -872,7 +877,67 @@ mod tests {
     #![allow(clippy::panic, clippy::disallowed_methods)]
     // HTTP smoke helpers use wall-clock lease timestamps and panic in unexpected match arms.
 
+    /// The compile-time forcing function for new error codes moved here when
+    /// `ErrorCode` became `#[non_exhaustive]`: every registered code must
+    /// appear in the api.md error table, and the status this server serves
+    /// must be the status the table documents.
+    #[test]
+    fn error_status_mapping_matches_the_api_spec_table() {
+        let spec = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/specs/api.md"
+        ))
+        .expect("read docs/specs/api.md");
+        let table = spec
+            .split("The full registry")
+            .nth(1)
+            .expect("api.md error registry intro")
+            .split("Precondition failures surface")
+            .next()
+            .expect("api.md error registry end");
+
+        let mut documented = std::collections::BTreeMap::new();
+        for line in table.lines() {
+            let Some(rest) = line.strip_prefix("| `") else {
+                continue;
+            };
+            let mut cells = rest.split(" | ");
+            let code = cells
+                .next()
+                .expect("code cell")
+                .trim_end_matches('`')
+                .to_owned();
+            let status: u16 = cells
+                .next()
+                .expect("status cell")
+                .trim()
+                .parse()
+                .expect("numeric status cell");
+            documented.insert(code, status);
+        }
+
+        for code in ErrorCode::ALL {
+            let documented_status = documented.remove(code.as_str()).unwrap_or_else(|| {
+                panic!(
+                    "`{}` is registered in loon-api but missing from the api.md error table",
+                    code.as_str()
+                )
+            });
+            assert_eq!(
+                status_for_core_error_code(code).as_u16(),
+                documented_status,
+                "served status for `{}` disagrees with the api.md error table",
+                code.as_str()
+            );
+        }
+        assert!(
+            documented.is_empty(),
+            "api.md documents codes this build does not register: {documented:?}"
+        );
+    }
+
     use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
+    use super::{status_for_core_error_code, ErrorCode};
     use crate::config::RuntimeCacheConfigOverrides;
     use crate::{ServerConfig, StoreConfig};
     use async_trait::async_trait;

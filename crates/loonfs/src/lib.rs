@@ -62,6 +62,7 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 /// Runtime error.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RuntimeError {
     #[error(transparent)]
     Core(#[from] CoreError),

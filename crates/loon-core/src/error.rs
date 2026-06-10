@@ -28,6 +28,7 @@ pub use loon_api::{ErrorCode, ErrorKind};
 /// Most callers should branch on [`CoreError::kind`] or [`CoreError::code`]
 /// instead of matching every internal variant.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum CoreError {
     #[error(transparent)]
     Basis(#[from] BasisLoadError),

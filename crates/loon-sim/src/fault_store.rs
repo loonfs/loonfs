@@ -549,6 +549,11 @@ fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventResult {
         Err(ObjectStoreError::Transport(_)) => SimEventResult::Error {
             class: "transport".to_owned(),
         },
+        // Keep the label set low-cardinality for error kinds this build
+        // does not know yet.
+        Err(_) => SimEventResult::Error {
+            class: "other".to_owned(),
+        },
     }
 }
 

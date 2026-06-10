@@ -21,6 +21,7 @@ use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BootstrapNamespaceError {
     #[error(transparent)]
     InvalidNamespaceId(#[from] NamespaceIdValidationError),

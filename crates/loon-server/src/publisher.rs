@@ -541,6 +541,7 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
         RuntimeError::Bootstrap(error) => CoreError::Store(error.to_string()),
         RuntimeError::Config(message) => CoreError::Store(message),
         RuntimeError::RuntimeTask(message) => CoreError::Store(message),
+        other => CoreError::Store(other.to_string()),
     }
 }
 

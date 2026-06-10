@@ -70,6 +70,7 @@ pub struct NamespacePath {
 
 /// Error returned by the blocking HTTP client.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ClientError {
     #[error("failed to read config: {0}")]
     ConfigIo(String),

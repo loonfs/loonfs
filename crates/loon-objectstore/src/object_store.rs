@@ -54,6 +54,7 @@ pub struct ByteRange {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ObjectStoreError {
     #[error("object not found")]
     NotFound,
