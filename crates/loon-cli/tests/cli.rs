@@ -404,10 +404,12 @@ fn profile_use_rejects_missing_profile() {
 }
 
 #[test]
-fn reserved_profile_names_are_rejected() {
+fn profile_names_matching_top_level_config_keys_are_allowed() {
+    // Profiles nest under [profiles.<name>], so names that once collided
+    // with top-level settings need no reservation.
     let harness = Harness::new();
 
-    let init_reserved = harness.run(&[
+    let init = harness.run(&[
         "--json",
         "init",
         "default_profile",
@@ -418,10 +420,9 @@ fn reserved_profile_names_are_rejected() {
         "--root",
         harness.store_root("default_profile").to_str().unwrap(),
     ]);
-    assert_failure(&init_reserved);
-    assert_eq!(json_error(&init_reserved)["code"], "invalid_input");
+    assert_success(&init);
 
-    let add_reserved = harness.run(&[
+    let create = harness.run(&[
         "--json",
         "profile",
         "create",
@@ -433,8 +434,18 @@ fn reserved_profile_names_are_rejected() {
         "--root",
         harness.store_root("config_version").to_str().unwrap(),
     ]);
-    assert_failure(&add_reserved);
-    assert_eq!(json_error(&add_reserved)["code"], "invalid_input");
+    assert_success(&create);
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_success(&list);
+    let names: Vec<_> = json_data(&list)["profiles"]
+        .as_array()
+        .expect("profiles array")
+        .iter()
+        .map(|profile| profile["name"].as_str().expect("profile name").to_owned())
+        .collect();
+    assert!(names.contains(&"default_profile".to_owned()));
+    assert!(names.contains(&"config_version".to_owned()));
 }
 
 #[test]
@@ -445,10 +456,10 @@ fn init_rejects_existing_config_file() {
 config_version = 1
 default_profile = "default"
 
-[default]
+[profiles.default]
 mode = "embedded"
 
-[default.store]
+[profiles.default.store]
 kind = "local-fs"
 root = "{}"
 "#,
@@ -481,16 +492,16 @@ root = "{}"
 }
 
 #[test]
-fn reserved_profile_names_in_config_are_rejected() {
+fn profiles_nest_under_their_own_table() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
         r#"
 config_version = 1
 
-[default_profile]
+[profiles.default_profile]
 mode = "embedded"
 
-[default_profile.store]
+[profiles.default_profile.store]
 kind = "local-fs"
 root = "{}"
 "#,
@@ -498,8 +509,11 @@ root = "{}"
     ));
 
     let list = harness.run(&["--json", "profile", "list"]);
-    assert_failure(&list);
-    assert_eq!(json_error(&list)["code"], "invalid_config");
+    assert_success(&list);
+    assert_eq!(
+        json_data(&list)["profiles"][0]["name"],
+        "default_profile"
+    );
 }
 
 #[test]
@@ -550,10 +564,10 @@ fn invalid_store_field_messages_use_flattened_paths() {
 config_version = 1
 default_profile = "default"
 
-[default]
+[profiles.default]
 mode = "embedded"
 
-[default.store]
+[profiles.default.store]
 kind = "local-fs"
 root = ""
 "#,
@@ -577,11 +591,11 @@ fn invalid_default_namespace_in_config_is_rejected() {
 config_version = 1
 default_profile = "default"
 
-[default]
+[profiles.default]
 mode = "embedded"
 default_namespace = "bad/name"
 
-[default.store]
+[profiles.default.store]
 kind = "local-fs"
 root = "{}"
 "#,
@@ -800,11 +814,11 @@ fn current_does_not_require_backend_resolution() {
         r#"config_version = 1
 default_profile = "broken"
 
-[broken]
+[profiles.broken]
 mode = "embedded"
 default_namespace = "demo"
 
-[broken.store]
+[profiles.broken.store]
 kind = "local-fs"
 root = "{}"
 key_prefix = "../bad"
