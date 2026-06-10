@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Embedded LoonFS runtime: a durable, agent-native filesystem on object storage."
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true

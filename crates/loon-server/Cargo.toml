@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "The reference LoonFS HTTP server."
+repository.workspace = true
 
 [[bin]]
 name = "loon-server"

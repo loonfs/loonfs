@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Blocking HTTP client for a LoonFS server."
+repository.workspace = true
 
 [dependencies]
 http.workspace = true

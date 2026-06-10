@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Wire types and durable-format codecs for LoonFS."
+repository.workspace = true
 
 [dependencies]
 ciborium.workspace = true

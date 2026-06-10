@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Core LoonFS engine: namespace metadata, commits, replay, and maintenance."
+repository.workspace = true
 
 [dependencies]
 loon-api = { path = "../loon-api" }

@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Executable reference model of LoonFS metadata semantics, used by differential tests."
+repository.workspace = true
+publish = false
 
 [dependencies]
 loon-api = { path = "../loon-api" }

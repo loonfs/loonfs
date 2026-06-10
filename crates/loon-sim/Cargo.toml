@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Deterministic simulation primitives for LoonFS tests."
+repository.workspace = true
+publish = false
 
 [dependencies]
 async-trait.workspace = true
