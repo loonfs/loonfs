@@ -27,7 +27,7 @@ pub enum ErrorKind {
 ///
 /// This is the complete registry of `code` values carried by
 /// [`ApiError`](crate::ApiError) bodies and embedded errors. Codes are
-/// permanent once released: spec 060 documents each code's meaning and HTTP
+/// permanent once released: the API spec documents each code's meaning and HTTP
 /// status, and clients must tolerate codes they do not recognize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {

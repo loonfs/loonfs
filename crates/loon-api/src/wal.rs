@@ -11,8 +11,8 @@ use thiserror::Error;
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload
 /// as an opaque CBOR byte string. `payload_checksum` covers exactly those
-/// bytes, and delta/precondition tags use the snake_case names from spec 050
-/// sections 5-6.
+/// bytes, and delta/precondition tags use the snake_case names the format
+/// spec fixes ("Standard mutation operations" and "Preconditions").
 pub const WAL_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -25,12 +25,8 @@ Before touching `loon-server`, `loon-core`, `loon-objectstore`, or `loon-client`
 
 - `README.md`
 - `docs/specs/020-architecture-overview.md`
-- `docs/specs/030-object-store-contract.md`
-- `docs/specs/040-filesystem-and-storage-model.md`
-- `docs/specs/050-write-read-protocol.md`
-- `docs/specs/060-interfaces-and-clients.md`
-- `docs/specs/080-background-jobs.md`
-- `docs/specs/090-versioning-conformance-and-extensions.md`
+- `docs/specs/format.md`
+- `docs/specs/api.md`
 
 These documents lock the high-leverage choices that are easiest to get wrong in a way that cascades through the codebase.
 
@@ -78,7 +74,7 @@ Suppose you add a new mutation, such as “restore revision.”
 
 You must do all of the following:
 
-1. Confirm the mutation in `docs/specs/050-write-read-protocol.md`, and update `docs/specs/040-filesystem-and-storage-model.md` if it changes visible resource semantics.
+1. Confirm the mutation in `docs/specs/format.md` ("Write and read protocol"), and update its storage-model sections if it changes visible resource semantics.
 2. Document preconditions and failure modes.
 3. Add or update the model behavior in `crates/loon-model/`.
 4. Add or update invariants in `crates/loon-core/src/invariants.rs`.

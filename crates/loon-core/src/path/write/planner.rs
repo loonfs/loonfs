@@ -67,7 +67,8 @@ impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
 
 /// Canonical preimage for path-intent fingerprints.
 ///
-/// The serde representation is durable contract (spec 050 section 3.1): the same
+/// The serde representation is durable contract (format spec, "Commit
+/// identity fingerprints"): the same
 /// normalized intent must fingerprint identically across releases. A
 /// pinned-value test below fails if the encoding drifts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -800,7 +801,8 @@ mod tests {
 
     /// Pins the exact stored fingerprint for a fixed path intent.
     ///
-    /// If this fails, the canonical preimage changed (spec 050 section 3.1) and every
+    /// If this fails, the canonical preimage changed (format spec, "Commit
+    /// identity fingerprints") and every
     /// persisted fingerprint would disagree with recomputed ones, breaking
     /// retry idempotency across versions. Do not update the literal without
     /// bumping the fingerprint scheme tag.

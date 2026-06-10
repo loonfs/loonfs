@@ -29,3 +29,7 @@
 | **Commit id** | A stable client-generated id used for idempotent retries of one commit request. |
 | **Operation id** | Optional commit metadata used to correlate multiple commits that belong to one higher-level workflow. |
 | **Control object** | A server-side control-plane object used to preserve authoritative state across multiple requests, such as a pinned read snapshot, a resumable upload, or a stable destination binding. |
+| **Profile** | An all-or-nothing API conformance unit covering one functional plane (for example `core/v0`). A deployment advertises a profile only when every required op in it is implemented. |
+| **Feature** | A named optional capability inside an advertised profile, keyed `plane.area.name` (for example `core.namespaces.list`). |
+| **Capability document** | The self-description a deployment returns from `GET /v0/config` (or exposes as a constant when embedded): protocol version, advertised profiles, features, and advisory limits. |
+| **Namespace features map** | The `features` map in a namespace manifest recording capabilities materialized on that namespace's data, such as derived indexes. |

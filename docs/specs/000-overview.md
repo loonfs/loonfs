@@ -21,6 +21,18 @@ LoonFS can be exposed as:
 
 This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
 
+The specification is organized as three documents with distinct normative force:
+
+| Document | Force | Contents |
+| --- | --- | --- |
+| `format.md` | Normative, mandatory | The durable format: object-store contract, storage model, write/read protocol, encodings and versioning, namespace features, maintenance invariants. |
+| `api.md` | Normative where implemented | Profiles (functional planes), capability discovery, the standard error contract, and the representative HTTP binding. |
+| `implementation-notes.md` | Non-normative | Scheduling, caching, batching, and multi-tenancy guidance. |
+
+`catalog.md` is reserved for a future cross-store discovery specification.
+
+Three sorting questions place every future addition: behavior another implementation must interpret from bytes or metadata belongs in the format spec; a client-visible operation whose shape should be uniform belongs in the API spec inside a profile or named feature; how work gets done belongs in implementation notes, or nowhere.
+
 ## 2. Design goals
 
 The design goals are:
@@ -85,9 +97,10 @@ Those choices are implementation-specific and do not change the filesystem model
 
 Readers should start with:
 
-1. the glossary
-2. the architecture overview
-3. the object store contract
-4. the filesystem and storage model
-5. the mutation and visibility model
-6. the interfaces and clients section
+1. the glossary (`010-glossary.md`)
+2. the architecture overview (`020-architecture-overview.md`)
+3. the format specification (`format.md`)
+4. the API specification (`api.md`)
+
+Implementers of servers or engines should additionally read
+`implementation-notes.md`.

@@ -29,18 +29,18 @@ Two rules follow from this split:
 
 Control-plane state should still be durable when losing it on restart would violate correctness, restart safety, or promised resumability.
 
-## 3. Client profiles
+## 3. Client usage patterns
 
-LoonFS supports multiple client profiles. These profiles are defined by the protocol surface they use, not by whether the implementation is a CLI, desktop app, web app, or service.
+LoonFS supports multiple client usage patterns. These patterns are defined by the protocol surface a client uses, not by whether the implementation is a CLI, desktop app, web app, or service. (API conformance *profiles* — `core/v0`, `admin/v0` — are a different concept, defined in `api.md`.)
 
-| Client profile | Primary surface | Typical state |
+| Client pattern | Primary surface | Typical state |
 | --- | --- | --- |
 | **Path-oriented client** | Filesystem operations such as `ls`, `stat`, `get`, `put`, `mv`, and `cp` | Often little or no durable local state beyond transient request context. |
 | **Explicit-commit client** | Staged upload, commit ids, explicit commit, and change cursors | Durable retry state for in-flight uploads and requests, but not necessarily a full local projection. |
 | **Sync client** | Change feed plus durable local projection, with optional writes | Durable local state, cursors, and restart-safe reconciliation state. |
 | **Operator or admin client** | Recovery, inspection, repair, and low-level operations | Implementation-specific. |
 
-A CLI, desktop app, web app, SDK, or service may implement one or more of these profiles.
+A CLI, desktop app, web app, SDK, or service may implement one or more of these patterns.
 
 ## 4. Operation classes
 

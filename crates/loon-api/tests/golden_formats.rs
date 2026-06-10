@@ -768,7 +768,8 @@ fn namespace_manifest_decode_tolerates_additive_payload_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-name pinning: spec 050 sections 5-6 durable delta and precondition names
+// Wire-name pinning: the durable delta and precondition names the format
+// spec fixes ("Standard mutation operations" and "Preconditions")
 // ---------------------------------------------------------------------------
 
 #[test]
