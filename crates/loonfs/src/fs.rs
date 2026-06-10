@@ -1,6 +1,6 @@
 //! The embedded runtime handle: [`Fs`], its builder, and the public
 //! operation surface, each method a thin, cache-aware delegation to
-//! `loon-core`.
+//! `loonfs-core`.
 
 use crate::cache::{
     BasisCache, CommitEngineCache, MetadataReadSource, RuntimeCacheStatsInner, RuntimeControlCache,
@@ -23,14 +23,14 @@ use crate::{
     RuntimeCacheConfig, RuntimeCacheStats, UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
-use loon_api::{
+use loonfs_api::{
     AbsolutePath, CapabilityDocument, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
     FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
 };
-use loon_core::cache::{load_namespace_head_summary, MetadataTableCache};
-use loon_core::{MutationContext, NamespaceEngine};
-use loon_objectstore::metrics::InstrumentedObjectStore;
+use loonfs_core::cache::{load_namespace_head_summary, MetadataTableCache};
+use loonfs_core::{MutationContext, NamespaceEngine};
+use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -222,7 +222,7 @@ impl Fs {
     ) -> Result<NamespaceSummary> {
         let result = self
             .namespace_engine(namespace_id)
-            .bootstrap_namespace(loon_core::BootstrapOptions {
+            .bootstrap_namespace(loonfs_core::BootstrapOptions {
                 allow_existing: options.allow_existing,
             })
             .await
@@ -240,7 +240,7 @@ impl Fs {
     ) -> Result<NamespaceSummary> {
         let result = self
             .namespace_engine(source)
-            .fork_namespace(target, loon_core::ForkOptions::default())
+            .fork_namespace(target, loonfs_core::ForkOptions::default())
             .await
             .map_err(RuntimeError::from);
         if should_invalidate_after_result(&result) {
@@ -275,7 +275,7 @@ impl Fs {
 
     /// Lists complete namespaces visible in the object store.
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
-        Ok(loon_core::list_namespaces(self.store()).await?)
+        Ok(loonfs_core::list_namespaces(self.store()).await?)
     }
 
     /// Summarizes a namespace's current head: manifest, latest checkpoint,
@@ -396,7 +396,7 @@ impl Fs {
             let entry = engine
                 .resolve_path(
                     absolute_path,
-                    loon_core::ReadOptions::materialized_tables_at_head(
+                    loonfs_core::ReadOptions::materialized_tables_at_head(
                         head.state.clone(),
                         Some(Arc::clone(&self.inner.metadata_table_cache)),
                     ),
@@ -416,7 +416,7 @@ impl Fs {
         let entry = engine
             .resolve_path(
                 absolute_path,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )
             .await?;
         self.inner
@@ -457,7 +457,7 @@ impl Fs {
             let entries = engine
                 .list_path(
                     absolute_path,
-                    loon_core::ReadOptions::materialized_tables_at_head(
+                    loonfs_core::ReadOptions::materialized_tables_at_head(
                         head.state.clone(),
                         Some(Arc::clone(&self.inner.metadata_table_cache)),
                     ),
@@ -472,7 +472,7 @@ impl Fs {
             let entries = engine
                 .list_path(
                     absolute_path,
-                    loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                    loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
                 )
                 .await?;
             self.inner
@@ -499,7 +499,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .read_file(
                 absolute_path,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )
             .await?)
     }
@@ -515,7 +515,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .list_file_revisions(
                 absolute_path,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )
             .await?)
     }
@@ -532,7 +532,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .list_file_revisions_for_inode(
                 inode_id,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )
             .await?)
     }
@@ -550,7 +550,7 @@ impl Fs {
             .read_file_revision(
                 absolute_path,
                 revision_no,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )
             .await?)
     }
@@ -568,7 +568,7 @@ impl Fs {
             .read_file_revision_for_inode(
                 inode_id,
                 revision_no,
-                loon_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
             )
             .await?)
     }
@@ -602,7 +602,7 @@ impl Fs {
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         validate_runtime_mutation_path(absolute_path)?;
         let store = self.uploaded_content_proof_store(namespace_id);
-        let stored = loon_core::content::store_bytes_as_content(&store, namespace_id, bytes)
+        let stored = loonfs_core::content::store_bytes_as_content(&store, namespace_id, bytes)
             .await
             .map_err(RuntimeError::from);
         let content_ref = stored?.content_ref;

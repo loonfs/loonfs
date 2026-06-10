@@ -6,8 +6,8 @@ use crate::{ContentRef, NamespaceId, ObjectStore, ObjectStoreError};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loon_api::sha256_digest;
-use loon_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
+use loonfs_api::sha256_digest;
+use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -72,7 +72,7 @@ impl UploadedContentProofCache {
 #[cfg(test)]
 mod proof_cache_tests {
     use super::{wall_clock_now, UploadedContentProofCache, UploadedContentProofKey};
-    use loon_api::{ContentRef, NamespaceId};
+    use loonfs_api::{ContentRef, NamespaceId};
     use std::time::Duration;
 
     #[test]
@@ -138,7 +138,7 @@ impl UploadedContentProofStore<'_> {
             .insert(
                 self.namespace_id,
                 ContentRef {
-                    kind: loon_api::ContentRefKind::WholeFileV0,
+                    kind: loonfs_api::ContentRefKind::WholeFileV0,
                     digest,
                     size_bytes: bytes.len() as u64,
                 },

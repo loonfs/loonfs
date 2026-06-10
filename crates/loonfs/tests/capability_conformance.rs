@@ -1,14 +1,14 @@
 //! Pins the capability registry's three copies to each other: the constants
-//! in `loon-api`, the document built by [`Fs::capabilities`], and the
+//! in `loonfs-api`, the document built by [`Fs::capabilities`], and the
 //! normative text in `docs/specs/api.md`. If any copy drifts, this fails.
 #![allow(clippy::panic)]
 // Spec parsing panics with precise messages when a section is missing.
 
-use loon_objectstore::fs::LocalFsStore;
 use loonfs::{
     CapabilityDocument, Fs, FsConfig, RuntimeCacheConfig, SharedObjectStore, TraceMode,
     TraceStoreKind,
 };
+use loonfs_objectstore::fs::LocalFsStore;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;

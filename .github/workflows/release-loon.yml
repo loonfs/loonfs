@@ -25,7 +25,7 @@ jobs:
 
       - name: Resolve workspace version
         id: version
-        run: echo "version=$(cargo pkgid -p loon-cli | sed 's/.*#//')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')" >> "$GITHUB_OUTPUT"
 
       - name: Validate tag matches workspace version
         env:
@@ -68,7 +68,7 @@ jobs:
           shared-key: release-loon-${{ matrix.target }}
 
       - name: Build loon release binary
-        run: cargo build --release -p loon-cli --target ${{ matrix.target }}
+        run: cargo build --release -p loonfs-cli --target ${{ matrix.target }}
 
       - name: Package release artifact
         env:
