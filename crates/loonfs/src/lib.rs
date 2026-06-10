@@ -22,11 +22,13 @@ pub use loon_api::v0::{
     CompleteUploadResponse, RenameMode, UploadContentResponse, UploadMode,
 };
 pub use loon_api::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
-    ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FileRevision,
-    FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
+    ChangeSeq, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName,
+    FileRevision, FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse,
     ListPathEntriesResponse, ManifestId, MutationResult, NameKey, NamePolicy, NamespaceId,
-    NamespaceSummary, RevisionNo,
+    NamespaceSummary, RevisionNo, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROTOCOL_VERSION,
 };
 pub use loon_core::cache::MetadataTableCacheConfig;
 pub use loon_core::publish::{NamespaceMutationCandidate, PathMutationIntent};

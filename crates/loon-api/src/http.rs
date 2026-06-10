@@ -13,6 +13,10 @@ pub struct ApiError {
     /// introduces a code they do not know; use [`ApiError::error_code`] for
     /// typed access.
     pub code: String,
+    /// For `not_supported` errors, the capability-document feature key the
+    /// client should reconcile against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature: Option<String>,
     /// Human-readable error message.
     pub message: String,
 }

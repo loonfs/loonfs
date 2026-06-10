@@ -7,6 +7,12 @@ pub enum ErrorKind {
     InvalidRequest,
     /// The request was not authorized. Fix credentials before retrying.
     Unauthorized,
+    /// The caller may not perform this operation. Request access; retrying
+    /// unchanged will not succeed.
+    PermissionDenied,
+    /// The deployment does not implement this operation. Gate on the
+    /// capability document instead of retrying.
+    NotSupported,
     /// The requested object does not exist. Refresh state or choose another target.
     NotFound,
     /// The create target already exists. Pick another id or treat this as idempotent.
@@ -39,6 +45,8 @@ pub enum ErrorCode {
     InvalidRevisionNo,
     InvalidConfig,
     Unauthorized,
+    PermissionDenied,
+    NotSupported,
     NamespaceNotFound,
     NamespaceExists,
     NamespacePartial,
@@ -67,7 +75,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 32] = [
+    pub const ALL: [ErrorCode; 34] = [
         ErrorCode::InvalidPath,
         ErrorCode::InvalidNamespaceId,
         ErrorCode::InvalidCommitId,
@@ -76,6 +84,8 @@ impl ErrorCode {
         ErrorCode::InvalidRevisionNo,
         ErrorCode::InvalidConfig,
         ErrorCode::Unauthorized,
+        ErrorCode::PermissionDenied,
+        ErrorCode::NotSupported,
         ErrorCode::NamespaceNotFound,
         ErrorCode::NamespaceExists,
         ErrorCode::NamespacePartial,
@@ -114,6 +124,8 @@ impl ErrorCode {
             | ErrorCode::UnsupportedRenameMode
             | ErrorCode::InvalidUploadContent => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
+            ErrorCode::PermissionDenied => ErrorKind::PermissionDenied,
+            ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
             | ErrorCode::PathNotFound
             | ErrorCode::RevisionNotFound
@@ -147,6 +159,8 @@ impl ErrorCode {
             ErrorCode::InvalidRevisionNo => "invalid_revision_no",
             ErrorCode::InvalidConfig => "invalid_config",
             ErrorCode::Unauthorized => "unauthorized",
+            ErrorCode::PermissionDenied => "permission_denied",
+            ErrorCode::NotSupported => "not_supported",
             ErrorCode::NamespaceNotFound => "namespace_not_found",
             ErrorCode::NamespaceExists => "namespace_exists",
             ErrorCode::NamespacePartial => "namespace_partial",

@@ -23,10 +23,15 @@ use crate::{
 };
 use crate::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::{Result, RuntimeError, SharedObjectStore};
-use loon_api::AbsolutePath;
+use loon_api::{
+    AbsolutePath, CapabilityDocument, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROTOCOL_VERSION,
+};
 use loon_core::cache::{load_namespace_head_summary, MetadataTableCache};
 use loon_core::{MutationContext, NamespaceEngine};
 use loon_objectstore::metrics::InstrumentedObjectStore;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Embedded filesystem runtime.
@@ -238,6 +243,27 @@ impl Fs {
             self.invalidate_namespace_cache(target);
         }
         result
+    }
+
+    /// Returns the capability document for this embedded build (API spec,
+    /// "Capability discovery").
+    ///
+    /// The embedded runtime implements every v0 plane, so the answer is a
+    /// constant. Callers should still gate on the document rather than on
+    /// the backend kind, so the same logic works against remote deployments
+    /// that implement less.
+    pub fn capabilities(&self) -> CapabilityDocument {
+        CapabilityDocument {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
+            features: BTreeMap::from([
+                (FEATURE_NAMESPACES_LIST.to_owned(), true),
+                (FEATURE_NAMESPACES_CREATE.to_owned(), true),
+                (FEATURE_NAMESPACES_FORK.to_owned(), true),
+                (FEATURE_NAMESPACES_DELETE.to_owned(), false),
+            ]),
+            limits: BTreeMap::new(),
+        }
     }
 
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {

@@ -74,6 +74,7 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
     };
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v0/config", get(config_handler))
         .route(
             "/v0/namespaces",
             post(create_namespace).get(list_namespaces_handler),
@@ -219,6 +220,14 @@ pub async fn serve(config: ServerConfig) -> Result<(), String> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn config_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<loon_api::CapabilityDocument>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    Ok(Json(state.fs.capabilities()))
 }
 
 async fn create_namespace(
@@ -693,6 +702,7 @@ impl ApiResponseError {
             status,
             body: ApiError {
                 code: code.as_str().to_owned(),
+                feature: None,
                 message: message.to_owned(),
             },
         }
@@ -800,6 +810,8 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
             StatusCode::SERVICE_UNAVAILABLE
         }
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
+        ErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,
         ErrorCode::NamespaceCorrupt | ErrorCode::ServerError | ErrorCode::BootstrapFailed => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

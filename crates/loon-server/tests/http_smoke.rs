@@ -35,6 +35,39 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_endpoint_advertises_capabilities() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-test",
+        "http-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let capabilities = harness.client.capabilities().expect("fetch capabilities");
+        assert_eq!(capabilities.protocol_version, "v0");
+        assert!(capabilities.has_profile("core/v0"));
+        assert!(capabilities.has_profile("admin/v0"));
+        assert!(capabilities.supports("core.namespaces.list"));
+        assert!(capabilities.supports("core.namespaces.create"));
+        assert!(capabilities.supports("core.namespaces.fork"));
+        // Registered but unimplemented: advertised as false, not omitted.
+        assert_eq!(
+            capabilities.features.get("core.namespaces.delete"),
+            Some(&false)
+        );
+        assert!(!capabilities.supports("core.namespaces.delete"));
+
+        let cached = harness.client.capabilities().expect("cached capabilities");
+        assert_eq!(cached, capabilities);
+    })
+    .await
+    .expect("blocking task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -1231,6 +1264,7 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
     match request.call() {
         Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
             code: "invalid_json".to_owned(),
+            feature: None,
             message: err.to_string(),
         }),
         Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
@@ -1238,10 +1272,12 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
         )
         .unwrap_or_else(|err| ApiError {
             code: "invalid_json".to_owned(),
+            feature: None,
             message: err.to_string(),
         })),
         Err(ureq::Error::Transport(error)) => Err(ApiError {
             code: "transport".to_owned(),
+            feature: None,
             message: error.to_string(),
         }),
     }

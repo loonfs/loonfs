@@ -13,16 +13,17 @@ use loon_api::{
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadContentResponse,
     },
-    ApiError, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, CreateNamespaceRequest,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
-    ListNamespacesResponse, ListPathEntriesResponse, MutationResult, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, RestoreFileRevisionRequest, RevisionNo,
+    ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
+    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId,
+    ListFileRevisionsResponse, ListNamespacesResponse, ListPathEntriesResponse, MutationResult,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -41,6 +42,8 @@ pub struct Client {
     base_url: String,
     auth_token: Option<String>,
     agent: ureq::Agent,
+    /// Capability document cache, shared by clones and filled on first use.
+    capabilities: Arc<OnceLock<CapabilityDocument>>,
 }
 
 /// Result of downloading a remote path to local storage.
@@ -86,6 +89,8 @@ pub enum ClientError {
     Api {
         status: u16,
         code: String,
+        /// Capability feature key accompanying `not_supported` errors.
+        feature: Option<String>,
         message: String,
     },
     #[error("i/o error: {0}")]
@@ -129,7 +134,33 @@ impl Client {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             agent: ureq::AgentBuilder::new().build(),
+            capabilities: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Returns the server's capability document, fetched once and cached for
+    /// the life of this client and its clones (API spec, "Capability
+    /// discovery").
+    ///
+    /// Feature keys that are not parented by an advertised profile are
+    /// dropped rather than trusted, per the spec's client guidance for
+    /// malformed documents.
+    pub fn capabilities(&self) -> Result<CapabilityDocument, ClientError> {
+        if let Some(document) = self.capabilities.get() {
+            return Ok(document.clone());
+        }
+        let url = format!("{}/v0/config", self.base_url);
+        let mut document: CapabilityDocument =
+            self.request_json::<(), _>(self.agent.get(&url), None)?;
+        document.retain_well_formed();
+        // If a racing clone fetched first, keep its copy; both came from the
+        // same server.
+        let _ = self.capabilities.set(document);
+        Ok(self
+            .capabilities
+            .get()
+            .expect("capability cache was just filled")
+            .clone())
     }
 
     pub fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, ClientError> {
@@ -734,6 +765,7 @@ impl Client {
                     Ok(body) => ClientError::Api {
                         status,
                         code: body.code,
+                        feature: body.feature,
                         message: body.message,
                     },
                     Err(err) => ClientError::Http(err.to_string()),
