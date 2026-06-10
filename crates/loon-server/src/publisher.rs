@@ -214,6 +214,7 @@ impl NamespacePublisher {
     }
 
     async fn publish_open_batch(self) {
+        let mut abort_guard = PublishAbortGuard::new(self.clone());
         let collect_started = Instant::now();
         let (notify, already_full, queue_depth_start) = {
             let state = self
@@ -285,6 +286,12 @@ impl NamespacePublisher {
             state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
             batch.candidates
         };
+        abort_guard.batch_taken(
+            candidates
+                .iter()
+                .map(|candidate| candidate.commit_id.clone())
+                .collect(),
+        );
         let selected_at = Instant::now();
         for candidate in &candidates {
             tracing::info!(
@@ -339,6 +346,7 @@ impl NamespacePublisher {
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
 
+        abort_guard.disarm();
         self.complete_batch(candidates, results, selected_at);
     }
 
@@ -449,6 +457,77 @@ impl NamespacePublisher {
     }
 }
 
+/// Keeps a namespace publisher serviceable if its publish task dies.
+///
+/// The publish task owns the taken batch: if it panics mid-publish, the
+/// taken requests' waiters would otherwise wait forever, and the stuck
+/// `publishing` flag would stop every future submit from spawning a new
+/// task. On abnormal exit this guard fails the taken waiters with an
+/// unknown outcome (the panic may have struck before or after the head
+/// compare-and-swap), clears the flag, and restarts publication for any
+/// batch that queued up behind the dead task.
+struct PublishAbortGuard {
+    publisher: NamespacePublisher,
+    taken_commit_ids: Vec<CommitId>,
+    disarmed: bool,
+}
+
+impl PublishAbortGuard {
+    fn new(publisher: NamespacePublisher) -> Self {
+        Self {
+            publisher,
+            taken_commit_ids: Vec::new(),
+            disarmed: false,
+        }
+    }
+
+    fn batch_taken(&mut self, commit_ids: Vec<CommitId>) {
+        self.taken_commit_ids = commit_ids;
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for PublishAbortGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let mut orphaned_waiters = Vec::new();
+        let should_spawn_next = {
+            // Recover a poisoned lock instead of `expect`: panicking in this
+            // drop during an unwind would abort the process, and every
+            // critical section over this state is a plain field update.
+            let mut state = self
+                .publisher
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.publishing = false;
+            for commit_id in self.taken_commit_ids.drain(..) {
+                if let Some(in_flight) = state.in_flight.remove(&commit_id) {
+                    orphaned_waiters.extend(in_flight.waiters);
+                }
+            }
+            state
+                .batch
+                .as_ref()
+                .is_some_and(|batch| !batch.candidates.is_empty())
+        };
+
+        for waiter in orphaned_waiters {
+            let _ = waiter.send(Err(CoreError::HeadPublish(
+                CommitHeadPublishError::OutcomeUnknown("publish task aborted mid-batch".to_owned()),
+            )));
+        }
+        if should_spawn_next {
+            self.publisher.spawn_publish_task();
+        }
+    }
+}
+
 fn is_head_publish_stale(result: &CommitResult) -> bool {
     matches!(
         result,
@@ -533,8 +612,8 @@ mod tests {
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
     use loonfs::{
-        CreateNamespaceOptions, Fs, FsConfig, RuntimeCacheConfig, SharedObjectStore as SharedStore,
-        TraceMode, TraceStoreKind,
+        CreateNamespaceOptions, ErrorCode, Fs, FsConfig, RuntimeCacheConfig,
+        SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
     };
     use std::path::Path;
     use std::sync::Condvar;
@@ -643,6 +722,143 @@ mod tests {
                 })
                 .await
                 .expect("head CAS gate wait task panicked");
+            }
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicHeadCasStore {
+        inner: LocalFsStore,
+        head_key: String,
+        gate: Arc<PanicGate>,
+    }
+
+    #[derive(Debug)]
+    struct PanicGate {
+        state: Mutex<PanicGateState>,
+        cvar: Condvar,
+    }
+
+    #[derive(Debug)]
+    struct PanicGateState {
+        armed: bool,
+        entered: bool,
+        released: bool,
+    }
+
+    impl PanicHeadCasStore {
+        fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+            Self {
+                inner: LocalFsStore::new(root.as_ref()).expect("store"),
+                head_key: namespace_head(namespace_id.as_str()),
+                gate: Arc::new(PanicGate {
+                    state: Mutex::new(PanicGateState {
+                        armed: false,
+                        entered: false,
+                        released: false,
+                    }),
+                    cvar: Condvar::new(),
+                }),
+            }
+        }
+
+        fn arm_blocking_panic(&self) {
+            let mut state = self.gate.lock_state();
+            state.armed = true;
+            state.entered = false;
+            state.released = false;
+        }
+
+        async fn wait_for_blocked_head_cas(&self) {
+            let gate = self.gate.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut state = gate.lock_state();
+                while !state.entered {
+                    state = gate
+                        .cvar
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            })
+            .await
+            .expect("wait for blocked head CAS");
+        }
+
+        fn release_into_panic(&self) {
+            let mut state = self.gate.lock_state();
+            state.released = true;
+            self.gate.cvar.notify_all();
+        }
+    }
+
+    impl PanicGate {
+        // The injected panic poisons this mutex by design; later store calls
+        // must keep working, so recover instead of unwrapping.
+        fn lock_state(&self) -> std::sync::MutexGuard<'_, PanicGateState> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for PanicHeadCasStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+                let gate = self.gate.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut state = gate.lock_state();
+                    if state.armed {
+                        state.armed = false;
+                        state.entered = true;
+                        gate.cvar.notify_all();
+                        while !state.released {
+                            state = gate
+                                .cvar
+                                .wait(state)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                        panic!("injected publish task panic");
+                    }
+                })
+                .await
+                .expect("head CAS gate task");
             }
             self.inner.put(key, bytes, mode).await
         }
@@ -970,6 +1186,58 @@ mod tests {
                 ChangeSeq(index as u64 + 1)
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_survives_publish_task_panic_and_keeps_serving() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        let fs = test_fs(shared.clone(), &config);
+        create_namespace(&fs, &namespace_id).await;
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+
+        store.arm_blocking_panic();
+        let doomed = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("doomed", "doomed"),
+        );
+        store.wait_for_blocked_head_cas().await;
+
+        // Queued behind the in-flight batch: only the abort guard's respawn
+        // can ever publish this one.
+        let queued = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("queued", "queued"),
+        );
+
+        store.release_into_panic();
+
+        // The panic may have struck either side of the head CAS, so the
+        // taken request reports an unknown outcome, not definite failure.
+        let doomed_error = doomed
+            .await
+            .expect("doomed waiter is answered, not abandoned")
+            .expect_err("doomed commit did not complete");
+        assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
+
+        let queued_response = recv_commit(queued, "queued").await;
+        assert_eq!(queued_response.committed_seq, ChangeSeq(1));
+
+        // The publisher is fully serviceable after the panic.
+        let after = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("after", "after"),
+        );
+        assert_eq!(
+            recv_commit(after, "after").await.committed_seq,
+            ChangeSeq(2)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
