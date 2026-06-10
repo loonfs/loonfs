@@ -5,8 +5,7 @@ use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
-    namespace_head, namespace_lease, namespace_manifest, queue_shard, wal_segment,
-    DerivedWorkClass,
+    namespace_head, namespace_lease, namespace_manifest, wal_segment, DerivedWorkClass,
 };
 use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
@@ -186,7 +185,6 @@ fn key_builders_cover_locked_object_families() {
         derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
         "namespaces/ns-1/derived/manifest-builder/progress.json"
     );
-    assert_eq!(queue_shard(12), "queue/shards/0000000012.json");
 }
 
 #[test]

@@ -437,8 +437,6 @@ where
     assert_eq!(decoded, envelope);
 }
 
-// `ControlObjectKind::QueueShard` is a reserved key family with no payload
-// type yet, so it has no fixture until its state struct exists.
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(

@@ -20,11 +20,10 @@ pub enum ControlObjectKind {
     NamespaceGcPinState,
     NamespaceProgress,
     UploadSession,
-    QueueShard,
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::NamespaceDescriptor,
         Self::ContentStoreDescriptor,
         Self::NamespaceHead,
@@ -33,7 +32,6 @@ impl ControlObjectKind {
         Self::NamespaceGcPinState,
         Self::NamespaceProgress,
         Self::UploadSession,
-        Self::QueueShard,
     ];
 
     /// Durable format version for this control object kind.
@@ -52,7 +50,6 @@ impl ControlObjectKind {
             Self::NamespaceGcPinState => 1,
             Self::NamespaceProgress => 1,
             Self::UploadSession => 1,
-            Self::QueueShard => 1,
         }
     }
 
@@ -66,7 +63,6 @@ impl ControlObjectKind {
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::NamespaceProgress => "namespace_progress",
             Self::UploadSession => "upload_session",
-            Self::QueueShard => "queue_shard",
         }
     }
 

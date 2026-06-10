@@ -115,9 +115,6 @@ define_invariant_ids! {
     (ProgressThroughSeqAdvancesMonotonically, "progress_through_seq_advances_monotonically"),
 
     // Background work queue shard object invariants.
-    (QueueShardChecksumMatchesPayload, "queue_shard_checksum_matches_payload"),
-    (QueueShardKeyMatchesShardId, "queue_shard_key_matches_shard_id"),
-    (QueueShardCasProtectsUpdates, "queue_shard_cas_protects_updates"),
 
     // Background work queue mutation invariants.
     (LostEnqueueRepairEnqueuesWhenHeadOutpacesProgress, "lost_enqueue_repair_enqueues_when_head_outpaces_progress"),

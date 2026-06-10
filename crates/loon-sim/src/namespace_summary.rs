@@ -69,8 +69,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
             | DurableObjectFamily::NamespaceGcBoundary
             | DurableObjectFamily::DerivedProgress
             | DurableObjectFamily::ContentStoreDescriptor
-            | DurableObjectFamily::ContentBlob
-            | DurableObjectFamily::QueueShard => {}
+            | DurableObjectFamily::ContentBlob => {}
         }
     }
 

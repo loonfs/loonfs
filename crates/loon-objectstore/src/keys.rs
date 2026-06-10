@@ -134,10 +134,6 @@ pub fn derived_progress(namespace: &str, work_class: DerivedWorkClass) -> String
         .into_string()
 }
 
-pub fn queue_shard(shard_index: u32) -> String {
-    ObjectLayout::new().queue_shard(shard_index).into_string()
-}
-
 pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
     layout::sha256_hex_from_digest(digest)
 }
@@ -147,7 +143,7 @@ mod tests {
     use super::{
         conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
         derived_progress, metadata_sst, namespace_descriptor, namespace_fork_state, namespace_head,
-        namespace_lease, namespace_manifest, queue_shard, sha256_hex_from_digest, upload_session,
+        namespace_lease, namespace_manifest, sha256_hex_from_digest, upload_session,
         upload_session_prefix, wal_segment, DerivedWorkClass,
     };
     use loon_api::ManifestId;
@@ -187,7 +183,6 @@ mod tests {
             derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
             "namespaces/ns-1/derived/manifest-builder/progress.json"
         );
-        assert_eq!(queue_shard(17), "queue/shards/0000000017.json");
         assert_eq!(
             content_blob(
                 "cs_00000000000000000000000000000001",

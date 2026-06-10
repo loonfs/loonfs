@@ -25,7 +25,6 @@ pub enum DurableObjectFamily {
     ContentStoreDescriptor,
     ContentBlob,
     DerivedProgress,
-    QueueShard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +77,6 @@ typed_key!(IndexGcBoundaryKey);
 typed_key!(NamespaceGcBoundaryKey);
 typed_key!(GcPinKey);
 typed_key!(DerivedProgressKey);
-typed_key!(QueueShardKey);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamespaceGcBoundaryKind {
@@ -298,14 +296,6 @@ impl ObjectLayout {
             "namespaces/{namespace}/derived/{work_class}/progress.json"
         )))
     }
-
-    pub fn queue_shard(&self, shard_index: u32) -> QueueShardKey {
-        // Ten digits cover the full `u32` range so shard keys always sort
-        // lexicographically in index order.
-        QueueShardKey(ObjectKey::new(format!(
-            "queue/shards/{shard_index:010}.json"
-        )))
-    }
 }
 
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
@@ -317,7 +307,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["content-stores", _, "blobs", "sha256", _, _, _] => {
             parsed(DurableObjectFamily::ContentBlob, None)
         }
-        ["queue", "shards", _] => parsed(DurableObjectFamily::QueueShard, None),
         ["namespaces", namespace, "descriptor.json"] => {
             parsed(DurableObjectFamily::NamespaceDescriptor, Some(namespace))
         }
@@ -516,10 +505,6 @@ mod tests {
             "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
         );
         assert_eq!(
-            layout.queue_shard(17).as_str(),
-            "queue/shards/0000000017.json"
-        );
-        assert_eq!(
             layout
                 .content_blob(
                     "cs_00000000000000000000000000000001",
@@ -663,10 +648,6 @@ mod tests {
                 DurableObjectFamily::ContentStoreDescriptor,
             ),
             (content_key, DurableObjectFamily::ContentBlob),
-            (
-                layout.queue_shard(17).into_string(),
-                DurableObjectFamily::QueueShard,
-            ),
         ];
 
         for (key, family) in cases {
