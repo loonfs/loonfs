@@ -8,6 +8,7 @@ use crate::{
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Version 1: an uncompressed JSON envelope document carrying the payload as
@@ -327,6 +328,11 @@ pub struct NamespaceManifestPayload {
     pub fork: Option<NamespaceManifestFork>,
     #[serde(default)]
     pub checkpoints: Vec<NamespaceCheckpointRecord>,
+    /// Per-namespace capabilities materialized on this file-set version,
+    /// such as derived indexes (format spec, "Namespace features map").
+    /// Values are feature-owned JSON objects; readers ignore unknown keys.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, serde_json::Value>,
     // TODO: split this flat list into structured run/table/index roots when
     // compaction and GC need richer reachability decisions.
     pub metadata_files: Vec<MetadataFileRef>,
@@ -620,6 +626,7 @@ mod tests {
         NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
     use crate::{ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamePolicy, NamespaceId};
+    use std::collections::BTreeMap;
 
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
@@ -649,6 +656,7 @@ mod tests {
                     expires_at_ms: None,
                     name: None,
                 }],
+                features: BTreeMap::new(),
                 metadata_files: vec![metadata_file_ref(
                     "demo",
                     "tbl_00000000000000000000000000000001",
@@ -699,6 +707,7 @@ mod tests {
                     source_head_seq: ChangeSeq(12),
                 }),
                 checkpoints: Vec::new(),
+                features: BTreeMap::new(),
                 metadata_files: vec![
                     metadata_file_ref(
                         "source",

@@ -26,6 +26,7 @@ use loon_objectstore::keys::{
     gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
+use std::collections::BTreeMap;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -154,6 +155,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                 expires_at_ms: None,
                 name: None,
             }],
+            features: BTreeMap::new(),
             metadata_files: source_manifest.manifest.payload.metadata_files.clone(),
         },
     )
@@ -372,6 +374,7 @@ mod tests {
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::gc_pin;
     use loon_objectstore::ObjectStore;
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -527,6 +530,7 @@ mod tests {
                     expires_at_ms: None,
                     name: None,
                 }],
+                features: BTreeMap::new(),
                 metadata_files: Vec::new(),
             },
         )
