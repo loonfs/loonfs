@@ -25,7 +25,7 @@ Content staging is idempotent and has no effect on the visible tree. If the call
 
 ### 1.2 Basis reconstruction
 
-Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the current manifest (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
+Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in section 2.1: load the head, load the current manifest (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
 
 ### 1.3 Validation and logical commits
 
@@ -33,12 +33,12 @@ The server validates each commit request against the reconstructed state:
 
 1. Resolve any operation-local references needed to identify referenced content.
 2. Verify that all referenced content objects are already durable in object storage, and that `content_ref.kind`, digest, and size match. When provider-verified SHA-256 metadata is present, this validation may use metadata instead of downloading the whole object; otherwise it must read and hash the object bytes.
-3. Evaluate preconditions in order (see §6 for the precondition catalogue).
+3. Evaluate preconditions in order (see section 6 for the precondition catalogue).
 4. Resolve inode references and allocate new inode ids monotonically from the head's `next_inode_id`.
 
 If a request contains multiple operations, they are evaluated sequentially against ephemeral state advanced by earlier operations in the same request.
 
-Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in §1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
+Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in section 1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
 
 Content reference validation fails before metadata preconditions are evaluated when:
 
@@ -148,6 +148,31 @@ One head update may publish one or more contiguous logical commits.
 A logical commit becomes visible only when the head advances to a value at or beyond that commit's `seq` and the visible WAL chain includes that commit.
 
 This gives each successful request one `seq` and one replay identity without requiring one object write or one head update per request.
+
+### 3.1 Commit identity fingerprints
+
+Retry idempotency needs a durable answer to "is this the same logical commit already published under this `commit_id`?". That answer is the semantic commit fingerprint stored as `semantic_commit_fingerprint` in every WAL commit record and commit receipt.
+
+A fingerprint value is `v0:sha256:<64 lowercase hex>`. The `v0` tag names the canonicalization rules below and `sha256` the digest algorithm, so either can change later without re-interpreting stored values.
+
+The `v0` preimage is the compact JSON encoding (no whitespace, object keys in exactly the order shown) of:
+
+```json
+{
+  "domain": "loonfs.core.commit.semantic.v0",
+  "namespace_id": "...",
+  "preconditions": [...],
+  "ops": [...],
+  "message": "... or null",
+  "annotations": {"... sorted keys ..."}
+}
+```
+
+where `ops` and `preconditions` appear in request order using their v0 wire encoding, `message` and `annotations` are `null` when absent, and annotation keys sort lexicographically. The preimage deliberately excludes `commit_id`, writer identity, and fence tokens: a retry of the same logical commit must fingerprint identically no matter who retries it or when.
+
+Path-level mutations fingerprint the same way with domain `loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind, normalized absolute paths, and the intent's semantic parameters).
+
+A reused `commit_id` with an equal fingerprint replays the originally committed response; an unequal fingerprint is rejected as `commit_id_reuse_conflict`. Reference values are pinned by tests in `loon-core` (`commit/identity.rs` and `path/write/planner.rs`); those literals must never change within scheme `v0`.
 
 ## 4. Server authority
 

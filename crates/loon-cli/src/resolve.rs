@@ -4,32 +4,34 @@ use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loon_api::NamespaceId;
 
-pub struct LoadedConfig {
+pub(crate) struct LoadedConfig {
     pub path: std::path::PathBuf,
     pub config: CliConfig,
 }
 
-pub struct ResolvedProfile {
+pub(crate) struct ResolvedProfile {
     pub profile_name: String,
     pub target: ResolvedTarget,
 }
 
-pub struct ResolvedNamespace {
+pub(crate) struct ResolvedNamespace {
     pub namespace: String,
 }
 
-pub fn load_cli_config() -> Result<LoadedConfig, CliError> {
+pub(crate) fn load_cli_config() -> Result<LoadedConfig, CliError> {
     let path = default_config_path()?;
     let config = load_config(&path)?;
     Ok(LoadedConfig { path, config })
 }
 
-pub fn resolve_target_profile(explicit_profile: Option<&str>) -> Result<ResolvedProfile, CliError> {
+pub(crate) fn resolve_target_profile(
+    explicit_profile: Option<&str>,
+) -> Result<ResolvedProfile, CliError> {
     let loaded = load_cli_config()?;
     resolve_target_profile_from_config(&loaded.config, explicit_profile)
 }
 
-pub fn resolve_target_profile_from_config(
+pub(crate) fn resolve_target_profile_from_config(
     config: &CliConfig,
     explicit_profile: Option<&str>,
 ) -> Result<ResolvedProfile, CliError> {
@@ -41,7 +43,7 @@ pub fn resolve_target_profile_from_config(
     })
 }
 
-pub fn resolve_namespace(
+pub(crate) fn resolve_namespace(
     config: &CliConfig,
     explicit_profile: Option<&str>,
     explicit_namespace: Option<&str>,

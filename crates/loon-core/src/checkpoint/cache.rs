@@ -52,7 +52,6 @@ pub(super) struct DecodedMetadataTableBlock {
     pub(super) row_count: u64,
     pub(super) min_key: String,
     pub(super) max_key: String,
-    pub(super) page_checksums_sha256: Vec<String>,
     pub(super) decoded_byte_len: usize,
 }
 

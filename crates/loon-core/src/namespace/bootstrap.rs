@@ -6,9 +6,9 @@ use crate::namespace::catalog::{
 use crate::namespace::control::ControlObjectLoadError;
 use bytes::Bytes;
 use loon_api::wire::control::{
-    ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ControlObjectKind, HeadState,
-    HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope,
-    NamespaceDescriptorState,
+    encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
+    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState,
 };
 use loon_api::{
     ChangeSeq, ContentStoreId, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError,
@@ -118,9 +118,9 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         initial_lease,
     )
     .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
-    let head_bytes = serde_json::to_vec(&head_envelope)
+    let head_bytes = encode_control_object(&head_envelope)
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    let lease_bytes = serde_json::to_vec(&lease_envelope)
+    let lease_bytes = encode_control_object(&lease_envelope)
         .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
 
     let head_key = namespace_head(namespace_id.as_str());
@@ -144,7 +144,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
-    let namespace_descriptor_bytes = serde_json::to_vec(&namespace_descriptor_envelope)
+    let namespace_descriptor_bytes = encode_control_object(&namespace_descriptor_envelope)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
 
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
@@ -176,7 +176,7 @@ async fn create_new_content_store<S: ObjectStore + ?Sized>(
             },
         )
         .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
-        let bytes = serde_json::to_vec(&descriptor)
+        let bytes = encode_control_object(&descriptor)
             .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
         let key = content_store_descriptor(content_store_id.as_str());
         match store.put_if_absent(&key, Bytes::from(bytes)).await {

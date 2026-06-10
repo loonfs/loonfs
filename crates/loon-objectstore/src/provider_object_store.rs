@@ -1,4 +1,3 @@
-use crate::checksum;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
@@ -6,6 +5,7 @@ use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
+use loon_api::sha256_digest;
 use object_store as provider_store;
 use provider_store::path::Path;
 use provider_store::{
@@ -185,9 +185,7 @@ impl ObjectStore for ProviderObjectStore {
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let path = self.to_path(key)?;
-        let checksum_sha256 = self
-            .sha256_checksum_metadata
-            .then(|| checksum::sha256_digest(&bytes));
+        let checksum_sha256 = self.sha256_checksum_metadata.then(|| sha256_digest(&bytes));
         let size_bytes = bytes.len() as u64;
         let options = PutOptions {
             mode: map_put_mode(mode),
@@ -322,10 +320,7 @@ mod tests {
             .expect("put");
         assert_eq!(metadata.size_bytes, 4);
         assert!(metadata.etag.is_some());
-        assert_eq!(
-            metadata.checksum_sha256,
-            Some(checksum::sha256_digest(b"head"))
-        );
+        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(b"head")));
 
         let head = store.head(key).await.expect("head").expect("head exists");
         assert_eq!(head.size_bytes, 4);

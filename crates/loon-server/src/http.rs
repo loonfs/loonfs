@@ -78,6 +78,7 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
             "/v0/namespaces",
             post(create_namespace).get(list_namespaces_handler),
         )
+        .route("/v0/namespaces/:namespace", get(namespace_status_handler))
         .route(
             "/v0/namespaces/:namespace/forks",
             post(fork_namespace_handler),
@@ -270,16 +271,38 @@ async fn list_entries(
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
     Query(query): Query<PathQuery>,
-) -> Result<Json<Vec<loon_api::AuthoritativePathEntry>>, ApiResponseError> {
+) -> Result<Json<loon_api::ListPathEntriesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
-    let entries = state
+    let listing = state
         .fs
-        .list_path(&namespace_id, &path)
+        .list_path_entries(&namespace_id, &path)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok(Json(entries))
+    Ok(Json(listing))
+}
+
+async fn namespace_status_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<loon_api::NamespaceStatusResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = parse_namespace_id(namespace)?;
+    let status = state
+        .fs
+        .namespace_status(&namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(loon_api::NamespaceStatusResponse {
+        namespace_id: status.namespace_id,
+        head_seq: status.head_seq,
+        current_manifest_id: status.current_manifest_id,
+        latest_checkpoint_id: status.latest_checkpoint_id,
+        wal_tail_segments: status.wal_tail_segments,
+        retention_floor_seq: status.retention_floor_seq,
+    }))
 }
 
 async fn stat_entry(
@@ -622,7 +645,7 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
     } else {
         Err(ApiResponseError::new(
             StatusCode::UNAUTHORIZED,
-            "unauthorized",
+            ErrorCode::Unauthorized,
             "missing or invalid bearer token",
         ))
     }
@@ -643,7 +666,7 @@ fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
     value.parse::<u64>().map(InodeId).map_err(|err| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            "invalid_inode_id",
+            ErrorCode::InvalidInodeId,
             &format!("invalid inode_id `{value}`: {err}"),
         )
     })
@@ -653,7 +676,7 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
     value.parse::<u64>().map(RevisionNo).map_err(|err| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            "invalid_revision_no",
+            ErrorCode::InvalidRevisionNo,
             &format!("invalid revision_no `{value}`: {err}"),
         )
     })
@@ -665,11 +688,11 @@ struct ApiResponseError {
 }
 
 impl ApiResponseError {
-    fn new(status: StatusCode, code: &str, message: &str) -> Self {
+    fn new(status: StatusCode, code: ErrorCode, message: &str) -> Self {
         Self {
             status,
             body: ApiError {
-                code: code.to_owned(),
+                code: code.as_str().to_owned(),
                 message: message.to_owned(),
             },
         }
@@ -678,7 +701,7 @@ impl ApiResponseError {
     fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
-            "invalid_namespace_id",
+            ErrorCode::InvalidNamespaceId,
             &error.to_string(),
         )
     }
@@ -686,23 +709,25 @@ impl ApiResponseError {
     fn bootstrap(error: BootstrapNamespaceError) -> Self {
         match error {
             BootstrapNamespaceError::InvalidNamespaceId(error) => Self::invalid_namespace_id(error),
-            BootstrapNamespaceError::NamespaceAlreadyExists { .. } => {
-                Self::new(StatusCode::CONFLICT, "namespace_exists", &error.to_string())
-            }
+            BootstrapNamespaceError::NamespaceAlreadyExists { .. } => Self::new(
+                StatusCode::CONFLICT,
+                ErrorCode::NamespaceExists,
+                &error.to_string(),
+            ),
             BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => Self::new(
                 StatusCode::CONFLICT,
-                "namespace_partial",
+                ErrorCode::NamespacePartial,
                 &error.to_string(),
             ),
             BootstrapNamespaceError::EmptyHolderId
             | BootstrapNamespaceError::EmptyWriterVersion => Self::new(
                 StatusCode::BAD_REQUEST,
-                "invalid_config",
+                ErrorCode::InvalidConfig,
                 &error.to_string(),
             ),
             _ => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "bootstrap_failed",
+                ErrorCode::BootstrapFailed,
                 &error.to_string(),
             ),
         }
@@ -713,11 +738,11 @@ impl ApiResponseError {
             RuntimeError::Core(error) => Self::core(error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
+                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
             }
             error @ RuntimeError::RuntimeTask(_) => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                ErrorCode::ServerError,
                 &error.to_string(),
             ),
         }
@@ -725,14 +750,14 @@ impl ApiResponseError {
 
     fn core(error: CoreError) -> Self {
         let status = status_for_core_error_code(error.code());
-        Self::new(status, error.code().as_str(), &error.to_string())
+        Self::new(status, error.code(), &error.to_string())
     }
 
     fn core_for_namespace(namespace: &NamespaceId, error: CoreError) -> Self {
         if matches!(error.code(), ErrorCode::NamespaceNotFound) {
             return Self::new(
                 StatusCode::NOT_FOUND,
-                "namespace_not_found",
+                ErrorCode::NamespaceNotFound,
                 &format!("namespace `{}` does not exist", namespace.as_str()),
             );
         }
@@ -745,11 +770,11 @@ impl ApiResponseError {
             RuntimeError::Core(error) => Self::core_for_namespace(namespace, error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
+                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
             }
             error @ RuntimeError::RuntimeTask(_) => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
+                ErrorCode::ServerError,
                 &error.to_string(),
             ),
         }
@@ -762,16 +787,24 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::InvalidNamespaceId
         | ErrorCode::InvalidCommitId
         | ErrorCode::InvalidUploadId
+        | ErrorCode::InvalidInodeId
+        | ErrorCode::InvalidRevisionNo
+        | ErrorCode::InvalidConfig
         | ErrorCode::UnsupportedRenameMode
         | ErrorCode::InvalidUploadContent => StatusCode::BAD_REQUEST,
-        ErrorCode::NamespaceNotFound | ErrorCode::PathNotFound | ErrorCode::UploadNotFound => {
-            StatusCode::NOT_FOUND
+        ErrorCode::NamespaceNotFound
+        | ErrorCode::PathNotFound
+        | ErrorCode::RevisionNotFound
+        | ErrorCode::UploadNotFound => StatusCode::NOT_FOUND,
+        ErrorCode::CommitQueueFull | ErrorCode::CheckpointUnavailable => {
+            StatusCode::SERVICE_UNAVAILABLE
         }
-        ErrorCode::CommitQueueFull => StatusCode::SERVICE_UNAVAILABLE,
-        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError | ErrorCode::BootstrapFailed => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
         ErrorCode::NamespaceExists
         | ErrorCode::NamespacePartial
-        | ErrorCode::RevisionNotFound
         | ErrorCode::PathConflict
         | ErrorCode::DirectoryNotEmpty
         | ErrorCode::StaleHead
@@ -780,7 +813,6 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::LeaseConflict
         | ErrorCode::WouldCycle
         | ErrorCode::CommitIdReuseConflict
-        | ErrorCode::CheckpointUnavailable
         | ErrorCode::UploadAlreadyCompleted
         | ErrorCode::UploadContentConflict
         | ErrorCode::RebootstrapRequired => StatusCode::CONFLICT,

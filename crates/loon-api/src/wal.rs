@@ -1,5 +1,6 @@
 use crate::control::WalSegmentPointer;
-use crate::digest::sha256_hex;
+use crate::digest::sha256_digest;
+use crate::envelope::EnvelopeProbe;
 use crate::v0::{CommitAnnotations, CommitOpResult};
 use crate::{
     ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
@@ -8,6 +9,10 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Version 1: a zstd-compressed CBOR envelope document carrying the payload
+/// as an opaque CBOR byte string. `payload_checksum` covers exactly those
+/// bytes, and delta/precondition tags use the snake_case names from spec 050
+/// sections 5-6.
 pub const WAL_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +21,16 @@ pub enum WalEnvelopeKind {
     NamespaceWalSegment,
 }
 
+impl WalEnvelopeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NamespaceWalSegment => "namespace_wal_segment",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "delta", rename_all = "snake_case")]
 pub enum WalDelta {
     CreateInode {
         delta_index: u32,
@@ -51,6 +65,7 @@ pub enum WalDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum WalPrecondition {
     InodeRevisionIs {
         inode_id: InodeId,
@@ -87,7 +102,7 @@ pub struct WalCommitPayload {
     pub seq: ChangeSeq,
     pub apply_after_seq: ChangeSeq,
     pub commit_id: CommitId,
-    pub semantic_commit_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint: String,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,12 +127,19 @@ pub struct WalSegmentPayload {
     pub records: Vec<WalCommitPayload>,
 }
 
+/// In-memory view of a WAL segment envelope.
+///
+/// This struct is not the durable layout; durable bytes are produced only by
+/// [`encode_wal_segment_envelope_zstd`] and validated only by
+/// [`decode_wal_segment_envelope_zstd`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalSegmentEnvelope {
     pub kind: WalEnvelopeKind,
     pub format_version: u32,
     pub writer_version: String,
-    pub payload_checksum_sha256: String,
+    /// Digest of the encoded payload bytes exactly as stored in the durable
+    /// document, in `sha256:<hex>` form.
+    pub payload_checksum: String,
     pub payload: WalSegmentPayload,
 }
 
@@ -130,13 +152,9 @@ impl WalSegmentEnvelope {
             kind: WalEnvelopeKind::NamespaceWalSegment,
             format_version: WAL_FORMAT_VERSION,
             writer_version: writer_version.into(),
-            payload_checksum_sha256: wal_payload_checksum_sha256(&payload)?,
+            payload_checksum: wal_payload_checksum(&payload)?,
             payload,
         })
-    }
-
-    pub fn has_valid_payload_checksum(&self) -> Result<bool, WalCodecError> {
-        Ok(self.payload_checksum_sha256 == wal_payload_checksum_sha256(&self.payload)?)
     }
 
     pub fn pointer(&self, object_key: String) -> WalSegmentPointer {
@@ -145,9 +163,24 @@ impl WalSegmentEnvelope {
             segment_id: self.payload.segment_id.clone(),
             start_seq: self.payload.start_seq,
             end_seq: self.payload.end_seq,
-            payload_checksum_sha256: self.payload_checksum_sha256.clone(),
+            payload_checksum: self.payload_checksum.clone(),
         }
     }
+}
+
+/// Durable layout of a WAL segment object (before zstd compression): the
+/// envelope fields plus the payload as an opaque CBOR byte string.
+/// `payload_checksum` covers exactly those bytes, so integrity verification
+/// never depends on re-encoding the payload with this build's schema and a
+/// payload with unknown additive fields still verifies.
+#[derive(Serialize, Deserialize)]
+struct WalSegmentDocument {
+    kind: String,
+    format_version: u32,
+    writer_version: String,
+    payload_checksum: String,
+    #[serde(with = "serde_bytes")]
+    payload: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -158,18 +191,27 @@ pub enum WalCodecError {
     EnvelopeEncode(String),
     #[error("failed to decode WAL envelope from CBOR: {0}")]
     EnvelopeDecode(String),
+    #[error("failed to decode WAL payload from CBOR: {0}")]
+    PayloadDecode(String),
     #[error("failed to compress WAL envelope: {0}")]
     Compress(String),
     #[error("failed to decompress WAL envelope: {0}")]
     Decompress(String),
-    #[error("unsupported WAL format version `{0}`")]
-    UnsupportedFormatVersion(u32),
+    #[error("unexpected WAL envelope kind `{found}`: expected `{expected}`")]
+    UnexpectedKind { expected: String, found: String },
+    #[error("unsupported WAL format version `{found}`: this build supports `{supported}`")]
+    UnsupportedFormatVersion { found: u32, supported: u32 },
     #[error("WAL payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
+    #[error(
+        "WAL envelope checksum `{checksum}` does not match its payload `{actual}`: \
+         rebuild the envelope with `WalSegmentEnvelope::from_payload`"
+    )]
+    StalePayloadChecksum { checksum: String, actual: String },
 }
 
-pub fn wal_payload_checksum_sha256(payload: &WalSegmentPayload) -> Result<String, WalCodecError> {
-    Ok(sha256_hex(&encode_wal_payload_cbor(payload)?))
+pub fn wal_payload_checksum(payload: &WalSegmentPayload) -> Result<String, WalCodecError> {
+    Ok(sha256_digest(&encode_wal_payload_cbor(payload)?))
 }
 
 pub fn encode_wal_payload_cbor(payload: &WalSegmentPayload) -> Result<Vec<u8>, WalCodecError> {
@@ -182,8 +224,30 @@ pub fn encode_wal_payload_cbor(payload: &WalSegmentPayload) -> Result<Vec<u8>, W
 pub fn encode_wal_segment_envelope_zstd(
     envelope: &WalSegmentEnvelope,
 ) -> Result<Vec<u8>, WalCodecError> {
+    if envelope.format_version != WAL_FORMAT_VERSION {
+        return Err(WalCodecError::UnsupportedFormatVersion {
+            found: envelope.format_version,
+            supported: WAL_FORMAT_VERSION,
+        });
+    }
+    let payload_bytes = encode_wal_payload_cbor(&envelope.payload)?;
+    let actual = sha256_digest(&payload_bytes);
+    if actual != envelope.payload_checksum {
+        return Err(WalCodecError::StalePayloadChecksum {
+            checksum: envelope.payload_checksum.clone(),
+            actual,
+        });
+    }
+
+    let document = WalSegmentDocument {
+        kind: envelope.kind.as_str().to_owned(),
+        format_version: envelope.format_version,
+        writer_version: envelope.writer_version.clone(),
+        payload_checksum: envelope.payload_checksum.clone(),
+        payload: payload_bytes,
+    };
     let mut encoded = Vec::new();
-    into_writer(envelope, &mut encoded)
+    into_writer(&document, &mut encoded)
         .map_err(|err| WalCodecError::EnvelopeEncode(err.to_string()))?;
     zstd::stream::encode_all(encoded.as_slice(), 0)
         .map_err(|err| WalCodecError::Compress(err.to_string()))
@@ -192,22 +256,39 @@ pub fn encode_wal_segment_envelope_zstd(
 pub fn decode_wal_segment_envelope_zstd(bytes: &[u8]) -> Result<WalSegmentEnvelope, WalCodecError> {
     let decompressed = zstd::stream::decode_all(bytes)
         .map_err(|err| WalCodecError::Decompress(err.to_string()))?;
-    let envelope: WalSegmentEnvelope = from_reader(decompressed.as_slice())
+    let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| WalCodecError::EnvelopeDecode(err.to_string()))?;
-
-    if envelope.format_version != WAL_FORMAT_VERSION {
-        return Err(WalCodecError::UnsupportedFormatVersion(
-            envelope.format_version,
-        ));
+    let expected_kind = WalEnvelopeKind::NamespaceWalSegment;
+    if probe.kind != expected_kind.as_str() {
+        return Err(WalCodecError::UnexpectedKind {
+            expected: expected_kind.as_str().to_owned(),
+            found: probe.kind,
+        });
     }
-
-    let actual = wal_payload_checksum_sha256(&envelope.payload)?;
-    if actual != envelope.payload_checksum_sha256 {
-        return Err(WalCodecError::ChecksumMismatch {
-            expected: envelope.payload_checksum_sha256.clone(),
-            actual,
+    if probe.format_version != WAL_FORMAT_VERSION {
+        return Err(WalCodecError::UnsupportedFormatVersion {
+            found: probe.format_version,
+            supported: WAL_FORMAT_VERSION,
         });
     }
 
-    Ok(envelope)
+    let document: WalSegmentDocument = from_reader(decompressed.as_slice())
+        .map_err(|err| WalCodecError::EnvelopeDecode(err.to_string()))?;
+    let actual = sha256_digest(&document.payload);
+    if actual != document.payload_checksum {
+        return Err(WalCodecError::ChecksumMismatch {
+            expected: document.payload_checksum,
+            actual,
+        });
+    }
+    let payload: WalSegmentPayload = from_reader(document.payload.as_slice())
+        .map_err(|err| WalCodecError::PayloadDecode(err.to_string()))?;
+
+    Ok(WalSegmentEnvelope {
+        kind: expected_kind,
+        format_version: document.format_version,
+        writer_version: document.writer_version,
+        payload_checksum: document.payload_checksum,
+        payload,
+    })
 }

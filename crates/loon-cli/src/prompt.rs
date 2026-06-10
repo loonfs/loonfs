@@ -1,14 +1,14 @@
 use crate::error::CliError;
 use dialoguer::{Confirm, FuzzySelect, Input, Select};
 
-pub fn prompt_line(label: &str) -> Result<String, CliError> {
+pub(crate) fn prompt_line(label: &str) -> Result<String, CliError> {
     Input::new()
         .with_prompt(label)
         .interact_text()
         .map_err(|err| CliError::io(std::io::Error::other(err)))
 }
 
-pub fn prompt_line_default(label: &str, default: &str) -> Result<String, CliError> {
+pub(crate) fn prompt_line_default(label: &str, default: &str) -> Result<String, CliError> {
     Input::new()
         .with_prompt(label)
         .default(default.to_owned())
@@ -16,7 +16,10 @@ pub fn prompt_line_default(label: &str, default: &str) -> Result<String, CliErro
         .map_err(|err| CliError::io(std::io::Error::other(err)))
 }
 
-pub fn prompt_optional(label: &str, current: Option<&str>) -> Result<Option<String>, CliError> {
+pub(crate) fn prompt_optional(
+    label: &str,
+    current: Option<&str>,
+) -> Result<Option<String>, CliError> {
     let prompt = match current {
         Some(val) => format!("{label} (current: {val}, enter to keep, empty to clear)"),
         None => format!("{label} (optional, enter to skip)"),
@@ -34,11 +37,11 @@ pub fn prompt_optional(label: &str, current: Option<&str>) -> Result<Option<Stri
     }
 }
 
-pub fn prompt_choice(label: &str, options: &[&str]) -> Result<String, CliError> {
+pub(crate) fn prompt_choice(label: &str, options: &[&str]) -> Result<String, CliError> {
     prompt_choice_default(label, options, 0)
 }
 
-pub fn prompt_choice_default(
+pub(crate) fn prompt_choice_default(
     label: &str,
     options: &[&str],
     default: usize,
@@ -52,7 +55,7 @@ pub fn prompt_choice_default(
     Ok(options[selection].to_owned())
 }
 
-pub fn prompt_fuzzy_choice(
+pub(crate) fn prompt_fuzzy_choice(
     label: &str,
     options: &[&str],
     default: usize,
@@ -72,7 +75,7 @@ pub fn prompt_fuzzy_choice(
     }
 }
 
-pub fn prompt_confirm(label: &str) -> Result<bool, CliError> {
+pub(crate) fn prompt_confirm(label: &str) -> Result<bool, CliError> {
     Confirm::new()
         .with_prompt(label)
         .default(false)

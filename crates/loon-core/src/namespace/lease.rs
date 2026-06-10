@@ -3,7 +3,8 @@ use crate::namespace::control::{read_head_object, read_lease_object, ControlObje
 use crate::namespace::{next_takeover_head, HeadFenceTakeoverError};
 use bytes::Bytes;
 use loon_api::wire::control::{
-    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
+    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState,
+    LeaseStateEnvelope,
 };
 use loon_api::{FenceToken, NamespaceId};
 use loon_objectstore::ObjectStore;
@@ -204,7 +205,8 @@ async fn compare_and_swap_head<S: ObjectStore + ?Sized>(
     let envelope =
         HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, writer_version, next_head)
             .map_err(|err| CasOutcome::Fatal(err.to_string()))?;
-    let bytes = serde_json::to_vec(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
+    let bytes =
+        encode_control_object(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
     store
         .compare_and_swap(object_key, expected_etag, Bytes::from(bytes))
         .await
@@ -225,7 +227,8 @@ async fn compare_and_swap_lease<S: ObjectStore + ?Sized>(
         next_lease,
     )
     .map_err(|err| CasOutcome::Fatal(err.to_string()))?;
-    let bytes = serde_json::to_vec(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
+    let bytes =
+        encode_control_object(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
     store
         .compare_and_swap(object_key, expected_etag, Bytes::from(bytes))
         .await

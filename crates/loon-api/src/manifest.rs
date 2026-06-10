@@ -1,4 +1,5 @@
-use crate::digest::sha256_hex;
+use crate::digest::sha256_digest;
+use crate::envelope::EnvelopeProbe;
 use crate::v0::CommitOpResult;
 use crate::{
     ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, ManifestId, NamePolicy,
@@ -6,10 +7,17 @@ use crate::{
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use thiserror::Error;
 
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 5;
-pub const METADATA_SST_FORMAT_VERSION: u32 = 4;
+/// Version 1: an uncompressed JSON envelope document carrying the payload as
+/// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
+/// Version 1: a zstd-compressed CBOR envelope document carrying the payload
+/// as an opaque CBOR byte string. `payload_checksum` covers exactly those
+/// bytes; pages are not independently stored, so the payload checksum is the
+/// unit of integrity.
+pub const METADATA_SST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,10 +25,26 @@ pub enum NamespaceManifestKind {
     NamespaceManifest,
 }
 
+impl NamespaceManifestKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NamespaceManifest => "namespace_manifest",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataSstKind {
     MetadataSst,
+}
+
+impl MetadataSstKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MetadataSst => "metadata_sst",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -56,8 +80,9 @@ pub struct MetadataFileRef {
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
-    pub payload_checksum_sha256: String,
-    pub page_checksums_sha256: Vec<String>,
+    /// Checksum of the referenced SST's payload bytes, in `sha256:<hex>`
+    /// form. Must equal the `payload_checksum` in the referenced envelope.
+    pub payload_checksum: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +157,7 @@ pub enum MetadataRow {
     },
     CommitReceipt {
         commit_id: CommitId,
-        semantic_commit_fingerprint_sha256: String,
+        semantic_commit_fingerprint: String,
         committed_seq: ChangeSeq,
         results: Vec<CommitOpResult>,
     },
@@ -253,21 +278,19 @@ pub struct MetadataSstPayload {
     pub pages: Vec<MetadataPage>,
 }
 
-impl MetadataSstPayload {
-    pub fn page_checksums_sha256(&self) -> Result<Vec<String>, MetadataSstCodecError> {
-        self.pages
-            .iter()
-            .map(metadata_page_checksum_sha256)
-            .collect()
-    }
-}
-
+/// In-memory view of a metadata SST envelope.
+///
+/// This struct is not the durable layout; durable bytes are produced only by
+/// [`encode_metadata_sst_envelope_zstd`] and validated only by
+/// [`decode_metadata_sst_envelope_zstd`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataSstEnvelope {
     pub kind: MetadataSstKind,
     pub format_version: u32,
     pub writer_version: String,
-    pub payload_checksum_sha256: String,
+    /// Digest of the encoded payload bytes exactly as stored in the durable
+    /// document, in `sha256:<hex>` form.
+    pub payload_checksum: String,
     pub payload: MetadataSstPayload,
 }
 
@@ -280,17 +303,9 @@ impl MetadataSstEnvelope {
             kind: MetadataSstKind::MetadataSst,
             format_version: METADATA_SST_FORMAT_VERSION,
             writer_version: writer_version.into(),
-            payload_checksum_sha256: metadata_sst_payload_checksum_sha256(&payload)?,
+            payload_checksum: metadata_sst_payload_checksum(&payload)?,
             payload,
         })
-    }
-
-    pub fn has_valid_payload_checksum(&self) -> Result<bool, MetadataSstCodecError> {
-        Ok(self.payload_checksum_sha256 == metadata_sst_payload_checksum_sha256(&self.payload)?)
-    }
-
-    pub fn page_checksums_sha256(&self) -> Result<Vec<String>, MetadataSstCodecError> {
-        self.payload.page_checksums_sha256()
     }
 }
 
@@ -317,12 +332,19 @@ pub struct NamespaceManifestPayload {
     pub metadata_files: Vec<MetadataFileRef>,
 }
 
+/// In-memory view of a namespace manifest envelope.
+///
+/// This struct is not the durable layout; durable bytes are produced only by
+/// [`encode_namespace_manifest_json`] and validated only by
+/// [`decode_namespace_manifest_json`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceManifestEnvelope {
     pub kind: NamespaceManifestKind,
     pub format_version: u32,
     pub writer_version: String,
-    pub payload_checksum_sha256: String,
+    /// Digest of the payload JSON exactly as stored in the durable document,
+    /// in `sha256:<hex>` form.
+    pub payload_checksum: String,
     pub payload: NamespaceManifestPayload,
 }
 
@@ -335,15 +357,39 @@ impl NamespaceManifestEnvelope {
             kind: NamespaceManifestKind::NamespaceManifest,
             format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
             writer_version: writer_version.into(),
-            payload_checksum_sha256: namespace_manifest_payload_checksum_sha256(&payload)?,
+            payload_checksum: namespace_manifest_payload_checksum(&payload)?,
             payload,
         })
     }
+}
 
-    pub fn has_valid_payload_checksum(&self) -> Result<bool, NamespaceManifestCodecError> {
-        Ok(self.payload_checksum_sha256
-            == namespace_manifest_payload_checksum_sha256(&self.payload)?)
-    }
+/// Durable layout of a namespace manifest object: the envelope fields plus
+/// the payload as a raw JSON fragment. Keeping the payload inline (rather
+/// than as encoded bytes) preserves the operational property that manifests
+/// are directly readable JSON, while `payload_checksum` still covers the
+/// exact fragment bytes as stored.
+#[derive(Serialize, Deserialize)]
+struct NamespaceManifestDocument {
+    kind: String,
+    format_version: u32,
+    writer_version: String,
+    payload_checksum: String,
+    payload: Box<RawValue>,
+}
+
+/// Durable layout of a metadata SST object (before zstd compression), with
+/// the payload as an opaque CBOR byte string. See [`WAL_FORMAT_VERSION`] for
+/// the shared envelope rationale.
+///
+/// [`WAL_FORMAT_VERSION`]: crate::wal::WAL_FORMAT_VERSION
+#[derive(Serialize, Deserialize)]
+struct MetadataSstDocument {
+    kind: String,
+    format_version: u32,
+    writer_version: String,
+    payload_checksum: String,
+    #[serde(with = "serde_bytes")]
+    payload: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -354,54 +400,133 @@ pub enum NamespaceManifestCodecError {
     EnvelopeEncode(String),
     #[error("failed to decode namespace manifest envelope from JSON: {0}")]
     EnvelopeDecode(String),
+    #[error("failed to decode namespace manifest payload from JSON: {0}")]
+    PayloadDecode(String),
+    #[error("unexpected namespace manifest kind `{found}`: expected `{expected}`")]
+    UnexpectedKind { expected: String, found: String },
+    #[error("unsupported namespace manifest format version `{found}`: this build supports `{supported}`")]
+    UnsupportedFormatVersion { found: u32, supported: u32 },
     #[error("namespace manifest payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
+    #[error(
+        "namespace manifest envelope checksum `{checksum}` does not match its payload `{actual}`: \
+         rebuild the envelope with `NamespaceManifestEnvelope::from_payload`"
+    )]
+    StalePayloadChecksum { checksum: String, actual: String },
 }
 
 #[derive(Debug, Error)]
 pub enum MetadataSstCodecError {
-    #[error("failed to encode manifest page to CBOR: {0}")]
-    PageEncode(String),
     #[error("failed to encode metadata SST payload to CBOR: {0}")]
     PayloadEncode(String),
     #[error("failed to encode metadata SST envelope to CBOR: {0}")]
     EnvelopeEncode(String),
     #[error("failed to decode metadata SST envelope from CBOR: {0}")]
     EnvelopeDecode(String),
+    #[error("failed to decode metadata SST payload from CBOR: {0}")]
+    PayloadDecode(String),
     #[error("failed to compress metadata SST envelope: {0}")]
     Compress(String),
     #[error("failed to decompress metadata SST envelope: {0}")]
     Decompress(String),
+    #[error("unexpected metadata SST kind `{found}`: expected `{expected}`")]
+    UnexpectedKind { expected: String, found: String },
+    #[error(
+        "unsupported metadata SST format version `{found}`: this build supports `{supported}`"
+    )]
+    UnsupportedFormatVersion { found: u32, supported: u32 },
     #[error("metadata SST payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
+    #[error(
+        "metadata SST envelope checksum `{checksum}` does not match its payload `{actual}`: \
+         rebuild the envelope with `MetadataSstEnvelope::from_payload`"
+    )]
+    StalePayloadChecksum { checksum: String, actual: String },
 }
 
-pub fn namespace_manifest_payload_checksum_sha256(
+pub fn namespace_manifest_payload_checksum(
     payload: &NamespaceManifestPayload,
 ) -> Result<String, NamespaceManifestCodecError> {
     let bytes = serde_json::to_vec(payload)
         .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?;
-    Ok(sha256_hex(&bytes))
+    Ok(sha256_digest(&bytes))
 }
 
 pub fn encode_namespace_manifest_json(
     envelope: &NamespaceManifestEnvelope,
 ) -> Result<Vec<u8>, NamespaceManifestCodecError> {
-    serde_json::to_vec(envelope)
+    if envelope.format_version != NAMESPACE_MANIFEST_FORMAT_VERSION {
+        return Err(NamespaceManifestCodecError::UnsupportedFormatVersion {
+            found: envelope.format_version,
+            supported: NAMESPACE_MANIFEST_FORMAT_VERSION,
+        });
+    }
+    let payload_json = serde_json::to_string(&envelope.payload)
+        .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?;
+    let actual = sha256_digest(payload_json.as_bytes());
+    if actual != envelope.payload_checksum {
+        return Err(NamespaceManifestCodecError::StalePayloadChecksum {
+            checksum: envelope.payload_checksum.clone(),
+            actual,
+        });
+    }
+
+    let document = NamespaceManifestDocument {
+        kind: envelope.kind.as_str().to_owned(),
+        format_version: envelope.format_version,
+        writer_version: envelope.writer_version.clone(),
+        payload_checksum: envelope.payload_checksum.clone(),
+        payload: RawValue::from_string(payload_json)
+            .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?,
+    };
+    serde_json::to_vec(&document)
         .map_err(|err| NamespaceManifestCodecError::EnvelopeEncode(err.to_string()))
 }
 
-pub fn metadata_page_checksum_sha256(page: &MetadataPage) -> Result<String, MetadataSstCodecError> {
-    let mut encoded = Vec::new();
-    into_writer(page, &mut encoded)
-        .map_err(|err| MetadataSstCodecError::PageEncode(err.to_string()))?;
-    Ok(sha256_hex(&encoded))
+pub fn decode_namespace_manifest_json(
+    bytes: &[u8],
+) -> Result<NamespaceManifestEnvelope, NamespaceManifestCodecError> {
+    let probe: EnvelopeProbe = serde_json::from_slice(bytes)
+        .map_err(|err| NamespaceManifestCodecError::EnvelopeDecode(err.to_string()))?;
+    let expected_kind = NamespaceManifestKind::NamespaceManifest;
+    if probe.kind != expected_kind.as_str() {
+        return Err(NamespaceManifestCodecError::UnexpectedKind {
+            expected: expected_kind.as_str().to_owned(),
+            found: probe.kind,
+        });
+    }
+    if probe.format_version != NAMESPACE_MANIFEST_FORMAT_VERSION {
+        return Err(NamespaceManifestCodecError::UnsupportedFormatVersion {
+            found: probe.format_version,
+            supported: NAMESPACE_MANIFEST_FORMAT_VERSION,
+        });
+    }
+
+    let document: NamespaceManifestDocument = serde_json::from_slice(bytes)
+        .map_err(|err| NamespaceManifestCodecError::EnvelopeDecode(err.to_string()))?;
+    let actual = sha256_digest(document.payload.get().as_bytes());
+    if actual != document.payload_checksum {
+        return Err(NamespaceManifestCodecError::ChecksumMismatch {
+            expected: document.payload_checksum,
+            actual,
+        });
+    }
+    let payload: NamespaceManifestPayload = serde_json::from_str(document.payload.get())
+        .map_err(|err| NamespaceManifestCodecError::PayloadDecode(err.to_string()))?;
+
+    Ok(NamespaceManifestEnvelope {
+        kind: expected_kind,
+        format_version: document.format_version,
+        writer_version: document.writer_version,
+        payload_checksum: document.payload_checksum,
+        payload,
+    })
 }
 
-pub fn metadata_sst_payload_checksum_sha256(
+pub fn metadata_sst_payload_checksum(
     payload: &MetadataSstPayload,
 ) -> Result<String, MetadataSstCodecError> {
-    Ok(sha256_hex(&encode_metadata_sst_payload_cbor(payload)?))
+    Ok(sha256_digest(&encode_metadata_sst_payload_cbor(payload)?))
 }
 
 pub fn encode_metadata_sst_payload_cbor(
@@ -413,34 +538,33 @@ pub fn encode_metadata_sst_payload_cbor(
     Ok(encoded)
 }
 
-pub fn decode_namespace_manifest_json(
-    bytes: &[u8],
-) -> Result<NamespaceManifestEnvelope, NamespaceManifestCodecError> {
-    let envelope: NamespaceManifestEnvelope = serde_json::from_slice(bytes)
-        .map_err(|err| NamespaceManifestCodecError::EnvelopeDecode(err.to_string()))?;
-    if envelope.format_version != NAMESPACE_MANIFEST_FORMAT_VERSION {
-        return Err(NamespaceManifestCodecError::EnvelopeDecode(format!(
-            "unsupported namespace manifest format version `{}`",
-            envelope.format_version
-        )));
+pub fn encode_metadata_sst_envelope_zstd(
+    envelope: &MetadataSstEnvelope,
+) -> Result<Vec<u8>, MetadataSstCodecError> {
+    if envelope.format_version != METADATA_SST_FORMAT_VERSION {
+        return Err(MetadataSstCodecError::UnsupportedFormatVersion {
+            found: envelope.format_version,
+            supported: METADATA_SST_FORMAT_VERSION,
+        });
     }
-    let actual = namespace_manifest_payload_checksum_sha256(&envelope.payload)?;
-
-    if actual != envelope.payload_checksum_sha256 {
-        return Err(NamespaceManifestCodecError::ChecksumMismatch {
-            expected: envelope.payload_checksum_sha256.clone(),
+    let payload_bytes = encode_metadata_sst_payload_cbor(&envelope.payload)?;
+    let actual = sha256_digest(&payload_bytes);
+    if actual != envelope.payload_checksum {
+        return Err(MetadataSstCodecError::StalePayloadChecksum {
+            checksum: envelope.payload_checksum.clone(),
             actual,
         });
     }
 
-    Ok(envelope)
-}
-
-pub fn encode_metadata_sst_envelope_zstd(
-    envelope: &MetadataSstEnvelope,
-) -> Result<Vec<u8>, MetadataSstCodecError> {
+    let document = MetadataSstDocument {
+        kind: envelope.kind.as_str().to_owned(),
+        format_version: envelope.format_version,
+        writer_version: envelope.writer_version.clone(),
+        payload_checksum: envelope.payload_checksum.clone(),
+        payload: payload_bytes,
+    };
     let mut encoded = Vec::new();
-    into_writer(envelope, &mut encoded)
+    into_writer(&document, &mut encoded)
         .map_err(|err| MetadataSstCodecError::EnvelopeEncode(err.to_string()))?;
     zstd::stream::encode_all(encoded.as_slice(), 0)
         .map_err(|err| MetadataSstCodecError::Compress(err.to_string()))
@@ -451,24 +575,41 @@ pub fn decode_metadata_sst_envelope_zstd(
 ) -> Result<MetadataSstEnvelope, MetadataSstCodecError> {
     let decompressed = zstd::stream::decode_all(bytes)
         .map_err(|err| MetadataSstCodecError::Decompress(err.to_string()))?;
-    let envelope: MetadataSstEnvelope = from_reader(decompressed.as_slice())
+    let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
         .map_err(|err| MetadataSstCodecError::EnvelopeDecode(err.to_string()))?;
-    if envelope.format_version != METADATA_SST_FORMAT_VERSION {
-        return Err(MetadataSstCodecError::EnvelopeDecode(format!(
-            "unsupported metadata SST format version `{}`",
-            envelope.format_version
-        )));
+    let expected_kind = MetadataSstKind::MetadataSst;
+    if probe.kind != expected_kind.as_str() {
+        return Err(MetadataSstCodecError::UnexpectedKind {
+            expected: expected_kind.as_str().to_owned(),
+            found: probe.kind,
+        });
     }
-
-    let actual = metadata_sst_payload_checksum_sha256(&envelope.payload)?;
-    if actual != envelope.payload_checksum_sha256 {
-        return Err(MetadataSstCodecError::ChecksumMismatch {
-            expected: envelope.payload_checksum_sha256.clone(),
-            actual,
+    if probe.format_version != METADATA_SST_FORMAT_VERSION {
+        return Err(MetadataSstCodecError::UnsupportedFormatVersion {
+            found: probe.format_version,
+            supported: METADATA_SST_FORMAT_VERSION,
         });
     }
 
-    Ok(envelope)
+    let document: MetadataSstDocument = from_reader(decompressed.as_slice())
+        .map_err(|err| MetadataSstCodecError::EnvelopeDecode(err.to_string()))?;
+    let actual = sha256_digest(&document.payload);
+    if actual != document.payload_checksum {
+        return Err(MetadataSstCodecError::ChecksumMismatch {
+            expected: document.payload_checksum,
+            actual,
+        });
+    }
+    let payload: MetadataSstPayload = from_reader(document.payload.as_slice())
+        .map_err(|err| MetadataSstCodecError::PayloadDecode(err.to_string()))?;
+
+    Ok(MetadataSstEnvelope {
+        kind: expected_kind,
+        format_version: document.format_version,
+        writer_version: document.writer_version,
+        payload_checksum: document.payload_checksum,
+        payload,
+    })
 }
 
 #[cfg(test)]
@@ -653,8 +794,7 @@ mod tests {
             row_count: 0,
             min_key: String::new(),
             max_key: String::new(),
-            payload_checksum_sha256: "sha256:unused".to_owned(),
-            page_checksums_sha256: Vec::new(),
+            payload_checksum: "sha256:unused".to_owned(),
         }
     }
 }

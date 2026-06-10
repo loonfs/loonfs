@@ -1,4 +1,4 @@
-use super::CHECKPOINT_TABLE_FAMILIES;
+use super::runs::CHECKPOINT_TABLE_FAMILIES;
 use crate::metadata::MetadataState;
 use loon_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loon_api::ChangeSeq;
@@ -75,9 +75,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|record| MetadataRow::CommitReceipt {
                 commit_id: record.commit_id.clone(),
-                semantic_commit_fingerprint_sha256: record
-                    .semantic_commit_fingerprint_sha256
-                    .clone(),
+                semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.committed_seq,
                 results: record.results.clone(),
             })

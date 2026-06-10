@@ -29,8 +29,8 @@ pub fn head_and_lease_fence_tokens_agree(head: &HeadState, lease: &LeaseState) -
     head.namespace_id == lease.namespace_id && head.active_fence_token == lease.fence_token
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
 /// Error while preparing a head for writer takeover.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HeadFenceTakeoverError {
     /// The fence token cannot be advanced.
     #[error("head fence token overflow from `{active:?}`")]

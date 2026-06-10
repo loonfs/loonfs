@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 
 #[derive(Debug, Parser)]
 #[command(name = "loon")]
-pub struct Cli {
+pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
     #[arg(long, global = true)]
@@ -13,7 +13,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     Init(InitArgs),
     Profile {
         #[command(subcommand)]
@@ -44,7 +44,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
-pub struct InitArgs {
+pub(crate) struct InitArgs {
     pub name: Option<String>,
     #[arg(long, value_name = "embedded|remote")]
     pub mode: Option<String>,
@@ -77,7 +77,7 @@ pub struct InitArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ProfileCommand {
+pub(crate) enum ProfileCommand {
     Create(ProfileCreateArgs),
     List,
     Show { name: Option<String> },
@@ -87,7 +87,7 @@ pub enum ProfileCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileCreateArgs {
+pub(crate) struct ProfileCreateArgs {
     pub name: String,
     #[arg(long, value_name = "embedded|remote")]
     pub mode: Option<String>,
@@ -120,7 +120,7 @@ pub struct ProfileCreateArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileUpdateArgs {
+pub(crate) struct ProfileUpdateArgs {
     pub name: String,
     #[arg(long)]
     pub root: Option<String>,
@@ -147,13 +147,13 @@ pub struct ProfileUpdateArgs {
 }
 
 #[derive(Debug, Args, Clone)]
-pub struct ProfileSelectorArgs {
+pub(crate) struct ProfileSelectorArgs {
     #[arg(long)]
     pub profile: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
-pub struct TargetSelectorArgs {
+pub(crate) struct TargetSelectorArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[arg(long)]
@@ -161,34 +161,34 @@ pub struct TargetSelectorArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct NamespaceUseArgs {
+pub(crate) struct NamespaceUseArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     pub namespace: String,
 }
 
 #[derive(Debug, Args)]
-pub struct CurrentArgs {
+pub(crate) struct CurrentArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum NamespaceCommand {
+pub(crate) enum NamespaceCommand {
     Create(NamespaceCreateArgs),
     Fork(NamespaceForkArgs),
     List(NamespaceListArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct NamespaceCreateArgs {
+pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     pub namespace_id: String,
 }
 
 #[derive(Debug, Args)]
-pub struct NamespaceForkArgs {
+pub(crate) struct NamespaceForkArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     pub source: String,
@@ -196,27 +196,27 @@ pub struct NamespaceForkArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct NamespaceListArgs {
+pub(crate) struct NamespaceListArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemLsArgs {
+pub(crate) struct FilesystemLsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: Option<String>,
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemPathArgs {
+pub(crate) struct FilesystemPathArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemCatArgs {
+pub(crate) struct FilesystemCatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
@@ -225,7 +225,7 @@ pub struct FilesystemCatArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemGetArgs {
+pub(crate) struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub remote_path: String,
@@ -235,7 +235,7 @@ pub struct FilesystemGetArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemPutArgs {
+pub(crate) struct FilesystemPutArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub local_path: String,
@@ -245,7 +245,7 @@ pub struct FilesystemPutArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemMoveArgs {
+pub(crate) struct FilesystemMoveArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub source_path: String,
@@ -253,7 +253,7 @@ pub struct FilesystemMoveArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct FilesystemRestoreArgs {
+pub(crate) struct FilesystemRestoreArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
@@ -262,20 +262,20 @@ pub struct FilesystemRestoreArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ConfigCommand {
+pub(crate) enum ConfigCommand {
     Path,
     Show,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeBehavior {
+pub(crate) struct RuntimeBehavior {
     pub json: bool,
     pub no_input: bool,
     pub interactive: bool,
 }
 
 impl RuntimeBehavior {
-    pub fn detect(cli: &Cli) -> Self {
+    pub(crate) fn detect(cli: &Cli) -> Self {
         let interactive = !cli.json
             && !cli.no_input
             && std::io::stdin().is_terminal()
@@ -289,7 +289,7 @@ impl RuntimeBehavior {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandKind {
+pub(crate) enum CommandKind {
     Init,
     ProfileCreate,
     ProfileList,
@@ -319,7 +319,7 @@ pub enum CommandKind {
 }
 
 impl CommandKind {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             CommandKind::Init => "init",
             CommandKind::ProfileCreate => "profile_create",
@@ -350,13 +350,13 @@ impl CommandKind {
         }
     }
 
-    pub fn supports_json(self) -> bool {
+    pub(crate) fn supports_json(self) -> bool {
         !matches!(self, CommandKind::FilesystemCat)
     }
 }
 
 impl Cli {
-    pub fn kind(&self) -> CommandKind {
+    pub(crate) fn kind(&self) -> CommandKind {
         match &self.command {
             Command::Init(_) => CommandKind::Init,
             Command::Profile { command } => match command {

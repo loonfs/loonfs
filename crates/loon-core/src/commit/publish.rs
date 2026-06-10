@@ -2,7 +2,9 @@ use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan};
 use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
-use loon_api::wire::control::{ControlObjectKind, HeadState, HeadStateEnvelope};
+use loon_api::wire::control::{
+    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
+};
 use loon_api::ChangeSeq;
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::ObjectStoreError;
@@ -93,7 +95,7 @@ pub fn prepare_commit_head_publish(
         resulting_head.clone(),
     )
     .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
-    let encoded_bytes = serde_json::to_vec(&envelope)
+    let encoded_bytes = encode_control_object(&envelope)
         .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
 
     let mut checked_invariants = plan.checked_invariants.clone();
@@ -190,7 +192,7 @@ mod tests {
                     apply_after_seq: ChangeSeq(seq.0.saturating_sub(1)),
                     commit_id: CommitId::try_new(format!("publish-record-{index}"))
                         .expect("valid commit id"),
-                    semantic_commit_fingerprint_sha256: format!("fingerprint-{index}"),
+                    semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     writer_id: "writer-a".to_owned(),
                     writer_fence_token: FenceToken(1),
                     message: None,

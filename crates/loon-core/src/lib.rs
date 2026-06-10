@@ -29,9 +29,6 @@
 //! let _ = engine.read_file("/plan.md", ReadOptions::default());
 //! ```
 
-#![forbid(unsafe_code)]
-
-#[path = "checkpoint/mod.rs"]
 mod checkpoint;
 pub mod commit;
 pub mod content;

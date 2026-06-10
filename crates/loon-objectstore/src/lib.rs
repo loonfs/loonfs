@@ -1,6 +1,12 @@
-#![forbid(unsafe_code)]
+//! The LoonFS object-store boundary.
+//!
+//! LoonFS assumes only the narrow provider contract spec 030 names —
+//! create-if-absent, compare-and-swap, read-after-write visibility, prefix
+//! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
+//! provider adapters for S3, Cloudflare R2, and the local filesystem, the
+//! durable key layout in [`keys`] and [`layout`], and the conformance
+//! [`probes`] that keep provider assumptions honest.
 
-mod checksum;
 mod configured;
 pub mod fs;
 pub mod keys;

@@ -18,11 +18,11 @@ use crate::invariants::InvariantId;
 
 pub use self::api_adapter::{commit_request_from_v0, CommitConversionError};
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
-pub(crate) use self::identity::PATH_INTENT_FINGERPRINT_DOMAIN;
 pub use self::identity::{
     core_commit_fingerprint, core_commit_fingerprint_for_v0_request, CommitFingerprintError,
     CoreCommitFingerprint, PathIntentFingerprint, SemanticMutationIdentity,
 };
+pub(crate) use self::identity::{fingerprint_digest, PATH_INTENT_FINGERPRINT_DOMAIN};
 pub use self::materialize::{materialize_commit, MaterializedCommit, MaterializedCommitDelta};
 pub use self::operation::CommitOp;
 pub(crate) use self::plan::ValidatedOp;

@@ -186,7 +186,7 @@ fn key_builders_cover_locked_object_families() {
         derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
         "namespaces/ns-1/derived/manifest-builder/progress.json"
     );
-    assert_eq!(queue_shard(12), "queue/shards/00012.json");
+    assert_eq!(queue_shard(12), "queue/shards/0000000012.json");
 }
 
 #[test]

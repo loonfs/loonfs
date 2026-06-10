@@ -349,7 +349,7 @@ async fn probe_scoped_prefix_behavior<S: ObjectStore + ?Sized>(
 }
 
 fn probe_namespace(run_id: &str, suffix: &str) -> String {
-    format!("doctor-{run_id}-{suffix}")
+    format!("loonfs-doctor-{run_id}-{suffix}")
 }
 
 fn assert_precondition_failed<T>(

@@ -1,5 +1,5 @@
 use super::intent::{PathMutationIntent, PutFileBehavior};
-use crate::commit::{PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
+use crate::commit::{fingerprint_digest, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
@@ -7,7 +7,6 @@ use crate::path::helpers::{
     final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
 };
 use crate::path::tombstone::reject_tombstoned_path_ancestor;
-use loon_api::wire::control::payload_checksum_sha256;
 use loon_api::wire::control::HeadState;
 use loon_api::wire::wal::WalDelta;
 use loon_api::{
@@ -66,6 +65,11 @@ impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
     }
 }
 
+/// Canonical preimage for path-intent fingerprints.
+///
+/// The serde representation is durable contract (spec 050 section 3.1): the same
+/// normalized intent must fingerprint identically across releases. A
+/// pinned-value test below fails if the encoding drifts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PathFingerprintInput {
@@ -111,7 +115,7 @@ fn path_intent_fingerprint(
         intent: &'a PathFingerprintInput,
     }
 
-    payload_checksum_sha256(&CanonicalPathIntent {
+    fingerprint_digest(&CanonicalPathIntent {
         domain: PATH_INTENT_FINGERPRINT_DOMAIN,
         intent: identity,
     })
@@ -792,6 +796,29 @@ mod tests {
             now_ms: 1,
             lease_duration_ms: 60_000,
         }
+    }
+
+    /// Pins the exact stored fingerprint for a fixed path intent.
+    ///
+    /// If this fails, the canonical preimage changed (spec 050 section 3.1) and every
+    /// persisted fingerprint would disagree with recomputed ones, breaking
+    /// retry idempotency across versions. Do not update the literal without
+    /// bumping the fingerprint scheme tag.
+    #[test]
+    fn path_intent_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let intent = PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse("c_00000000000000000000000000000042").expect("commit id"),
+            absolute_path: "/docs".to_owned(),
+        };
+
+        let fingerprint =
+            path_intent_fingerprint_for_path_intent(&namespace_id, &intent).expect("fingerprint");
+
+        assert_eq!(
+            fingerprint.as_str(),
+            "v0:sha256:85be04e569ee0e20adb4b3da3d095a6c27bd4fc2b5cb90785cc71980a48fddad"
+        );
     }
 
     async fn setup_namespace() -> (

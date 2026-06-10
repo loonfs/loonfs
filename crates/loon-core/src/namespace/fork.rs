@@ -10,9 +10,10 @@ use crate::namespace::catalog::{
 };
 use bytes::Bytes;
 use loon_api::wire::control::{
-    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkState,
-    NamespaceForkStateEnvelope, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
+    decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
+    LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+    NamespaceForkState, NamespaceForkStateEnvelope, NamespaceGcPinState,
+    NamespaceGcPinStateEnvelope,
 };
 use loon_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
@@ -157,13 +158,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let referenced_metadata_files_debug = target_manifest
-        .payload
-        .metadata_files
-        .iter()
-        .filter(|metadata_file| metadata_file.owner_namespace_id == *source_namespace_id)
-        .map(|metadata_file| metadata_file.object_key.clone())
-        .collect::<Vec<_>>();
     let gc_pin_envelope = NamespaceGcPinStateEnvelope::from_state(
         ControlObjectKind::NamespaceGcPinState,
         &context.writer_version,
@@ -180,7 +174,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             source_checkpoint_id,
             source_manifest_id,
             source_head_seq,
-            referenced_metadata_files_debug,
             created_at_ms: context.now_ms,
         },
     )
@@ -194,28 +187,28 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         store,
         new_namespace_id,
         &head_key,
-        &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&head).map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &fork_state_key,
-        &serde_json::to_vec(&fork_state).map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&fork_state).map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &lease_key,
-        &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &descriptor_key,
-        &serde_json::to_vec(&namespace_descriptor_envelope)
+        &encode_control_object(&namespace_descriptor_envelope)
             .map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
@@ -230,7 +223,7 @@ async fn write_source_gc_pin<S: ObjectStore + ?Sized>(
     object_key: &str,
     expected: &NamespaceGcPinStateEnvelope,
 ) -> Result<(), CoreError> {
-    let bytes = serde_json::to_vec(expected).map_err(|err| CoreError::Store(err.to_string()))?;
+    let bytes = encode_control_object(expected).map_err(|err| CoreError::Store(err.to_string()))?;
     match store.put_if_absent(object_key, Bytes::from(bytes)).await {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
@@ -293,17 +286,10 @@ async fn verify_existing_gc_pin<S: ObjectStore + ?Sized>(
             "GC pin `{object_key}` write conflicted, but the existing object is missing"
         )));
     };
-    let existing: NamespaceGcPinStateEnvelope = serde_json::from_slice(&bytes).map_err(|err| {
-        CoreError::NamespaceCorrupt(format!("GC pin `{object_key}` is not valid JSON: {err}"))
-    })?;
-    if !existing
-        .has_valid_payload_checksum()
-        .map_err(|err| CoreError::NamespaceCorrupt(err.to_string()))?
-    {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "GC pin `{object_key}` payload checksum is invalid"
-        )));
-    }
+    let existing: NamespaceGcPinStateEnvelope =
+        decode_control_object(&bytes, ControlObjectKind::NamespaceGcPinState).map_err(|err| {
+            CoreError::NamespaceCorrupt(format!("GC pin `{object_key}` is invalid: {err}"))
+        })?;
     if gc_pin_matches(expected, &existing) {
         Ok(())
     } else {
@@ -317,8 +303,7 @@ fn gc_pin_matches(
     expected: &NamespaceGcPinStateEnvelope,
     existing: &NamespaceGcPinStateEnvelope,
 ) -> bool {
-    existing.kind == ControlObjectKind::NamespaceGcPinState
-        && existing.format_version == expected.format_version
+    existing.format_version == expected.format_version
         && existing.state.pin_id == expected.state.pin_id
         && existing.state.source_namespace_id == expected.state.source_namespace_id
         && existing.state.target_namespace_id == expected.state.target_namespace_id
@@ -464,7 +449,9 @@ mod tests {
         store
             .put_if_absent(
                 &object_key,
-                Bytes::from(serde_json::to_vec(&conflicting).expect("encode conflicting pin")),
+                Bytes::from(
+                    super::encode_control_object(&conflicting).expect("encode conflicting pin"),
+                ),
             )
             .await
             .expect("write conflicting pin");
@@ -502,7 +489,6 @@ mod tests {
                 source_checkpoint_id: checkpoint_id.to_owned(),
                 source_manifest_id,
                 source_head_seq,
-                referenced_metadata_files_debug: Vec::new(),
                 created_at_ms,
             },
         )

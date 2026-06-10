@@ -1,7 +1,7 @@
 use loon_api::wire::control::{
-    payload_checksum_sha256, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState, CONTROL_OBJECT_FORMAT_VERSION,
+    decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
+    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState,
+    LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
 };
 use loon_api::{ContentStoreId, NamespaceId};
 use loon_objectstore::keys::{
@@ -9,72 +9,71 @@ use loon_objectstore::keys::{
 };
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ObjectMetadata, ObjectStore};
-use serde::Serialize;
-use serde::{Deserialize, Serialize as DeriveSerialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LoadedHeadObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: HeadStateEnvelope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LoadedNamespaceDescriptorObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: NamespaceDescriptorEnvelope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LoadedContentStoreDescriptorObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: ContentStoreDescriptorEnvelope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LoadedLeaseObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: LeaseStateEnvelope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectIdentity {
     pub etag: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedNamespaceDescriptorControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: NamespaceDescriptorState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedContentStoreDescriptorControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: ContentStoreDescriptorState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedHeadControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: HeadState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedLeaseControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: LeaseState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ControlObjectLoadError {
     #[error("invalid namespace_id {namespace_id:?}: {message}")]
     InvalidNamespaceId {
@@ -85,14 +84,6 @@ pub enum ControlObjectLoadError {
     MissingObject { object_key: String },
     #[error("missing control object after head `{object_key}`")]
     MissingObjectAfterHead { object_key: String },
-    #[error(
-        "control object kind mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
-    )]
-    KindMismatch {
-        object_key: String,
-        expected: ControlObjectKind,
-        actual: ControlObjectKind,
-    },
     #[error(
         "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
@@ -131,11 +122,13 @@ pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     let object_key = namespace_descriptor(expected_namespace.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: NamespaceDescriptorEnvelope =
-        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
-        })?;
-    validate_namespace_descriptor_envelope(expected_namespace, &object_key, &envelope)?;
+        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceDescriptor)
+            .map_err(|err| map_control_codec_error(&object_key, err))?;
+    validate_expected_namespace(
+        &object_key,
+        expected_namespace,
+        &envelope.state.namespace_id,
+    )?;
 
     Ok(LoadedNamespaceDescriptorObject {
         object_key,
@@ -151,11 +144,15 @@ pub(crate) async fn read_content_store_descriptor_object<S: ObjectStore + ?Sized
     let object_key = content_store_descriptor(expected_content_store.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: ContentStoreDescriptorEnvelope =
-        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
-        })?;
-    validate_content_store_descriptor_envelope(expected_content_store, &object_key, &envelope)?;
+        decode_control_object(&encoded_bytes, ControlObjectKind::ContentStoreDescriptor)
+            .map_err(|err| map_control_codec_error(&object_key, err))?;
+    if envelope.state.content_store_id != *expected_content_store {
+        return Err(ControlObjectLoadError::ContentStoreMismatch {
+            object_key,
+            expected: expected_content_store.clone(),
+            actual: envelope.state.content_store_id.clone(),
+        });
+    }
 
     Ok(LoadedContentStoreDescriptorObject {
         object_key,
@@ -172,11 +169,13 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     let object_key = namespace_head(expected_namespace.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: HeadStateEnvelope =
-        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
-        })?;
-    validate_head_envelope(expected_namespace, &object_key, &envelope)?;
+        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceHead)
+            .map_err(|err| map_control_codec_error(&object_key, err))?;
+    validate_expected_namespace(
+        &object_key,
+        expected_namespace,
+        &envelope.state.namespace_id,
+    )?;
 
     Ok(LoadedHeadObject {
         object_key,
@@ -193,11 +192,13 @@ pub(crate) async fn read_lease_object<S: ObjectStore + ?Sized>(
     let object_key = namespace_lease(expected_namespace.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: LeaseStateEnvelope =
-        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
-        })?;
-    validate_lease_envelope(expected_namespace, &object_key, &envelope)?;
+        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceLease)
+            .map_err(|err| map_control_codec_error(&object_key, err))?;
+    validate_expected_namespace(
+        &object_key,
+        expected_namespace,
+        &envelope.state.namespace_id,
+    )?;
 
     Ok(LoadedLeaseObject {
         object_key,
@@ -293,155 +294,38 @@ fn validate_namespace_id_for_control_key(
         })
 }
 
-fn validate_namespace_descriptor_envelope(
-    expected_namespace: &NamespaceId,
+fn validate_expected_namespace(
     object_key: &str,
-    envelope: &NamespaceDescriptorEnvelope,
+    expected: &NamespaceId,
+    actual: &NamespaceId,
 ) -> Result<(), ControlObjectLoadError> {
-    validate_control_format_version(object_key, envelope.format_version)?;
-    if envelope.kind != ControlObjectKind::NamespaceDescriptor {
-        return Err(ControlObjectLoadError::KindMismatch {
-            object_key: object_key.to_owned(),
-            expected: ControlObjectKind::NamespaceDescriptor,
-            actual: envelope.kind,
-        });
-    }
-    if envelope.state.namespace_id != *expected_namespace {
+    if actual != expected {
         return Err(ControlObjectLoadError::NamespaceMismatch {
             object_key: object_key.to_owned(),
-            expected: expected_namespace.clone(),
-            actual: envelope.state.namespace_id.clone(),
-        });
-    }
-    validate_control_checksum(
-        object_key,
-        &envelope.payload_checksum_sha256,
-        &envelope.state,
-    )
-}
-
-fn validate_content_store_descriptor_envelope(
-    expected_content_store: &ContentStoreId,
-    object_key: &str,
-    envelope: &ContentStoreDescriptorEnvelope,
-) -> Result<(), ControlObjectLoadError> {
-    validate_control_format_version(object_key, envelope.format_version)?;
-    if envelope.kind != ControlObjectKind::ContentStoreDescriptor {
-        return Err(ControlObjectLoadError::KindMismatch {
-            object_key: object_key.to_owned(),
-            expected: ControlObjectKind::ContentStoreDescriptor,
-            actual: envelope.kind,
-        });
-    }
-    if envelope.state.content_store_id != *expected_content_store {
-        return Err(ControlObjectLoadError::ContentStoreMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_content_store.clone(),
-            actual: envelope.state.content_store_id.clone(),
-        });
-    }
-    validate_control_checksum(
-        object_key,
-        &envelope.payload_checksum_sha256,
-        &envelope.state,
-    )
-}
-
-fn validate_head_envelope(
-    expected_namespace: &NamespaceId,
-    object_key: &str,
-    envelope: &HeadStateEnvelope,
-) -> Result<(), ControlObjectLoadError> {
-    validate_control_format_version(object_key, envelope.format_version)?;
-    if envelope.kind != ControlObjectKind::NamespaceHead {
-        return Err(ControlObjectLoadError::KindMismatch {
-            object_key: object_key.to_owned(),
-            expected: ControlObjectKind::NamespaceHead,
-            actual: envelope.kind,
-        });
-    }
-
-    validate_control_checksum(
-        object_key,
-        &envelope.payload_checksum_sha256,
-        &envelope.state,
-    )?;
-
-    if &envelope.state.namespace_id != expected_namespace {
-        return Err(ControlObjectLoadError::NamespaceMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_namespace.clone(),
-            actual: envelope.state.namespace_id.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_lease_envelope(
-    expected_namespace: &NamespaceId,
-    object_key: &str,
-    envelope: &LeaseStateEnvelope,
-) -> Result<(), ControlObjectLoadError> {
-    validate_control_format_version(object_key, envelope.format_version)?;
-    if envelope.kind != ControlObjectKind::NamespaceLease {
-        return Err(ControlObjectLoadError::KindMismatch {
-            object_key: object_key.to_owned(),
-            expected: ControlObjectKind::NamespaceLease,
-            actual: envelope.kind,
-        });
-    }
-
-    validate_control_checksum(
-        object_key,
-        &envelope.payload_checksum_sha256,
-        &envelope.state,
-    )?;
-
-    if &envelope.state.namespace_id != expected_namespace {
-        return Err(ControlObjectLoadError::NamespaceMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_namespace.clone(),
-            actual: envelope.state.namespace_id.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_control_format_version(
-    object_key: &str,
-    format_version: u32,
-) -> Result<(), ControlObjectLoadError> {
-    if format_version != CONTROL_OBJECT_FORMAT_VERSION {
-        return Err(ControlObjectLoadError::Codec {
-            object_key: object_key.to_owned(),
-            message: format!("unsupported control object format version `{format_version}`"),
+            expected: expected.clone(),
+            actual: actual.clone(),
         });
     }
     Ok(())
 }
 
-fn validate_control_checksum<T: Serialize>(
+pub(crate) fn map_control_codec_error(
     object_key: &str,
-    expected_checksum: &str,
-    state: &T,
-) -> Result<(), ControlObjectLoadError> {
-    let actual_checksum =
-        payload_checksum_sha256(state).map_err(|err| ControlObjectLoadError::Codec {
+    err: ControlCodecError,
+) -> ControlObjectLoadError {
+    match err {
+        ControlCodecError::ChecksumMismatch { expected, actual } => {
+            ControlObjectLoadError::ChecksumMismatch {
+                object_key: object_key.to_owned(),
+                expected,
+                actual,
+            }
+        }
+        other => ControlObjectLoadError::Codec {
             object_key: object_key.to_owned(),
-            message: err.to_string(),
-        })?;
-
-    if expected_checksum != actual_checksum {
-        return Err(ControlObjectLoadError::ChecksumMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_checksum.to_owned(),
-            actual: actual_checksum,
-        });
+            message: other.to_string(),
+        },
     }
-
-    Ok(())
 }
 
 fn map_store_load_error(err: ObjectStoreError) -> ControlObjectLoadError {

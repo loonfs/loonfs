@@ -1,9 +1,9 @@
-use crate::checksum;
 use crate::keyspace::validate_segments;
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
+use loon_api::sha256_digest;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File, OpenOptions};
@@ -48,18 +48,14 @@ impl LocalFsStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(err)),
         };
-        let checksum_sha256 = if include_checksum {
-            Some(checksum::sha256_digest(
-                &fs::read(path).await.map_err(io_error)?,
-            ))
-        } else {
-            None
-        };
-        Self::metadata_from_fs_metadata(&metadata, checksum_sha256, path).map(Some)
+        let content_digest = sha256_digest(&fs::read(path).await.map_err(io_error)?);
+        let checksum_sha256 = include_checksum.then_some(content_digest.clone());
+        Self::metadata_from_fs_metadata(&metadata, &content_digest, checksum_sha256, path).map(Some)
     }
 
     fn metadata_from_fs_metadata(
         metadata: &std::fs::Metadata,
+        content_digest: &str,
         checksum_sha256: Option<String>,
         path: &Path,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
@@ -70,15 +66,8 @@ impl LocalFsStore {
             )));
         }
 
-        let modified_nanos = metadata
-            .modified()
-            .map_err(io_error)?
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-
         Ok(ObjectMetadata {
-            etag: Some(format!("{:x}-{:x}", metadata.len(), modified_nanos)),
+            etag: Some(format!("local-fs-v1:{content_digest}")),
             version: None,
             size_bytes: metadata.len(),
             checksum_sha256,
@@ -175,9 +164,11 @@ impl LocalFsStore {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).await.map_err(io_error)?;
 
+        let content_digest = sha256_digest(&bytes);
         let metadata = Self::metadata_from_fs_metadata(
             &fs_metadata,
-            Some(checksum::sha256_digest(&bytes)),
+            &content_digest,
+            Some(content_digest.clone()),
             &path,
         )?;
         Ok(Some(ObjectBody { metadata, bytes }))

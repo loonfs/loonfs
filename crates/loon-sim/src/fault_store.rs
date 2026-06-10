@@ -579,8 +579,14 @@ mod tests {
 
         let trace = store.trace().snapshot();
         assert_eq!(trace.events.len(), 2);
-        assert_eq!(trace.events[0].object_op.as_ref().unwrap().step, 1);
-        assert_eq!(trace.events[1].object_op.as_ref().unwrap().step, 2);
+        assert_eq!(
+            trace.events[0].object_op.as_ref().expect("first op").step,
+            1
+        );
+        assert_eq!(
+            trace.events[1].object_op.as_ref().expect("second op").step,
+            2
+        );
     }
 
     #[tokio::test]
@@ -602,7 +608,7 @@ mod tests {
             Err(ObjectStoreError::Transport(_))
         ));
         assert_eq!(
-            store.inner().get("a", None).await.unwrap(),
+            store.inner().get("a", None).await.expect("inner get"),
             Some(Bytes::from_static(b"abc"))
         );
     }
@@ -625,7 +631,7 @@ mod tests {
             store.put_overwrite("a", Bytes::from_static(b"abc")).await,
             Err(ObjectStoreError::Transport(_))
         ));
-        assert_eq!(store.inner().get("a", None).await.unwrap(), None);
+        assert_eq!(store.inner().get("a", None).await.expect("inner get"), None);
     }
 
     #[tokio::test]
