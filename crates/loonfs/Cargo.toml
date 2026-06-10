@@ -4,19 +4,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Embedded LoonFS runtime: a durable, agent-native filesystem on object storage."
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
-loon-api = { path = "../loon-api" }
-loon-core = { path = "../loon-core" }
-loon-objectstore = { path = "../loon-objectstore" }
+loonfs-api = { path = "../loonfs-api" }
+loonfs-core = { path = "../loonfs-core" }
+loonfs-objectstore = { path = "../loonfs-objectstore" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

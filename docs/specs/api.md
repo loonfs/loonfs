@@ -110,7 +110,7 @@ hoc.
 | `core.namespaces.list` | Enumerating namespaces (`GET /v0/namespaces`, `loon namespace list`). | Deniable for tenancy reasons; a deployment that disables it still resolves namespaces by id. |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces. | Registered for forward compatibility; no v0 implementation supports it, so deployments advertise `false` today. |
+| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Registered for forward compatibility; no v0 implementation supports it, so deployments advertise `false` today. |
 
 `admin/v0` currently has required ops only and no feature keys. `query.*` and
 `acl.*` keys are unregistered until their planes materialize.
@@ -155,7 +155,7 @@ Two codes exist specifically so capability handling is uniform from day one:
   without breaking clients. Deployments may use it today for tenancy denials
   (for example, refusing namespace enumeration).
 
-The full registry (`ErrorCode` in `loon-api`):
+The full registry (`ErrorCode` in `loonfs-api`):
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
@@ -188,6 +188,7 @@ The full registry (`ErrorCode` in `loon-api`):
 | `invalid_upload_content` | 400 | The staged or referenced content is invalid. |
 | `rebootstrap_required` | 409 | The change cursor is older than the retention floor. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
+| `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is not yet available; retry. |
 | `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
@@ -205,7 +206,7 @@ One SDK serves both backends; deployment mode never forks the client
 codebase.
 
 - The embedded engine (`loonfs::Fs`) and the remote client
-  (`loon_client::Client`) expose the same operations and the same
+  (`loonfs_client::Client`) expose the same operations and the same
   `capabilities()` accessor returning the capability document of section 2.1.
   For the remote client the document is fetched from `GET /v0/config` and
   cached; for the embedded engine it is a constant.
@@ -252,6 +253,11 @@ committed logical commit only after its WAL segment is durably written and the
 head update succeeds; a segment written before a failed head update is
 orphaned, and the request is not committed.
 
+If the head update's outcome was never observed — a transport failure after
+the update was sent — the server reports `commit_outcome_unknown`: the commit
+may already be visible. A retry must reuse the same `commit_id`, which replays
+the committed response instead of double-committing.
+
 The server may publish multiple committed logical commits in one WAL segment
 and one head update, but it must preserve per-commit idempotency, ordering,
 and change-feed identity.
@@ -296,6 +302,7 @@ A representative v0 binding is shown below.
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
+| Delete a namespace | `DELETE /v0/namespaces/{ns}` — registered feature `core.namespaces.delete`; answers `not_supported` until a deployment implements it |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 

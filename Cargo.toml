@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/loon-api",
-  "crates/loon-objectstore",
-  "crates/loon-core",
+  "crates/loonfs-api",
+  "crates/loonfs-objectstore",
+  "crates/loonfs-core",
   "crates/loonfs",
-  "crates/loon-model",
-  "crates/loon-server",
-  "crates/loon-client",
-  "crates/loon-cli",
-  "crates/loon-sim",
+  "crates/loonfs-model",
+  "crates/loonfs-server",
+  "crates/loonfs-client",
+  "crates/loonfs-cli",
+  "crates/loonfs-sim",
 ]
 
 [workspace.package]
@@ -29,8 +29,9 @@ axum = "0.7"
 bytes = "1"
 ciborium = "0.2"
 clap = { version = "4.5", features = ["derive"] }
-http = "0.2"
+http = "1"
 futures = "0.3"
+fs4 = "0.13"
 object_store = { version = "=0.12.4", default-features = false, features = ["aws"] }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"

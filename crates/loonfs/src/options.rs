@@ -41,21 +41,32 @@ pub enum MaintenanceTickOutcome {
     /// No checkpoint was needed.
     NotNeeded,
     /// A checkpoint was published.
-    CheckpointPublished { checkpoint_seq: ChangeSeq },
+    CheckpointPublished {
+        /// Sequence covered by the published checkpoint.
+        checkpoint_seq: ChangeSeq,
+    },
     /// Another checkpoint already covered the attempted sequence.
     CheckpointSuperseded {
+        /// Sequence this tick attempted to checkpoint.
         attempted_seq: ChangeSeq,
+        /// Manifest pointer the head currently records.
         current_manifest_id: ManifestId,
     },
     /// A concurrent head update won the race.
-    CheckpointPublishRaceLost { observed_head_seq: ChangeSeq },
+    CheckpointPublishRaceLost {
+        /// Head sequence observed before the checkpoint attempt.
+        observed_head_seq: ChangeSeq,
+    },
 }
 
 /// Result of one maintenance tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintenanceTickResult {
+    /// Namespace the tick ran against.
     pub namespace_id: NamespaceId,
+    /// Namespace status observed before the tick acted.
     pub status_before: NamespaceStatus,
+    /// What the tick did.
     pub outcome: MaintenanceTickOutcome,
 }
 

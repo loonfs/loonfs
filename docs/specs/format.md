@@ -61,7 +61,7 @@ private objects must not collide with the spec'd families and are not
 interoperable state.
 
 Namespace object keys are built through the central object layout API in
-`loon-objectstore`. The namespace root remains `namespaces/{namespace_id}/`;
+`loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`;
 mutable control objects live under `control/`, WAL files live under `wal/`,
 namespace manifests live under `manifest/`, and immutable metadata SSTs live
 under `compacted/metadata/`. Forks are copy-on-write: the target manifest may
@@ -635,6 +635,12 @@ becomes committed, successful, and visible only if step 5 durably stores the
 WAL segment and step 6 succeeds. A request rejected at step 3 receives no
 `seq` and creates no durable WAL record.
 
+If step 6's outcome cannot be observed — a transport failure after the update
+was sent — the writer must report the commit outcome as unknown, never as
+failure: the head may already reference the new segment. A retry must reuse
+the same `commit_id` so it replays rather than double-commits (section
+3.3.1).
+
 #### 3.1.5 Failure semantics inside a publication batch
 
 A publication batch is not an all-or-nothing multi-client transaction.
@@ -799,7 +805,7 @@ normalized absolute paths, and the intent's semantic parameters).
 A reused `commit_id` with an equal fingerprint replays the originally
 committed response; an unequal fingerprint is rejected as
 `commit_id_reuse_conflict`. Reference values are pinned by tests in
-`loon-core` (`commit/identity.rs` and `path/write/planner.rs`); those literals
+`loonfs-core` (`commit/identity.rs` and `path/write/planner.rs`); those literals
 must never change within scheme `v0`.
 
 ### 3.4 Server authority
@@ -1047,7 +1053,7 @@ kind's payload schema can change without invalidating the others.
   rewriting rows; it must not create new references with kinds it does not
   understand (section 3.1.3).
 - **Every encoding is pinned by golden-byte fixtures**
-  (`crates/loon-api/tests/golden_formats.rs`). An encoder change that alters
+  (`crates/loonfs-api/tests/golden_formats.rs`). An encoder change that alters
   durable bytes fails those tests; the failure message demands either
   reverting the change or bumping the format version and regenerating the
   fixtures.
