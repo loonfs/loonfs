@@ -188,6 +188,7 @@ The full registry (`ErrorCode` in `loon-api`):
 | `invalid_upload_content` | 400 | The staged or referenced content is invalid. |
 | `rebootstrap_required` | 409 | The change cursor is older than the retention floor. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
+| `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is not yet available; retry. |
 | `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
@@ -251,6 +252,11 @@ may reject it immediately. A tentatively accepted request becomes one
 committed logical commit only after its WAL segment is durably written and the
 head update succeeds; a segment written before a failed head update is
 orphaned, and the request is not committed.
+
+If the head update's outcome was never observed — a transport failure after
+the update was sent — the server reports `commit_outcome_unknown`: the commit
+may already be visible. A retry must reuse the same `commit_id`, which replays
+the committed response instead of double-committing.
 
 The server may publish multiple committed logical commits in one WAL segment
 and one head update, but it must preserve per-commit idempotency, ordering,

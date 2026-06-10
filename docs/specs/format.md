@@ -635,6 +635,12 @@ becomes committed, successful, and visible only if step 5 durably stores the
 WAL segment and step 6 succeeds. A request rejected at step 3 receives no
 `seq` and creates no durable WAL record.
 
+If step 6's outcome cannot be observed — a transport failure after the update
+was sent — the writer must report the commit outcome as unknown, never as
+failure: the head may already reference the new segment. A retry must reuse
+the same `commit_id` so it replays rather than double-commits (section
+3.3.1).
+
 #### 3.1.5 Failure semantics inside a publication batch
 
 A publication batch is not an all-or-nothing multi-client transaction.

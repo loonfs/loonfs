@@ -23,6 +23,10 @@ pub enum ErrorKind {
     PreconditionFailed,
     /// The system is temporarily unavailable. Back off and retry.
     Unavailable,
+    /// The operation may have committed: its acknowledgment was lost. Retry
+    /// with the same commit id or reconcile against namespace state; do not
+    /// assume failure.
+    OutcomeUnknown,
     /// Durable state is malformed. Treat this as operator or repair work.
     DataCorruption,
     /// LoonFS hit an internal failure. Capture details and report it.
@@ -61,6 +65,7 @@ pub enum ErrorCode {
     WouldCycle,
     UnsupportedRenameMode,
     CommitIdReuseConflict,
+    CommitOutcomeUnknown,
     CommitQueueFull,
     CheckpointUnavailable,
     UploadNotFound,
@@ -75,7 +80,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 34] = [
+    pub const ALL: [ErrorCode; 35] = [
         ErrorCode::InvalidPath,
         ErrorCode::InvalidNamespaceId,
         ErrorCode::InvalidCommitId,
@@ -100,6 +105,7 @@ impl ErrorCode {
         ErrorCode::WouldCycle,
         ErrorCode::UnsupportedRenameMode,
         ErrorCode::CommitIdReuseConflict,
+        ErrorCode::CommitOutcomeUnknown,
         ErrorCode::CommitQueueFull,
         ErrorCode::CheckpointUnavailable,
         ErrorCode::UploadNotFound,
@@ -133,6 +139,7 @@ impl ErrorCode {
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
             ErrorCode::CommitQueueFull | ErrorCode::CheckpointUnavailable => ErrorKind::Unavailable,
+            ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError | ErrorCode::BootstrapFailed => ErrorKind::Internal,
             ErrorCode::NamespacePartial
@@ -175,6 +182,7 @@ impl ErrorCode {
             ErrorCode::WouldCycle => "would_cycle",
             ErrorCode::UnsupportedRenameMode => "unsupported_rename_mode",
             ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
+            ErrorCode::CommitOutcomeUnknown => "commit_outcome_unknown",
             ErrorCode::CommitQueueFull => "commit_queue_full",
             ErrorCode::CheckpointUnavailable => "checkpoint_unavailable",
             ErrorCode::UploadNotFound => "upload_not_found",

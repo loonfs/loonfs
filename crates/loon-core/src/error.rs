@@ -368,6 +368,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
 fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
     match error {
         CommitHeadPublishError::StaleHead => ErrorCode::StaleHead,
+        CommitHeadPublishError::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
         CommitHeadPublishError::EmptyWriterVersion
         | CommitHeadPublishError::EmptyExpectedHeadEtag
         | CommitHeadPublishError::NamespaceMismatch { .. }
@@ -397,6 +398,10 @@ mod tests {
             ErrorKind::PreconditionFailed
         );
         assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
+        assert_eq!(
+            ErrorCode::CommitOutcomeUnknown.kind(),
+            ErrorKind::OutcomeUnknown
+        );
         assert_eq!(
             ErrorCode::NamespaceCorrupt.kind(),
             ErrorKind::DataCorruption

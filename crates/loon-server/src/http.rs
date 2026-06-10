@@ -806,9 +806,9 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::PathNotFound
         | ErrorCode::RevisionNotFound
         | ErrorCode::UploadNotFound => StatusCode::NOT_FOUND,
-        ErrorCode::CommitQueueFull | ErrorCode::CheckpointUnavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        ErrorCode::CommitQueueFull
+        | ErrorCode::CommitOutcomeUnknown
+        | ErrorCode::CheckpointUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
         ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
         ErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,

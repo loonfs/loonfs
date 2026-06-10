@@ -2088,6 +2088,47 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = AckLostHeadCasStore::new(temp_dir.path(), &namespace_id);
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"ack lost")
+        .await
+        .expect("stage content");
+    let publisher = DirectObjectStorePublisher::new(&store);
+    let intent = || PathMutationIntent::PutFile {
+        commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
+        absolute_path: "/ack.txt".to_owned(),
+        content_ref: content.content_ref.clone(),
+        behavior: PutFileBehavior::CreateOnly,
+    };
+
+    // The CAS landed but its acknowledgment was lost: this must surface as
+    // an unknown outcome, never as definite failure.
+    let error = publisher
+        .submit_path_intent(&namespace_id, intent(), &context, PublishOptions::default())
+        .await
+        .expect_err("ack-lost head CAS is not definite failure");
+    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert!(store.injected_ack_loss());
+
+    // The documented remedy: retry with the same commit id. The commit is
+    // already visible, so the retry replays it instead of double-committing.
+    let result = publisher
+        .submit_path_intent(&namespace_id, intent(), &context, PublishOptions::default())
+        .await
+        .expect("same-commit-id retry replays the committed mutation");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load basis");
+    assert_eq!(basis.head.seq, ChangeSeq(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -4635,6 +4676,90 @@ impl ObjectStore for StaleHeadGetStore {
             self.record_head_write(previous_head);
         }
         Ok(metadata)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct AckLostHeadCasStore {
+    inner: LocalFsStore,
+    head_key: String,
+    injected_ack_loss: Mutex<bool>,
+}
+
+impl AckLostHeadCasStore {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            head_key: namespace_head(namespace_id.as_str()),
+            injected_ack_loss: Mutex::new(false),
+        }
+    }
+
+    fn injected_ack_loss(&self) -> bool {
+        *self
+            .injected_ack_loss
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[async_trait]
+impl ObjectStore for AckLostHeadCasStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+            let should_inject = {
+                let mut injected = self
+                    .injected_ack_loss
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *injected {
+                    false
+                } else {
+                    *injected = true;
+                    true
+                }
+            };
+            if should_inject {
+                // Apply the CAS, then lose the acknowledgment.
+                self.inner.put(key, bytes, mode).await?;
+                return Err(ObjectStoreError::Transport(
+                    "response lost after head compare-and-swap".to_owned(),
+                ));
+            }
+        }
+        self.inner.put(key, bytes, mode).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

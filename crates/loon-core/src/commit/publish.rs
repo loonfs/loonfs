@@ -137,6 +137,9 @@ fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
         ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict => {
             CommitHeadPublishError::StaleHead
         }
+        // A transport failure after the CAS was sent leaves the outcome
+        // unobserved: the head may already reference the new segment.
+        ObjectStoreError::Transport(message) => CommitHeadPublishError::OutcomeUnknown(message),
         other => CommitHeadPublishError::Store(other.to_string()),
     }
 }
@@ -144,6 +147,22 @@ fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {
+        assert_eq!(
+            map_object_store_error(ObjectStoreError::Transport("timeout".to_owned())),
+            CommitHeadPublishError::OutcomeUnknown("timeout".to_owned())
+        );
+        assert_eq!(
+            map_object_store_error(ObjectStoreError::PreconditionFailed),
+            CommitHeadPublishError::StaleHead
+        );
+        assert!(matches!(
+            map_object_store_error(ObjectStoreError::NotFound),
+            CommitHeadPublishError::Store(_)
+        ));
+    }
     use loon_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
     use loon_api::{CommitId, FenceToken, InodeId, ManifestId, NamespaceId};
 

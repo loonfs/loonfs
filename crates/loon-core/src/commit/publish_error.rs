@@ -28,6 +28,10 @@ pub enum CommitHeadPublishError {
     EmptyWalSegment,
     SeqOverflow,
     StaleHead,
+    /// The head compare-and-swap was sent but its outcome was never
+    /// observed (for example, a transport failure waiting for the
+    /// response). The commit may or may not be visible.
+    OutcomeUnknown(String),
     Codec(String),
     Store(String),
 }
