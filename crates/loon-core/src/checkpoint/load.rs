@@ -466,12 +466,12 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
         MetadataRow::Tombstone { .. } => 32,
         MetadataRow::CommitReceipt {
             commit_id,
-            semantic_commit_fingerprint_sha256,
+            semantic_commit_fingerprint,
             results,
             ..
         } => {
             96 + commit_id.as_str().len()
-                + semantic_commit_fingerprint_sha256.len()
+                + semantic_commit_fingerprint.len()
                 + results.len().saturating_mul(64)
         }
     }
@@ -568,13 +568,13 @@ pub(super) fn append_rows_to_metadata(
                 MetadataTableFamily::CommitReceipts,
                 MetadataRow::CommitReceipt {
                     commit_id,
-                    semantic_commit_fingerprint_sha256,
+                    semantic_commit_fingerprint,
                     committed_seq,
                     results,
                 },
             ) => metadata_state.push_commit_receipt(CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                semantic_commit_fingerprint_sha256: semantic_commit_fingerprint_sha256.clone(),
+                semantic_commit_fingerprint: semantic_commit_fingerprint.clone(),
                 committed_seq: *committed_seq,
                 results: results.clone(),
             }),

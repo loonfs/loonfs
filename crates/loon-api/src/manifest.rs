@@ -10,17 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
-/// Version 6: the durable document carries the payload as a raw JSON fragment
-/// checksummed over its exact bytes. (Version 5 verified checksums by
-/// re-encoding the decoded payload and bound per-page checksums into file
-/// refs; v5 objects are rejected with `UnsupportedFormatVersion`.)
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 6;
-/// Version 5: the durable document carries the payload as an opaque CBOR byte
-/// string checksummed over those exact bytes, and per-page checksums are gone
-/// (pages are not independently stored, so the payload checksum is the unit
-/// of integrity). (Version 4 verified checksums by re-encoding the decoded
-/// payload; v4 objects are rejected with `UnsupportedFormatVersion`.)
-pub const METADATA_SST_FORMAT_VERSION: u32 = 5;
+/// Version 1: an uncompressed JSON envelope document carrying the payload as
+/// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
+/// Version 1: a zstd-compressed CBOR envelope document carrying the payload
+/// as an opaque CBOR byte string. `payload_checksum` covers exactly those
+/// bytes; pages are not independently stored, so the payload checksum is the
+/// unit of integrity.
+pub const METADATA_SST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,7 +157,7 @@ pub enum MetadataRow {
     },
     CommitReceipt {
         commit_id: CommitId,
-        semantic_commit_fingerprint_sha256: String,
+        semantic_commit_fingerprint: String,
         committed_seq: ChangeSeq,
         results: Vec<CommitOpResult>,
     },
