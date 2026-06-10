@@ -62,6 +62,7 @@ A representative v0 binding is shown below.
 | Purpose | Representative HTTP shape |
 | --- | --- |
 | Create a namespace | `POST /v0/namespaces` |
+| Read one namespace's status | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt` |
@@ -91,6 +92,21 @@ Namespace creation uses the namespace id directly. v0 has no namespace aliases o
 The field name `namespace_id` is intentional API compatibility surface. Fork creation uses `new_namespace_id` for the target namespace. Route placeholders such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are only path parameter names for the same namespace id value; v0 does not accept or emit a namespace `name` alias.
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
+
+### 3.0 `GET /v0/namespaces/{ns}`
+
+The namespace status read answers "does this namespace exist, and where is its head?" without listing every namespace. A missing namespace is `404` with code `namespace_not_found`.
+
+```json
+{
+  "namespace_id": "demo",
+  "head_seq": 418,
+  "current_manifest_id": 410,
+  "latest_checkpoint_id": "chk_f3d6b97a7d394ddf84b621ddf36e5071",
+  "wal_tail_segments": 3,
+  "retention_floor_seq": 120
+}
+```
 
 ### 3.1 `GET /filesystem/stat`
 

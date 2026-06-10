@@ -510,10 +510,7 @@ root = "{}"
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
-    assert_eq!(
-        json_data(&list)["profiles"][0]["name"],
-        "default_profile"
-    );
+    assert_eq!(json_data(&list)["profiles"][0]["name"], "default_profile");
 }
 
 #[test]

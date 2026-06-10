@@ -72,6 +72,25 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
         let bytes = harness.client.read_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello over http\n");
+
+        let status = harness
+            .client
+            .namespace_status("demo")
+            .expect("namespace status");
+        assert_eq!(status.namespace_id.as_str(), "demo");
+        assert_eq!(status.head_seq, ChangeSeq(2));
+
+        let missing = harness
+            .client
+            .namespace_status("absent")
+            .expect_err("missing namespace status");
+        match missing {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 404);
+                assert_eq!(code, "namespace_not_found");
+            }
+            other => panic!("expected API error for missing namespace, got {other:?}"),
+        }
     })
     .await
     .expect("join blocking task");

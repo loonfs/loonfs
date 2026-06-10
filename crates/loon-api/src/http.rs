@@ -40,6 +40,28 @@ pub struct ListNamespacesResponse {
     pub namespaces: Vec<NamespaceSummary>,
 }
 
+/// Status summary for one namespace.
+///
+/// This is the point-lookup answer to "does this namespace exist, and where
+/// is its head?" — cheaper than listing all namespaces when only one matters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceStatusResponse {
+    /// Namespace being inspected.
+    pub namespace_id: NamespaceId,
+    /// Current visible namespace sequence.
+    pub head_seq: ChangeSeq,
+    /// Current manifest pointer recorded by the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_manifest_id: Option<ManifestId>,
+    /// Latest checkpoint recorded by the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_checkpoint_id: Option<String>,
+    /// Number of visible WAL segments after the manifest basis.
+    pub wal_tail_segments: u64,
+    /// Oldest sequence still promised for incremental replay.
+    pub retention_floor_seq: ChangeSeq,
+}
+
 /// Result of a namespace-visible mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationResult {

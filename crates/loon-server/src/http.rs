@@ -78,6 +78,7 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
             "/v0/namespaces",
             post(create_namespace).get(list_namespaces_handler),
         )
+        .route("/v0/namespaces/:namespace", get(namespace_status_handler))
         .route(
             "/v0/namespaces/:namespace/forks",
             post(fork_namespace_handler),
@@ -280,6 +281,28 @@ async fn list_entries(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(entries))
+}
+
+async fn namespace_status_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<loon_api::NamespaceStatusResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = parse_namespace_id(namespace)?;
+    let status = state
+        .fs
+        .namespace_status(&namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(loon_api::NamespaceStatusResponse {
+        namespace_id: status.namespace_id,
+        head_seq: status.head_seq,
+        current_manifest_id: status.current_manifest_id,
+        latest_checkpoint_id: status.latest_checkpoint_id,
+        wal_tail_segments: status.wal_tail_segments,
+        retention_floor_seq: status.retention_floor_seq,
+    }))
 }
 
 async fn stat_entry(

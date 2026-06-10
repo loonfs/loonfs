@@ -152,10 +152,10 @@ pub(crate) fn run_namespace_use(
         )
     })?;
 
-    let namespaces = resolved
+    resolved
         .target
         .backend()
-        .list_namespaces()
+        .namespace_status(&args.namespace)
         .map_err(|error| {
             fail(
                 kind,
@@ -164,20 +164,6 @@ pub(crate) fn run_namespace_use(
                 error,
             )
         })?;
-    if !namespaces
-        .iter()
-        .any(|candidate| candidate.namespace_id.as_str() == args.namespace)
-    {
-        return Err(fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            CliError::new(
-                "namespace_not_found",
-                format!("namespace `{}` does not exist", args.namespace),
-            ),
-        ));
-    }
 
     set_default_namespace(&mut loaded.config, &resolved.profile_name, &args.namespace).map_err(
         |error| {

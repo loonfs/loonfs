@@ -16,7 +16,7 @@ use loon_api::{
     ApiError, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
-    ListNamespacesResponse, MutationResult, NamespaceId, NamespaceSummary,
+    ListNamespacesResponse, MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
@@ -148,6 +148,15 @@ impl Client {
         Ok(self
             .request_json::<(), ListNamespacesResponse>(self.agent.get(&url), None)?
             .namespaces)
+    }
+
+    pub fn namespace_status(
+        &self,
+        namespace: &str,
+    ) -> Result<NamespaceStatusResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/namespaces/{namespace}", self.base_url);
+        self.request_json::<(), NamespaceStatusResponse>(self.agent.get(&url), None)
     }
 
     pub fn fork_namespace(

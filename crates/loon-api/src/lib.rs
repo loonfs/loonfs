@@ -40,7 +40,7 @@ pub use http::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FileRevision, FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, ListFileRevisionsResponse, ListNamespacesResponse,
-    MutationResult, NamespaceSummary, RestoreFileRevisionRequest,
+    MutationResult, NamespaceStatusResponse, NamespaceSummary, RestoreFileRevisionRequest,
 };
 pub use ids::{
     generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
