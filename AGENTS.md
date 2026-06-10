@@ -21,7 +21,7 @@ The durable source of truth is object storage. Everything else is either compute
 
 ## 2a. Required reading before changing core behavior
 
-Before touching `loon-server`, `loon-core`, `loon-objectstore`, or `loon-client`, read:
+Before touching `loonfs-server`, `loonfs-core`, `loonfs-objectstore`, or `loonfs-client`, read:
 
 - `README.md`
 - `docs/specs/architecture.md`
@@ -35,7 +35,7 @@ These documents lock the high-leverage choices that are easiest to get wrong in 
 For normal feature work, follow this order:
 
 1. Confirm the relevant behavior in `docs/specs/` and `README.md`.
-2. Update the reference model in `crates/loon-model/` when metadata semantics change.
+2. Update the reference model in `crates/loonfs-model/` when metadata semantics change.
 3. Implement the production code to the current spec.
 4. Add or update deterministic tests after the behavior is understood.
 5. If the required behavior cannot fit the current spec, stop and escalate to the core team rather than inventing a local contract.
@@ -63,9 +63,9 @@ Every randomized failure must print:
 
 - `README.md`: active product and operator guide
 - `docs/specs/`: authoritative contracts, orientation docs, and reference material (`docs/specs/README.md` is the index)
-- `crates/loon-model/`: pure reference model for metadata replay and semantic comparison
-- `crates/loon-core/`: canonical implementation of metadata rules and replay
-- `crates/loon-objectstore/`: provider contract, keys, and conformance behavior
+- `crates/loonfs-model/`: pure reference model for metadata replay and semantic comparison
+- `crates/loonfs-core/`: canonical implementation of metadata rules and replay
+- `crates/loonfs-objectstore/`: provider contract, keys, and conformance behavior
 
 ## 6. How to add a new namespace mutation
 
@@ -75,8 +75,8 @@ You must do all of the following:
 
 1. Confirm the mutation in `docs/specs/format.md` ("Write and read protocol"), and update its storage-model sections if it changes visible resource semantics.
 2. Document preconditions and failure modes.
-3. Add or update the model behavior in `crates/loon-model/`.
-4. Add or update invariants in `crates/loon-core/src/invariants.rs`.
+3. Add or update the model behavior in `crates/loonfs-model/`.
+4. Add or update invariants in `crates/loonfs-core/src/invariants.rs`.
 5. Add deterministic tests for the new behavior.
 6. Only then add the production implementation.
 
@@ -86,16 +86,16 @@ Example: “we need compare-and-swap update on small mutable control objects.”
 
 Required steps:
 
-1. Add the capability to `crates/loon-objectstore/`.
+1. Add the capability to `crates/loonfs-objectstore/`.
 2. Add a conformance test case.
 3. Mark the provider expectation for S3 and R2.
 4. If the contract itself must change, stop and escalate to the core team so the spec can be reoriented before code diverges.
 
-Do not smuggle provider-specific behavior into `loon-core`.
+Do not smuggle provider-specific behavior into `loonfs-core`.
 
 ## 8. Commit and PR style
 
-Always use [Conventional Commits](https://www.conventionalcommits.org/) for both commit messages and PR titles (e.g. `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Scope is optional but encouraged when the change is confined to a single crate (e.g. `fix(loon-client):`, `refactor(loon-server):`).
+Always use [Conventional Commits](https://www.conventionalcommits.org/) for both commit messages and PR titles (e.g. `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Scope is optional but encouraged when the change is confined to a single crate (e.g. `fix(loonfs-client):`, `refactor(loonfs-server):`).
 
 Prefer small commits. Good commit shapes:
 

@@ -2,7 +2,7 @@
 
 LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams in embedded/direct mode without a LoonFS server.
 
-The Loon protocol enables version history, branching, and replays out of the box.
+The LoonFS protocol enables version history, branching, and replays out of the box.
 
 ## Download
 
@@ -18,7 +18,7 @@ brew install loonfs/tap/loon
 
 Finally, you can compile it directly from source by checking out this repository and running
 ```bash
-cargo build -p loon-cli                     # compile from source
+cargo build -p loonfs-cli                     # compile from source
 cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
 ```
 
@@ -52,7 +52,7 @@ If your agent cannot run shell commands, use the [paste-in install prompt](https
 
 ## Sample usage
 
-Here are the main filesystem commands. See [here](https://github.com/loonfs/loonfs/tree/main/crates/loon-cli/README.md) for a comprehensive list.
+Here are the main filesystem commands. See [here](https://github.com/loonfs/loonfs/tree/main/crates/loonfs-cli/README.md) for a comprehensive list.
 
 ```bash
 loon put {LOCAL_FILE_PATH} {REMOTE_FILE_PATH}
@@ -73,11 +73,11 @@ Embedded mode is production-capable when backed by an object store that satisfie
 
 ## Performance tracing
 
-Server tracing is opt-in. Set `LOONFS_TRACE=json` to emit JSON `tracing` span close events, and use `RUST_LOG` to control filters. When `LOONFS_TRACE=json` is set without `RUST_LOG`, the server defaults to `loon_server=info,loonfs=info,loon_core=info`.
+Server tracing is opt-in. Set `LOONFS_TRACE=json` to emit JSON `tracing` span close events, and use `RUST_LOG` to control filters. When `LOONFS_TRACE=json` is set without `RUST_LOG`, the server defaults to `loonfs_server=info,loonfs=info,loonfs_core=info`.
 
 ```bash
-LOONFS_TRACE=json RUST_LOG=loon_server=info,loonfs=info,loon_core=info \
-  cargo run -p loon-server -- --config configs/loon-server.local-fs.example.toml
+LOONFS_TRACE=json RUST_LOG=loonfs_server=info,loonfs=info,loonfs_core=info \
+  cargo run -p loonfs-server -- --config configs/loonfs-server.local-fs.example.toml
 ```
 
 Server object-store metrics are separately opt-in. Set `LOONFS_OBJECT_STORE_METRICS_JSONL=target/loonfs-perf/object-store.ndjson` to write privacy-safe per-call samples for object-store operations.

@@ -155,7 +155,7 @@ Two codes exist specifically so capability handling is uniform from day one:
   without breaking clients. Deployments may use it today for tenancy denials
   (for example, refusing namespace enumeration).
 
-The full registry (`ErrorCode` in `loon-api`):
+The full registry (`ErrorCode` in `loonfs-api`):
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
@@ -206,7 +206,7 @@ One SDK serves both backends; deployment mode never forks the client
 codebase.
 
 - The embedded engine (`loonfs::Fs`) and the remote client
-  (`loon_client::Client`) expose the same operations and the same
+  (`loonfs_client::Client`) expose the same operations and the same
   `capabilities()` accessor returning the capability document of section 2.1.
   For the remote client the document is fetched from `GET /v0/config` and
   cached; for the embedded engine it is a constant.

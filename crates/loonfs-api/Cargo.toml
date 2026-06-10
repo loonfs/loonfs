@@ -1,0 +1,23 @@
+[package]
+name = "loonfs-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wire types and durable-format codecs for LoonFS."
+repository.workspace = true
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-casefold.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true

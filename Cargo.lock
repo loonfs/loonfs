@@ -1063,7 +1063,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
-name = "loon-api"
+name = "loonfs"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "loonfs-api",
+ "loonfs-core",
+ "loonfs-objectstore",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "loonfs-api"
 version = "0.1.1"
 dependencies = [
  "ciborium",
@@ -1079,7 +1096,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-cli"
+name = "loonfs-cli"
 version = "0.1.1"
 dependencies = [
  "clap",
@@ -1087,11 +1104,11 @@ dependencies = [
  "hostname",
  "http",
  "insta",
- "loon-api",
- "loon-client",
- "loon-core",
- "loon-objectstore",
  "loonfs",
+ "loonfs-api",
+ "loonfs-client",
+ "loonfs-core",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1101,11 +1118,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-client"
+name = "loonfs-client"
 version = "0.1.1"
 dependencies = [
  "http",
- "loon-api",
+ "loonfs-api",
  "serde",
  "serde_json",
  "tempfile",
@@ -1117,15 +1134,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-core"
+name = "loonfs-core"
 version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "loon-api",
- "loon-model",
- "loon-objectstore",
+ "loonfs-api",
+ "loonfs-model",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "sha2",
@@ -1136,23 +1153,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-model"
+name = "loonfs-model"
 version = "0.1.1"
 dependencies = [
- "loon-api",
+ "loonfs-api",
  "serde",
  "thiserror 2.0.18",
 ]
 
 [[package]]
-name = "loon-objectstore"
+name = "loonfs-objectstore"
 version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
  "fs4",
  "futures",
- "loon-api",
+ "loonfs-api",
  "object_store",
  "serde",
  "serde_json",
@@ -1163,7 +1180,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-server"
+name = "loonfs-server"
 version = "0.1.1"
 dependencies = [
  "async-trait",
@@ -1172,11 +1189,11 @@ dependencies = [
  "clap",
  "futures",
  "http",
- "loon-api",
- "loon-client",
- "loon-core",
- "loon-objectstore",
  "loonfs",
+ "loonfs-api",
+ "loonfs-client",
+ "loonfs-core",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1189,38 +1206,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-sim"
+name = "loonfs-sim"
 version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "loon-api",
- "loon-core",
- "loon-objectstore",
+ "loonfs-api",
+ "loonfs-core",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
-]
-
-[[package]]
-name = "loonfs"
-version = "0.1.1"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "loon-api",
- "loon-core",
- "loon-objectstore",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]

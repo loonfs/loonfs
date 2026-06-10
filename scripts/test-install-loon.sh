@@ -3,7 +3,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-version=$(cargo pkgid -p loon-cli | sed 's/.*#//')
+version=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')
 target="${LOON_TEST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
 
 tmpdir=$(mktemp -d)
@@ -31,7 +31,7 @@ artifact_dir="$tmpdir/artifacts"
 latest_dir="$tmpdir/releases/latest/download"
 pinned_dir="$tmpdir/releases/download/v$version"
 
-cargo build --release -p loon-cli --target "$target"
+cargo build --release -p loonfs-cli --target "$target"
 "$repo_root/scripts/package-loon-release.sh" --target "$target" --version "$version" --artifact-dir "$artifact_dir"
 
 tar -tzf "$artifact_dir/loon-$target.tar.gz" | grep -Fx "./LICENSE" >/dev/null

@@ -1,0 +1,10 @@
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server-local"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "local-fs"
+root = "./.loonfs-store"
+key_prefix = "local-demo"

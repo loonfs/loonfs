@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/loon-api",
-  "crates/loon-objectstore",
-  "crates/loon-core",
+  "crates/loonfs-api",
+  "crates/loonfs-objectstore",
+  "crates/loonfs-core",
   "crates/loonfs",
-  "crates/loon-model",
-  "crates/loon-server",
-  "crates/loon-client",
-  "crates/loon-cli",
-  "crates/loon-sim",
+  "crates/loonfs-model",
+  "crates/loonfs-server",
+  "crates/loonfs-client",
+  "crates/loonfs-cli",
+  "crates/loonfs-sim",
 ]
 
 [workspace.package]

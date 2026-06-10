@@ -1,0 +1,36 @@
+[package]
+name = "loonfs-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The LoonFS command-line interface."
+repository.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "loon"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+hostname = "0.4"
+http.workspace = true
+loonfs-api = { path = "../loonfs-api" }
+loonfs-client = { path = "../loonfs-client" }
+loonfs = { path = "../loonfs" }
+loonfs-objectstore = { path = "../loonfs-objectstore" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+insta = { version = "1.39", features = ["json"] }
+loonfs-core = { path = "../loonfs-core" }
+tempfile.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true
