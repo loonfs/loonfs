@@ -16,8 +16,8 @@ difference a client observes is *which* capabilities a deployment advertises.
 
 ## 1. Profiles are functional planes
 
-**Definition (normative): a profile is a functional plane** — a coherent area
-of responsibility with its own endpoint set — not a resource type. Profiles
+**A profile is a functional plane** — a coherent area of responsibility with
+its own endpoint set — not a resource type. Profiles
 are **all-or-nothing** conformance units: a deployment MUST NOT advertise a
 profile unless every required op in it is implemented. Optional behavior
 within a plane is expressed as **named features** (section 2).
@@ -246,13 +246,11 @@ A commit request carries the following logical fields:
 | `message` | Optional human-readable description of the mutation event. |
 | `annotations` | Optional structured metadata attached to the logical commit request. |
 
-The server validates each request against authoritative namespace state. A
-request may be rejected immediately. If it is tentatively accepted into a
-publication batch, the server may assign it a `seq`, but the request is not
-yet committed or successful at that point. It becomes one committed logical
-commit only after its WAL segment is durably written and the head update
-succeeds. If the WAL segment is written but the head update fails, the segment
-is orphaned and the request is not committed.
+The server validates each request against authoritative namespace state and
+may reject it immediately. A tentatively accepted request becomes one
+committed logical commit only after its WAL segment is durably written and the
+head update succeeds; a segment written before a failed head update is
+orphaned, and the request is not committed.
 
 The server may publish multiple committed logical commits in one WAL segment
 and one head update, but it must preserve per-commit idempotency, ordering,
@@ -319,15 +317,13 @@ or separate display names:
 }
 ```
 
-The field name `namespace_id` is intentional API compatibility surface. Fork
-creation uses `new_namespace_id` for the target namespace. Route placeholders
+Fork creation uses `new_namespace_id` for the target namespace. Route placeholders
 such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are
 only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
-A few representative requests and responses are shown below. These examples
-are illustrative, not exhaustive. Responses may gain fields within v0; clients
-must ignore JSON fields they do not recognize.
+The examples below are representative, not exhaustive. Responses may gain
+fields within v0; clients must ignore JSON fields they do not recognize.
 
 ### 6.1 `GET /v0/config`
 
@@ -504,9 +500,8 @@ The semantic rule is:
 Repeating `PUT /content` with the same bytes for the same upload id is
 idempotent. Repeating it with different bytes is a conflict. Completing an
 upload fails if no content was staged or if the expected `content_ref` differs
-from the staged one. Generic metadata publication still applies the durable
-content validation rules from the write protocol before arbitrary
-`content_ref`s become visible.
+from the staged one. Commits that reference arbitrary `content_ref`s still
+pass the write protocol's durable-content validation.
 
 Representative begin-upload response:
 
@@ -597,8 +592,7 @@ Representative request:
 ```
 
 A request may be rejected immediately. A successful response is returned only
-after the request is actually committed: the WAL segment is durably stored and
-the head has been updated to reference it.
+after the request is committed (section 5.1).
 
 Representative response:
 
@@ -788,9 +782,9 @@ to an implementation or deployment.
 
 ## 9. Operation statefulness
 
-This section defines when an operation is a single-request operation and when
-it uses a control object, and the split of responsibility between client and
-server for the common filesystem commands.
+This section defines when an operation is a single request, when it uses a
+control object, and how responsibility splits between client and server for
+the common filesystem commands.
 
 One-shot operations are fully described by a single request and normally do
 not require durable control-plane state. Long-running operations may span

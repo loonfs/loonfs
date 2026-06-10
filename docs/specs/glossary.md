@@ -22,7 +22,7 @@
 | **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. |
 | **Change feed** | The ordered stream of committed metadata changes after a chosen `seq`. |
 | **Cursor** | A bookmark such as `after_seq` used to resume incremental reads. |
-| **mount** | Reserved future presentation concept for exposing another namespace, or a subtree of another namespace, inside a visible tree; not a v0 inode kind. |
+| **Mount** | Reserved for the future: presenting another namespace, or a subtree of one, inside a visible tree. Not a v0 inode kind. |
 | **ACL** | An access-control rule granting a principal a role over a namespace or subtree. ACLs are not part of namespace metadata history. |
 | **Share** | An access grant to a namespace or subtree. A share may later be presented through a mount in another tree. |
 | **Precondition** | A rule that must still hold at an explicit namespace history point before a commit is accepted. |

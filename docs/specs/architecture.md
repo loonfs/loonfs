@@ -14,8 +14,6 @@ Namespaces and content stores are separate durable domains. A namespace owns fil
 
 ## 2. Data plane, metadata plane, and control plane
 
-This spec uses three terms.
-
 | Plane | Purpose | Examples | Namespace-visible history? |
 | --- | --- | --- | --- |
 | **Data plane** | Stores and serves file bytes. | Whole-file content objects and download streams. | No, by itself. |
@@ -31,7 +29,7 @@ Control-plane state should still be durable when losing it on restart would viol
 
 ## 3. Client usage patterns
 
-LoonFS supports multiple client usage patterns. These patterns are defined by the protocol surface a client uses, not by whether the implementation is a CLI, desktop app, web app, or service. (API conformance *profiles* — `core/v0`, `admin/v0` — are a different concept, defined in `api.md`.)
+A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API *profiles* — `core/v0`, `admin/v0` — are a different concept; see `api.md`.)
 
 | Client pattern | Primary surface | Typical state |
 | --- | --- | --- |
@@ -40,7 +38,6 @@ LoonFS supports multiple client usage patterns. These patterns are defined by th
 | **Sync client** | Change feed plus durable local projection, with optional writes | Durable local state, cursors, and restart-safe reconciliation state. |
 | **Operator or admin client** | Recovery, inspection, repair, and low-level operations | Implementation-specific. |
 
-A CLI, desktop app, web app, SDK, or service may implement one or more of these patterns.
 
 ## 4. Operation classes
 
@@ -53,4 +50,4 @@ Most core operations fall into one of two classes.
 
 Implementations may additionally expose coordinator-specific helpers for recursive workflows or admin work, but those helpers are outside the interoperable core model.
 
-Control-objects and any implementation-specific helpers preserve stable meaning across time. They do not create a second history model.
+Control objects and implementation-specific helpers never create a second history model.

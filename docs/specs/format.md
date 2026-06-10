@@ -113,9 +113,6 @@ LoonFS uses distinct naming conventions for distinct surfaces:
   system use (for example, object-store doctor probes write under
   `loonfs-doctor-*`); implementations must reject it for user namespaces.
 
-Namespace IDs are durable storage identities. A `namespace_id` must not be
-reused after namespace destruction; future user-facing display names or
-aliases may be reused only by mapping them to a new namespace ID.
 
 Implementations must reject invalid namespace IDs before object-key
 construction. Durable objects that deserialize to invalid typed namespace IDs
@@ -130,7 +127,7 @@ values. Fixed object-store path-family names should not use underscores.
 
 ### 1.4 WAL segment rules
 
-The metadata log has six important rules.
+The metadata log has six rules.
 
 1. A logical commit is the semantic record of one accepted client commit
    request.
@@ -287,7 +284,7 @@ Those facts live in other metadata families:
 The inode itself is only one part of the metadata model. A complete visible
 file usually involves multiple logical records.
 
-Illustrative inode row:
+An illustrative inode row:
 
 ```json
 {
@@ -297,7 +294,7 @@ Illustrative inode row:
 }
 ```
 
-Illustrative direntry bind row that binds that inode into the tree:
+The bind row that places that inode in the tree:
 
 ```json
 {
@@ -309,7 +306,7 @@ Illustrative direntry bind row that binds that inode into the tree:
 }
 ```
 
-Illustrative direntry unbind row that removes one exact prior binding:
+The unbind row that removes one exact prior binding:
 
 ```json
 {
@@ -323,7 +320,7 @@ Illustrative direntry unbind row that removes one exact prior binding:
 }
 ```
 
-Illustrative revision row for the current file contents:
+The revision row for the current file contents:
 
 ```json
 {
@@ -338,7 +335,7 @@ Illustrative revision row for the current file contents:
 }
 ```
 
-Together, those three records mean:
+Together, the inode, bind, and revision rows mean:
 
 - inode `42` is the durable identity of the file;
 - the file is currently visible under parent directory inode `9` as
@@ -536,9 +533,8 @@ then replay only the visible WAL chain after the manifest's `head_seq`.
 The WAL preserves ordered history even when multiple logical commits are
 stored in one segment. Each logical commit records semantic results plus
 normalized metadata deltas such as inode creation, direntry bind/unbind, file
-revision append, and subtree tombstone rows. Checkpoints keep replay bounded.
-Together they provide recovery from durable artifacts alone without requiring
-unbounded WAL replay as history grows.
+revision append, and subtree tombstone rows. Checkpoints keep replay bounded
+as history grows.
 
 ## 3. Write and read protocol
 
@@ -601,9 +597,7 @@ against ephemeral state advanced by earlier operations in the same request.
 
 Passing validation does not by itself make the request committed or
 successful. If a client mutation request reaches the success boundary in
-section 3.1.4, it becomes one logical commit. Distinct client commit requests
-remain distinct logical commits even when they are published in the same WAL
-segment.
+section 3.1.4, it becomes one logical commit.
 
 Content reference validation fails before metadata preconditions are evaluated
 when:
@@ -756,9 +750,8 @@ A request may contain more than one operation, but:
 - the request becomes one ordered logical commit in namespace history.
 
 Each successful logical commit receives exactly one namespace `seq`. A request
-that is rejected receives no `seq`. A request may be assigned a `seq` while
-tentatively accepted into a batch, but it is not committed or successful
-unless the WAL segment is durable and the head update succeeds.
+that is rejected receives no `seq`. Tentative acceptance into a batch is not
+success (section 3.1.4).
 
 One head update may publish one or more contiguous logical commits.
 
@@ -987,8 +980,8 @@ A stable format needs explicit versioning in three places.
 A new version should be introduced only when an old implementation could
 misread or misapply a new feature.
 
-For the protocol binding, the API spec's "Error responses" section is the
-registry of stable error codes and their HTTP statuses, and the rule that
+For the protocol binding, the API spec's "Standard error contract" section is
+the registry of stable error codes and HTTP statuses, and of the rule that
 clients must ignore unknown JSON response fields and tolerate unknown error
 codes.
 
@@ -1098,17 +1091,14 @@ Maintenance keeps read cost bounded, retention safe, and durable state clean.
 Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. An embedded engine where an operator
 triggers maintenance manually and a server that runs the same work invisibly
-are equally conformant (see `api.md` for the optional maintenance plane).
-
-It does not matter *who* performs maintenance; the invariants below bind every
-implementation. Maintenance never creates a second source of truth for the
-filesystem.
+are equally conformant (see `api.md` for the optional maintenance plane). The
+invariants below bind every implementation, whoever runs the work: maintenance
+never creates a second source of truth for the filesystem.
 
 ### 6.1 Manifest publication and checkpoint verification
 
-A namespace manifest summarizes namespace files at one chosen manifest id. It
-records metadata SSTs, fork references, head summary, checkpoint records, and
-the namespace features map.
+A namespace manifest records one namespace file-set version (the section 1.2
+table lists its contents).
 
 A checkpoint is a durable record that pins one manifest version. A checkpoint
 is useful only after both the checkpoint record and its referenced manifest

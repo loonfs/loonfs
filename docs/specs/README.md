@@ -35,8 +35,6 @@ When something new needs a home: if other implementations must understand it to 
 
 ## 2. Design goals
 
-The design goals are:
-
 | Goal | Meaning |
 | --- | --- |
 | **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content refs, logical commits, WAL segments, manifests, and checkpoints. |

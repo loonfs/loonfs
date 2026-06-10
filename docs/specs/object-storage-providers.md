@@ -1,6 +1,6 @@
 # LoonFS Object Storage Provider Reference
 
-This document is a non-normative reference. It collects useful provider limits and performance data points for LoonFS design work. It is a quick engineering reference, useful for high-level design discussions, but not a substitute for provider conformance tests.
+This document is a non-normative reference: provider limits and performance data points that inform LoonFS design work. It is not a substitute for provider conformance tests.
 
 ## 1. Frequently Used Data Points
 
@@ -23,9 +23,9 @@ This document is a non-normative reference. It collects useful provider limits a
 
 ## 3. LoonFS Design Implications
 
-1. **WAL/head flush cadence:** a 1 update per second is the single key CAS ceiling for GCS and R2. For more throughput, write immutable segment objects and update multiple sharded heads or a batched manifest.
+1. **WAL/head flush cadence:** one update per second is the same-key CAS ceiling for GCS and R2. For more throughput, write immutable segment objects and update multiple sharded heads or a batched manifest.
 2. **Immutable content path:** content-addressed or monotonic keys can scale through multipart upload and distributed prefixes. 
-4. **Checksums:** LoonFS should own end-to-end integrity. Provider checksums help validate transport/storage, but ETag/checksum semantics diverge sharply across providers and multipart modes.
+3. **Checksums:** LoonFS should own end-to-end integrity. Provider checksums help validate transport/storage, but ETag/checksum semantics diverge sharply across providers and multipart modes.
 
 ## 4. Sources
 
