@@ -10,6 +10,11 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+/// Lock file serializing mutations across processes sharing one store root.
+/// Held only for the duration of each write; the OS releases it if the
+/// holding process dies. Never listed as an object (see `is_scratch_name`).
+const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
+
 #[derive(Debug)]
 pub struct LocalFsStore {
     root: PathBuf,
@@ -26,12 +31,38 @@ impl LocalFsStore {
         })
     }
 
+    /// Extends the in-process write mutex across processes with an advisory
+    /// file lock on the store root. Check-then-act writes (compare-and-swap,
+    /// delete-then-prune) are only safe while both are held.
+    async fn acquire_cross_process_write_lock(&self) -> Result<std::fs::File, ObjectStoreError> {
+        let lock_path = self.root.join(STORE_LOCK_FILE_NAME);
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(io_error)?;
+            fs4::fs_std::FileExt::lock_exclusive(&file).map_err(io_error)?;
+            Ok(file)
+        })
+        .await
+        .map_err(|err| ObjectStoreError::Transport(format!("store lock task failed: {err}")))?
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     fn resolve_key(&self, key: &str) -> Result<PathBuf, ObjectStoreError> {
         let segments = validate_segments(key, false)?;
+        // Scratch-shaped names are reserved by this store: they are hidden
+        // from listings, so accepting them as keys would create objects a
+        // listing can never report.
+        if segments.iter().any(|segment| is_scratch_name(segment)) {
+            return Err(ObjectStoreError::InvalidKey(key.to_owned()));
+        }
         let mut path = self.root.clone();
         for segment in segments {
             path.push(segment);
@@ -74,8 +105,12 @@ impl LocalFsStore {
         })
     }
 
-    async fn create_new_object(path: &Path, bytes: &[u8]) -> Result<(), ObjectStoreError> {
-        ensure_parent_dir(path).await?;
+    async fn create_new_object(
+        root: &Path,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), ObjectStoreError> {
+        let created_dirs = ensure_parent_dir(path).await?;
         let mut file = match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -94,13 +129,21 @@ impl LocalFsStore {
 
         if result.is_err() {
             let _ = fs::remove_file(path).await;
+            return result;
         }
 
-        result
+        if created_dirs {
+            sync_dir_chain(path, root).await?;
+        }
+        sync_parent_dir(path).await
     }
 
-    async fn replace_object(path: &Path, bytes: &[u8]) -> Result<(), ObjectStoreError> {
-        ensure_parent_dir(path).await?;
+    async fn replace_object(
+        root: &Path,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), ObjectStoreError> {
+        let created_dirs = ensure_parent_dir(path).await?;
         let temp_path = temp_path(path);
 
         let result: Result<(), ObjectStoreError> = async {
@@ -133,9 +176,13 @@ impl LocalFsStore {
 
         if result.is_err() {
             let _ = fs::remove_file(&temp_path).await;
+            return result;
         }
 
-        result
+        if created_dirs {
+            sync_dir_chain(path, root).await?;
+        }
+        sync_parent_dir(path).await
     }
 }
 
@@ -215,14 +262,15 @@ impl LocalFsStore {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let path = self.resolve_key(key)?;
         let _guard = self.write_lock.lock().await;
+        let _cross_process_guard = self.acquire_cross_process_write_lock().await?;
 
         match mode {
-            PutMode::Overwrite => Self::replace_object(&path, bytes).await?,
+            PutMode::Overwrite => Self::replace_object(&self.root, &path, bytes).await?,
             PutMode::CreateIfAbsent => {
                 if fs::try_exists(&path).await.map_err(io_error)? {
                     return Err(ObjectStoreError::PreconditionFailed);
                 }
-                Self::create_new_object(&path, bytes).await?;
+                Self::create_new_object(&self.root, &path, bytes).await?;
             }
             PutMode::CompareAndSwap { expected_etag } => {
                 let current = Self::metadata_for_path(&path, false)
@@ -231,7 +279,7 @@ impl LocalFsStore {
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
                     return Err(ObjectStoreError::PreconditionFailed);
                 }
-                Self::replace_object(&path, bytes).await?;
+                Self::replace_object(&self.root, &path, bytes).await?;
             }
         }
 
@@ -243,9 +291,11 @@ impl LocalFsStore {
     async fn delete_object(&self, key: &str) -> Result<(), ObjectStoreError> {
         let path = self.resolve_key(key)?;
         let _guard = self.write_lock.lock().await;
+        let _cross_process_guard = self.acquire_cross_process_write_lock().await?;
 
         match fs::remove_file(&path).await {
             Ok(()) => {
+                sync_parent_dir(&path).await?;
                 prune_empty_parent_dirs(path.parent(), &self.root).await?;
                 Ok(())
             }
@@ -328,11 +378,60 @@ async fn list_prefix_for_root(
     Ok(keys)
 }
 
-async fn ensure_parent_dir(path: &Path) -> Result<(), ObjectStoreError> {
+/// Creates the parent directory chain. Returns whether anything was created,
+/// so callers know the new directory entries also need to be made durable.
+async fn ensure_parent_dir(path: &Path) -> Result<bool, ObjectStoreError> {
     match path.parent() {
-        Some(parent) => fs::create_dir_all(parent).await.map_err(io_error),
+        Some(parent) => {
+            if fs::try_exists(parent).await.map_err(io_error)? {
+                return Ok(false);
+            }
+            fs::create_dir_all(parent).await.map_err(io_error)?;
+            Ok(true)
+        }
         None => Err(ObjectStoreError::InvalidKey(path.display().to_string())),
     }
+}
+
+/// Fsyncs the directory holding `path`, making a rename, create, or unlink
+/// of that entry durable. Without this, the file data can survive a crash
+/// while the directory entry pointing at it does not.
+async fn sync_parent_dir(path: &Path) -> Result<(), ObjectStoreError> {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            let dir = File::open(parent).await.map_err(io_error)?;
+            dir.sync_all().await.map_err(io_error)?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+/// Fsyncs every directory from `path`'s parent up to and including the
+/// store root, so a freshly created directory chain survives a crash. The
+/// root itself pre-exists, so the chain never needs to go past it.
+async fn sync_dir_chain(path: &Path, root: &Path) -> Result<(), ObjectStoreError> {
+    #[cfg(unix)]
+    {
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            let handle = File::open(dir).await.map_err(io_error)?;
+            handle.sync_all().await.map_err(io_error)?;
+            if dir == root {
+                break;
+            }
+            current = dir.parent();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, root);
+    }
+    Ok(())
 }
 
 async fn collect_keys(root: PathBuf) -> Result<Vec<String>, ObjectStoreError> {
@@ -355,6 +454,13 @@ async fn collect_keys(root: PathBuf) -> Result<Vec<String>, ObjectStoreError> {
             }
 
             if metadata.is_file() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_scratch_name)
+                {
+                    continue;
+                }
                 keys.push(relative_key(&root, &path)?);
             }
         }
@@ -407,6 +513,15 @@ async fn prune_empty_parent_dirs(
     Ok(())
 }
 
+/// Private scratch names (the store lock and in-flight temp writes) are
+/// never objects: listings hide them and `resolve_key` rejects them, so the
+/// hidden set and the unaddressable set are identical. The match is
+/// deliberately narrow — key segments are otherwise allowed to start with a
+/// dot.
+fn is_scratch_name(name: &str) -> bool {
+    name == STORE_LOCK_FILE_NAME || (name.starts_with('.') && name.contains(".tmp-"))
+}
+
 #[allow(clippy::disallowed_methods)]
 fn temp_path(path: &Path) -> PathBuf {
     // Local atomic writes need a unique sibling name; this timestamp is not durable state.
@@ -436,8 +551,11 @@ fn io_error(err: std::io::Error) -> ObjectStoreError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+    // Tests panic in unexpected match arms for precise diagnostics.
+
     use super::LocalFsStore;
-    use super::{ObjectStore, PutMode};
+    use super::{ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{namespace_head, namespace_lease};
     use bytes::Bytes;
     use std::fs;
@@ -499,6 +617,95 @@ mod tests {
         store.delete(&key).await.expect("delete existing object");
         store.delete(&key).await.expect("delete missing object");
         assert_eq!(store.head(&key).await.expect("head after delete"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compare_and_swap_is_safe_across_store_instances() {
+        let temp_dir = TestDir::new("cross-instance-cas");
+        let key = namespace_head("ns-cas");
+        let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
+            .await
+            .expect("seed counter");
+
+        let mut writers = Vec::new();
+        for _ in 0..2 {
+            let root = temp_dir.path().to_path_buf();
+            let key = key.clone();
+            writers.push(tokio::spawn(async move {
+                // A separate instance models a separate process: it shares
+                // no in-process mutex with its sibling, only the file lock.
+                let store = LocalFsStore::new(&root).expect("create local fs store");
+                for _ in 0..20 {
+                    loop {
+                        let body = store
+                            .get_with_metadata(&key)
+                            .await
+                            .expect("read counter")
+                            .expect("counter exists");
+                        let value: u64 = std::str::from_utf8(&body.bytes)
+                            .expect("utf8 counter")
+                            .parse()
+                            .expect("numeric counter");
+                        let expected_etag = body.metadata.etag.expect("counter etag");
+                        let put = store
+                            .put(
+                                &key,
+                                Bytes::from((value + 1).to_string()),
+                                PutMode::CompareAndSwap { expected_etag },
+                            )
+                            .await;
+                        match put {
+                            Ok(_) => break,
+                            Err(ObjectStoreError::PreconditionFailed) => continue,
+                            Err(err) => panic!("unexpected CAS error: {err}"),
+                        }
+                    }
+                }
+            }));
+        }
+        for writer in writers {
+            writer.await.expect("writer task");
+        }
+
+        let bytes = seed
+            .get(&key, None)
+            .await
+            .expect("read final counter")
+            .expect("counter exists");
+        assert_eq!(std::str::from_utf8(&bytes).expect("utf8"), "40");
+    }
+
+    #[tokio::test]
+    async fn listings_hide_scratch_files_and_reject_scratch_keys() {
+        let temp_dir = TestDir::new("scratch");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = namespace_head("ns-scratch");
+        store
+            .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
+            .await
+            .expect("put object");
+
+        // The write above created the store lock; fake an in-flight temp
+        // write next to the real object as well.
+        assert!(temp_dir.path().join(super::STORE_LOCK_FILE_NAME).exists());
+        let control_dir = temp_dir.path().join("namespaces/ns-scratch/control");
+        fs::write(control_dir.join(".head.json.tmp-123-456"), b"partial")
+            .expect("write fake temp file");
+
+        let keys = store.list_prefix("").await.expect("list all");
+        assert_eq!(keys, vec![key]);
+
+        let reserved = store.get(super::STORE_LOCK_FILE_NAME, None).await;
+        assert!(matches!(reserved, Err(ObjectStoreError::InvalidKey(_))));
+        let temp_shaped = store
+            .put(
+                "namespaces/ns-scratch/control/.head.json.tmp-9-9",
+                Bytes::from_static(b"x"),
+                PutMode::Overwrite,
+            )
+            .await;
+        assert!(matches!(temp_shaped, Err(ObjectStoreError::InvalidKey(_))));
     }
 
     struct TestDir {

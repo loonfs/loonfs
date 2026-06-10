@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+fs4.workspace = true
 futures.workspace = true
 http.workspace = true
 loon-api = { path = "../loon-api" }
