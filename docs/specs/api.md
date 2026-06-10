@@ -27,7 +27,7 @@ within a plane is expressed as **named features** (section 2).
 
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
-| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace resolution (operate on a namespace by id, including namespace status), `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
+| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Trigger checkpoint creation; trigger retention-floor advancement. Future maintenance triggers (compaction, GC, index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | — | **Reserved name only.** Materializes only if derived indexes introduce endpoints beyond the core ops; until that decision, no ops are specified and no `query.*` feature keys are registered. |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. The error contract already carries `permission_denied` so this plane can land without breaking clients. |
@@ -51,7 +51,7 @@ Notes:
 
 ### 1.1 Where new behavior belongs
 
-Three sorting questions place every future addition:
+When new behavior arrives, three questions decide where it belongs:
 
 1. Does it change bytes or metadata another implementation must interpret?
    It belongs in `format.md`, and it is mandatory.
@@ -151,8 +151,8 @@ must not parse `message`.
 Two codes exist specifically so capability handling is uniform from day one:
 
 - `not_supported` (HTTP 501): the deployment does not implement the requested
-  op or feature. Every op may return it, so SDKs reconcile capability drift
-  deterministically — map the error to its `feature`, then disable or degrade.
+  op or feature. Any op may return it; a client maps the error to its
+  `feature` key and disables or degrades that code path.
 - `permission_denied` (HTTP 403): the caller is authenticated but not allowed.
   This exists **now**, before the authorization plane, so `acl/v0` can land
   without breaking clients. Deployments may use it today for tenancy denials
@@ -216,9 +216,9 @@ codebase.
   `not_supported` error with its `feature` name, so gating logic — check the
   capability document, fall back on `not_supported` — is identical against
   either backend.
-- As optional planes accumulate ops, SDKs should group them behind
-  plane-shaped seams (mirroring `core`, `admin`, and later planes) so a
-  deployment's unsupported planes are absent rather than throwing.
+- As optional planes gain ops, SDKs should group them the way the planes are
+  grouped (`core`, `admin`, and later), so the surface a deployment does not
+  support is visibly absent instead of failing call by call.
 
 ## 5. Minimal upload, commit, and change-feed model
 

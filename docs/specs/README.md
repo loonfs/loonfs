@@ -11,17 +11,17 @@ The durable state consists of:
 - immutable namespace manifests and checkpoint records
 - small mutable control objects such as the namespace head and leases
 
-All other state is cache, coordination, or other rebuildable state.
+Everything else — caches, queues, coordination state — can be rebuilt from those objects.
 
 LoonFS can be exposed as:
 
 - an embedded/direct filesystem runtime with commands such as `ls`, `get`, `put`, `mv`, and `cp`
-- an advanced writer surface for staged upload, explicit commit, and incremental change consumption
+- a lower-level writer surface: staged uploads, explicit commits, and an ordered change feed
 - a foundation for sync clients, batch writers, and operator tooling
 
-This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
+This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize implementation internals such as client databases, queues, or schedulers.
 
-The specification is two normative documents plus supporting material, all in this folder:
+The specification lives in this folder:
 
 | Document | Force | Contents |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ The specification is two normative documents plus supporting material, all in th
 | `architecture.md` | Orientation | How the durable pieces and the runtime fit together. |
 | `object-storage-providers.md` | Non-normative reference | Provider limits and performance data points that inform the design. |
 
-Two sorting questions place every future addition: behavior another implementation must interpret from bytes or metadata belongs in the format spec; a client-visible operation whose shape should be uniform belongs in the API spec inside a profile or named feature. How work gets done — queues, schedulers, caches — is implementation freedom and belongs in no specification document.
+When something new needs a home: if other implementations must understand it to read or write a store correctly, it belongs in `format.md`. If it is an operation clients call, it belongs in `api.md`. How an implementation organizes its internal work — queues, schedulers, caches — is not specified at all.
 
 ## 2. Design goals
 
@@ -85,12 +85,10 @@ The design goals are:
 The following are intentionally outside the core spec:
 
 - local client database schemas
-- job schedulers and worker topologies
-- queue shard layouts
+- job schedulers, queues, and worker topologies
 - platform-specific file-watcher integrations
-- exact binary encodings for large immutable metadata objects
-- whether recursive workflows use purely client-side orchestration or implementation-specific coordinators
-- whether one implementation uses a single process or several services internally
+- how recursive operations are coordinated
+- whether an implementation is one process or several services
 
 Those choices are implementation-specific and do not change the filesystem model.
 
@@ -103,5 +101,5 @@ Readers should start with:
 3. the format specification (`format.md`)
 4. the API specification (`api.md`)
 
-The operation statefulness matrix and the provider reference support design
-work around those two specifications.
+`operation-statefulness.md` and `object-storage-providers.md` are reference
+material for deeper design work.
