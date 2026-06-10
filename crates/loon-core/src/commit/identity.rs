@@ -10,25 +10,32 @@ use thiserror::Error;
 const CORE_COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.core.commit.semantic.v0";
 pub(crate) const PATH_INTENT_FINGERPRINT_DOMAIN: &str = "loonfs.path.intent.semantic.v0";
 
-/// Bare-hex SHA-256 over the canonical JSON encoding of a fingerprint
-/// preimage.
+/// Scheme-and-algorithm tag carried by every stored fingerprint value.
 ///
-/// Fingerprints deliberately keep this legacy un-prefixed form: the stored
-/// values carry no algorithm or version tag yet, so any change to this
-/// function changes every persisted fingerprint and breaks cross-version
-/// retry idempotency. Re-canonicalizing fingerprints (tagging values,
-/// speccing the preimage) is tracked as its own format change.
-pub(crate) fn fingerprint_sha256_hex<T>(value: &T) -> Result<String, serde_json::Error>
+/// `v0` names the canonicalization rules (domain string plus the v0 wire
+/// encoding of the preimage, spec 050 section 3.1) and `sha256` the digest
+/// algorithm, so either can change later without re-interpreting values
+/// already stored in WAL records and commit receipts.
+const FINGERPRINT_SCHEME: &str = "v0:sha256";
+
+/// Computes a stored fingerprint value (`v0:sha256:<64 lowercase hex>`) from
+/// a canonical preimage.
+///
+/// The preimage's compact JSON encoding is the durable contract: pinned-value
+/// tests below (and in `path::write::planner`) fail if it drifts.
+pub(crate) fn fingerprint_digest<T>(preimage: &T) -> Result<String, serde_json::Error>
 where
     T: Serialize,
 {
-    let bytes = serde_json::to_vec(value)?;
+    let bytes = serde_json::to_vec(preimage)?;
     let digest = Sha256::digest(&bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
+    let mut value = String::with_capacity(FINGERPRINT_SCHEME.len() + 1 + digest.len() * 2);
+    value.push_str(FINGERPRINT_SCHEME);
+    value.push(':');
     for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String should not fail");
+        write!(&mut value, "{byte:02x}").expect("writing to a String should not fail");
     }
-    Ok(encoded)
+    Ok(value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,6 +129,9 @@ fn core_commit_fingerprint_from_parts(
     message: &Option<String>,
     annotations: &Option<api_v0::CommitAnnotations>,
 ) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
+    // This struct's compact JSON is the v0 fingerprint preimage (spec 050
+    // section 3.1): field order, field names, and the v0-mirroring encodings of
+    // `Precondition` and `CommitOp` are all durable contract.
     #[derive(Serialize)]
     struct CanonicalCoreCommit<'a> {
         domain: &'static str,
@@ -132,7 +142,7 @@ fn core_commit_fingerprint_from_parts(
         annotations: &'a Option<api_v0::CommitAnnotations>,
     }
 
-    fingerprint_sha256_hex(&CanonicalCoreCommit {
+    fingerprint_digest(&CanonicalCoreCommit {
         domain: CORE_COMMIT_FINGERPRINT_DOMAIN,
         namespace_id,
         preconditions,
@@ -173,6 +183,105 @@ mod tests {
             core_commit_fingerprint(&core_request(FenceToken(1))).expect("right fingerprint");
 
         assert_eq!(left, right);
+    }
+
+    /// Pins the exact stored fingerprint for a fixed logical commit.
+    ///
+    /// If this fails, the canonical preimage changed (spec 050 section 3.1) and every
+    /// persisted fingerprint would disagree with recomputed ones, breaking
+    /// retry idempotency across versions. Do not update the literal without
+    /// bumping the fingerprint scheme tag.
+    #[test]
+    fn core_commit_fingerprint_value_is_pinned() {
+        let fingerprint =
+            core_commit_fingerprint(&core_request(FenceToken(1))).expect("fingerprint");
+
+        assert_eq!(
+            fingerprint.as_str(),
+            "v0:sha256:571632b55898f3ee1eba2ce0a82dfb499c9cf01f60e0029b79123b96762e8dda"
+        );
+    }
+
+    /// The internal commit vocabulary must serialize exactly like the v0 wire
+    /// vocabulary: the fingerprint preimage is defined over the v0 encoding.
+    #[test]
+    fn internal_commit_vocabulary_matches_v0_wire_encoding() {
+        let content_ref = loon_api::ContentRef::whole_file_v0(b"fingerprint bytes");
+        let name_key = loon_api::NameKey::for_display_name(
+            loon_api::NamePolicy::default(),
+            &loon_api::DisplayName::parse("Docs").expect("display name"),
+        );
+        let v0_ops = vec![
+            api_v0::CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "Docs".to_owned(),
+            },
+            api_v0::CommitOp::CreateFile {
+                parent_inode: InodeId(1),
+                display_name: "a.txt".to_owned(),
+                content_ref: content_ref.clone(),
+            },
+            api_v0::CommitOp::ReplaceFile {
+                inode_id: InodeId(5),
+                base_revision_no: loon_api::RevisionNo(1),
+                content_ref: content_ref.clone(),
+            },
+            api_v0::CommitOp::RestoreRevision {
+                inode_id: InodeId(5),
+                source_revision_no: loon_api::RevisionNo(1),
+                base_revision_no: loon_api::RevisionNo(2),
+            },
+            api_v0::CommitOp::DeleteFile {
+                inode_id: InodeId(5),
+            },
+            api_v0::CommitOp::Rename {
+                inode_id: InodeId(5),
+                new_parent_inode: InodeId(2),
+                new_display_name: "b.txt".to_owned(),
+                mode: api_v0::RenameMode::NoReplace,
+            },
+            api_v0::CommitOp::DeleteSubtree {
+                root_inode: InodeId(9),
+            },
+        ];
+        let v0_preconditions = vec![
+            api_v0::CommitPrecondition::InodeRevisionIs {
+                inode_id: InodeId(5),
+                revision_no: loon_api::RevisionNo(1),
+            },
+            api_v0::CommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: InodeId(5),
+            },
+            api_v0::CommitPrecondition::ChildNameAbsent {
+                parent_inode: InodeId(1),
+                name_key: name_key.clone(),
+            },
+            api_v0::CommitPrecondition::BindingIs {
+                parent_inode: InodeId(1),
+                name_key,
+                child_inode: InodeId(5),
+                bind_seq: loon_api::ChangeSeq(7),
+                bind_delta_index: 3,
+            },
+            api_v0::CommitPrecondition::DirectoryEmpty {
+                inode_id: InodeId(9),
+            },
+        ];
+
+        for v0_op in v0_ops {
+            let internal = commit_op_from_v0(v0_op.clone());
+            assert_eq!(
+                serde_json::to_value(&internal).expect("internal op"),
+                serde_json::to_value(&v0_op).expect("v0 op"),
+            );
+        }
+        for v0_precondition in v0_preconditions {
+            let internal = commit_precondition_from_v0(v0_precondition.clone());
+            assert_eq!(
+                serde_json::to_value(&internal).expect("internal precondition"),
+                serde_json::to_value(&v0_precondition).expect("v0 precondition"),
+            );
+        }
     }
 
     #[test]

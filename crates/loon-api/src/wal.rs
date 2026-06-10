@@ -9,12 +9,11 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Version 2: the durable document carries the payload as an opaque CBOR byte
-/// string checksummed over those exact bytes, and delta/precondition tags use
-/// the snake_case names from spec 050 sections 5-6. (Version 1 verified checksums by
-/// re-encoding the decoded payload and stored Rust enum identifiers; v1
-/// objects are rejected with `UnsupportedFormatVersion`.)
-pub const WAL_FORMAT_VERSION: u32 = 2;
+/// Version 1: a zstd-compressed CBOR envelope document carrying the payload
+/// as an opaque CBOR byte string. `payload_checksum` covers exactly those
+/// bytes, and delta/precondition tags use the snake_case names from spec 050
+/// sections 5-6.
+pub const WAL_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,7 +102,7 @@ pub struct WalCommitPayload {
     pub seq: ChangeSeq,
     pub apply_after_seq: ChangeSeq,
     pub commit_id: CommitId,
-    pub semantic_commit_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint: String,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]

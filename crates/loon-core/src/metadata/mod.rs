@@ -127,7 +127,7 @@ pub struct SubtreeTombstoneRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
-    pub semantic_commit_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint: String,
     pub committed_seq: ChangeSeq,
     pub results: Vec<CommitOpResult>,
 }
@@ -449,7 +449,7 @@ impl MetadataState {
         let mut checked_invariants = self.apply_committed_wal_deltas_mut(record.seq, &deltas)?;
         self.push_commit_receipt_record(CommitReceiptRecord {
             commit_id: record.commit_id.clone(),
-            semantic_commit_fingerprint_sha256: record.semantic_commit_fingerprint_sha256.clone(),
+            semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
             committed_seq: record.seq,
             results: record.results.clone(),
         });
@@ -1126,7 +1126,7 @@ fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
 fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
     size_of::<CommitReceiptRecord>()
         + record.commit_id.as_str().len()
-        + record.semantic_commit_fingerprint_sha256.len()
+        + record.semantic_commit_fingerprint.len()
         + record
             .results
             .iter()
@@ -1557,19 +1557,19 @@ mod tests {
             vec![
                 CommitReceiptRecord {
                     commit_id: commit_id.clone(),
-                    semantic_commit_fingerprint_sha256: "old".to_owned(),
+                    semantic_commit_fingerprint: "old".to_owned(),
                     committed_seq: ChangeSeq(1),
                     results: Vec::new(),
                 },
                 CommitReceiptRecord {
                     commit_id: CommitId::parse("other-commit").expect("valid commit id"),
-                    semantic_commit_fingerprint_sha256: "other".to_owned(),
+                    semantic_commit_fingerprint: "other".to_owned(),
                     committed_seq: ChangeSeq(3),
                     results: Vec::new(),
                 },
                 CommitReceiptRecord {
                     commit_id: commit_id.clone(),
-                    semantic_commit_fingerprint_sha256: "new".to_owned(),
+                    semantic_commit_fingerprint: "new".to_owned(),
                     committed_seq: ChangeSeq(2),
                     results: Vec::new(),
                 },
@@ -1580,7 +1580,7 @@ mod tests {
             .find_commit_receipt(&commit_id)
             .expect("receipt");
         assert_eq!(receipt.committed_seq, ChangeSeq(2));
-        assert_eq!(receipt.semantic_commit_fingerprint_sha256, "new");
+        assert_eq!(receipt.semantic_commit_fingerprint, "new");
     }
 
     #[test]
@@ -1621,7 +1621,7 @@ mod tests {
         });
         builder.push_commit_receipt(CommitReceiptRecord {
             commit_id: commit_id.clone(),
-            semantic_commit_fingerprint_sha256: "fingerprint".to_owned(),
+            semantic_commit_fingerprint: "fingerprint".to_owned(),
             committed_seq: ChangeSeq(3),
             results: vec![CommitOpResult::ReplaceFile {
                 op_index: 0,
@@ -1670,7 +1670,7 @@ mod tests {
             decoded
                 .find_commit_receipt(&commit_id)
                 .expect("receipt after decode")
-                .semantic_commit_fingerprint_sha256,
+                .semantic_commit_fingerprint,
             "fingerprint"
         );
     }

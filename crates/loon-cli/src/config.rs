@@ -17,7 +17,9 @@ pub(crate) struct CliConfig {
     pub config_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
-    #[serde(flatten)]
+    /// Profiles live in their own `[profiles.<name>]` tables so profile
+    /// names can never collide with top-level settings.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
 
@@ -346,17 +348,7 @@ pub(crate) fn default_config_path() -> Result<PathBuf, CliError> {
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
-    require_non_empty("profile name", name)?;
-    if is_reserved_profile_name(name) {
-        return Err(CliError::invalid_input(format!(
-            "profile name `{name}` is reserved"
-        )));
-    }
-    Ok(())
-}
-
-fn is_reserved_profile_name(name: &str) -> bool {
-    matches!(name, "config_version" | "default_profile")
+    require_non_empty("profile name", name)
 }
 
 fn profile_field(name: &str, field: &str) -> String {

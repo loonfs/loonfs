@@ -844,7 +844,7 @@ fn record_primary_request_or_complete_idempotent(
 ) -> bool {
     if let Some(existing) = find_commit_receipt(visible_metadata_state, commit_id) {
         outcomes[index] = Some(
-            if existing.semantic_commit_fingerprint_sha256 != semantic_identity.as_str() {
+            if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
                 Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
             } else {
                 Ok(commit_response_from_commit_receipt(namespace_id, existing))

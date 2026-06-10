@@ -1,15 +1,28 @@
 use crate::{
-    v0::RenameMode, ChangeSeq, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
+    v0::RenameMode, ChangeSeq, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
 /// HTTP error body used by LoonFS APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
-    /// Stable machine-readable reason.
+    /// Stable machine-readable reason from the [`ErrorCode`] registry.
+    ///
+    /// Carried as a string so clients keep working when a newer server
+    /// introduces a code they do not know; use [`ApiError::error_code`] for
+    /// typed access.
     pub code: String,
     /// Human-readable error message.
     pub message: String,
+}
+
+impl ApiError {
+    /// Returns the registered code, or `None` for codes this build does not
+    /// know.
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        ErrorCode::parse(&self.code)
+    }
 }
 
 /// Request to create a namespace.
@@ -38,6 +51,28 @@ pub struct NamespaceSummary {
 pub struct ListNamespacesResponse {
     /// Complete namespaces visible to the store.
     pub namespaces: Vec<NamespaceSummary>,
+}
+
+/// Status summary for one namespace.
+///
+/// This is the point-lookup answer to "does this namespace exist, and where
+/// is its head?" — cheaper than listing all namespaces when only one matters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceStatusResponse {
+    /// Namespace being inspected.
+    pub namespace_id: NamespaceId,
+    /// Current visible namespace sequence.
+    pub head_seq: ChangeSeq,
+    /// Current manifest pointer recorded by the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_manifest_id: Option<ManifestId>,
+    /// Latest checkpoint recorded by the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_checkpoint_id: Option<String>,
+    /// Number of visible WAL segments after the manifest basis.
+    pub wal_tail_segments: u64,
+    /// Oldest sequence still promised for incremental replay.
+    pub retention_floor_seq: ChangeSeq,
 }
 
 /// Result of a namespace-visible mutation.

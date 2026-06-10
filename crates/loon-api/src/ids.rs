@@ -220,7 +220,16 @@ pub fn validate_generated_id(
 }
 
 fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> {
-    validate_id_grammar(value).map_err(|reason| namespace_id_error(value, reason))
+    validate_id_grammar(value).map_err(|reason| namespace_id_error(value, reason))?;
+    // System tooling (for example the object-store doctor probes) writes
+    // under namespace slots that must never collide with user namespaces.
+    if value.starts_with("loonfs-") {
+        return Err(namespace_id_error(
+            value,
+            "the `loonfs-` prefix is reserved for LoonFS system namespaces",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
@@ -573,19 +582,6 @@ pub enum InodeKind {
     Dir,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConflictDisposition {
-    KeepRequestedName,
-    RenameLoser { deterministic_suffix: String },
-    ConflictCopy { deterministic_suffix: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Identity {
-    pub namespace_id: NamespaceId,
-    pub inode_id: InodeId,
-}
-
 impl fmt::Display for NamespaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -659,6 +655,21 @@ mod tests {
                 "expected invalid namespace_id {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn namespace_id_parse_rejects_reserved_system_prefix() {
+        assert!(NamespaceId::parse("loonfs-doctor-abc").is_err());
+        assert!(NamespaceId::parse("loonfs-").is_err());
+        // The reservation is a prefix rule, not a substring rule.
+        assert_eq!(
+            NamespaceId::parse("my-loonfs-notes")
+                .expect("non-prefixed use is allowed")
+                .as_str(),
+            "my-loonfs-notes"
+        );
+        // Commit ids share the base grammar but not the reservation.
+        assert!(CommitId::parse("loonfs-retry-1").is_ok());
     }
 
     #[test]

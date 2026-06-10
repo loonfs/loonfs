@@ -164,7 +164,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 format!("path: {}", entry.absolute_path),
                 format!("inode: {}", entry.inode_id),
                 format!("kind: {:?}", entry.inode_kind),
-                format!("seq: {}", entry.authoritative_head_seq.0),
+                format!("seq: {}", entry.head_seq.0),
             ];
             if let Some(size) = entry.size_bytes {
                 lines.push(format!("size: {size}"));

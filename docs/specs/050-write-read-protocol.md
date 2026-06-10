@@ -149,6 +149,31 @@ A logical commit becomes visible only when the head advances to a value at or be
 
 This gives each successful request one `seq` and one replay identity without requiring one object write or one head update per request.
 
+### 3.1 Commit identity fingerprints
+
+Retry idempotency needs a durable answer to "is this the same logical commit already published under this `commit_id`?". That answer is the semantic commit fingerprint stored as `semantic_commit_fingerprint` in every WAL commit record and commit receipt.
+
+A fingerprint value is `v0:sha256:<64 lowercase hex>`. The `v0` tag names the canonicalization rules below and `sha256` the digest algorithm, so either can change later without re-interpreting stored values.
+
+The `v0` preimage is the compact JSON encoding (no whitespace, object keys in exactly the order shown) of:
+
+```json
+{
+  "domain": "loonfs.core.commit.semantic.v0",
+  "namespace_id": "...",
+  "preconditions": [...],
+  "ops": [...],
+  "message": "... or null",
+  "annotations": {"... sorted keys ..."}
+}
+```
+
+where `ops` and `preconditions` appear in request order using their v0 wire encoding, `message` and `annotations` are `null` when absent, and annotation keys sort lexicographically. The preimage deliberately excludes `commit_id`, writer identity, and fence tokens: a retry of the same logical commit must fingerprint identically no matter who retries it or when.
+
+Path-level mutations fingerprint the same way with domain `loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind, normalized absolute paths, and the intent's semantic parameters).
+
+A reused `commit_id` with an equal fingerprint replays the originally committed response; an unequal fingerprint is rejected as `commit_id_reuse_conflict`. Reference values are pinned by tests in `loon-core` (`commit/identity.rs` and `path/write/planner.rs`); those literals must never change within scheme `v0`.
+
 ## 4. Server authority
 
 The server is authoritative for mutation validation.
