@@ -119,6 +119,14 @@ pub enum BasisLoadError {
     LoadLease(ControlObjectLoadError),
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
+    #[error(
+        "namespace head changed during basis load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
+    )]
+    HeadChangedDuringLoad {
+        object_key: String,
+        loaded_head_etag: String,
+        current_head_etag: String,
+    },
     #[error(transparent)]
     WalChainLoad(#[from] WalChainLoadError),
     #[error(transparent)]
@@ -252,6 +260,7 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
         .map_err(BasisLoadError::WalReplay)
     }?;
     ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
+    ensure_head_etag_still_current(store, expected_namespace, &head_etag).await?;
 
     Ok(VerifiedNamespaceBasis {
         namespace_descriptor: catalog_entry.namespace_descriptor,
@@ -261,6 +270,38 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
         lease: loaded_lease.envelope.state,
         metadata_state: replayed.resulting_metadata_state,
     })
+}
+
+async fn ensure_head_etag_still_current<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    loaded_head_etag: &str,
+) -> Result<(), BasisLoadError> {
+    let object_key = namespace_head(expected_namespace.as_str());
+    let metadata = store
+        .head(&object_key)
+        .await
+        .map_err(|error| {
+            BasisLoadError::LoadHead(ControlObjectLoadError::Store(error.to_string()))
+        })?
+        .ok_or_else(|| {
+            BasisLoadError::LoadHead(ControlObjectLoadError::MissingObject {
+                object_key: object_key.clone(),
+            })
+        })?;
+    let current_head_etag = metadata
+        .etag
+        .ok_or_else(|| BasisLoadError::MissingHeadEtag {
+            object_key: object_key.clone(),
+        })?;
+    if current_head_etag != loaded_head_etag {
+        return Err(BasisLoadError::HeadChangedDuringLoad {
+            object_key,
+            loaded_head_etag: loaded_head_etag.to_owned(),
+            current_head_etag,
+        });
+    }
+    Ok(())
 }
 
 pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
@@ -400,4 +441,117 @@ fn ensure_reconstructed_head_matches(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BootstrapOptions, NamespaceEngine, WriteOptions};
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
+    use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct StaleHeadGetStore {
+        inner: Arc<LocalFsStore>,
+        head_key: String,
+        stale_head: ObjectBody,
+    }
+
+    #[async_trait]
+    impl ObjectStore for StaleHeadGetStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn head_with_checksum(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head_with_checksum(key).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            if key == self.head_key {
+                return Ok(Some(self.stale_head.clone()));
+            }
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
+
+    #[tokio::test]
+    async fn basis_load_rejects_stale_head_body_when_current_etag_changed() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("primary").expect("valid namespace id");
+        let engine = NamespaceEngine::builder(Arc::clone(&store))
+            .namespace(namespace_id.clone())
+            .writer("writer-a")
+            .build()
+            .expect("engine");
+        engine
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap");
+
+        let head_key = namespace_head(namespace_id.as_str());
+        let stale_head = store
+            .get_with_metadata(&head_key)
+            .await
+            .expect("read initial head")
+            .expect("initial head exists");
+        engine
+            .create_dir("/docs", WriteOptions::default())
+            .await
+            .expect("create dir");
+
+        let stale_store = StaleHeadGetStore {
+            inner: store,
+            head_key: head_key.clone(),
+            stale_head,
+        };
+        let error = load_verified_namespace_basis(&stale_store, &namespace_id)
+            .await
+            .expect_err("stale head is rejected");
+
+        assert!(matches!(
+            error,
+            BasisLoadError::HeadChangedDuringLoad { object_key, .. } if object_key == head_key
+        ));
+    }
 }
