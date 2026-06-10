@@ -115,7 +115,7 @@ dependencies = [
  "axum-core",
  "bytes",
  "futures-util",
- "http 1.4.0",
+ "http",
  "http-body",
  "http-body-util",
  "hyper",
@@ -148,7 +148,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
- "http 1.4.0",
+ "http",
  "http-body",
  "http-body-util",
  "mime",
@@ -650,7 +650,7 @@ dependencies = [
  "fnv",
  "futures-core",
  "futures-sink",
- "http 1.4.0",
+ "http",
  "indexmap",
  "slab",
  "tokio",
@@ -703,17 +703,6 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "601cbb57e577e2f5ef5be8e7b83f0f63994f25aa94d673e54a92d5c516d101f1"
-dependencies = [
- "bytes",
- "fnv",
- "itoa",
-]
-
-[[package]]
-name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
@@ -729,7 +718,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
 dependencies = [
  "bytes",
- "http 1.4.0",
+ "http",
 ]
 
 [[package]]
@@ -740,7 +729,7 @@ checksum = "b021d93e26becf5dc7e1b75b1bed1fd93124b374ceb73f43d4d4eafec896a64a"
 dependencies = [
  "bytes",
  "futures-core",
- "http 1.4.0",
+ "http",
  "http-body",
  "pin-project-lite",
 ]
@@ -774,7 +763,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "h2",
- "http 1.4.0",
+ "http",
  "http-body",
  "httparse",
  "httpdate",
@@ -791,7 +780,7 @@ version = "0.27.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33ca68d021ef39cf6463ab54c1d0f5daf03377b70561305bb89a8f83aab66e0f"
 dependencies = [
- "http 1.4.0",
+ "http",
  "hyper",
  "hyper-util",
  "rustls",
@@ -811,7 +800,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
- "http 1.4.0",
+ "http",
  "http-body",
  "hyper",
  "ipnet",
@@ -1074,7 +1063,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
-name = "loon-api"
+name = "loonfs"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "loonfs-api",
+ "loonfs-core",
+ "loonfs-objectstore",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "loonfs-api"
 version = "0.1.1"
 dependencies = [
  "ciborium",
@@ -1090,19 +1096,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-cli"
+name = "loonfs-cli"
 version = "0.1.1"
 dependencies = [
  "clap",
  "dialoguer",
  "hostname",
- "http 0.2.12",
+ "http",
  "insta",
- "loon-api",
- "loon-client",
- "loon-core",
- "loon-objectstore",
  "loonfs",
+ "loonfs-api",
+ "loonfs-client",
+ "loonfs-core",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1112,11 +1118,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-client"
+name = "loonfs-client"
 version = "0.1.1"
 dependencies = [
- "http 0.2.12",
- "loon-api",
+ "http",
+ "loonfs-api",
  "serde",
  "serde_json",
  "tempfile",
@@ -1128,15 +1134,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-core"
+name = "loonfs-core"
 version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "loon-api",
- "loon-model",
- "loon-objectstore",
+ "loonfs-api",
+ "loonfs-model",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "sha2",
@@ -1147,24 +1153,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-model"
+name = "loonfs-model"
 version = "0.1.1"
 dependencies = [
- "loon-api",
+ "loonfs-api",
  "serde",
  "thiserror 2.0.18",
 ]
 
 [[package]]
-name = "loon-objectstore"
+name = "loonfs-objectstore"
 version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
  "fs4",
  "futures",
- "http 0.2.12",
- "loon-api",
+ "loonfs-api",
  "object_store",
  "serde",
  "serde_json",
@@ -1175,7 +1180,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-server"
+name = "loonfs-server"
 version = "0.1.1"
 dependencies = [
  "async-trait",
@@ -1183,12 +1188,12 @@ dependencies = [
  "bytes",
  "clap",
  "futures",
- "http 0.2.12",
- "loon-api",
- "loon-client",
- "loon-core",
- "loon-objectstore",
+ "http",
  "loonfs",
+ "loonfs-api",
+ "loonfs-client",
+ "loonfs-core",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1201,38 +1206,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-sim"
+name = "loonfs-sim"
 version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "loon-api",
- "loon-core",
- "loon-objectstore",
+ "loonfs-api",
+ "loonfs-core",
+ "loonfs-objectstore",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
-]
-
-[[package]]
-name = "loonfs"
-version = "0.1.1"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "loon-api",
- "loon-core",
- "loon-objectstore",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1329,7 +1317,7 @@ dependencies = [
  "chrono",
  "form_urlencoded",
  "futures",
- "http 1.4.0",
+ "http",
  "http-body-util",
  "humantime",
  "hyper",
@@ -1600,7 +1588,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "h2",
- "http 1.4.0",
+ "http",
  "http-body",
  "http-body-util",
  "hyper",
@@ -2190,7 +2178,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "futures-util",
- "http 1.4.0",
+ "http",
  "http-body",
  "pin-project-lite",
  "tower",

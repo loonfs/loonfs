@@ -8,19 +8,19 @@ use crate::fs::{should_invalidate_after_result, Fs};
 use crate::time::{elapsed_ms_usize, monotonic_now};
 use crate::{CommitResponse, CoreError, NamespaceId, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
-use loon_api::wire::control::HeadState;
-use loon_core::cache::{
+use loonfs_api::wire::control::HeadState;
+use loonfs_core::cache::{
     load_verified_namespace_basis, load_verified_namespace_basis_at_head,
     probe_namespace_head_etag, BasisLoadError, MetadataTableCacheStats, NamespaceHeadEtagProbe,
     VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
 };
-use loon_core::control::{
+use loonfs_core::control::{
     load_namespace_head_control, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
 };
-use loon_core::publish::{
+use loonfs_core::publish::{
     BasisReuseEvent, NamespaceCommitEngine, NamespaceCommitEnginePublishResult,
 };
-use loon_objectstore::keys::namespace_head;
+use loonfs_objectstore::keys::namespace_head;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -334,27 +334,49 @@ pub(crate) struct CachedControl<T> {
 /// understanding read/write warmup behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeCacheStats {
+    /// Reads and publishes that reused a cached verified basis after head revalidation.
     pub warm_basis_cache_hits: usize,
+    /// Reads and publishes that could not reuse a cached verified basis.
     pub warm_basis_cache_misses: usize,
+    /// Cached bases dropped by budget eviction or invalidation.
     pub warm_basis_evictions: usize,
+    /// Metadata rows dropped with evicted bases.
     pub warm_basis_evicted_rows: usize,
+    /// Decoded bytes dropped with evicted bases.
     pub warm_basis_evicted_decoded_bytes: usize,
+    /// Verified bases too heavy to cache under the configured limits.
     pub warm_basis_uncacheable_count: usize,
+    /// Metadata rows in bases that were too heavy to cache.
     pub warm_basis_uncacheable_rows: usize,
+    /// Decoded bytes in bases that were too heavy to cache.
     pub warm_basis_uncacheable_decoded_bytes: usize,
+    /// Metadata rows currently retained across cached bases.
     pub warm_basis_cached_rows: usize,
+    /// Decoded bytes currently retained across cached bases.
     pub warm_basis_cached_decoded_bytes: usize,
+    /// Cold loads that reconstructed a verified basis from durable state.
     pub warm_basis_rehydrate_count: usize,
+    /// Total milliseconds spent reconstructing verified bases from durable state.
     pub warm_basis_rehydrate_ms: usize,
+    /// Publish batches that reused the commit engine's cached basis.
     pub publish_warm_basis_hits: usize,
+    /// Publish batches that had to cold-load a basis.
     pub publish_warm_basis_misses: usize,
+    /// Publish results that invalidated a cached basis.
     pub publish_warm_basis_invalidations: usize,
+    /// Publish results that advanced the cached basis to the committed head.
     pub publish_warm_basis_advances: usize,
+    /// Metadata reads served from materialized tables.
     pub read_materialized_table_hits: usize,
+    /// Metadata reads that fell back to a full verified basis.
     pub read_full_basis_fallbacks: usize,
+    /// Decoded metadata-table cache hits.
     pub metadata_table_cache_hits: usize,
+    /// Decoded metadata-table cache misses.
     pub metadata_table_cache_misses: usize,
+    /// Blocks inserted into the decoded metadata-table cache.
     pub metadata_table_cache_inserts: usize,
+    /// Blocks evicted from the decoded metadata-table cache.
     pub metadata_table_cache_evictions: usize,
 }
 

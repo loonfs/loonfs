@@ -1,10 +1,16 @@
+//! Low-cardinality labels attached to runtime trace spans and metrics.
+
+/// Runtime deployment mode label used in trace spans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceMode {
+    /// The runtime runs in-process with its caller.
     Embedded,
+    /// The runtime is reached through a remote server.
     Remote,
 }
 
 impl TraceMode {
+    /// Returns the stable low-cardinality span label.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Embedded => "embedded",
@@ -13,15 +19,21 @@ impl TraceMode {
     }
 }
 
+/// Object-store backend label used in trace spans and metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceStoreKind {
+    /// Local-filesystem object store.
     LocalFs,
+    /// Amazon S3.
     S3,
+    /// Cloudflare R2.
     R2,
+    /// Backend not identified by the caller.
     Unknown,
 }
 
 impl TraceStoreKind {
+    /// Returns the stable low-cardinality span label.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LocalFs => "local_fs",
@@ -51,6 +63,8 @@ impl CachePath {
     }
 }
 
+/// Classifies a payload size into the low-cardinality `small`, `medium`, or
+/// `large` trace label.
 pub fn payload_class(size_bytes: usize) -> &'static str {
     match size_bytes {
         0..=16_383 => "small",
