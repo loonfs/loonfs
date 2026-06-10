@@ -110,7 +110,7 @@ The namespace status read answers "does this namespace exist, and where is its h
 
 ### 3.1 `GET /filesystem/stat`
 
-The response is one authoritative path entry. Enum values are snake_case per the durable naming rules (spec 030 §4).
+The response is one authoritative path entry. Enum values are snake_case per the durable naming rules (spec 030 section 4).
 
 ```json
 {
@@ -437,7 +437,7 @@ Every error response is a JSON body with two fields:
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
 | `invalid_path` | 400 | The supplied path is not a valid absolute path. |
-| `invalid_namespace_id` | 400 | The namespace id violates the slug grammar (spec 030 §4). |
+| `invalid_namespace_id` | 400 | The namespace id violates the slug grammar (spec 030 section 4). |
 | `invalid_commit_id` | 400 | The commit id violates the id grammar. |
 | `invalid_upload_id` | 400 | The upload id violates the generated-id grammar. |
 | `invalid_inode_id` | 400 | The inode id path parameter is not a valid integer id. |

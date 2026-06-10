@@ -13,7 +13,7 @@ pub(crate) const PATH_INTENT_FINGERPRINT_DOMAIN: &str = "loonfs.path.intent.sema
 /// Scheme-and-algorithm tag carried by every stored fingerprint value.
 ///
 /// `v0` names the canonicalization rules (domain string plus the v0 wire
-/// encoding of the preimage, spec 050 §3.1) and `sha256` the digest
+/// encoding of the preimage, spec 050 section 3.1) and `sha256` the digest
 /// algorithm, so either can change later without re-interpreting values
 /// already stored in WAL records and commit receipts.
 const FINGERPRINT_SCHEME: &str = "v0:sha256";
@@ -130,7 +130,7 @@ fn core_commit_fingerprint_from_parts(
     annotations: &Option<api_v0::CommitAnnotations>,
 ) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
     // This struct's compact JSON is the v0 fingerprint preimage (spec 050
-    // §3.1): field order, field names, and the v0-mirroring encodings of
+    // section 3.1): field order, field names, and the v0-mirroring encodings of
     // `Precondition` and `CommitOp` are all durable contract.
     #[derive(Serialize)]
     struct CanonicalCoreCommit<'a> {
@@ -187,7 +187,7 @@ mod tests {
 
     /// Pins the exact stored fingerprint for a fixed logical commit.
     ///
-    /// If this fails, the canonical preimage changed (spec 050 §3.1) and every
+    /// If this fails, the canonical preimage changed (spec 050 section 3.1) and every
     /// persisted fingerprint would disagree with recomputed ones, breaking
     /// retry idempotency across versions. Do not update the literal without
     /// bumping the fingerprint scheme tag.
