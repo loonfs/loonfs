@@ -26,8 +26,7 @@ The specification lives in this folder:
 | Document | Force | Contents |
 | --- | --- | --- |
 | `format.md` | Normative, mandatory | The durable format: object-store contract, storage model, write/read protocol, encodings and versioning, namespace features, maintenance invariants. |
-| `api.md` | Normative where implemented | Profiles (functional planes), capability discovery, the standard error contract, and the representative HTTP binding. |
-| `operation-statefulness.md` | Normative where implemented | When an operation is single-request versus control-object-backed, and the client/server responsibility split. |
+| `api.md` | Normative where implemented | Profiles (functional planes), capability discovery, the standard error contract, operation statefulness, and the representative HTTP binding. |
 | `glossary.md` | Orientation | Shared vocabulary for every other document. |
 | `architecture.md` | Orientation | How the durable pieces and the runtime fit together. |
 | `object-storage-providers.md` | Non-normative reference | Provider limits and performance data points that inform the design. |
@@ -101,5 +100,4 @@ Readers should start with:
 3. the format specification (`format.md`)
 4. the API specification (`api.md`)
 
-`operation-statefulness.md` and `object-storage-providers.md` are reference
-material for deeper design work.
+`object-storage-providers.md` is reference material for deeper design work.

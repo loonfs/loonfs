@@ -1,16 +1,13 @@
 # LoonFS API Specification
 
 This document is the normative specification of the LoonFS client-facing API:
-profiles, capability discovery, the standard error contract, and the
-representative v0 HTTP binding. It is **normative where implemented** — a
+profiles, capability discovery, the standard error contract, operation
+statefulness, and the representative v0 HTTP binding. It is **normative where implemented** — a
 deployment chooses which optional profiles to expose, but every op it does
 expose must have the shape specified here.
 
-The companion documents are:
-
-- `format.md` — the durable format. Mandatory for every implementation.
-- `operation-statefulness.md` — when an operation is single-request versus
-  control-object-backed. Normative where implemented, like this document.
+The companion document is `format.md` — the durable format, mandatory for
+every implementation.
 
 The same client codebase works against an embedded engine and a hosted
 server: both expose the same operations, advertise their capabilities the
@@ -789,20 +786,134 @@ Typical behavior:
 This client uses low-level recovery or inspection surfaces that are specific
 to an implementation or deployment.
 
-## 9. Statefulness summary
+## 9. Operation statefulness
 
-The following table summarizes the core split. For more detailed
-command-oriented guidance, see
-[the operation statefulness matrix](operation-statefulness.md).
+This section defines when an operation is a single-request operation and when
+it uses a control object, and the split of responsibility between client and
+server for the common filesystem commands.
 
-| Operation | Usual shape | Typical server-side state |
+One-shot operations are fully described by a single request and normally do
+not require durable control-plane state. Long-running operations may span
+multiple requests, may require a stable snapshot or destination binding, and
+may need resumability across client or server restarts.
+
+### 9.1 Definitions
+
+| Term | Meaning |
+| --- | --- |
+| **Single-request operation** | An operation that is fully described by a single request and does not require a server-side control object after the request completes. |
+| **Control object** | A server-side control-plane object used when the client continues driving an operation across multiple requests. For large or resumable `put <file>`, an implementation may use a single `UploadHandle`. |
+| **Implementation-specific coordinator** | A helper resource or service that correlates multiple logical commits for one higher-level workflow. Coordinators are outside the core interoperable model and do not define namespace history. |
+| **Authoritative operation state** | The state that determines the correctness, visibility, and resumability of an operation. |
+| **Transfer progress** | Non-authoritative progress information such as completed bytes, completed files, local temporary outputs, or user-interface counters. |
+
+### 9.2 Normative rules
+
+1. A LoonFS operation **MAY** be a single-request operation only when all of
+   the following are true:
+   - the operation is fully described by one request;
+   - the operation completes synchronously;
+   - no pinned read snapshot is required after the request returns;
+   - no stable destination binding is required after the request returns; and
+   - the request can be retried by replaying the full request.
+
+2. A LoonFS operation **MAY** use a server-side control object when any of
+   the following are true:
+   - the client will continue the operation across multiple requests;
+   - the operation requires a pinned snapshot for consistent reads;
+   - the operation requires a stable destination binding across time;
+   - the operation requires resumable multi-part upload; or
+   - loss of server restart state would change correctness, retention
+     safety, or promised resumability guarantees.
+
+   For large or resumable `put <file>`, an implementation that uses a
+   server-side control object typically uses a single `UploadHandle`.
+
+3. The core specification does **NOT** require a server-side job object for
+   recursive `put` or recursive `cp`. Those workflows may be realized as one
+   or more logical commits, optionally coordinated by implementation-specific
+   helpers outside the core model.
+
+4. When a server-side control-plane object is used, the authoritative
+   identity of the in-flight interaction **MUST** become the server-issued
+   object identifier. After that point, the original path string is entry
+   input only and **MUST NOT** remain the sole identifier of the in-flight
+   interaction.
+
+5. Server-side control-plane objects **MUST NOT** advance namespace `seq`,
+   **MUST NOT** appear as filesystem-visible resources, and **MUST NOT**
+   appear in the namespace change feed.
+
+6. Implementation-specific coordinators **MAY** exist, but they **MUST NOT**
+   redefine logical commit boundaries or change-feed semantics.
+
+### 9.3 Statefulness by operation
+
+| Operation | Typical execution shape | Typical server-side control-plane object | Long-lived server state required? | Server is authoritative for | Client is authoritative for |
+| --- | --- | --- | --- | --- | --- |
+| `get <file>` | Single-request read | none | No | path resolution, access check, selected file revision, content serving or delegated download | local download progress, temporary file, client retries |
+| `get -r <dir>` | Multi-request snapshot read | optional read session pinning a consistent snapshot | Only if a consistent snapshot is promised across requests | snapshot selection, per-request reads as for `get` | traversal progress, local outputs, client retries |
+| `put <file>` (small, one-shot convenience) | Single request | none | No | destination resolution, validation, metadata commit | request payload, client retries |
+| `put <file>` (large or resumable) | Begin, upload, commit | `UploadHandle`, if used | Only if server-side resumability or stable binding is promised | stable destination binding, expected slot or revision, upload handle validity, final publish | file reading, hashing, content upload progress, retry tokens |
+| `put -r <dir>` | Client- or coordinator-driven uploads plus one or more logical commits | none required by the core model | No | each commit's validation and publication | orchestration across files, progress, retries |
+| `cp <file>` (same server) | Single-request server-side copy | none | No | source resolution, destination resolution, metadata publication, content reference reuse | request retry |
+| `cp -r <dir>` (same server) | Client- or coordinator-driven sequence of logical commits | none required by the core model | No | each commit's validation and publication | orchestration across entries, retries |
+| `cp remote -> local` | Alias for `get` or `get -r` | same as `get` | same as `get` | same as `get` | same as `get` |
+| `cp local -> remote` | Alias for `put` or `put -r` | same as `put` | same as `put` | same as `put` | same as `put` |
+
+### 9.4 Client and server split for common commands
+
+The following table is the normative split of responsibility for the primary
+filesystem commands.
+
+| Command | Server responsibilities | Client responsibilities |
 | --- | --- | --- |
-| `get <file>` | One request | None after the request completes. |
-| `get -r <dir>` | Multi-request snapshot read | A read session may pin a consistent snapshot. |
-| `put <file>` | One request for small files; staged upload for large files | A put intent and upload session may bind the destination and upload. |
-| `put -r <dir>` | Client- or coordinator-driven upload plus one or more commits | No core job is required. Implementation-specific helpers may exist outside the core model. |
-| `cp <file>` on one service | One request | Usually none after the request completes. |
-| `cp -r <dir>` on one service | Client- or coordinator-driven sequence of logical commits | No core job is required. Implementation-specific helpers may exist outside the core model. |
+| `get <file>` | resolve the requested path or handle; authorize the read; select the file revision to read; serve bytes or delegated download targets | receive bytes; write local output; maintain local retry and resume state |
+| `put <file>` (one-shot) | resolve the destination; validate preconditions; publish the metadata change | supply bytes or content reference; retry the request if needed |
+| `put <file>` (resumable) | if an `UploadHandle` is used, create or validate it; bind the destination; validate durable content and commit the final publish | read the local file; hash it; upload content; track upload progress; submit the final commit request |
+| `cp <file>` (same server) | resolve source and destination; authorize both sides; create the copied resource; publish the metadata change | submit the request; retry if appropriate |
+
+### 9.5 When raw paths cease to identify the operation
+
+LoonFS accepts path-oriented input because user intent is naturally expressed
+by path. However, long-running operations require a more stable identity than
+a raw path string.
+
+| Operation | Raw path is used for | Stable in-flight identity after start |
+| --- | --- | --- |
+| `get <file>` | the request itself | none required |
+| `put <file>` (resumable) | `begin_put` only | server-issued `UploadHandle`, if used |
+
+### 9.6 Control-plane durability guidance
+
+1. A control object **MUST** be durably recorded if losing it on restart
+   would change correctness, visibility, retention safety, or promised
+   resumability.
+
+2. At minimum, an `UploadHandle` is normally durable when an implementation
+   uses one for stable destination binding across time or restart-safe
+   resumability.
+
+3. Implementation-specific coordinators **MAY** also be stored durably, but
+   they are not required by this specification.
+
+4. Control objects and any implementation-specific coordinators **MUST**
+   remain outside namespace-visible metadata. Their existence is
+   authoritative for orchestration, not for filesystem history.
+
+### 9.7 Recommended defaults
+
+A conforming implementation SHOULD use the following defaults unless a
+stronger mode is explicitly requested:
+
+- `get <file>` is a single-request operation;
+- `cp <file>` on the same service is a single-request operation;
+- if large or resumable `put <file>` uses a control object, it uses a single
+  `UploadHandle`.
+
+These defaults preserve a simple model for single-request commands while
+allowing multi-request correctness and resumability where they actually
+matter.
 
 ## 10. Client and server responsibilities
 
