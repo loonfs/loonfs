@@ -6,6 +6,7 @@ use crate::cache::{
     BasisCache, CommitEngineCache, MetadataReadSource, RuntimeCacheStatsInner, RuntimeControlCache,
 };
 use crate::config::{default_writer_version, validate_config};
+use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::uploads::{UploadedContentProofCache, UploadedContentProofStore};
@@ -21,7 +22,6 @@ use crate::{
     ObjectStoreMetricsRecorder, PutFileOptions, RenameMode, RestoreRevisionOptions, RevisionNo,
     RuntimeCacheConfig, RuntimeCacheStats, UploadContentResponse,
 };
-use crate::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loon_api::{
     AbsolutePath, CapabilityDocument, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
@@ -211,6 +211,10 @@ impl Fs {
         span.record("store_kind", self.inner.config.trace_store_kind.as_str());
     }
 
+    /// Creates a namespace, bootstrapping its durable state.
+    ///
+    /// With `options.allow_existing`, an already-existing namespace is
+    /// treated as success.
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -226,6 +230,9 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
+    /// Forks `source` into `target` at the source's current head.
+    ///
+    /// The fork shares immutable file bytes but gets its own metadata history.
     pub async fn fork_namespace(
         &self,
         source: &NamespaceId,
@@ -266,10 +273,13 @@ impl Fs {
         }
     }
 
+    /// Lists complete namespaces visible in the object store.
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
         Ok(loon_core::list_namespaces(self.store()).await?)
     }
 
+    /// Summarizes a namespace's current head: manifest, latest checkpoint,
+    /// WAL tail, and retention floor.
     pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
         let summary = load_namespace_head_summary(self.store(), namespace_id).await?;
         Ok(NamespaceStatus {
@@ -282,6 +292,12 @@ impl Fs {
         })
     }
 
+    /// Runs one bounded maintenance step against a namespace.
+    ///
+    /// Publishes a checkpoint once the visible WAL tail reaches
+    /// `options.max_wal_tail_segments`. Losing the head race or being
+    /// superseded by another checkpoint is reported as an outcome, not an
+    /// error.
     #[tracing::instrument(
         level = "info",
         name = "loon.compaction",
@@ -353,6 +369,8 @@ impl Fs {
         })
     }
 
+    /// Resolves an absolute path to its authoritative entry at the current
+    /// head.
     #[tracing::instrument(
         level = "info",
         name = "loon.stat",
@@ -407,6 +425,9 @@ impl Fs {
         Ok(entry)
     }
 
+    /// Lists the children of a directory path.
+    ///
+    /// Entries-only convenience over [`Self::list_path_entries`].
     pub async fn list_path(
         &self,
         namespace_id: &NamespaceId,
@@ -467,6 +488,7 @@ impl Fs {
         })
     }
 
+    /// Reads a file's current content plus the metadata entry it came from.
     pub async fn read_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -482,6 +504,7 @@ impl Fs {
             .await?)
     }
 
+    /// Lists the revision history of a file path.
     pub async fn list_file_revisions(
         &self,
         namespace_id: &NamespaceId,
@@ -497,6 +520,8 @@ impl Fs {
             .await?)
     }
 
+    /// Lists a file's revision history by inode id, independent of its
+    /// current path.
     pub async fn list_file_revisions_for_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -512,6 +537,7 @@ impl Fs {
             .await?)
     }
 
+    /// Reads the content of one historical file revision by path.
     pub async fn read_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -529,6 +555,7 @@ impl Fs {
             .await?)
     }
 
+    /// Reads the content of one historical file revision by inode id.
     pub async fn read_file_revision_bytes_for_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -546,6 +573,11 @@ impl Fs {
             .await?)
     }
 
+    /// Writes file bytes to a path.
+    ///
+    /// The bytes become durable content first; metadata referencing them is
+    /// published only afterward. `options.behavior` selects create-only or
+    /// replace semantics.
     #[tracing::instrument(
         level = "info",
         name = "loon.put",
@@ -586,6 +618,11 @@ impl Fs {
         .await
     }
 
+    /// Publishes a file revision that points at an already-durable content
+    /// ref.
+    ///
+    /// Use this when content was staged separately, for example through the
+    /// upload protocol.
     #[tracing::instrument(
         level = "info",
         name = "loon.put",
@@ -625,6 +662,7 @@ impl Fs {
         .await
     }
 
+    /// Creates a directory at an absolute path.
     pub async fn create_dir(
         &self,
         namespace_id: &NamespaceId,
@@ -641,6 +679,11 @@ impl Fs {
         .await
     }
 
+    /// Deletes a file or directory path.
+    ///
+    /// Deletion is tombstone-first: the commit hides the path (or, with
+    /// `options.recursive`, the subtree) without erasing history. Physical
+    /// reclamation is background garbage collection.
     pub async fn delete_path(
         &self,
         namespace_id: &NamespaceId,
@@ -658,6 +701,8 @@ impl Fs {
         .await
     }
 
+    /// Moves a path within the same namespace, never replacing an existing
+    /// destination.
     pub async fn move_path(
         &self,
         namespace_id: &NamespaceId,
@@ -677,6 +722,8 @@ impl Fs {
         .await
     }
 
+    /// Copies a file to a new path in the same namespace. The new file
+    /// reuses the source revision's content reference: no bytes are copied.
     pub async fn copy_path(
         &self,
         namespace_id: &NamespaceId,
@@ -695,6 +742,7 @@ impl Fs {
         .await
     }
 
+    /// Restores a prior file revision by appending a new current revision.
     pub async fn restore_file_revision(
         &self,
         namespace_id: &NamespaceId,
@@ -713,6 +761,12 @@ impl Fs {
         .await
     }
 
+    /// Restores a prior revision of an inode, guarded by a base-revision
+    /// precondition.
+    ///
+    /// The commit appends a new current revision from `source_revision_no`
+    /// and fails if the inode's current revision is no longer
+    /// `base_revision_no`.
     pub async fn restore_file_revision_for_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -739,10 +793,12 @@ impl Fs {
         self.commit_operations(namespace_id, request).await
     }
 
+    /// Starts a durable upload session for a namespace.
     pub async fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
         Ok(self.namespace_engine(namespace_id).begin_upload().await?)
     }
 
+    /// Uploads whole-file content into an upload session.
     pub async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
@@ -756,6 +812,7 @@ impl Fs {
             .await?)
     }
 
+    /// Completes an upload session when the expected content ref matches.
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
@@ -768,6 +825,10 @@ impl Fs {
             .await?)
     }
 
+    /// Submits one explicit semantic commit request.
+    ///
+    /// This is the lower-level surface for clients that need their own commit
+    /// ids, preconditions, and operation lists.
     pub async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
@@ -787,6 +848,8 @@ impl Fs {
         })
     }
 
+    /// Submits explicit semantic commit requests as one publication attempt,
+    /// returning one result per request in order.
     pub async fn commit_operations_batch(
         &self,
         namespace_id: &NamespaceId,
@@ -824,6 +887,11 @@ impl Fs {
         })
     }
 
+    /// Publishes already-classified namespace mutation candidates as one
+    /// batch.
+    ///
+    /// Server code uses this to push path intents and explicit commits
+    /// through one namespace publisher; results match candidates in order.
     pub async fn publish_namespace_mutations_batch(
         &self,
         namespace_id: &NamespaceId,
@@ -885,12 +953,14 @@ impl Fs {
         results
     }
 
+    /// Snapshots the runtime cache counters.
     pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
         self.inner
             .cache_stats
             .snapshot(self.inner.metadata_table_cache.stats())
     }
 
+    /// Reads the ordered change feed after the `after_seq` cursor.
     pub async fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
@@ -902,6 +972,12 @@ impl Fs {
             .await?)
     }
 
+    /// Creates or reuses a checkpoint for the current namespace head.
+    ///
+    /// A checkpoint pins a manifest version for retention and provenance. If
+    /// the current head has no manifest yet, one is published first for the
+    /// current durable namespace state; this is not a request to compact
+    /// metadata.
     #[tracing::instrument(
         level = "info",
         name = "loon.compaction",
@@ -927,6 +1003,8 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
+    /// Advances the namespace retention floor when a verified checkpoint
+    /// makes it safe.
     pub async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,

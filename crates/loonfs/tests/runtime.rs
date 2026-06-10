@@ -14,15 +14,16 @@ use loon_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecor
 use loon_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
+use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, CopyOptions, CreateCheckpointResponse,
     CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    MutationResult, NamespaceId, NamespaceMutationCandidate, NamespaceStatus, PathMutationIntent,
-    PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    TraceMode, TraceStoreKind, UploadContentResponse,
+    MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    UploadContentResponse,
 };
 use std::future::Future;
 use std::path::Path;

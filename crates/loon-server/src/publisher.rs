@@ -1,7 +1,8 @@
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{CommitId, NamespaceId};
 use loon_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
-use loonfs::{CoreError, Fs, NamespaceMutationCandidate, PathMutationIntent, RuntimeError};
+use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs::{CoreError, Fs, RuntimeError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Notify};

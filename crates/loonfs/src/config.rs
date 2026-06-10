@@ -4,10 +4,16 @@
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{MetadataTableCacheConfig, Result, RuntimeError};
 
+/// Default lease duration for write operations, in milliseconds.
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
+/// Default visible WAL-tail length, in segments, at which a maintenance tick
+/// publishes a checkpoint.
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
+/// Default maximum namespaces retained in runtime caches.
 pub const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
+/// Default maximum metadata rows retained across cached bases.
 pub const DEFAULT_MAX_CACHED_BASIS_ROWS: usize = 1_000_000;
+/// Default decoded-byte budget for cached bases.
 pub const DEFAULT_MAX_CACHED_BASIS_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 /// Configuration for an embedded runtime instance.

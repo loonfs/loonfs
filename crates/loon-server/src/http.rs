@@ -18,11 +18,11 @@ use loon_api::{
     ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
     RevisionNo,
 };
+use loonfs::publish::PathMutationIntent;
 use loonfs::{
     payload_class, BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, Fs,
-    JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PathMutationIntent,
-    PutFileBehavior, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    FEATURE_NAMESPACES_DELETE,
+    JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PutFileBehavior, RuntimeError,
+    SharedObjectStore, TraceMode, TraceStoreKind, FEATURE_NAMESPACES_DELETE,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
