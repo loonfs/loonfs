@@ -110,7 +110,7 @@ hoc.
 | `core.namespaces.list` | Enumerating namespaces (`GET /v0/namespaces`, `loon namespace list`). | Deniable for tenancy reasons; a deployment that disables it still resolves namespaces by id. |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces. | Registered for forward compatibility; no v0 implementation supports it, so deployments advertise `false` today. |
+| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Registered for forward compatibility; no v0 implementation supports it, so deployments advertise `false` today. |
 
 `admin/v0` currently has required ops only and no feature keys. `query.*` and
 `acl.*` keys are unregistered until their planes materialize.
@@ -155,7 +155,7 @@ Two codes exist specifically so capability handling is uniform from day one:
   without breaking clients. Deployments may use it today for tenancy denials
   (for example, refusing namespace enumeration).
 
-The full registry (`ErrorCode` in `loon-api`):
+The full registry (`ErrorCode` in `loonfs-api`):
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
@@ -206,7 +206,7 @@ One SDK serves both backends; deployment mode never forks the client
 codebase.
 
 - The embedded engine (`loonfs::Fs`) and the remote client
-  (`loon_client::Client`) expose the same operations and the same
+  (`loonfs_client::Client`) expose the same operations and the same
   `capabilities()` accessor returning the capability document of section 2.1.
   For the remote client the document is fetched from `GET /v0/config` and
   cached; for the embedded engine it is a constant.
@@ -302,6 +302,7 @@ A representative v0 binding is shown below.
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
+| Delete a namespace | `DELETE /v0/namespaces/{ns}` — registered feature `core.namespaces.delete`; answers `not_supported` until a deployment implements it |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 

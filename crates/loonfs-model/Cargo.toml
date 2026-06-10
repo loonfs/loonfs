@@ -1,0 +1,17 @@
+[package]
+name = "loonfs-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Executable reference model of LoonFS metadata semantics, used by differential tests."
+repository.workspace = true
+publish = false
+
+[dependencies]
+loonfs-api = { path = "../loonfs-api" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -32,7 +32,7 @@ Step 3 — If `loon` is not installed, install it using the first appropriate me
   - If Homebrew is available and the install script is not appropriate:
       brew install loonfs/tap/loon
   - If neither works, build from source:
-      clone https://github.com/loonfs/loonfs, run `cargo build -p loon-cli`,
+      clone https://github.com/loonfs/loonfs, run `cargo build -p loonfs-cli`,
       and place the resulting `loon` binary somewhere on PATH.
 
   If network access, filesystem permissions, or command approval is required, ask me for approval with a concise reason.

@@ -1,0 +1,7 @@
+---
+source: crates/loonfs-cli/src/render.rs
+expression: human_success(&output)
+---
+NAMESPACE_ID
+alpha
+prod
