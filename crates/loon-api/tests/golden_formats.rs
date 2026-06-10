@@ -342,6 +342,10 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 expires_at_ms: Some(2_000),
                 name: Some("golden".to_owned()),
             }],
+            features: BTreeMap::from([(
+                "index.fulltext".to_owned(),
+                serde_json::json!({ "version": 2 }),
+            )]),
             metadata_files: vec![MetadataFileRef {
                 owner_namespace_id: namespace_id(),
                 table_id: "tbl_0123456789abcdef0123456789abcdef".to_owned(),
@@ -437,8 +441,6 @@ where
     assert_eq!(decoded, envelope);
 }
 
-// `ControlObjectKind::QueueShard` is a reserved key family with no payload
-// type yet, so it has no fixture until its state struct exists.
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
@@ -768,7 +770,8 @@ fn namespace_manifest_decode_tolerates_additive_payload_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-name pinning: spec 050 sections 5-6 durable delta and precondition names
+// Wire-name pinning: the durable delta and precondition names the format
+// spec fixes ("Standard mutation operations" and "Preconditions")
 // ---------------------------------------------------------------------------
 
 #[test]

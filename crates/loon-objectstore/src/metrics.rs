@@ -497,8 +497,7 @@ fn classify_key(key: &str) -> KeyClass {
         | DurableObjectFamily::NamespaceForkState
         | DurableObjectFamily::UploadSession
         | DurableObjectFamily::ConflictArtifact
-        | DurableObjectFamily::ContentStoreDescriptor
-        | DurableObjectFamily::QueueShard => KeyClass::Metadata,
+        | DurableObjectFamily::ContentStoreDescriptor => KeyClass::Metadata,
     }
 }
 

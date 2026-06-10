@@ -7,6 +7,7 @@
 //! Other LoonFS crates depend on this one for vocabulary; it depends on none
 //! of them.
 
+mod capability;
 mod content;
 mod control;
 mod digest;
@@ -35,6 +36,11 @@ pub mod wire {
     }
 }
 
+pub use capability::{
+    CapabilityDocument, CapabilityDocumentError, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
+};
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

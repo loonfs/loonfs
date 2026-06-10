@@ -28,6 +28,7 @@ use loon_api::wire::manifest::{
 use loon_api::{generate_checkpoint_id, CreateCheckpointResponse, ManifestId, NamespaceId};
 use loon_objectstore::keys::namespace_manifest;
 use loon_objectstore::ObjectStore;
+use std::collections::BTreeMap;
 use tracing::Instrument;
 
 // Manifest id allocation can race with other manifest publishers. Exhausting
@@ -332,6 +333,7 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
             verified: true,
             fork: None,
             checkpoints,
+            features: BTreeMap::new(),
             metadata_files,
         },
     )

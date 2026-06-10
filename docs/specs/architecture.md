@@ -1,4 +1,4 @@
-# Architecture Overview
+# LoonFS Architecture Overview
 
 ## 1. Major parts
 
@@ -14,8 +14,6 @@ Namespaces and content stores are separate durable domains. A namespace owns fil
 
 ## 2. Data plane, metadata plane, and control plane
 
-This spec uses three terms.
-
 | Plane | Purpose | Examples | Namespace-visible history? |
 | --- | --- | --- | --- |
 | **Data plane** | Stores and serves file bytes. | Whole-file content objects and download streams. | No, by itself. |
@@ -29,18 +27,17 @@ Two rules follow from this split:
 
 Control-plane state should still be durable when losing it on restart would violate correctness, restart safety, or promised resumability.
 
-## 3. Client profiles
+## 3. Client usage patterns
 
-LoonFS supports multiple client profiles. These profiles are defined by the protocol surface they use, not by whether the implementation is a CLI, desktop app, web app, or service.
+A client pattern is defined by the protocol surface a client uses, not by what the client is: a CLI, desktop app, or service may implement several. (API *profiles* — `core/v0`, `admin/v0` — are a different concept; see `api.md`.)
 
-| Client profile | Primary surface | Typical state |
+| Client pattern | Primary surface | Typical state |
 | --- | --- | --- |
 | **Path-oriented client** | Filesystem operations such as `ls`, `stat`, `get`, `put`, `mv`, and `cp` | Often little or no durable local state beyond transient request context. |
 | **Explicit-commit client** | Staged upload, commit ids, explicit commit, and change cursors | Durable retry state for in-flight uploads and requests, but not necessarily a full local projection. |
 | **Sync client** | Change feed plus durable local projection, with optional writes | Durable local state, cursors, and restart-safe reconciliation state. |
 | **Operator or admin client** | Recovery, inspection, repair, and low-level operations | Implementation-specific. |
 
-A CLI, desktop app, web app, SDK, or service may implement one or more of these profiles.
 
 ## 4. Operation classes
 
@@ -53,4 +50,4 @@ Most core operations fall into one of two classes.
 
 Implementations may additionally expose coordinator-specific helpers for recursive workflows or admin work, but those helpers are outside the interoperable core model.
 
-Control-objects and any implementation-specific helpers preserve stable meaning across time. They do not create a second history model.
+Control objects and implementation-specific helpers never create a second history model.

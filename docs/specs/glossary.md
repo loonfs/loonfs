@@ -1,4 +1,4 @@
-# Glossary
+# LoonFS Glossary
 
 | Term | Meaning |
 | --- | --- |
@@ -22,10 +22,14 @@
 | **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. |
 | **Change feed** | The ordered stream of committed metadata changes after a chosen `seq`. |
 | **Cursor** | A bookmark such as `after_seq` used to resume incremental reads. |
-| **mount** | Reserved future presentation concept for exposing another namespace, or a subtree of another namespace, inside a visible tree; not a v0 inode kind. |
+| **Mount** | Reserved for the future: presenting another namespace, or a subtree of one, inside a visible tree. Not a v0 inode kind. |
 | **ACL** | An access-control rule granting a principal a role over a namespace or subtree. ACLs are not part of namespace metadata history. |
 | **Share** | An access grant to a namespace or subtree. A share may later be presented through a mount in another tree. |
 | **Precondition** | A rule that must still hold at an explicit namespace history point before a commit is accepted. |
 | **Commit id** | A stable client-generated id used for idempotent retries of one commit request. |
 | **Operation id** | Optional commit metadata used to correlate multiple commits that belong to one higher-level workflow. |
 | **Control object** | A server-side control-plane object used to preserve authoritative state across multiple requests, such as a pinned read snapshot, a resumable upload, or a stable destination binding. |
+| **Profile** | An all-or-nothing API conformance unit covering one functional plane (for example `core/v0`). A deployment advertises a profile only when every required op in it is implemented. |
+| **Feature** | A named optional capability inside an advertised profile, keyed `plane.area.name` (for example `core.namespaces.list`). |
+| **Capability document** | The self-description a deployment returns from `GET /v0/config` (or exposes as a constant when embedded): protocol version, advertised profiles, features, and advisory limits. |
+| **Namespace features map** | The `features` map in a namespace manifest recording capabilities materialized on that namespace's data, such as derived indexes. |

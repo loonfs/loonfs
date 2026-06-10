@@ -48,7 +48,7 @@ use loon_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
 use loon_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use tempfile::tempdir;
 
@@ -652,6 +652,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             verified: true,
             fork: None,
             checkpoints: Vec::new(),
+            features: BTreeMap::new(),
             metadata_files,
         },
     )
@@ -1881,6 +1882,7 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
             verified: true,
             fork: None,
             checkpoints: Vec::new(),
+            features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(tables),
         },
     )

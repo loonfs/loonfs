@@ -1,6 +1,6 @@
 //! The LoonFS object-store boundary.
 //!
-//! LoonFS assumes only the narrow provider contract spec 030 names —
+//! LoonFS assumes only the narrow provider contract the format spec names —
 //! create-if-absent, compare-and-swap, read-after-write visibility, prefix
 //! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
 //! provider adapters for S3, Cloudflare R2, and the local filesystem, the
