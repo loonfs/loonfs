@@ -267,7 +267,7 @@ pub struct CommittedChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangesResponse {
     pub namespace_id: NamespaceId,
-    pub from_exclusive_seq: ChangeSeq,
+    pub after_seq: ChangeSeq,
     pub through_seq: ChangeSeq,
     pub changes: Vec<CommittedChange>,
 }

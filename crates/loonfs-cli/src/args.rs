@@ -176,6 +176,7 @@ pub(crate) struct CurrentArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum NamespaceCommand {
     Create(NamespaceCreateArgs),
+    Delete(NamespaceDeleteArgs),
     Fork(NamespaceForkArgs),
     List(NamespaceListArgs),
 }
@@ -185,6 +186,19 @@ pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     pub namespace_id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct NamespaceDeleteArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    pub namespace_id: String,
+    /// Delete only if the namespace head is still at this sequence.
+    #[arg(long)]
+    pub expected_head_seq: Option<u64>,
+    /// Skip the interactive confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -298,6 +312,7 @@ pub(crate) enum CommandKind {
     ProfileRemove,
     ProfileUse,
     NamespaceCreate,
+    NamespaceDelete,
     NamespaceFork,
     NamespaceList,
     NamespaceUse,
@@ -329,6 +344,7 @@ impl CommandKind {
             CommandKind::ProfileRemove => "profile_remove",
             CommandKind::ProfileUse => "profile_use",
             CommandKind::NamespaceCreate => "namespace_create",
+            CommandKind::NamespaceDelete => "namespace_delete",
             CommandKind::NamespaceFork => "namespace_fork",
             CommandKind::NamespaceList => "namespace_list",
             CommandKind::NamespaceUse => "namespace_use",
@@ -369,6 +385,7 @@ impl Cli {
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create(_) => CommandKind::NamespaceCreate,
+                NamespaceCommand::Delete(_) => CommandKind::NamespaceDelete,
                 NamespaceCommand::Fork(_) => CommandKind::NamespaceFork,
                 NamespaceCommand::List(_) => CommandKind::NamespaceList,
             },

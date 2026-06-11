@@ -141,6 +141,10 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             format!("profile: {profile}\nnamespace: {namespace}")
         }
         CommandData::NamespaceSummary(namespace) => namespace.namespace_id.to_string(),
+        CommandData::NamespaceDeleted(response) => format!(
+            "deleted {} (head_seq {})",
+            response.namespace_id, response.head_seq.0
+        ),
         CommandData::NamespaceList { namespaces } => {
             let mut lines = vec!["NAMESPACE_ID".to_owned()];
             for namespace in namespaces {

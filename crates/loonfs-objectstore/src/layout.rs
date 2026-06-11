@@ -80,15 +80,17 @@ typed_key!(DerivedProgressKey);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamespaceGcBoundaryKind {
+    Wal,
     Manifest,
-    Compactions,
+    Compaction,
 }
 
 impl NamespaceGcBoundaryKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Wal => "wal",
             Self::Manifest => "manifest",
-            Self::Compactions => "compactions",
+            Self::Compaction => "compaction",
         }
     }
 }
@@ -213,13 +215,13 @@ impl ObjectLayout {
         compactions_id: u64,
     ) -> NamespaceCompactionsKey {
         NamespaceCompactionsKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compactions/{compactions_id:020}.compactions"
+            "namespaces/{namespace}/compaction/{compactions_id:020}.plan"
         )))
     }
 
     pub fn metadata_sst(&self, namespace: &str, table_id: &str) -> CompactedMetadataSstKey {
         CompactedMetadataSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compacted/metadata/{table_id}.sst"
+            "namespaces/{namespace}/tables/metadata/{table_id}.sst"
         )))
     }
 
@@ -229,7 +231,7 @@ impl ObjectLayout {
         table_id: &str,
     ) -> CompactedMetadataSstKey {
         CompactedMetadataSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compacted/metadata/{table_id}.sst"
+            "namespaces/{namespace}/tables/metadata/{table_id}.sst"
         )))
     }
 
@@ -331,12 +333,10 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "wal", wal] if wal.ends_with(".wal.zst") => {
             parsed(DurableObjectFamily::WalSegment, Some(namespace))
         }
-        ["namespaces", namespace, "compactions", compactions]
-            if compactions.ends_with(".compactions") =>
-        {
+        ["namespaces", namespace, "compaction", compactions] if compactions.ends_with(".plan") => {
             parsed(DurableObjectFamily::NamespaceCompactions, Some(namespace))
         }
-        ["namespaces", namespace, "compacted", "metadata", table] if table.ends_with(".sst") => {
+        ["namespaces", namespace, "tables", "metadata", table] if table.ends_with(".sst") => {
             parsed(DurableObjectFamily::CompactedMetadataSst, Some(namespace))
         }
         ["namespaces", namespace, "indexes", _, _, "compacted", table]
@@ -353,7 +353,10 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             parsed(DurableObjectFamily::IndexGcBoundary, Some(namespace))
         }
         ["namespaces", namespace, "gc", boundary]
-            if matches!(*boundary, "manifest.boundary" | "compactions.boundary") =>
+            if matches!(
+                *boundary,
+                "wal.boundary" | "manifest.boundary" | "compaction.boundary"
+            ) =>
         {
             parsed(DurableObjectFamily::NamespaceGcBoundary, Some(namespace))
         }
@@ -445,19 +448,19 @@ mod tests {
         );
         assert_eq!(
             layout.namespace_compactions("ns-1", 42).as_str(),
-            "namespaces/ns-1/compactions/00000000000000000042.compactions"
+            "namespaces/ns-1/compaction/00000000000000000042.plan"
         );
         assert_eq!(
             layout
                 .metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
         );
         assert_eq!(
             layout
                 .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
         );
         assert_eq!(
             layout
@@ -590,7 +593,7 @@ mod tests {
             ),
             (
                 layout
-                    .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Compactions)
+                    .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Compaction)
                     .into_string(),
                 DurableObjectFamily::NamespaceGcBoundary,
             ),

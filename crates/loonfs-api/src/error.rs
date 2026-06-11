@@ -54,6 +54,7 @@ pub enum ErrorCode {
     PermissionDenied,
     NotSupported,
     NamespaceNotFound,
+    NamespaceDeleted,
     NamespaceExists,
     NamespacePartial,
     PathNotFound,
@@ -82,7 +83,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 35] = [
+    pub const ALL: [ErrorCode; 36] = [
         ErrorCode::InvalidPath,
         ErrorCode::InvalidNamespaceId,
         ErrorCode::InvalidCommitId,
@@ -94,6 +95,7 @@ impl ErrorCode {
         ErrorCode::PermissionDenied,
         ErrorCode::NotSupported,
         ErrorCode::NamespaceNotFound,
+        ErrorCode::NamespaceDeleted,
         ErrorCode::NamespaceExists,
         ErrorCode::NamespacePartial,
         ErrorCode::PathNotFound,
@@ -135,6 +137,7 @@ impl ErrorCode {
             ErrorCode::PermissionDenied => ErrorKind::PermissionDenied,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
+            | ErrorCode::NamespaceDeleted
             | ErrorCode::PathNotFound
             | ErrorCode::RevisionNotFound
             | ErrorCode::UploadNotFound => ErrorKind::NotFound,
@@ -171,6 +174,7 @@ impl ErrorCode {
             ErrorCode::PermissionDenied => "permission_denied",
             ErrorCode::NotSupported => "not_supported",
             ErrorCode::NamespaceNotFound => "namespace_not_found",
+            ErrorCode::NamespaceDeleted => "namespace_deleted",
             ErrorCode::NamespaceExists => "namespace_exists",
             ErrorCode::NamespacePartial => "namespace_partial",
             ErrorCode::PathNotFound => "path_not_found",

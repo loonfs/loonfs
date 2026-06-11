@@ -2,13 +2,13 @@ use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use loonfs::{
     BootstrapNamespaceError, CopyOptions, CoreError, CreateDirOptions, CreateNamespaceOptions,
-    DeleteOptions, ErrorCode, Fs, FsConfig, MoveOptions, PutFileBehavior, PutFileOptions,
-    RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
-    TraceStoreKind,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, Fs, FsConfig,
+    MoveOptions, PutFileBehavior, PutFileOptions, RestoreRevisionOptions, RuntimeCacheConfig,
+    RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{
-    AuthoritativePathEntry, CommitId, ListFileRevisionsResponse, MutationResult, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CommitId, ListFileRevisionsResponse, MutationResult,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use std::future::Future;
@@ -18,6 +18,11 @@ const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 pub(crate) trait Backend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError>;
+    fn delete_namespace(
+        &self,
+        namespace_id: &str,
+        expected_head_seq: Option<u64>,
+    ) -> Result<DeleteNamespaceResponse, CliError>;
     fn fork_namespace(
         &self,
         source: &str,
@@ -72,6 +77,16 @@ impl Backend for RemoteBackend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
         self.client
             .create_namespace(namespace_id)
+            .map_err(map_client_error)
+    }
+
+    fn delete_namespace(
+        &self,
+        namespace_id: &str,
+        expected_head_seq: Option<u64>,
+    ) -> Result<DeleteNamespaceResponse, CliError> {
+        self.client
+            .delete_namespace(namespace_id, expected_head_seq.map(ChangeSeq))
             .map_err(map_client_error)
     }
 
@@ -229,6 +244,18 @@ impl Backend for EmbeddedBackend {
             self.fs
                 .create_namespace(&namespace_id, CreateNamespaceOptions::default()),
         )
+    }
+
+    fn delete_namespace(
+        &self,
+        namespace_id: &str,
+        expected_head_seq: Option<u64>,
+    ) -> Result<DeleteNamespaceResponse, CliError> {
+        let namespace_id = parse_namespace_id(namespace_id)?;
+        let options = DeleteNamespaceOptions {
+            expected_head_seq: expected_head_seq.map(ChangeSeq),
+        };
+        self.block_on(self.fs.delete_namespace(&namespace_id, options))
     }
 
     fn fork_namespace(
@@ -491,6 +518,9 @@ fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {
         }
         BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => {
             CliError::new("namespace_partial", error.to_string())
+        }
+        BootstrapNamespaceError::NamespaceDeleted { .. } => {
+            CliError::new("namespace_deleted", error.to_string())
         }
         BootstrapNamespaceError::EmptyHolderId | BootstrapNamespaceError::EmptyWriterVersion => {
             CliError::invalid_config(error.to_string())

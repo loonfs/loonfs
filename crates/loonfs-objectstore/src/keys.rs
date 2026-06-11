@@ -177,7 +177,7 @@ mod tests {
         );
         assert_eq!(
             metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
-            "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
         );
         assert_eq!(
             derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),

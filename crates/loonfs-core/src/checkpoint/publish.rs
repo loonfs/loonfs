@@ -24,7 +24,7 @@ pub(super) const HEAD_CAS_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
-    Published(HeadState),
+    Published(Box<HeadState>),
     CurrentManifestMissingCheckpoint { current_manifest_id: ManifestId },
     HeadCasRaceLost,
 }
@@ -124,7 +124,9 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                     .await
                     .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
             if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
-                return Ok(ManifestPublicationOutcome::Published(current_head));
+                return Ok(ManifestPublicationOutcome::Published(Box::new(
+                    current_head,
+                )));
             }
             return Ok(
                 ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
@@ -144,6 +146,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             latest_checkpoint_id: Some(checkpoint_id.to_owned()),
             retention_floor_seq: current_head.retention_floor_seq,
             visible_wal_tip: current_head.visible_wal_tip.clone(),
+            state: current_head.state,
         };
         match compare_and_swap_head(
             store,
@@ -154,7 +157,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            Ok(()) => return Ok(ManifestPublicationOutcome::Published(next_head)),
+            Ok(()) => return Ok(ManifestPublicationOutcome::Published(Box::new(next_head))),
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
             Err(error) => return Err(CoreError::Store(error.to_string())),
         }

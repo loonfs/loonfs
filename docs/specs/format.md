@@ -47,9 +47,9 @@ The required durable object families and standard key patterns are:
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/control/lease.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
-| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.wal.zst` |
+| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
-| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
+| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/tables/metadata/{table_id}.sst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Conflict artifacts** | Immutable | Preserve rejected-write context for later inspection. | `namespaces/{namespace_id}/conflicts/{conflict_id}.json` |
 | **Derived progress** | Mutable | Record how far one background work class has processed namespace history. | `namespaces/{namespace_id}/derived/{work_class}/progress.json` |
@@ -64,13 +64,14 @@ Namespace object keys are built through the central object layout API in
 `loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`;
 mutable control objects live under `control/`, WAL files live under `wal/`,
 namespace manifests live under `manifest/`, and immutable metadata SSTs live
-under `compacted/metadata/`. Forks are copy-on-write: the target manifest may
+under `tables/metadata/`. Forks are copy-on-write: the target manifest may
 reference source-owned metadata SSTs through a source checkpoint-backed
 manifest, and the source records a GC pin for that checkpoint/manifest pair.
 
-WAL file ids are opaque generated ids. Recovery follows `head.visible_wal_tip`
-and the predecessor links inside verified WAL envelopes; prefix listing order
-is not recovery authority.
+WAL segment names sort by history position (section 1.3); recovery still
+follows `head.visible_wal_tip` and the predecessor links inside verified WAL
+envelopes. Listing order is an inspection and reclamation convenience, never
+recovery authority.
 
 The object layout also reserves these namespace-root file families for
 fork-aware materialization, derived indexes, compaction control, and garbage
@@ -79,11 +80,11 @@ collection:
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
 | **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
+| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compaction/{compactions_id}.plan` |
 | **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
 | **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/compacted/{table_id}.sst` |
 | **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
-| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions}.boundary` |
+| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest\|compaction}.boundary` |
 | **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
 
 GC boundary files are sequenced cleanup cursors for manifest and compaction
@@ -92,17 +93,55 @@ manifest, checkpoint records, fork GC pins, and the retention floor.
 
 ### 1.3 Durable naming conventions
 
-LoonFS uses distinct naming conventions for distinct surfaces:
+The namespace tree's lifecycle can be read off its grammar:
+
+- **Singular directories are ordered history streams** (`wal/`,
+  `manifest/`, `compaction/`). Object names sort by history position, a
+  boundary cursor in `gc/` records reclamation progress, and reclaiming a
+  stream is one algorithm: range-scan below the cursor, check the bounded
+  window for chain, checkpoint, and pin references, sweep what nothing
+  protects, advance the cursor.
+- **Plural directories are unordered collections** (`tables/`, `uploads/`,
+  `conflicts/`, `gc/pins/`, `indexes/`, `content-stores/`, `blobs/`).
+  Object names are opaque, and references — manifests, chains, pins — are
+  the only truth about liveness; collections reclaim by reachability or
+  session expiry, never by name order.
+- **`control/` is the mutable plane**: compare-and-swap singletons (head,
+  lease, fork record) that are never swept.
+- **The root `descriptor.json` is the existence marker**: written last at
+  creation as the publish marker, kept forever after deletion as half of
+  the tombstone pair that retires the namespace id.
+
+Names are never authority anywhere — recovery follows the head and its
+references. Ordered names exist so that inspection and reclamation can
+trust a listing's order; opaque names exist where nothing should ever
+read meaning into one.
+
+Within that grammar, LoonFS uses distinct conventions for distinct
+surfaces:
 
 - Fixed object-store path segments use lowercase words or lowercase-kebab,
   e.g. `content-stores`, `commit-receipts`, and `uploads`.
 - Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex
   characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`,
   `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`,
-  `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`,
   `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`,
   `chk_f3d6b97a7d394ddf84b621ddf36e5071`, and
   `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
+- Stream-positioned IDs order by history position: a 20-digit zero-padded
+  decimal position, optionally followed by `-` and a 16-lowercase-hex
+  uniqueness suffix. WAL segment ids carry the suffix
+  (`00000000000000000412-9f2a6c0e4b7d4a90`) because segments are *proposals*:
+  racing writers may both write one for the same position before the head
+  chooses, so names at the same position must never collide. Manifest and
+  compaction-plan ids are bare positions (`00000000000000000412`) because
+  those objects are *derivations* of already-committed history: any two
+  writers at the same position produce semantically equivalent objects, so a
+  deterministic name gives one canonical object per position and idempotent
+  retry. A derived-stream writer uses create-if-absent and, on `exists`,
+  verifies and adopts the existing object or reloads — it never overwrites.
+  In every case the ordered name is an inspection and reclamation hint;
+  recovery authority is the head and its references, never a listing.
 - Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs. They use the durable slug grammar:
@@ -141,9 +180,12 @@ The metadata log has six rules.
    `start_seq`, `end_seq`, `base_head_seq`, and `prev_visible_segment_id`, is
    one conforming shape. Equivalent semantics are acceptable.
 5. `segment_id` must be unique and never reused within a namespace
-   incarnation. It should be generated from a collision-resistant source with
-   at least 120 bits of randomness (for example, a version-4 UUID's 122 random
-   bits), not derived only from the sequence range.
+   incarnation. It is a stream-positioned id (section 1.3): the ordered
+   prefix is the segment's `start_seq` so listings and reclamation scans
+   sort by history position, and the collision-resistant suffix keeps
+   competing proposals for the same position distinct. The order in a
+   listing is never recovery authority — recovery follows the head and the
+   chain (rule 4) exclusively.
 6. Orphan WAL segments are permitted and harmless when a writer loses the head
    compare-and-swap.
 
@@ -438,9 +480,32 @@ becomes visible as part of normal namespace history.
 Physical reclamation is separate maintenance work (see section 6). It may
 happen only when retention and reference-safety rules allow it.
 
+A namespace's lifecycle has two recorded states, carried in the head's
+`state` field: `active` (the default; an absent field reads as active) and
+the terminal `deleted`. Initialization progress is deliberately *not*
+recorded here — a namespace is complete when its descriptor exists, partial
+when only earlier objects exist — because object presence cannot go stale.
+Deletion is the one transition presence cannot express: a deleted namespace
+keeps its head and descriptor forever as the tombstone that retires its
+`namespace_id`. Readers MUST refuse to serve a namespace whose head state
+they do not recognize.
+
+Deleting a namespace is a fenced control-plane transition, not a logical
+commit: the deleting writer acquires the namespace lease (advancing the
+fence token, so no stale writer can publish past it) and compare-and-swaps
+the head into `state: deleted`. The delete linearizes at that swap. Every
+commit whose head advance serialized before it remains committed and
+durable — deletion never retroactively falsifies an acknowledgment; it ends
+the namespace's history at that `seq`. Every operation that observes the
+deleted head afterward — reads, commits, forks from the namespace, status,
+and re-creation of the same id — fails with `namespace_deleted`.
+
 Namespace deletion does not imply content-store deletion. In v0, content-store
 deletion and destructive content garbage collection are unsupported
-operator-only work.
+operator-only work, and deletion does not physically reclaim metadata
+objects; reclamation is future maintenance work bound by the invariants in
+section 6 (notably: objects protected by fork GC pins survive, so clones of
+a deleted source stay readable).
 
 ### 2.6 Forks
 
@@ -507,6 +572,7 @@ at minimum:
 
 - `seq`
 - `head_commit_id`
+- `state` (lifecycle: absent or `active`, or the terminal `deleted`)
 - `next_inode_id`
 - `current_manifest_id`
 - `latest_checkpoint_id`
@@ -1142,6 +1208,12 @@ material to support readers from the new floor forward.
 Delete is tombstone-first. Garbage collection is the separate process that
 eventually reclaims content or metadata that is no longer reachable and no
 longer protected by retention policy.
+
+Reclamation follows the tree's grammar (section 1.3). Ordered streams
+(`wal/`, `manifest/`, `compaction/`) reclaim by advancing their boundary
+cursor in `gc/`: range-scan below the cursor, verify the bounded window
+against the reference rules below, sweep, advance. Collections reclaim by
+reachability or expiry. Either way:
 
 Garbage collection must be conservative. It MUST NOT remove an object that is
 reachable from any retained version. Concretely, it may reclaim an object only

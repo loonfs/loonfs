@@ -59,6 +59,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             latest_checkpoint_id: head.latest_checkpoint_id.clone(),
             retention_floor_seq: target_floor,
             visible_wal_tip: head.visible_wal_tip.clone(),
+            state: head.state,
         };
         match compare_and_swap_head(
             store,

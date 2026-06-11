@@ -3,8 +3,10 @@ use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
+use crate::namespace::control::read_head_object;
 use crate::namespace::control::ControlObjectLoadError;
 use bytes::Bytes;
+use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
@@ -33,6 +35,8 @@ pub enum BootstrapNamespaceError {
     NamespaceAlreadyExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is partially initialized")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` is deleted and its id is retired")]
+    NamespaceDeleted { namespace_id: NamespaceId },
     #[error(transparent)]
     Descriptor(ControlObjectLoadError),
     #[error("failed to write namespace descriptor object: {0}")]
@@ -82,12 +86,22 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     }
 
     match namespace_initialization_state(store, namespace_id).await? {
-        NamespaceInitializationState::Complete if allow_existing => {
-            return Ok(NamespaceSummary {
-                namespace_id: namespace_id.clone(),
-            });
-        }
         NamespaceInitializationState::Complete => {
+            let head = read_head_object(store, namespace_id)
+                .await
+                .map_err(BootstrapNamespaceError::Head)?;
+            // A deleted namespace retires its id permanently; re-creation is
+            // refused as deleted, not as existing.
+            if head.envelope.state.state == NamespaceState::Deleted {
+                return Err(BootstrapNamespaceError::NamespaceDeleted {
+                    namespace_id: namespace_id.clone(),
+                });
+            }
+            if allow_existing {
+                return Ok(NamespaceSummary {
+                    namespace_id: namespace_id.clone(),
+                });
+            }
             return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
                 namespace_id: namespace_id.clone(),
             });

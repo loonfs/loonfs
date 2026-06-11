@@ -13,7 +13,7 @@ use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadError,
     WalChainLoadRequest, WalReplayError,
 };
-use loonfs_api::wire::control::{HeadState, LeaseState, NamespaceDescriptorState};
+use loonfs_api::wire::control::{HeadState, LeaseState, NamespaceDescriptorState, NamespaceState};
 use loonfs_api::{ChangeSeq, ContentStoreId, ManifestId, NamespaceId};
 use loonfs_objectstore::{
     keys::{namespace_descriptor, namespace_head},
@@ -119,6 +119,8 @@ pub enum BasisLoadError {
     LoadLease(ControlObjectLoadError),
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
+    #[error("namespace `{namespace_id}` is deleted")]
+    NamespaceDeleted { namespace_id: NamespaceId },
     #[error(
         "namespace head changed during basis load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
     )]
@@ -221,6 +223,14 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
     head: HeadState,
     head_etag: String,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    // The single lifecycle gate: every read, publish, status, fork, and
+    // checkpoint reconstructs through here, so a deleted head refuses them
+    // all in one place.
+    if head.state == NamespaceState::Deleted {
+        return Err(BasisLoadError::NamespaceDeleted {
+            namespace_id: expected_namespace.clone(),
+        });
+    }
     let loaded_lease = read_lease_object(store, expected_namespace)
         .await
         .map_err(BasisLoadError::LoadLease)?;
@@ -328,6 +338,11 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     let loaded_head = read_head_object(store, expected_namespace)
         .await
         .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+    if loaded_head.envelope.state.state == NamespaceState::Deleted {
+        return Err(CoreError::NamespaceDeleted {
+            namespace_id: expected_namespace.clone(),
+        });
+    }
     let head = loaded_head.envelope.state;
     let manifest_basis_seq = if let Some(manifest_id) = head.current_manifest_id {
         load_verified_manifest_materialization(store, expected_namespace, manifest_id)
