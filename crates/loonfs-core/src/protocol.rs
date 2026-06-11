@@ -885,7 +885,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     if after_seq >= basis.head.seq {
         return Ok(ChangesResponse {
             namespace_id: namespace_id.clone(),
-            from_exclusive_seq: after_seq,
+            after_seq,
             through_seq: basis.head.seq,
             changes: Vec::new(),
         });
@@ -925,7 +925,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 
     Ok(ChangesResponse {
         namespace_id: namespace_id.clone(),
-        from_exclusive_seq: after_seq,
+        after_seq,
         through_seq: basis.head.seq,
         changes,
     })

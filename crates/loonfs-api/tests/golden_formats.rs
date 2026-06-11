@@ -117,8 +117,8 @@ fn sample_content_ref() -> ContentRef {
 
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
-        object_key: "namespaces/demo/wal/seg_fedcba9876543210fedcba9876543210.wal.zst".to_owned(),
-        segment_id: "seg_fedcba9876543210fedcba9876543210".to_owned(),
+        object_key: "namespaces/demo/wal/00000000000000000002-fedcba9876543210.wal.zst".to_owned(),
+        segment_id: "00000000000000000002-fedcba9876543210".to_owned(),
         start_seq: ChangeSeq(1),
         end_seq: ChangeSeq(1),
         payload_checksum: sha256_digest(b"previous segment payload"),
@@ -206,7 +206,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
         WRITER_VERSION,
         WalSegmentPayload {
             namespace_id: namespace_id(),
-            segment_id: "seg_0123456789abcdef0123456789abcdef".to_owned(),
+            segment_id: "00000000000000000001-0123456789abcdef".to_owned(),
             prev_visible_segment: Some(sample_wal_pointer()),
             base_head_seq: ChangeSeq(1),
             start_seq: ChangeSeq(2),
@@ -350,7 +350,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 owner_namespace_id: namespace_id(),
                 table_id: "tbl_0123456789abcdef0123456789abcdef".to_owned(),
                 object_key:
-                    "namespaces/demo/compacted/metadata/tbl_0123456789abcdef0123456789abcdef.sst"
+                    "namespaces/demo/tables/metadata/tbl_0123456789abcdef0123456789abcdef.sst"
                         .to_owned(),
                 run_seq: ChangeSeq(2),
                 level: 0,

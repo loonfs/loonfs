@@ -49,7 +49,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             if attempted_swap {
                 return Ok(DeleteNamespaceResponse {
                     namespace_id: namespace_id.clone(),
-                    final_seq: head.seq,
+                    head_seq: head.seq,
                 });
             }
             return Err(CoreError::NamespaceDeleted {
@@ -94,7 +94,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             Ok(_) => {
                 return Ok(DeleteNamespaceResponse {
                     namespace_id: namespace_id.clone(),
-                    final_seq: head.seq,
+                    head_seq: head.seq,
                 });
             }
             // The head moved (a commit, fence takeover, or another deleter

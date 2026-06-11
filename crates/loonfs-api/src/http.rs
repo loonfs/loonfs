@@ -84,8 +84,9 @@ pub struct NamespaceStatusResponse {
 pub struct DeleteNamespaceResponse {
     /// Namespace whose history ended.
     pub namespace_id: NamespaceId,
-    /// The last committed sequence; the delete linearized immediately after.
-    pub final_seq: ChangeSeq,
+    /// The head's last committed sequence; the delete linearized
+    /// immediately after it, so this is where history ended.
+    pub head_seq: ChangeSeq,
 }
 
 /// Result of a namespace-visible mutation.

@@ -1505,7 +1505,7 @@ mod tests {
             .await
             .expect("delete task")
             .expect("delete succeeds");
-        assert_eq!(response.final_seq, ChangeSeq(2));
+        assert_eq!(response.head_seq, ChangeSeq(2));
 
         // Admitted-after work is rejected, and the tombstone fails new
         // admissions immediately.

@@ -61,10 +61,12 @@ pub(crate) fn prepare_wal_segment(
         .last()
         .map(|record| record.seq)
         .ok_or(WalBuildError::EmptySegment)?;
-    // WAL segment IDs are collision-resistant namespace-incarnation IDs. They
-    // are intentionally not derived from the seq range, so losing writers can
-    // leave harmless orphan segments without creating reusable object names.
-    let segment_id = generate_wal_segment_id();
+    // WAL segments are proposals: racing writers may both write one for the
+    // same position before the head chooses. The id's ordered prefix makes
+    // listings and reclamation scans sort by history position; its random
+    // suffix keeps competing proposals (and losers' harmless orphans) from
+    // ever colliding on a name.
+    let segment_id = generate_wal_segment_id(start_seq);
     let payload = WalSegmentPayload {
         namespace_id,
         segment_id: segment_id.clone(),

@@ -370,7 +370,7 @@ race-explicit pattern preconditions give file mutations.
 ```json
 {
   "namespace_id": "demo",
-  "final_seq": 418
+  "head_seq": 418
 }
 ```
 
@@ -649,7 +649,7 @@ Representative response:
 ```json
 {
   "namespace_id": "demo",
-  "from_exclusive_seq": 418,
+  "after_seq": 418,
   "through_seq": 420,
   "changes": [
     {
