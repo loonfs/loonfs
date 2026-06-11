@@ -152,8 +152,17 @@ pub fn generate_upload_id() -> String {
     generated_id("upl")
 }
 
-pub fn generate_wal_segment_id() -> String {
-    generated_id("seg")
+/// WAL segment ids order by history position and stay unique under races.
+///
+/// The 20-digit prefix is the segment's `start_seq`, so listings sort by
+/// position and reclamation can range-scan below a boundary cursor. The
+/// 16-hex suffix keeps speculative writes unique: racing writers proposing
+/// different segments for the same position never collide, and the head
+/// compare-and-swap chooses among them. The name is an inspection and
+/// reclamation hint only — recovery authority is the head and chain.
+pub fn generate_wal_segment_id(start_seq: ChangeSeq) -> String {
+    let suffix = Uuid::new_v4().simple().to_string();
+    format!("{:020}-{}", start_seq.0, &suffix[..16])
 }
 
 pub fn generate_metadata_table_id() -> String {
@@ -173,7 +182,30 @@ pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValid
 }
 
 pub fn validate_wal_segment_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("seg", value.as_ref())
+    let value = value.as_ref();
+    let Some((position, suffix)) = value.split_once('-') else {
+        return Err(generated_id_error(
+            value,
+            "must be `<20 digit start_seq>-<16 lowercase hex>`".to_owned(),
+        ));
+    };
+    if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(generated_id_error(
+            value,
+            "position prefix must be 20 decimal digits".to_owned(),
+        ));
+    }
+    if suffix.len() != 16
+        || !suffix
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(generated_id_error(
+            value,
+            "suffix must be 16 lowercase hex characters".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_metadata_table_id(
@@ -629,8 +661,8 @@ mod tests {
     use super::{
         generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
         generate_wal_segment_id, validate_checkpoint_id, validate_gc_pin_id,
-        validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, CommitId,
-        ContentStoreId, NameKey, NamespaceId,
+        validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, ChangeSeq,
+        CommitId, ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
 
@@ -765,12 +797,14 @@ mod tests {
     #[test]
     fn generated_upload_wal_segment_table_and_pin_validators_reject_hyphenated_ids() {
         assert!(validate_upload_id("upl_00000000000000000000000000000001").is_ok());
-        assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
         assert!(validate_metadata_table_id("tbl_00000000000000000000000000000001").is_ok());
         assert!(validate_gc_pin_id("pin_00000000000000000000000000000001").is_ok());
         assert!(validate_checkpoint_id("chk_00000000000000000000000000000001").is_ok());
         assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
-        assert!(validate_wal_segment_id(["seg", "123"].join("-")).is_err());
+        assert!(validate_wal_segment_id("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
+        assert!(validate_wal_segment_id("412-9f2a6c0e4b7d4a90").is_err());
+        assert!(validate_wal_segment_id("00000000000000000412-9F2A6C0E4B7D4A90").is_err());
+        assert!(validate_wal_segment_id("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(validate_metadata_table_id(["tbl", "123"].join("-")).is_err());
         assert!(validate_gc_pin_id(["pin", "123"].join("-")).is_err());
         assert!(validate_checkpoint_id(["chk", "123"].join("-")).is_err());
@@ -779,13 +813,13 @@ mod tests {
     #[test]
     fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
         let upload_id = generate_upload_id();
-        let wal_segment_id = generate_wal_segment_id();
+        let wal_segment_id = generate_wal_segment_id(ChangeSeq(412));
         let metadata_table_id = generate_metadata_table_id();
         let gc_pin_id = generate_gc_pin_id();
         let checkpoint_id = generate_checkpoint_id();
 
         assert_generated_id_shape(&upload_id, "upl");
-        assert_generated_id_shape(&wal_segment_id, "seg");
+        assert!(wal_segment_id.starts_with("00000000000000000412-"));
         assert_generated_id_shape(&metadata_table_id, "tbl");
         assert_generated_id_shape(&gc_pin_id, "pin");
         assert_generated_id_shape(&checkpoint_id, "chk");
@@ -798,9 +832,11 @@ mod tests {
 
     #[test]
     fn generated_wal_segment_ids_are_not_reused_across_samples() {
+        // Same position, many proposers: the suffix keeps every proposal
+        // distinct.
         let mut ids = BTreeSet::new();
         for _ in 0..128 {
-            let id = generate_wal_segment_id();
+            let id = generate_wal_segment_id(ChangeSeq(412));
             assert!(
                 ids.insert(id.clone()),
                 "generated duplicate WAL segment id {id}"

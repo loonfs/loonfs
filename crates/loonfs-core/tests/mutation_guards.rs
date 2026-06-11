@@ -1871,7 +1871,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     }
     store
         .put_if_absent(
-            "namespaces/demo/wal/seg_99999999999999999999999999999999.wal.zst",
+            "namespaces/demo/wal/00000000000000000099-9999999999999999.wal.zst",
             wal_bytes,
         )
         .await
@@ -2972,7 +2972,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/compacted/metadata/",
+                "namespaces/{}/tables/metadata/",
                 clone_namespace_id.as_str()
             ))
             .await
