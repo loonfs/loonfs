@@ -20,7 +20,7 @@ use crate::namespace::control::{
     load_namespace_head_control, load_namespace_lease_control,
 };
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
-use crate::path::write::{path_intent_fingerprint_for_path_intent, PathPlanner};
+use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{write_immutable_object, ContentValidationTracker};
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
@@ -31,7 +31,7 @@ use loonfs_api::v0::{
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind, HeadState,
+    decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind,
     UploadSessionEnvelope, UploadSessionState,
 };
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
@@ -461,8 +461,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     }
     let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
         (0..candidates.len()).map(|_| None).collect();
-    let mut current_head = basis.head.clone();
-    let mut current_metadata_state = basis.metadata_state.clone();
+    let mut session = PublishPlanningSession::new(basis);
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut in_batch_requests: HashMap<CommitId, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
@@ -479,11 +478,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
             let candidate_request = {
                 let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
                 prepare_candidate_request(
-                    store,
                     namespace_id,
                     basis,
-                    &current_head,
-                    &current_metadata_state,
+                    &session,
                     candidate,
                     context,
                     index,
@@ -496,10 +493,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
                 continue;
             };
             let validation = CommitValidationContext {
-                head: current_head.clone(),
+                head: session.head().clone(),
                 lease: basis.lease.clone(),
                 now_ms: context.now_ms,
-                metadata_state: &current_metadata_state,
+                metadata_state: session.metadata_state(),
             };
             let request = candidate_request.request;
             let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
@@ -565,14 +562,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
             let applied = {
                 let _span = tracing::info_span!("loon.phase", phase = "apply_committed_wal_record")
                     .entered();
-                current_metadata_state.apply_committed_wal_record_mut(&preview)
+                session.apply_accepted_commit(&preview, &plan)
             };
             match applied {
-                Ok(_) => {
-                    current_head.seq = plan.assigned_seq;
-                    current_head.next_inode_id = plan.resulting_next_inode_id;
-                    accepted.push((index, materialized));
-                }
+                Ok(()) => accepted.push((index, materialized)),
                 Err(error) => outcomes[index] = Some(Err(error.into())),
             }
         }
@@ -695,7 +688,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         head: head_publish.resulting_head.clone(),
         head_etag,
         lease: basis.lease.clone(),
-        metadata_state: current_metadata_state,
+        metadata_state: session.into_metadata_state(),
     });
 
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
@@ -714,12 +707,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_candidate_request<S: ObjectStore + ?Sized>(
-    store: &S,
+fn prepare_candidate_request(
     namespace_id: &NamespaceId,
     basis: &VerifiedNamespaceBasis,
-    current_head: &HeadState,
-    current_metadata_state: &MetadataState,
+    session: &PublishPlanningSession,
     candidate: &NamespaceMutationCandidate,
     context: &MutationContext,
     index: usize,
@@ -798,12 +789,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            let planned = match PathPlanner::new(store).plan_against_state(
-                namespace_id,
-                intent,
-                current_head,
-                current_metadata_state,
-            ) {
+            let planned = match session.plan_path_mutation(namespace_id, intent) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error));
