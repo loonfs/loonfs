@@ -47,7 +47,7 @@ The required durable object families and standard key patterns are:
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/control/lease.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
-| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.wal.zst` |
+| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
 | **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
@@ -68,9 +68,10 @@ under `compacted/metadata/`. Forks are copy-on-write: the target manifest may
 reference source-owned metadata SSTs through a source checkpoint-backed
 manifest, and the source records a GC pin for that checkpoint/manifest pair.
 
-WAL file ids are opaque generated ids. Recovery follows `head.visible_wal_tip`
-and the predecessor links inside verified WAL envelopes; prefix listing order
-is not recovery authority.
+WAL segment names sort by history position (section 1.3); recovery still
+follows `head.visible_wal_tip` and the predecessor links inside verified WAL
+envelopes. Listing order is an inspection and reclamation convenience, never
+recovery authority.
 
 The object layout also reserves these namespace-root file families for
 fork-aware materialization, derived indexes, compaction control, and garbage
@@ -99,10 +100,23 @@ LoonFS uses distinct naming conventions for distinct surfaces:
 - Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex
   characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`,
   `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`,
-  `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`,
   `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`,
   `chk_f3d6b97a7d394ddf84b621ddf36e5071`, and
   `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
+- Stream-positioned IDs order by history position: a 20-digit zero-padded
+  decimal position, optionally followed by `-` and a 16-lowercase-hex
+  uniqueness suffix. WAL segment ids carry the suffix
+  (`00000000000000000412-9f2a6c0e4b7d4a90`) because segments are *proposals*:
+  racing writers may both write one for the same position before the head
+  chooses, so names at the same position must never collide. Manifest and
+  compaction-plan ids are bare positions (`00000000000000000412`) because
+  those objects are *derivations* of already-committed history: any two
+  writers at the same position produce semantically equivalent objects, so a
+  deterministic name gives one canonical object per position and idempotent
+  retry. A derived-stream writer uses create-if-absent and, on `exists`,
+  verifies and adopts the existing object or reloads — it never overwrites.
+  In every case the ordered name is an inspection and reclamation hint;
+  recovery authority is the head and its references, never a listing.
 - Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs. They use the durable slug grammar:
@@ -141,9 +155,12 @@ The metadata log has six rules.
    `start_seq`, `end_seq`, `base_head_seq`, and `prev_visible_segment_id`, is
    one conforming shape. Equivalent semantics are acceptable.
 5. `segment_id` must be unique and never reused within a namespace
-   incarnation. It should be generated from a collision-resistant source with
-   at least 120 bits of randomness (for example, a version-4 UUID's 122 random
-   bits), not derived only from the sequence range.
+   incarnation. It is a stream-positioned id (section 1.3): the ordered
+   prefix is the segment's `start_seq` so listings and reclamation scans
+   sort by history position, and the collision-resistant suffix keeps
+   competing proposals for the same position distinct. The order in a
+   listing is never recovery authority — recovery follows the head and the
+   chain (rule 4) exclusively.
 6. Orphan WAL segments are permitted and harmless when a writer loses the head
    compare-and-swap.
 
