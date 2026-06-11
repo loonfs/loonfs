@@ -118,6 +118,36 @@ pub struct WalSegmentPointer {
     pub payload_checksum: String,
 }
 
+/// Lifecycle state recorded in the namespace head.
+///
+/// Initialization progress is not recorded here: it stays derived from
+/// object presence (the descriptor is the completion marker). This field
+/// records the one transition object presence cannot express, because a
+/// deleted namespace keeps its head and descriptor forever as the id-reuse
+/// tombstone.
+///
+/// Decoding is fail-closed: a reader presented with a state it does not
+/// recognize fails with a typed decode error instead of serving the
+/// namespace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceState {
+    /// The namespace serves reads and accepts commits.
+    #[default]
+    Active,
+    /// Terminal: the namespace's history has ended. Reads, commits, forks,
+    /// and re-creation of the same id are all refused.
+    Deleted,
+}
+
+impl NamespaceState {
+    /// Whether this is the default state, used to keep active heads encoded
+    /// exactly as before the field existed.
+    pub fn is_active(&self) -> bool {
+        matches!(self, NamespaceState::Active)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadState {
     pub namespace_id: NamespaceId,
@@ -139,6 +169,10 @@ pub struct HeadState {
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
+    /// Lifecycle state. Absent means active, on read and on write, so the
+    /// field appears only in deleted heads.
+    #[serde(default, skip_serializing_if = "NamespaceState::is_active")]
+    pub state: NamespaceState,
 }
 
 impl HeadState {
@@ -155,6 +189,7 @@ impl HeadState {
             latest_checkpoint_id: None,
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
+            state: NamespaceState::Active,
         }
     }
 }

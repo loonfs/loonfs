@@ -438,9 +438,32 @@ becomes visible as part of normal namespace history.
 Physical reclamation is separate maintenance work (see section 6). It may
 happen only when retention and reference-safety rules allow it.
 
+A namespace's lifecycle has two recorded states, carried in the head's
+`state` field: `active` (the default; an absent field reads as active) and
+the terminal `deleted`. Initialization progress is deliberately *not*
+recorded here — a namespace is complete when its descriptor exists, partial
+when only earlier objects exist — because object presence cannot go stale.
+Deletion is the one transition presence cannot express: a deleted namespace
+keeps its head and descriptor forever as the tombstone that retires its
+`namespace_id`. Readers MUST refuse to serve a namespace whose head state
+they do not recognize.
+
+Deleting a namespace is a fenced control-plane transition, not a logical
+commit: the deleting writer acquires the namespace lease (advancing the
+fence token, so no stale writer can publish past it) and compare-and-swaps
+the head into `state: deleted`. The delete linearizes at that swap. Every
+commit whose head advance serialized before it remains committed and
+durable — deletion never retroactively falsifies an acknowledgment; it ends
+the namespace's history at that `seq`. Every operation that observes the
+deleted head afterward — reads, commits, forks from the namespace, status,
+and re-creation of the same id — fails with `namespace_deleted`.
+
 Namespace deletion does not imply content-store deletion. In v0, content-store
 deletion and destructive content garbage collection are unsupported
-operator-only work.
+operator-only work, and deletion does not physically reclaim metadata
+objects; reclamation is future maintenance work bound by the invariants in
+section 6 (notably: objects protected by fork GC pins survive, so clones of
+a deleted source stay readable).
 
 ### 2.6 Forks
 
@@ -507,6 +530,7 @@ at minimum:
 
 - `seq`
 - `head_commit_id`
+- `state` (lifecycle: absent or `active`, or the terminal `deleted`)
 - `next_inode_id`
 - `current_manifest_id`
 - `latest_checkpoint_id`

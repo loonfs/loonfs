@@ -10,7 +10,7 @@ use crate::namespace::catalog::{
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
+    decode_control_object, encode_control_object, ControlObjectKind, HeadState, NamespaceState, HeadStateEnvelope,
     LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
     NamespaceForkState, NamespaceForkStateEnvelope, NamespaceGcPinState,
     NamespaceGcPinStateEnvelope,
@@ -78,6 +78,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         latest_checkpoint_id: Some(target_checkpoint_id.clone()),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
+        state: NamespaceState::Active,
     };
     let initial_lease = LeaseState {
         namespace_id: new_namespace_id.clone(),

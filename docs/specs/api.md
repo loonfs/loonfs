@@ -169,6 +169,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `permission_denied` | 403 | Authenticated, but not allowed to perform this operation. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
+| `namespace_deleted` | 410 | The namespace existed and was deleted. The id is permanently retired. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id. |

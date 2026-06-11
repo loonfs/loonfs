@@ -56,5 +56,6 @@ pub fn next_takeover_head(current_head: &HeadState) -> Result<HeadState, HeadFen
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
+        state: current_head.state,
     })
 }

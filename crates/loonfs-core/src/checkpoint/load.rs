@@ -102,6 +102,7 @@ pub(crate) fn manifest_basis_head(
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: None,
+        state: current_head.state,
     }
 }
 

@@ -88,6 +88,7 @@ pub fn prepare_commit_head_publish(
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: Some(wal.envelope.pointer(wal.object_key.clone())),
+        state: current_head.state,
     };
     let envelope = HeadStateEnvelope::from_state(
         ControlObjectKind::NamespaceHead,
@@ -179,6 +180,7 @@ mod tests {
             latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
+            state: Default::default(),
         }
     }
 

@@ -21,6 +21,7 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, LeaseState,
+    NamespaceState,
     NamespaceDescriptorState, NamespaceForkState, NamespaceGcPinState, ProgressState,
     UploadSessionState, WalSegmentPointer,
 };
@@ -379,6 +380,14 @@ fn sample_head_state() -> HeadState {
         latest_checkpoint_id: Some("chk_00000000000000000000000000000002".to_owned()),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: Some(sample_wal_pointer()),
+        state: NamespaceState::Active,
+    }
+}
+
+fn sample_deleted_head_state() -> HeadState {
+    HeadState {
+        state: NamespaceState::Deleted,
+        ..sample_head_state()
     }
 }
 
@@ -442,11 +451,39 @@ where
 }
 
 #[test]
+fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
+    // An active head encodes without the field at all: the golden fixture
+    // for the pre-state format decodes as Active (additive evolution), and
+    // re-encoding it stays byte-identical.
+    let active = sample_head_state();
+    let encoded = serde_json::to_string(&active).expect("encode active head");
+    assert!(
+        !encoded.contains("\"state\""),
+        "active heads must omit the lifecycle field"
+    );
+
+    // A state this build does not know must fail decode, never default:
+    // serving a namespace in an unrecognized lifecycle state is the one
+    // mistake the field exists to prevent.
+    let future = encoded.replacen('{', "{\"state\":\"frozen\",", 1);
+    let decoded = serde_json::from_str::<HeadState>(&future);
+    assert!(decoded.is_err(), "unknown lifecycle state must fail closed");
+
+    let deleted = serde_json::to_string(&sample_deleted_head_state()).expect("encode deleted");
+    assert!(deleted.contains("\"state\":\"deleted\""));
+}
+
+#[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_namespace_head.v1.json",
         ControlObjectKind::NamespaceHead,
         sample_head_state(),
+    );
+    check_control_golden(
+        "control_namespace_head.deleted.v1.json",
+        ControlObjectKind::NamespaceHead,
+        sample_deleted_head_state(),
     );
     check_control_golden(
         "control_namespace_lease.v1.json",

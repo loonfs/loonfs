@@ -144,6 +144,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             latest_checkpoint_id: Some(checkpoint_id.to_owned()),
             retention_floor_seq: current_head.retention_floor_seq,
             visible_wal_tip: current_head.visible_wal_tip.clone(),
+            state: current_head.state,
         };
         match compare_and_swap_head(
             store,

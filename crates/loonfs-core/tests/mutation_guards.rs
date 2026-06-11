@@ -4284,6 +4284,7 @@ fn validation_context(
         latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
+        state: Default::default(),
     };
     let lease = LeaseState {
         namespace_id,

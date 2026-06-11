@@ -839,6 +839,7 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         ErrorCode::CommitQueueFull
         | ErrorCode::CommitOutcomeUnknown
         | ErrorCode::CheckpointUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::NamespaceDeleted => StatusCode::GONE,
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
         ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
         ErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,
