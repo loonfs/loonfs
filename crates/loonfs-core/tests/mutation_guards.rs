@@ -2972,7 +2972,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/compacted/metadata/",
+                "namespaces/{}/tables/metadata/",
                 clone_namespace_id.as_str()
             ))
             .await

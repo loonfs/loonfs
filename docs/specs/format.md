@@ -49,7 +49,7 @@ The required durable object families and standard key patterns are:
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
-| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
+| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/tables/metadata/{table_id}.sst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Conflict artifacts** | Immutable | Preserve rejected-write context for later inspection. | `namespaces/{namespace_id}/conflicts/{conflict_id}.json` |
 | **Derived progress** | Mutable | Record how far one background work class has processed namespace history. | `namespaces/{namespace_id}/derived/{work_class}/progress.json` |
@@ -64,7 +64,7 @@ Namespace object keys are built through the central object layout API in
 `loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`;
 mutable control objects live under `control/`, WAL files live under `wal/`,
 namespace manifests live under `manifest/`, and immutable metadata SSTs live
-under `compacted/metadata/`. Forks are copy-on-write: the target manifest may
+under `tables/metadata/`. Forks are copy-on-write: the target manifest may
 reference source-owned metadata SSTs through a source checkpoint-backed
 manifest, and the source records a GC pin for that checkpoint/manifest pair.
 
@@ -80,11 +80,11 @@ collection:
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
 | **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
+| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compaction/{compactions_id}.plan` |
 | **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
 | **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/compacted/{table_id}.sst` |
 | **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
-| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions}.boundary` |
+| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest\|compaction}.boundary` |
 | **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
 
 GC boundary files are sequenced cleanup cursors for manifest and compaction

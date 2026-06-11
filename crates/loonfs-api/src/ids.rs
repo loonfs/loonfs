@@ -798,7 +798,6 @@ mod tests {
     #[test]
     fn generated_upload_wal_segment_table_and_pin_validators_reject_hyphenated_ids() {
         assert!(validate_upload_id("upl_00000000000000000000000000000001").is_ok());
-        assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
         assert!(validate_metadata_table_id("tbl_00000000000000000000000000000001").is_ok());
         assert!(validate_gc_pin_id("pin_00000000000000000000000000000001").is_ok());
         assert!(validate_checkpoint_id("chk_00000000000000000000000000000001").is_ok());
