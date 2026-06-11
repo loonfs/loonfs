@@ -10,6 +10,10 @@ pub(super) struct MetadataIndexes {
     indexed_seq: ChangeSeq,
     inode_by_id: HashMap<InodeId, InodeRecord>,
     active_child_by_parent_name: HashMap<(InodeId, String), DirentryBindRecord>,
+    /// Latest bind ever recorded per (parent, name), kept even after the
+    /// binding is unbound. Tombstone-ancestry checks need to see dead
+    /// bindings, which the active map deliberately drops.
+    latest_bind_by_parent_name: HashMap<(InodeId, String), DirentryBindRecord>,
     active_parent_by_child: HashMap<InodeId, DirentryBindRecord>,
     unbound_binding_keys: HashSet<BindingKey>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
@@ -24,6 +28,7 @@ impl Default for MetadataIndexes {
             indexed_seq: ChangeSeq(0),
             inode_by_id: HashMap::new(),
             active_child_by_parent_name: HashMap::new(),
+            latest_bind_by_parent_name: HashMap::new(),
             active_parent_by_child: HashMap::new(),
             unbound_binding_keys: HashSet::new(),
             tombstone_by_root: HashMap::new(),
@@ -82,6 +87,7 @@ impl MetadataIndexes {
                 .active_parent_by_child
                 .insert(bind.child_inode_id, bind.clone());
         }
+        indexes.latest_bind_by_parent_name = latest_by_parent_name;
 
         for revision in revisions {
             indexes.record_revision(revision);
@@ -112,6 +118,16 @@ impl MetadataIndexes {
         name_key: &str,
     ) -> Option<DirentryBindRecord> {
         self.active_child_by_parent_name
+            .get(&(parent_inode_id, name_key.to_owned()))
+            .cloned()
+    }
+
+    pub(super) fn latest_bind(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+    ) -> Option<DirentryBindRecord> {
+        self.latest_bind_by_parent_name
             .get(&(parent_inode_id, name_key.to_owned()))
             .cloned()
     }
@@ -169,6 +185,11 @@ impl MetadataIndexes {
     pub(super) fn record_bind(&mut self, record: &DirentryBindRecord) {
         self.indexed_seq = self.indexed_seq.max(record.bind_seq);
         let parent_name_key = (record.parent_inode_id, record.name_key.clone());
+        replace_if_newer_bind(
+            &mut self.latest_bind_by_parent_name,
+            parent_name_key.clone(),
+            record.clone(),
+        );
 
         if let Some(previous_child_at_name) =
             self.active_child_by_parent_name.remove(&parent_name_key)

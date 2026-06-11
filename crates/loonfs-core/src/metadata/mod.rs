@@ -197,6 +197,13 @@ impl MetadataState {
         state
     }
 
+    /// Highest sequence carried by any indexed record.
+    ///
+    /// No record carries a larger seq, so a query at `base_seq >=
+    /// indexed_seq()` passes every `seq <= base_seq` filter and is equivalent
+    /// to an at-head query. The seq-gated read methods below rely on this to
+    /// route to the indexes; only queries strictly below `indexed_seq()` need
+    /// the historical scans.
     pub fn indexed_seq(&self) -> ChangeSeq {
         self.indexes.indexed_seq()
     }
@@ -461,7 +468,7 @@ impl MetadataState {
     }
 
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.inode_at_head(inode_id);
         }
         self.inode_at_seq_scan(inode_id, base_seq)
@@ -483,7 +490,7 @@ impl MetadataState {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<RevisionRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.latest_revision_at_head(inode_id);
         }
         self.latest_revision_head_at_seq_scan(inode_id, base_seq)
@@ -517,7 +524,7 @@ impl MetadataState {
         revision_no: RevisionNo,
         base_seq: ChangeSeq,
     ) -> Option<RevisionRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.revision_at_head(inode_id, revision_no);
         }
         self.revision_at_seq_scan(inode_id, revision_no, base_seq)
@@ -548,12 +555,17 @@ impl MetadataState {
             .cloned()
     }
 
+    /// Latest bind for `(parent, name)` at or before `base_seq`, regardless
+    /// of whether it has since been unbound.
     pub fn bound_child_at_seq(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
+        if base_seq >= self.indexed_seq() {
+            return self.indexes.latest_bind(parent_inode_id, name_key);
+        }
         self.bound_child_at_seq_scan(parent_inode_id, name_key, base_seq)
     }
 
@@ -579,7 +591,7 @@ impl MetadataState {
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.current_parent_binding_for_child_at_head(child_inode_id);
         }
         let direntry = self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)?;
@@ -601,7 +613,7 @@ impl MetadataState {
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.active_subtree_tombstone_at_head(root_inode_id);
         }
         self.active_subtree_tombstone_scan(root_inode_id, base_seq)
@@ -633,7 +645,7 @@ impl MetadataState {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.covering_subtree_tombstone_at_head(inode_id);
         }
 
@@ -682,7 +694,7 @@ impl MetadataState {
     }
 
     pub fn visible_inode(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.visible_inode_at_head(inode_id);
         }
 
@@ -721,7 +733,7 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.visible_child_at_head(parent_inode_id, name_key);
         }
 
@@ -755,7 +767,7 @@ impl MetadataState {
         parent_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Vec<DirentryBindRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.visible_children_at_head(parent_inode_id);
         }
 
@@ -895,7 +907,7 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.indexes.active_child(parent_inode_id, name_key);
         }
 
@@ -936,7 +948,7 @@ impl MetadataState {
         direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
     ) -> bool {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.is_direntry_unbound_at_head(direntry);
         }
         self.is_direntry_unbound_at_seq_scan(direntry, base_seq)
@@ -967,7 +979,7 @@ impl MetadataState {
         new_parent_inode: InodeId,
         base_seq: ChangeSeq,
     ) -> bool {
-        if base_seq == self.indexed_seq() {
+        if base_seq >= self.indexed_seq() {
             return self.would_create_directory_cycle_at_head(inode_id, new_parent_inode);
         }
 
@@ -1672,6 +1684,197 @@ mod tests {
                 .expect("receipt after decode")
                 .semantic_commit_fingerprint,
             "fingerprint"
+        );
+    }
+
+    /// Binding churn under one parent:
+    /// - seq 1: child 2 bound at `contested`, child 4 bound at `deleted`
+    /// - seq 2: child 2 renamed to `renamed-away`, child 4 unbound for good
+    /// - seq 3: child 3 takes over `contested`
+    ///
+    /// At head this leaves `contested` rebound, `renamed-away` active, and
+    /// `deleted` with only a dead binding.
+    fn churned_binding_state() -> MetadataState {
+        let mut state = MetadataState::default();
+        state
+            .apply_committed_wal_deltas_mut(
+                ChangeSeq(0),
+                &[WalDelta::CreateInode {
+                    delta_index: 0,
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                }],
+            )
+            .expect("seed root");
+        state
+            .apply_committed_wal_deltas_mut(
+                ChangeSeq(1),
+                &[
+                    WalDelta::CreateInode {
+                        delta_index: 0,
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::Dir,
+                    },
+                    WalDelta::BindDirentry {
+                        delta_index: 1,
+                        parent_inode: InodeId(1),
+                        name_key: "contested".to_owned(),
+                        display_name: "contested".to_owned(),
+                        child_inode: InodeId(2),
+                    },
+                    WalDelta::CreateInode {
+                        delta_index: 2,
+                        inode_id: InodeId(4),
+                        inode_kind: InodeKind::Dir,
+                    },
+                    WalDelta::BindDirentry {
+                        delta_index: 3,
+                        parent_inode: InodeId(1),
+                        name_key: "deleted".to_owned(),
+                        display_name: "deleted".to_owned(),
+                        child_inode: InodeId(4),
+                    },
+                ],
+            )
+            .expect("bind children 2 and 4");
+        state
+            .apply_committed_wal_deltas_mut(
+                ChangeSeq(2),
+                &[
+                    WalDelta::UnbindDirentry {
+                        delta_index: 0,
+                        parent_inode: InodeId(1),
+                        name_key: "contested".to_owned(),
+                        child_inode: InodeId(2),
+                        bind_seq: ChangeSeq(1),
+                        bind_delta_index: 1,
+                    },
+                    WalDelta::BindDirentry {
+                        delta_index: 1,
+                        parent_inode: InodeId(1),
+                        name_key: "renamed-away".to_owned(),
+                        display_name: "renamed-away".to_owned(),
+                        child_inode: InodeId(2),
+                    },
+                    WalDelta::UnbindDirentry {
+                        delta_index: 2,
+                        parent_inode: InodeId(1),
+                        name_key: "deleted".to_owned(),
+                        child_inode: InodeId(4),
+                        bind_seq: ChangeSeq(1),
+                        bind_delta_index: 3,
+                    },
+                ],
+            )
+            .expect("rename child 2, unbind child 4");
+        state
+            .apply_committed_wal_deltas_mut(
+                ChangeSeq(3),
+                &[
+                    WalDelta::CreateInode {
+                        delta_index: 0,
+                        inode_id: InodeId(3),
+                        inode_kind: InodeKind::Dir,
+                    },
+                    WalDelta::BindDirentry {
+                        delta_index: 1,
+                        parent_inode: InodeId(1),
+                        name_key: "contested".to_owned(),
+                        display_name: "contested".to_owned(),
+                        child_inode: InodeId(3),
+                    },
+                ],
+            )
+            .expect("bind child 3");
+        state
+    }
+
+    /// Rebuilds the churned state from its rows, so the `from_rows` index
+    /// construction path is pinned against the incremental one.
+    fn churned_binding_state_rebuilt() -> MetadataState {
+        let incremental = churned_binding_state();
+        MetadataState::from_rows(
+            incremental.inodes().to_vec(),
+            incremental.direntry_binds().to_vec(),
+            incremental.direntry_unbinds().to_vec(),
+            incremental.revisions().to_vec(),
+            incremental.subtree_tombstones().to_vec(),
+            incremental.commit_receipts().to_vec(),
+        )
+    }
+
+    #[test]
+    fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
+        let state = churned_binding_state();
+        let head = state.indexed_seq();
+        assert_eq!(head, ChangeSeq(3));
+
+        // The latest bind at the contested name is child 3.
+        let head_bind = state
+            .bound_child_at_seq(InodeId(1), "contested", head)
+            .expect("bind at head");
+        assert_eq!(head_bind.child_inode_id, InodeId(3));
+        assert_eq!(head_bind.bind_seq, ChangeSeq(3));
+
+        // The deleted name still answers with its dead binding: the bind is
+        // unbound but tombstone-ancestry walks must see it.
+        let dead_bind = state
+            .bound_child_at_seq(InodeId(1), "deleted", head)
+            .expect("dead binding visible at head");
+        assert_eq!(dead_bind.child_inode_id, InodeId(4));
+        assert!(state.is_direntry_unbound_at_seq(&dead_bind, head));
+        assert!(state.visible_child(InodeId(1), "deleted", head).is_none());
+    }
+
+    #[test]
+    fn bound_child_below_indexed_seq_still_scans_history() {
+        let state = churned_binding_state();
+
+        // At seq 2 the contested name's latest bind is still child 2's
+        // (unbound) binding; the rebind at seq 3 is not visible yet.
+        let historical = state
+            .bound_child_at_seq(InodeId(1), "contested", ChangeSeq(2))
+            .expect("historical bind");
+        assert_eq!(historical.child_inode_id, InodeId(2));
+        assert_eq!(historical.bind_seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn incremental_and_rebuilt_indexes_agree_on_latest_binds() {
+        let incremental = churned_binding_state();
+        let rebuilt = churned_binding_state_rebuilt();
+
+        for name_key in ["contested", "renamed-away", "deleted", "never-bound"] {
+            assert_eq!(
+                rebuilt.bound_child_at_seq(InodeId(1), name_key, ChangeSeq(3)),
+                incremental.bound_child_at_seq(InodeId(1), name_key, ChangeSeq(3)),
+                "latest bind for `{name_key}` diverges between construction paths"
+            );
+        }
+    }
+
+    /// Queries above `indexed_seq()` are at-head queries: commit validation
+    /// probes the basis at the next assigned seq and must hit the indexes.
+    #[test]
+    fn queries_above_indexed_seq_match_at_head_results() {
+        let state = churned_binding_state();
+        let beyond_head = ChangeSeq(state.indexed_seq().0 + 1);
+
+        assert_eq!(
+            state.bound_child_at_seq(InodeId(1), "contested", beyond_head),
+            state.indexes.latest_bind(InodeId(1), "contested"),
+        );
+        assert_eq!(
+            state.visible_child(InodeId(1), "contested", beyond_head),
+            state.visible_child_at_head(InodeId(1), "contested"),
+        );
+        assert_eq!(
+            state.current_parent_binding_for_child(InodeId(2), beyond_head),
+            state.current_parent_binding_for_child_at_head(InodeId(2)),
+        );
+        assert_eq!(
+            state.visible_inode(InodeId(3), beyond_head),
+            state.visible_inode_at_head(InodeId(3)),
         );
     }
 }
