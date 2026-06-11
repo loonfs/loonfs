@@ -24,16 +24,17 @@ pub use loonfs_api::v0::{
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
-    ChangeSeq, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName,
-    FileRevision, FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ManifestId, MutationResult, NameKey, NamePolicy, NamespaceId,
-    NamespaceSummary, RevisionNo, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROTOCOL_VERSION,
+    ChangeSeq, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse,
+    DeleteNamespaceResponse, DisplayName, FileRevision, FilesystemOperationResponse, InodeId,
+    InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult,
+    NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
-    BootstrapNamespaceError, Error as CoreError, ErrorCode, ErrorKind, PutFileBehavior,
+    BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
+    PutFileBehavior,
 };
 
 /// Server-integration seam: the vocabulary a batching publisher uses to

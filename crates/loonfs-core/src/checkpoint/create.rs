@@ -191,6 +191,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
         .await?
         {
             ManifestPublicationOutcome::Published(resulting_head) => {
+                let resulting_head = *resulting_head;
                 return Ok(CreateCheckpointResponse {
                     namespace_id: namespace_id.clone(),
                     checkpoint_id: checkpoint.checkpoint_id.clone(),

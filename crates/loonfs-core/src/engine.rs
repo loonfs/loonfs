@@ -1,9 +1,10 @@
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
-use crate::namespace::{bootstrap, catalog, fork, BootstrapNamespaceError};
+use crate::namespace::{bootstrap, catalog, delete, fork, BootstrapNamespaceError};
 use crate::options::{
-    BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, ReadSource, WriteOptions,
+    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
+    WriteOptions,
 };
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::v0::{
@@ -124,6 +125,22 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             target,
+            &self.mutation_context(),
+        )
+        .await
+    }
+
+    /// Deletes this namespace: a fenced, terminal head-state transition.
+    /// Commits acknowledged before the swap stay committed; everything that
+    /// observes the deleted head afterward fails with `namespace_deleted`.
+    pub async fn delete_namespace(
+        &self,
+        options: DeleteNamespaceOptions,
+    ) -> CoreResult<loonfs_api::DeleteNamespaceResponse> {
+        delete::delete_namespace(
+            &self.store,
+            &self.namespace_id,
+            options,
             &self.mutation_context(),
         )
         .await

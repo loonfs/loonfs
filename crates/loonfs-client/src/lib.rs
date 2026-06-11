@@ -14,10 +14,11 @@ use loonfs_api::{
         UploadContentResponse,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
-    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId,
-    ListFileRevisionsResponse, ListNamespacesResponse, ListPathEntriesResponse, MutationResult,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, RestoreFileRevisionRequest, RevisionNo,
+    CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
+    ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListNamespacesResponse,
+    ListPathEntriesResponse, MutationResult, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -191,17 +192,22 @@ impl Client {
         self.request_json::<(), NamespaceStatusResponse>(self.agent.get(&url), None)
     }
 
-    /// Deletes a namespace. Registered as feature
-    /// `core.namespaces.delete`; no v0 deployment supports it, so gate on
-    /// [`Client::capabilities`] and expect a `not_supported` error carrying
-    /// that feature key today.
-    pub fn delete_namespace(&self, namespace: &str) -> Result<(), ClientError> {
+    /// Deletes a namespace (feature `core.namespaces.delete`): terminal,
+    /// and the id is permanently retired. Pass `expected_head_seq` to delete
+    /// only if the namespace is still where you last observed it
+    /// (`stale_head` on mismatch). Deleting an already-deleted namespace
+    /// fails with `namespace_deleted`.
+    pub fn delete_namespace(
+        &self,
+        namespace: &str,
+        expected_head_seq: Option<ChangeSeq>,
+    ) -> Result<DeleteNamespaceResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
-        let url = format!("{}/v0/namespaces/{namespace}", self.base_url);
-        self.authenticated(self.agent.delete(&url))
-            .call()
-            .map_err(|err| self.map_error(err))?;
-        Ok(())
+        let mut url = format!("{}/v0/namespaces/{namespace}", self.base_url);
+        if let Some(expected) = expected_head_seq {
+            url.push_str(&format!("?expected_head_seq={}", expected.0));
+        }
+        self.request_json::<(), DeleteNamespaceResponse>(self.agent.delete(&url), None)
     }
 
     pub fn fork_namespace(

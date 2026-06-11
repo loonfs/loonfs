@@ -74,7 +74,7 @@ therefore identical for both backends.
     "core.namespaces.list": true,
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
-    "core.namespaces.delete": false
+    "core.namespaces.delete": true
   },
   "limits": {}
 }
@@ -110,7 +110,7 @@ hoc.
 | `core.namespaces.list` | Enumerating namespaces (`GET /v0/namespaces`, `loon namespace list`). | Deniable for tenancy reasons; a deployment that disables it still resolves namespaces by id. |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Registered for forward compatibility; no v0 implementation supports it, so deployments advertise `false` today. |
+| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
 
 `admin/v0` currently has required ops only and no feature keys. `query.*` and
 `acl.*` keys are unregistered until their planes materialize.
@@ -303,7 +303,7 @@ A representative v0 binding is shown below.
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
-| Delete a namespace | `DELETE /v0/namespaces/{ns}` — registered feature `core.namespaces.delete`; answers `not_supported` until a deployment implements it |
+| Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 
@@ -354,7 +354,32 @@ code `namespace_not_found`.
 }
 ```
 
-### 6.3 `GET /filesystem/stat`
+### 6.4 `DELETE /v0/namespaces/{ns}`
+
+Deletion is a fenced, terminal head transition (`format.md`, "Tombstones and
+deletion"). It linearizes at the head swap: commits acknowledged before it
+stay committed; everything that observes the deleted namespace afterwards —
+reads, commits, forks, status, re-creation of the id — fails with
+`namespace_deleted` (410). Deleting an already-deleted namespace is also
+`namespace_deleted`. Storage is not reclaimed in v0.
+
+The optional `expected_head_seq` query parameter deletes only if the head is
+still at that sequence, failing with `stale_head` otherwise — the same
+race-explicit pattern preconditions give file mutations.
+
+```json
+{
+  "namespace_id": "demo",
+  "final_seq": 418
+}
+```
+
+An unacknowledged request was never committed. The reference server resolves
+its queue in admission order — requests admitted before the delete publish first, requests admitted
+after it fail with `namespace_deleted`, and nothing is rejected for a delete
+that ends up failing its precondition.
+
+### 6.4 `GET /filesystem/stat`
 
 The response is one authoritative path entry. Enum values are snake_case per
 the durable naming rules (`format.md`, "Durable naming conventions").
@@ -378,7 +403,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
 }
 ```
 
-### 6.4 `GET /filesystem/list`
+### 6.5 `GET /filesystem/list`
 
 The envelope names the listed path and the head the listing was read from, so
 an empty directory still reports which state it observed and the response can
@@ -421,12 +446,12 @@ the file-only fields out).
 }
 ```
 
-### 6.5 `GET /filesystem/content`
+### 6.6 `GET /filesystem/content`
 
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
-### 6.6 `POST /filesystem/operations`
+### 6.7 `POST /filesystem/operations`
 
 Representative request:
 
@@ -491,7 +516,7 @@ identity and the expected current base revision:
 }
 ```
 
-### 6.7 Upload transport
+### 6.8 Upload transport
 
 The upload transport standardizes staged content publication, not one specific
 byte path. In v0, uploads are whole-file uploads: the staged body is the
@@ -561,7 +586,7 @@ Representative complete-upload response:
 }
 ```
 
-### 6.8 `POST /commits`
+### 6.9 `POST /commits`
 
 Representative request:
 
@@ -619,7 +644,7 @@ Representative response:
 }
 ```
 
-### 6.9 `GET /changes`
+### 6.10 `GET /changes`
 
 ```json
 {
@@ -663,7 +688,7 @@ Representative response:
 }
 ```
 
-### 6.10 `POST /forks`
+### 6.11 `POST /forks`
 
 Representative request:
 

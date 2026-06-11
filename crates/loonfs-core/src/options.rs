@@ -20,6 +20,14 @@ pub struct BootstrapOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ForkOptions {}
 
+/// Options for namespace deletion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteNamespaceOptions {
+    /// Delete only if the head is still at this sequence. A mismatch fails
+    /// with `stale_head` instead of deleting work the caller has not seen.
+    pub expected_head_seq: Option<loonfs_api::ChangeSeq>,
+}
+
 /// Controls where read operations get their namespace view.
 ///
 /// The default prefers materialized metadata tables when they are available,

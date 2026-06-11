@@ -8,12 +8,13 @@ use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
+use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, ControlObjectKind, HeadState, NamespaceState, HeadStateEnvelope,
+    decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
     LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
     NamespaceForkState, NamespaceForkStateEnvelope, NamespaceGcPinState,
-    NamespaceGcPinStateEnvelope,
+    NamespaceGcPinStateEnvelope, NamespaceState,
 };
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
@@ -40,6 +41,14 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     {
         NamespaceInitializationState::Absent => {}
         NamespaceInitializationState::Complete => {
+            let head = read_head_object(store, new_namespace_id)
+                .await
+                .map_err(|error| CoreError::Basis(error.into()))?;
+            if head.envelope.state.state == NamespaceState::Deleted {
+                return Err(CoreError::NamespaceDeleted {
+                    namespace_id: new_namespace_id.clone(),
+                });
+            }
             return Err(CoreError::NamespaceAlreadyExists {
                 namespace_id: new_namespace_id.clone(),
             });

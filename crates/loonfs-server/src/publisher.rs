@@ -1,5 +1,5 @@
 use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use loonfs::{CoreError, Fs, RuntimeError};
+use loonfs::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
@@ -10,6 +10,7 @@ use tokio::time::{Duration, Instant};
 use tracing::Instrument;
 
 type CommitResult = Result<ApiCommitResponse, CoreError>;
+type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 
 const MAX_BATCH_CANDIDATES: usize = 1024;
 const COALESCING_DELAY: Duration = Duration::from_millis(100);
@@ -54,6 +55,24 @@ impl PublisherRegistry {
             .await
     }
 
+    pub(crate) async fn submit_delete(
+        &self,
+        namespace_id: NamespaceId,
+        options: DeleteNamespaceOptions,
+    ) -> DeleteResult {
+        let publisher = {
+            let mut publishers = self
+                .inner
+                .lock()
+                .expect("publisher registry mutex poisoned");
+            publishers
+                .entry(namespace_id.clone())
+                .or_insert_with(|| NamespacePublisher::new(namespace_id.clone(), self.fs.clone()))
+                .clone()
+        };
+        publisher.submit_delete(options).await
+    }
+
     async fn submit_candidate(
         &self,
         namespace_id: NamespaceId,
@@ -82,9 +101,28 @@ struct NamespacePublisher {
 
 struct NamespacePublisherState {
     batch: Option<OpenBatch>,
+    /// At most one delete waits here (later deletes join its waiters). It
+    /// seals the batch that was open when it arrived: those requests publish
+    /// first, the delete runs next, and anything admitted afterwards lands
+    /// in a fresh `batch` that only publishes if the delete fails.
+    pending_delete: Option<PendingDelete>,
+    /// Terminal: set once a delete succeeds. Admissions fail fast from then
+    /// on without touching the store.
+    deleted: bool,
     in_flight: HashMap<CommitId, InFlightRequest>,
     publishing: bool,
     next_allowed_cas_at: Instant,
+}
+
+struct PendingDelete {
+    sealed_batch: Option<OpenBatch>,
+    options: DeleteNamespaceOptions,
+    waiters: Vec<oneshot::Sender<DeleteResult>>,
+}
+
+enum WorkUnit {
+    Mutations(Vec<BatchCandidate>),
+    Delete(PendingDelete),
 }
 
 struct OpenBatch {
@@ -112,6 +150,8 @@ impl NamespacePublisher {
             fs,
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 batch: None,
+                pending_delete: None,
+                deleted: false,
                 in_flight: HashMap::new(),
                 publishing: false,
                 next_allowed_cas_at: Instant::now(),
@@ -154,6 +194,11 @@ impl NamespacePublisher {
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
+            if state.deleted {
+                return Err(CoreError::NamespaceDeleted {
+                    namespace_id: self.namespace_id.clone(),
+                });
+            }
             if let Some(existing) = state.in_flight.get_mut(&commit_id) {
                 if existing.semantic_identity != semantic_identity {
                     return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
@@ -207,6 +252,52 @@ impl NamespacePublisher {
         Ok(())
     }
 
+    /// Enqueues the delete as a barrier: requests admitted before it
+    /// publish first, the delete runs next, and requests admitted after it
+    /// fail with `namespace_deleted` once it succeeds. If the delete fails
+    /// (for example a stale `expected_head_seq`), later requests publish
+    /// normally — nothing is rejected for a delete that did not happen.
+    async fn submit_delete(&self, options: DeleteNamespaceOptions) -> DeleteResult {
+        let (sender, receiver) = oneshot::channel();
+        let should_spawn = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("namespace publisher mutex poisoned");
+            if state.deleted {
+                return Err(CoreError::NamespaceDeleted {
+                    namespace_id: self.namespace_id.clone(),
+                });
+            }
+            if let Some(pending) = state.pending_delete.as_mut() {
+                pending.waiters.push(sender);
+                false
+            } else {
+                let sealed_batch = state.batch.take();
+                if let Some(batch) = &sealed_batch {
+                    // Stop coalescing: the sealed batch publishes now.
+                    batch.notify.notify_one();
+                }
+                state.pending_delete = Some(PendingDelete {
+                    sealed_batch,
+                    options,
+                    waiters: vec![sender],
+                });
+                !state.publishing
+            }
+        };
+        if should_spawn {
+            self.spawn_publish_task();
+        }
+        receiver.await.unwrap_or_else(|_| {
+            Err(CoreError::HeadPublish(
+                CommitHeadPublishError::OutcomeUnknown(
+                    "publisher task stopped mid-delete".to_owned(),
+                ),
+            ))
+        })
+    }
+
     fn spawn_publish_task(&self) {
         let publisher = self.clone();
         tokio::spawn(async move {
@@ -217,25 +308,30 @@ impl NamespacePublisher {
     async fn publish_open_batch(self) {
         let mut abort_guard = PublishAbortGuard::new(self.clone());
         let collect_started = Instant::now();
-        let (notify, already_full, queue_depth_start) = {
+        let coalesce = {
             let state = self
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
-            let Some(batch) = state.batch.as_ref() else {
-                return;
-            };
-            (
-                batch.notify.clone(),
-                batch.candidates.len() >= MAX_BATCH_CANDIDATES,
-                batch.candidates.len(),
-            )
+            match state.batch.as_ref() {
+                Some(batch) => Some((
+                    batch.notify.clone(),
+                    batch.candidates.len() >= MAX_BATCH_CANDIDATES,
+                    batch.candidates.len(),
+                )),
+                // A pending delete needs no coalescing window.
+                None if state.pending_delete.is_some() => None,
+                None => return,
+            }
         };
 
-        if !already_full {
-            tokio::select! {
-                _ = coalescing_delay() => {}
-                _ = notify.notified() => {}
+        let queue_depth_start = coalesce.as_ref().map_or(0, |(_, _, depth)| *depth);
+        if let Some((notify, already_full, _)) = coalesce {
+            if !already_full {
+                tokio::select! {
+                    _ = coalescing_delay() => {}
+                    _ = notify.notified() => {}
+                }
             }
         }
         let queue_depth_end = {
@@ -259,34 +355,71 @@ impl NamespacePublisher {
             "publisher.batch_collect"
         );
 
+        // Drain work units in admission order: the batch sealed by a pending
+        // delete, then the delete itself, then whatever queued behind it.
         loop {
-            let sleep_until = {
-                let state = self
+            self.wait_for_cas_pacing().await;
+
+            let unit = {
+                let mut state = self
                     .state
                     .lock()
                     .expect("namespace publisher mutex poisoned");
-                state.next_allowed_cas_at
+                state.publishing = true;
+                let unit = if let Some(pending) = state.pending_delete.as_mut() {
+                    if let Some(batch) = pending.sealed_batch.take() {
+                        Some(WorkUnit::Mutations(batch.candidates))
+                    } else {
+                        state.pending_delete.take().map(WorkUnit::Delete)
+                    }
+                } else {
+                    state
+                        .batch
+                        .take()
+                        .map(|batch| WorkUnit::Mutations(batch.candidates))
+                };
+                match unit {
+                    Some(unit) => {
+                        state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
+                        Some(unit)
+                    }
+                    None => {
+                        // Checked and cleared under one lock, so a racing
+                        // admit either sees `publishing` already false and
+                        // spawns, or queued before this check and was taken.
+                        state.publishing = false;
+                        None
+                    }
+                }
             };
-            let now = Instant::now();
-            if sleep_until <= now {
-                break;
-            }
-            tokio::time::sleep_until(sleep_until).await;
-        }
-
-        let candidates = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            state.publishing = true;
-            let Some(batch) = state.batch.take() else {
-                state.publishing = false;
+            let Some(unit) = unit else {
+                abort_guard.disarm();
                 return;
             };
-            state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
-            batch.candidates
-        };
+
+            match unit {
+                WorkUnit::Mutations(candidates) => {
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    self.publish_mutation_run(&mut abort_guard, candidates)
+                        .await;
+                }
+                WorkUnit::Delete(pending) => {
+                    if self.execute_delete(pending).await {
+                        abort_guard.disarm();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn publish_mutation_run(
+        &self,
+        abort_guard: &mut PublishAbortGuard,
+        candidates: Vec<BatchCandidate>,
+    ) {
         abort_guard.batch_taken(
             candidates
                 .iter()
@@ -347,8 +480,76 @@ impl NamespacePublisher {
         publish_span.record("retry_count", retry_count);
         drop(publish_span);
 
-        abort_guard.disarm();
-        self.complete_batch(candidates, results, selected_at);
+        self.deliver_batch_results(candidates, results, selected_at);
+        abort_guard.batch_taken(Vec::new());
+    }
+
+    /// Runs the delete barrier. Returns true when the publisher is now
+    /// terminal and the task should exit.
+    async fn execute_delete(&self, pending: PendingDelete) -> bool {
+        let outcome = self
+            .fs
+            .delete_namespace(&self.namespace_id, pending.options)
+            .await
+            .map_err(runtime_error_to_core);
+        match outcome {
+            Ok(response) => {
+                // Tombstone first, then fail everything that queued behind
+                // the delete; admissions from here on fail fast.
+                let failed_waiters = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .expect("namespace publisher mutex poisoned");
+                    state.deleted = true;
+                    state.publishing = false;
+                    let mut failed = Vec::new();
+                    if let Some(batch) = state.batch.take() {
+                        for candidate in batch.candidates {
+                            if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
+                                failed.extend(in_flight.waiters);
+                            }
+                        }
+                    }
+                    failed
+                };
+                for waiter in pending.waiters {
+                    let _ = waiter.send(Ok(response.clone()));
+                }
+                for waiter in failed_waiters {
+                    let _ = waiter.send(Err(CoreError::NamespaceDeleted {
+                        namespace_id: self.namespace_id.clone(),
+                    }));
+                }
+                true
+            }
+            Err(error) => {
+                // The namespace was not deleted (stale precondition, lease
+                // conflict, ...). Report it and let queued work publish.
+                for waiter in pending.waiters {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                false
+            }
+        }
+    }
+
+    /// Sleeps until the next head CAS is allowed, without claiming it.
+    async fn wait_for_cas_pacing(&self) {
+        loop {
+            let sleep_until = {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("namespace publisher mutex poisoned");
+                state.next_allowed_cas_at
+            };
+            let now = Instant::now();
+            if sleep_until <= now {
+                break;
+            }
+            tokio::time::sleep_until(sleep_until).await;
+        }
     }
 
     async fn wait_for_next_cas_token(&self) {
@@ -373,7 +574,7 @@ impl NamespacePublisher {
         }
     }
 
-    fn complete_batch(
+    fn deliver_batch_results(
         &self,
         candidates: Vec<BatchCandidate>,
         results: Vec<CommitResult>,
@@ -381,12 +582,11 @@ impl NamespacePublisher {
     ) {
         let mut deliveries = Vec::new();
         let mut wait_traces = Vec::new();
-        let should_spawn_next = {
+        {
             let mut state = self
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
-            state.publishing = false;
             let mut results = results.into_iter();
             for candidate in candidates {
                 let result = results.next().unwrap_or_else(|| {
@@ -405,11 +605,7 @@ impl NamespacePublisher {
                     }
                 }
             }
-            state
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.candidates.is_empty())
-        };
+        }
 
         for (operation_class, result, wait_ms) in wait_traces {
             tracing::info!(
@@ -425,10 +621,6 @@ impl NamespacePublisher {
 
         for (waiter, result) in deliveries {
             let _ = waiter.send(result);
-        }
-
-        if should_spawn_next {
-            self.spawn_publish_task();
         }
     }
 
@@ -512,10 +704,11 @@ impl Drop for PublishAbortGuard {
                     orphaned_waiters.extend(in_flight.waiters);
                 }
             }
-            state
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.candidates.is_empty())
+            state.pending_delete.is_some()
+                || state
+                    .batch
+                    .as_ref()
+                    .is_some_and(|batch| !batch.candidates.is_empty())
         };
 
         for waiter in orphaned_waiters {
@@ -1240,6 +1433,93 @@ mod tests {
             recv_commit(after, "after").await.committed_seq,
             ChangeSeq(2)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        let fs = test_fs(shared.clone(), &config);
+        create_namespace(&fs, &namespace_id).await;
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+
+        // A publishes and blocks at its head CAS; B queues behind it.
+        store.arm_next_head_cas();
+        let before_a = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("before-a", "before-a"),
+        );
+        store.wait_for_blocked_head_cas().await;
+        let before_b = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("before-b", "before-b"),
+        );
+
+        // The delete arrives: everything above was admitted before it,
+        // everything below after it.
+        let delete_task = {
+            let publisher = publisher.clone();
+            tokio::spawn(async move {
+                publisher
+                    .submit_delete(DeleteNamespaceOptions::default())
+                    .await
+            })
+        };
+        // Deterministic: wait until the delete has sealed the open batch.
+        loop {
+            let sealed = {
+                let state = publisher
+                    .state
+                    .lock()
+                    .expect("namespace publisher mutex poisoned");
+                state.pending_delete.is_some()
+            };
+            if sealed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let after = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("after", "after"),
+        );
+
+        store.release_head_cas();
+
+        // Admitted-before work publishes; the delete lands after it.
+        assert_eq!(
+            recv_commit(before_a, "before-a").await.committed_seq,
+            ChangeSeq(1)
+        );
+        assert_eq!(
+            recv_commit(before_b, "before-b").await.committed_seq,
+            ChangeSeq(2)
+        );
+        let response = delete_task
+            .await
+            .expect("delete task")
+            .expect("delete succeeds");
+        assert_eq!(response.final_seq, ChangeSeq(2));
+
+        // Admitted-after work is rejected, and the tombstone fails new
+        // admissions immediately.
+        let after_error = after
+            .await
+            .expect("after waiter answered")
+            .expect_err("admitted after the delete");
+        assert_eq!(after_error.code(), ErrorCode::NamespaceDeleted);
+        let fast_fail = try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("too-late", "too-late"),
+        );
+        assert!(matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. })));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

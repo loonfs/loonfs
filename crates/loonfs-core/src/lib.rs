@@ -85,6 +85,7 @@ pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuil
 pub use error::{Error, ErrorCode, ErrorKind, Result};
 pub use namespace::{list_namespaces, BootstrapNamespaceError};
 pub use options::{
-    BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, ReadSource, WriteOptions,
+    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
+    WriteOptions,
 };
 pub use path::write::PutFileBehavior;

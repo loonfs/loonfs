@@ -2,7 +2,7 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use loonfs_api::{AuthoritativePathEntry, FileRevision, NamespaceSummary};
+use loonfs_api::{AuthoritativePathEntry, DeleteNamespaceResponse, FileRevision, NamespaceSummary};
 use serde::Serialize;
 
 pub(crate) struct CommandOutput {
@@ -40,6 +40,7 @@ pub(crate) enum CommandData {
         namespace: Option<String>,
     },
     NamespaceSummary(NamespaceSummary),
+    NamespaceDeleted(DeleteNamespaceResponse),
     NamespaceList {
         namespaces: Vec<NamespaceSummary>,
     },

@@ -35,7 +35,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_namespace_answers_not_supported_with_its_feature_key() {
+async fn delete_namespace_is_terminal_and_retires_the_id() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -46,27 +46,87 @@ async fn delete_namespace_answers_not_supported_with_its_feature_key() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let error = harness
+        harness
             .client
-            .delete_namespace("demo")
-            .expect_err("namespace deletion is unimplemented");
-        match error {
-            ClientError::Api {
-                status,
-                code,
-                feature,
-                ..
-            } => {
-                assert_eq!(status, 501);
-                assert_eq!(code, "not_supported");
-                assert_eq!(feature.as_deref(), Some("core.namespaces.delete"));
-            }
-            other => panic!("expected not_supported api error, got {other:?}"),
-        }
+            .create_namespace("doomed")
+            .expect("create namespace");
+        let target = NamespacePath::parse("doomed:/note.txt").expect("parse path");
+        harness
+            .client
+            .write_file_bytes(&target, b"last words")
+            .expect("write file");
 
-        // The error and the capability document tell the same story.
-        let capabilities = harness.client.capabilities().expect("fetch capabilities");
-        assert!(!capabilities.supports("core.namespaces.delete"));
+        // A stale precondition refuses the delete and deletes nothing.
+        let stale = harness
+            .client
+            .delete_namespace("doomed", Some(ChangeSeq(0)))
+            .expect_err("stale precondition");
+        match stale {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 409);
+                assert_eq!(code, "stale_head");
+            }
+            other => panic!("expected stale_head, got {other:?}"),
+        }
+        harness
+            .client
+            .namespace_status("doomed")
+            .expect("still alive after failed precondition");
+
+        let response = harness
+            .client
+            .delete_namespace("doomed", None)
+            .expect("delete namespace");
+        assert_eq!(response.namespace_id.as_str(), "doomed");
+        assert_eq!(response.final_seq, ChangeSeq(1));
+
+        // Terminal: status is 410, reads fail, the namespace leaves the
+        // list, repeat deletes report deleted, and the id is retired.
+        let status = harness
+            .client
+            .namespace_status("doomed")
+            .expect_err("deleted namespace has no status");
+        match status {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 410);
+                assert_eq!(code, "namespace_deleted");
+            }
+            other => panic!("expected namespace_deleted, got {other:?}"),
+        }
+        let read = harness
+            .client
+            .read_file_bytes(&target)
+            .expect_err("reads observe the deleted namespace");
+        match read {
+            ClientError::Api { code, .. } => assert_eq!(code, "namespace_deleted"),
+            other => panic!("expected namespace_deleted, got {other:?}"),
+        }
+        let namespaces = harness.client.list_namespaces().expect("list");
+        assert!(namespaces
+            .iter()
+            .all(|namespace| namespace.namespace_id.as_str() != "doomed"));
+        let again = harness
+            .client
+            .delete_namespace("doomed", None)
+            .expect_err("repeat delete");
+        match again {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 410);
+                assert_eq!(code, "namespace_deleted");
+            }
+            other => panic!("expected namespace_deleted, got {other:?}"),
+        }
+        let recreate = harness
+            .client
+            .create_namespace("doomed")
+            .expect_err("the id is retired");
+        match recreate {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 410);
+                assert_eq!(code, "namespace_deleted");
+            }
+            other => panic!("expected namespace_deleted, got {other:?}"),
+        }
     })
     .await
     .expect("blocking task");
@@ -91,12 +151,7 @@ async fn config_endpoint_advertises_capabilities() {
         assert!(capabilities.supports("core.namespaces.list"));
         assert!(capabilities.supports("core.namespaces.create"));
         assert!(capabilities.supports("core.namespaces.fork"));
-        // Registered but unimplemented: advertised as false, not omitted.
-        assert_eq!(
-            capabilities.features.get("core.namespaces.delete"),
-            Some(&false)
-        );
-        assert!(!capabilities.supports("core.namespaces.delete"));
+        assert!(capabilities.supports("core.namespaces.delete"));
 
         let cached = harness.client.capabilities().expect("cached capabilities");
         assert_eq!(cached, capabilities);

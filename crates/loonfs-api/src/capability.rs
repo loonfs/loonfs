@@ -16,8 +16,7 @@ pub const FEATURE_NAMESPACES_LIST: &str = "core.namespaces.list";
 pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
 /// Gates namespace forking.
 pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
-/// Gates namespace deletion. Registered for forward compatibility; no v0
-/// implementation supports it.
+/// Gates namespace deletion.
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 
 /// A deployment's self-description (API spec, "Capability discovery").

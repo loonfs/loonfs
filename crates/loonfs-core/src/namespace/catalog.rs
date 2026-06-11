@@ -1,8 +1,10 @@
 use crate::error::CoreError;
+use crate::namespace::control::read_head_object;
 use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
 use loonfs_api::wire::control::NamespaceDescriptorState;
+use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError, NamespaceSummary};
 use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use loonfs_objectstore::ObjectStore;
@@ -101,6 +103,14 @@ pub(crate) async fn list_namespaces<S: ObjectStore + ?Sized>(
         };
         let namespace_id = NamespaceId::parse(namespace)?;
         load_namespace_descriptor(store, &namespace_id).await?;
+        // Deleted namespaces keep their descriptor forever as the id-reuse
+        // tombstone; the head's lifecycle state is what excludes them here.
+        let head = read_head_object(store, &namespace_id)
+            .await
+            .map_err(|error| CoreError::Basis(error.into()))?;
+        if head.envelope.state.state == NamespaceState::Deleted {
+            continue;
+        }
         names.insert(namespace_id);
     }
     Ok(names

@@ -21,9 +21,8 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, LeaseState,
-    NamespaceState,
-    NamespaceDescriptorState, NamespaceForkState, NamespaceGcPinState, ProgressState,
-    UploadSessionState, WalSegmentPointer,
+    NamespaceDescriptorState, NamespaceForkState, NamespaceGcPinState, NamespaceState,
+    ProgressState, UploadSessionState, WalSegmentPointer,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,

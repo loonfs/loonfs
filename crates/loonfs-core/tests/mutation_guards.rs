@@ -2088,6 +2088,133 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
+        .await
+        .expect("stage content");
+    let publisher = DirectObjectStorePublisher::new(&store);
+    publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("before-delete").expect("valid commit id"),
+                absolute_path: "/keep.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .await
+        .expect("commit before delete");
+
+    // A stale precondition deletes nothing.
+    let engine = namespace_engine(&store, &namespace_id, &context);
+    let stale = engine
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions {
+            expected_head_seq: Some(ChangeSeq(0)),
+        })
+        .await
+        .expect_err("stale precondition");
+    assert_eq!(stale.code(), ErrorCode::StaleHead);
+
+    let response = engine
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete namespace");
+    assert_eq!(response.final_seq, ChangeSeq(1));
+
+    // Terminal: basis loads, commits, status, repeat deletes, re-creation,
+    // and forks all observe the deleted head.
+    let read = load_verified_namespace_basis(&store, &namespace_id).await;
+    assert!(matches!(read, Err(BasisLoadError::NamespaceDeleted { .. })));
+    let commit = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("after-delete").expect("valid commit id"),
+                absolute_path: "/late.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .await
+        .expect_err("commit after delete");
+    assert_eq!(commit.code(), ErrorCode::NamespaceDeleted);
+    let again = engine
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect_err("repeat delete");
+    assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
+    let recreate = bootstrap_namespace(&store, &namespace_id, &context, false);
+    assert!(matches!(
+        recreate,
+        Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
+    ));
+    let fork_target = NamespaceId::parse("fork-of-deleted").expect("valid namespace id");
+    let fork = fork_namespace(&store, &namespace_id, &fork_target, &context);
+    assert_eq!(
+        fork.expect_err("fork of deleted source").code(),
+        ErrorCode::NamespaceDeleted
+    );
+    let listed = list_namespaces(&store).expect("list namespaces");
+    assert!(listed
+        .iter()
+        .all(|summary| summary.namespace_id != namespace_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_clone_survives_source_delete() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source = NamespaceId::parse("source").expect("valid namespace id");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    let context = mutation_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&store, &source, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &source, b"shared bytes")
+        .await
+        .expect("stage content");
+    let publisher = DirectObjectStorePublisher::new(&store);
+    publisher
+        .submit_path_intent(
+            &source,
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
+                absolute_path: "/shared.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .await
+        .expect("seed source");
+    fork_namespace(&store, &source, &clone, &context).expect("fork");
+
+    namespace_engine(&store, &source, &context)
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete source");
+
+    // The spec promise: the clone keeps reading through the source-owned
+    // immutable metadata its manifest pins.
+    let basis = load_verified_namespace_basis(&store, &clone)
+        .await
+        .expect("clone basis survives source delete");
+    assert_eq!(basis.head.seq, ChangeSeq(1));
+    let listed = list_namespaces(&store).expect("list namespaces");
+    assert!(listed.iter().any(|summary| summary.namespace_id == clone));
+    assert!(listed.iter().all(|summary| summary.namespace_id != source));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

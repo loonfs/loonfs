@@ -110,6 +110,8 @@ pub enum CoreError {
     Store(String),
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceAlreadyExists { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` is deleted")]
+    NamespaceDeleted { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is partially initialized")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
 }
@@ -182,6 +184,7 @@ impl CoreError {
             CoreError::MissingPath(_) => ErrorCode::PathNotFound,
             CoreError::MissingRevision { .. } => ErrorCode::RevisionNotFound,
             CoreError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
+            CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
@@ -221,6 +224,7 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
 
 fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
     match error {
+        BasisLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
         BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
         BasisLoadError::LoadContentStoreDescriptor(error) => match error {
             ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,

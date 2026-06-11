@@ -8,9 +8,10 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use loonfs::publish::PathMutationIntent;
 use loonfs::{
-    payload_class, BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, Fs,
-    JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PutFileBehavior, RuntimeError,
-    SharedObjectStore, TraceMode, TraceStoreKind, FEATURE_NAMESPACES_DELETE,
+    payload_class, BootstrapNamespaceError, ChangeSeq, CoreError, CreateNamespaceOptions,
+    DeleteNamespaceOptions, ErrorCode, Fs, JsonlObjectStoreMetricsRecorder,
+    ObjectStoreMetricsRecorder, PutFileBehavior, RuntimeError, SharedObjectStore, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_api::{
     v0::{
@@ -53,6 +54,13 @@ struct ContentQuery {
 #[derive(Debug, serde::Deserialize)]
 struct ChangesQuery {
     after_seq: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeleteNamespaceQuery {
+    /// Delete only if the head is still at this sequence (`stale_head` on
+    /// mismatch).
+    expected_head_seq: Option<u64>,
 }
 
 pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
@@ -234,19 +242,23 @@ async fn config_handler(
     Ok(Json(state.fs.capabilities()))
 }
 
-/// Namespace deletion is a registered feature no v0 deployment implements
-/// (API spec, "Feature registry"). Conformance still requires the route to
-/// exist and answer with `not_supported` plus its feature key, so clients
-/// reconcile against the capability document instead of guessing from a 404.
 async fn delete_namespace_handler(
     State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    Query(query): Query<DeleteNamespaceQuery>,
     headers: HeaderMap,
-) -> Result<Json<()>, ApiResponseError> {
+) -> Result<Json<loonfs::DeleteNamespaceResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    Err(ApiResponseError::not_supported(
-        FEATURE_NAMESPACES_DELETE,
-        "this deployment does not support namespace deletion",
-    ))
+    let namespace_id = parse_namespace_id(namespace)?;
+    let options = DeleteNamespaceOptions {
+        expected_head_seq: query.expected_head_seq.map(ChangeSeq),
+    };
+    let response = state
+        .publisher
+        .submit_delete(namespace_id.clone(), options)
+        .await
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
 }
 
 async fn create_namespace(
@@ -727,17 +739,6 @@ impl ApiResponseError {
         }
     }
 
-    fn not_supported(feature: &str, message: &str) -> Self {
-        Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            body: ApiError {
-                code: ErrorCode::NotSupported.as_str().to_owned(),
-                feature: Some(feature.to_owned()),
-                message: message.to_owned(),
-            },
-        }
-    }
-
     fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -757,6 +758,11 @@ impl ApiResponseError {
             BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => Self::new(
                 StatusCode::CONFLICT,
                 ErrorCode::NamespacePartial,
+                &error.to_string(),
+            ),
+            BootstrapNamespaceError::NamespaceDeleted { .. } => Self::new(
+                StatusCode::GONE,
+                ErrorCode::NamespaceDeleted,
                 &error.to_string(),
             ),
             BootstrapNamespaceError::EmptyHolderId

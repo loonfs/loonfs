@@ -79,6 +79,15 @@ pub struct NamespaceStatusResponse {
     pub retention_floor_seq: ChangeSeq,
 }
 
+/// Result of deleting a namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteNamespaceResponse {
+    /// Namespace whose history ended.
+    pub namespace_id: NamespaceId,
+    /// The last committed sequence; the delete linearized immediately after.
+    pub final_seq: ChangeSeq,
+}
+
 /// Result of a namespace-visible mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationResult {

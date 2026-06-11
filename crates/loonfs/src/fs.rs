@@ -15,12 +15,13 @@ use crate::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
-    ErrorCode, FsConfig, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
-    MutationResult, NamespaceId, NamespaceStatus, NamespaceSummary, ObjectStore,
-    ObjectStoreMetricsRecorder, PutFileOptions, RenameMode, RestoreRevisionOptions, RevisionNo,
-    RuntimeCacheConfig, RuntimeCacheStats, UploadContentResponse,
+    CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
+    NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
+    RenameMode, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
+    UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -252,6 +253,30 @@ impl Fs {
         result
     }
 
+    /// Deletes a namespace: a fenced, terminal head transition (format
+    /// spec, "Tombstones and deletion"). Commits acknowledged before the
+    /// swap stay committed; reads, writes, forks, and re-creation of the id
+    /// fail with `namespace_deleted` afterward. Deletion does not reclaim
+    /// storage; reclamation is future maintenance work.
+    pub async fn delete_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        // Serialize with this process's publishers so the delete takes its
+        // turn behind any in-flight publication for the namespace.
+        let engine = self.commit_engine(namespace_id);
+        let result = {
+            let _engine = engine.lock().await;
+            self.namespace_engine(namespace_id)
+                .delete_namespace(options)
+                .await
+                .map_err(RuntimeError::from)
+        };
+        self.invalidate_namespace_cache(namespace_id);
+        result
+    }
+
     /// Returns the capability document for this embedded build (API spec,
     /// "Capability discovery").
     ///
@@ -267,7 +292,7 @@ impl Fs {
                 (FEATURE_NAMESPACES_LIST.to_owned(), true),
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
-                (FEATURE_NAMESPACES_DELETE.to_owned(), false),
+                (FEATURE_NAMESPACES_DELETE.to_owned(), true),
             ]),
             limits: BTreeMap::new(),
         }
