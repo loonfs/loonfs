@@ -93,7 +93,32 @@ manifest, checkpoint records, fork GC pins, and the retention floor.
 
 ### 1.3 Durable naming conventions
 
-LoonFS uses distinct naming conventions for distinct surfaces:
+The namespace tree's lifecycle can be read off its grammar:
+
+- **Singular directories are ordered history streams** (`wal/`,
+  `manifest/`, `compaction/`). Object names sort by history position, a
+  boundary cursor in `gc/` records reclamation progress, and reclaiming a
+  stream is one algorithm: range-scan below the cursor, check the bounded
+  window for chain, checkpoint, and pin references, sweep what nothing
+  protects, advance the cursor.
+- **Plural directories are unordered collections** (`tables/`, `uploads/`,
+  `conflicts/`, `gc/pins/`, `indexes/`, `content-stores/`, `blobs/`).
+  Object names are opaque, and references — manifests, chains, pins — are
+  the only truth about liveness; collections reclaim by reachability or
+  session expiry, never by name order.
+- **`control/` is the mutable plane**: compare-and-swap singletons (head,
+  lease, fork record) that are never swept.
+- **The root `descriptor.json` is the existence marker**: written last at
+  creation as the publish marker, kept forever after deletion as half of
+  the tombstone pair that retires the namespace id.
+
+Names are never authority anywhere — recovery follows the head and its
+references. Ordered names exist so that inspection and reclamation can
+trust a listing's order; opaque names exist where nothing should ever
+read meaning into one.
+
+Within that grammar, LoonFS uses distinct conventions for distinct
+surfaces:
 
 - Fixed object-store path segments use lowercase words or lowercase-kebab,
   e.g. `content-stores`, `commit-receipts`, and `uploads`.
@@ -1183,6 +1208,12 @@ material to support readers from the new floor forward.
 Delete is tombstone-first. Garbage collection is the separate process that
 eventually reclaims content or metadata that is no longer reachable and no
 longer protected by retention policy.
+
+Reclamation follows the tree's grammar (section 1.3). Ordered streams
+(`wal/`, `manifest/`, `compaction/`) reclaim by advancing their boundary
+cursor in `gc/`: range-scan below the cursor, verify the bounded window
+against the reference rules below, sweep, advance. Collections reclaim by
+reachability or expiry. Either way:
 
 Garbage collection must be conservative. It MUST NOT remove an object that is
 reachable from any retained version. Concretely, it may reclaim an object only
