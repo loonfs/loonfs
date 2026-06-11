@@ -662,8 +662,7 @@ mod tests {
         generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
         generate_wal_segment_id, validate_checkpoint_id, validate_gc_pin_id,
         validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, ChangeSeq,
-        CommitId,
-        ContentStoreId, NameKey, NamespaceId,
+        CommitId, ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
 

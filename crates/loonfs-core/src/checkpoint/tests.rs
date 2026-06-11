@@ -1089,10 +1089,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("basis");
     let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
-    let compacted_run_prefix = format!(
-        "namespaces/{}/tables/metadata/tbl_",
-        namespace_id.as_str()
-    );
+    let compacted_run_prefix = format!("namespaces/{}/tables/metadata/tbl_", namespace_id.as_str());
 
     assert_eq!(
         compacted_materialized.manifest.payload.base_seq,

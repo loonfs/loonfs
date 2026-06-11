@@ -117,8 +117,7 @@ fn sample_content_ref() -> ContentRef {
 
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
-        object_key: "namespaces/demo/wal/00000000000000000002-fedcba9876543210.wal.zst"
-            .to_owned(),
+        object_key: "namespaces/demo/wal/00000000000000000002-fedcba9876543210.wal.zst".to_owned(),
         segment_id: "00000000000000000002-fedcba9876543210".to_owned(),
         start_seq: ChangeSeq(1),
         end_seq: ChangeSeq(1),
