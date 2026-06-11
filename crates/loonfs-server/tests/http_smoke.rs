@@ -78,7 +78,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             .delete_namespace("doomed", None)
             .expect("delete namespace");
         assert_eq!(response.namespace_id.as_str(), "doomed");
-        assert_eq!(response.final_seq, ChangeSeq(1));
+        assert_eq!(response.head_seq, ChangeSeq(1));
 
         // Terminal: status is 410, reads fail, the namespace leaves the
         // list, repeat deletes report deleted, and the id is retired.
@@ -557,7 +557,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .list_changes(namespace, ChangeSeq(0))
             .expect("list changes");
         assert_eq!(changes.namespace_id.as_str(), namespace);
-        assert_eq!(changes.from_exclusive_seq, ChangeSeq(0));
+        assert_eq!(changes.after_seq, ChangeSeq(0));
         assert_eq!(changes.through_seq, commit.committed_seq);
         assert_eq!(changes.changes.len(), 1);
         let change = &changes.changes[0];

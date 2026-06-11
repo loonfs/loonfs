@@ -142,8 +142,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         }
         CommandData::NamespaceSummary(namespace) => namespace.namespace_id.to_string(),
         CommandData::NamespaceDeleted(response) => format!(
-            "deleted {} (final_seq {})",
-            response.namespace_id, response.final_seq.0
+            "deleted {} (head_seq {})",
+            response.namespace_id, response.head_seq.0
         ),
         CommandData::NamespaceList { namespaces } => {
             let mut lines = vec!["NAMESPACE_ID".to_owned()];

@@ -2127,7 +2127,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
-    assert_eq!(response.final_seq, ChangeSeq(1));
+    assert_eq!(response.head_seq, ChangeSeq(1));
 
     // Terminal: basis loads, commits, status, repeat deletes, re-creation,
     // and forks all observe the deleted head.
