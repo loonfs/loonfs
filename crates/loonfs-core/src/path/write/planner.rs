@@ -8,7 +8,6 @@ use crate::path::helpers::{
 };
 use crate::path::tombstone::reject_tombstoned_path_ancestor;
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
@@ -359,18 +358,9 @@ fn plan_put_file_content_ref(
     );
 
     let mut ops = Vec::new();
-    let mut working = view.metadata_state.clone();
     let mut next_inode_id = view.head.next_inode_id;
-    let mut op_index = 0u32;
-    let final_parent_inode = ensure_parent_directories(
-        &absolute_path,
-        view.head.seq,
-        view.head.name_policy,
-        &mut working,
-        &mut ops,
-        &mut next_inode_id,
-        &mut op_index,
-    )?;
+    let final_parent_inode =
+        ensure_parent_directories(&absolute_path, view, &mut ops, &mut next_inode_id)?;
     let final_name = final_component(&absolute_path)?;
     let mut preconditions = Vec::new();
 
@@ -690,14 +680,19 @@ fn plan_restore_revision(
     })
 }
 
+/// Resolves the parent chain of `absolute_path`, planning `CreateDir` ops for
+/// missing ancestors.
+///
+/// Planned directories receive speculative inode ids allocated in op order
+/// from `next_inode_id`; commit validation re-derives the same ids because it
+/// allocates from the same head counter in the same order. Once one ancestor
+/// is missing, every deeper component is missing too (a planned directory has
+/// no children), so the walk never needs to materialize planned state.
 fn ensure_parent_directories(
     absolute_path: &AbsolutePath,
-    committed_seq: ChangeSeq,
-    name_policy: loonfs_api::NamePolicy,
-    working: &mut MetadataState,
+    view: &PathPlanningView<'_>,
     ops: &mut Vec<ApiCommitOp>,
     next_inode_id: &mut InodeId,
-    op_index: &mut u32,
 ) -> Result<InodeId, CoreError> {
     let components = absolute_path.components();
     if components.len() <= 1 {
@@ -705,21 +700,28 @@ fn ensure_parent_directories(
     }
 
     let mut current_inode = InodeId(1);
+    let mut creating_missing_ancestors = false;
     for component in &components[..components.len() - 1] {
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(name_policy, &display_name);
-        if let Some(child) = working.visible_child(current_inode, name_key.as_str(), committed_seq)
-        {
-            let inode = working
-                .visible_inode(child.child_inode_id, committed_seq)
-                .ok_or_else(|| CoreError::MissingPath(component.as_str().to_owned()))?;
-            if inode.inode_kind != InodeKind::Dir {
-                return Err(CoreError::NonDirectoryPathComponent(
-                    component.as_str().to_owned(),
-                ));
+        let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+        if !creating_missing_ancestors {
+            if let Some(child) =
+                view.metadata_state
+                    .visible_child(current_inode, name_key.as_str(), view.head.seq)
+            {
+                let inode = view
+                    .metadata_state
+                    .visible_inode(child.child_inode_id, view.head.seq)
+                    .ok_or_else(|| CoreError::MissingPath(component.as_str().to_owned()))?;
+                if inode.inode_kind != InodeKind::Dir {
+                    return Err(CoreError::NonDirectoryPathComponent(
+                        component.as_str().to_owned(),
+                    ));
+                }
+                current_inode = child.child_inode_id;
+                continue;
             }
-            current_inode = child.child_inode_id;
-            continue;
+            creating_missing_ancestors = true;
         }
 
         ops.push(ApiCommitOp::CreateDir {
@@ -728,26 +730,6 @@ fn ensure_parent_directories(
         });
         let allocated = *next_inode_id;
         *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
-        let delta_index = op_index.saturating_mul(2);
-        let applied = working.apply_committed_wal_deltas(
-            committed_seq,
-            &[
-                WalDelta::CreateInode {
-                    delta_index,
-                    inode_id: allocated,
-                    inode_kind: InodeKind::Dir,
-                },
-                WalDelta::BindDirentry {
-                    delta_index: delta_index.saturating_add(1),
-                    parent_inode: current_inode,
-                    name_key: name_key.as_str().to_owned(),
-                    display_name: display_name.as_str().to_owned(),
-                    child_inode: allocated,
-                },
-            ],
-        )?;
-        *working = applied.metadata_state;
-        *op_index = op_index.saturating_add(1);
         current_inode = allocated;
     }
     Ok(current_inode)

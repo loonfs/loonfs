@@ -181,6 +181,18 @@ pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValid
     validate_generated_id("upl", value.as_ref())
 }
 
+/// Start seq encoded in a WAL segment id's 20-digit position prefix.
+///
+/// Returns `None` when the value does not follow the generated id shape, so
+/// listings can skip foreign objects instead of failing. Like the name
+/// itself, the parsed position is an inspection and reclamation hint only —
+/// recovery authority is the head and chain.
+pub fn wal_segment_id_start_seq(segment_id: &str) -> Option<ChangeSeq> {
+    validate_wal_segment_id(segment_id).ok()?;
+    let (position, _) = segment_id.split_once('-')?;
+    position.parse().ok().map(ChangeSeq)
+}
+
 pub fn validate_wal_segment_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
     let value = value.as_ref();
     let Some((position, suffix)) = value.split_once('-') else {

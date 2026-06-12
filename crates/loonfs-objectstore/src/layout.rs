@@ -158,6 +158,23 @@ impl ObjectLayout {
         )))
     }
 
+    /// Listing prefix that contains every WAL segment of `namespace`.
+    ///
+    /// Segment file names start with the segment's 20-digit `start_seq`, so
+    /// a listing under this prefix orders by history position.
+    pub fn wal_segment_prefix(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/wal/")
+    }
+
+    /// Extracts the WAL segment id from a listed object key.
+    ///
+    /// Returns `None` for keys that are not current-format WAL segments, so
+    /// listings can skip boundary markers and foreign objects.
+    pub fn wal_segment_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
+        let (_, file_name) = key.rsplit_once('/')?;
+        file_name.strip_suffix(".wal.zst")
+    }
+
     pub fn content_store_descriptor(&self, content_store: &str) -> ContentStoreDescriptorKey {
         ContentStoreDescriptorKey(ObjectKey::new(format!(
             "content-stores/{content_store}/descriptor.json"

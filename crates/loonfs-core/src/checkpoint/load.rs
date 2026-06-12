@@ -41,6 +41,22 @@ pub(crate) async fn load_verified_manifest_materialization<S: ObjectStore + ?Siz
         })
 }
 
+/// Loads and validates only the manifest envelope, without fetching its
+/// metadata tables. Enough for callers that need manifest framing such as
+/// the materialized basis seq, not the rows.
+pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_id: ManifestId,
+) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
+    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+    load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_id, &manifest_key)
+        .await?
+        .ok_or(ManifestLoadError::MissingManifest {
+            object_key: manifest_key,
+        })
+}
+
 pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
