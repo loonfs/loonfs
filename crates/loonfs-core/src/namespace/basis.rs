@@ -1,5 +1,6 @@
 use crate::checkpoint::{
-    load_verified_manifest_materialization, manifest_basis_head, ManifestLoadError,
+    load_namespace_manifest_envelope, load_verified_manifest_materialization, manifest_basis_head,
+    ManifestLoadError,
 };
 use crate::error::CoreError;
 use crate::metadata::MetadataState;
@@ -14,9 +15,9 @@ use crate::wal::{
     WalChainLoadRequest, WalReplayError,
 };
 use loonfs_api::wire::control::{HeadState, LeaseState, NamespaceDescriptorState, NamespaceState};
-use loonfs_api::{ChangeSeq, ContentStoreId, ManifestId, NamespaceId};
+use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ContentStoreId, ManifestId, NamespaceId};
 use loonfs_objectstore::{
-    keys::{namespace_descriptor, namespace_head},
+    keys::{namespace_descriptor, namespace_head, wal_segment_id_from_key, wal_segment_prefix},
     ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,11 @@ pub struct NamespaceHeadSummary {
     pub head_seq: ChangeSeq,
     pub current_manifest_id: Option<ManifestId>,
     pub latest_checkpoint_id: Option<String>,
+    /// WAL segment objects positioned past the materialized manifest basis.
+    ///
+    /// Derived from position-ordered object names, not from walking the
+    /// chain: an inspection count for maintenance gating and operators, not
+    /// a validated chain length.
     pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
@@ -345,29 +351,19 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     }
     let head = loaded_head.envelope.state;
     let manifest_basis_seq = if let Some(manifest_id) = head.current_manifest_id {
-        load_verified_manifest_materialization(store, expected_namespace, manifest_id)
+        load_namespace_manifest_envelope(store, expected_namespace, manifest_id)
             .await
             .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?
-            .manifest
             .payload
             .head_seq
     } else {
         ChangeSeq(0)
     };
-    let wal_chain = load_validated_wal_chain(
-        store,
-        WalChainLoadRequest {
-            namespace_id: expected_namespace,
-            chain_base_seq: manifest_basis_seq,
-            head_seq: head.seq,
-            visible_tip: head.visible_wal_tip.clone(),
-            stop_after_seq: None,
-        },
-    )
-    .await
-    .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
-    let wal_tail_segments = u64::try_from(wal_chain.segments().len())
-        .map_err(|_| CoreError::Store("WAL tail segment count overflow".to_owned()))?;
+    let wal_tail_segments = if head.visible_wal_tip.is_some() {
+        count_wal_tail_segments_by_position(store, expected_namespace, manifest_basis_seq).await?
+    } else {
+        0
+    };
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
@@ -376,6 +372,33 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         wal_tail_segments,
         retention_floor_seq: head.retention_floor_seq,
     })
+}
+
+/// Counts WAL tail segments from their position-ordered object names.
+///
+/// Status is an inspection surface, so the count comes from one listing
+/// instead of loading and validating segment bodies: segment file names
+/// carry their `start_seq`, and every chain segment past the materialized
+/// manifest basis starts above it. Objects that lost a head race are counted
+/// until reclamation removes them, which can only over-trigger maintenance,
+/// never starve it. Recovery authority stays with the head and chain.
+async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_basis_seq: ChangeSeq,
+) -> Result<u64, CoreError> {
+    let keys = store
+        .list_prefix(&wal_segment_prefix(namespace_id.as_str()))
+        .await
+        .map_err(|error| CoreError::Store(format!("list WAL tail segments: {error}")))?;
+    let tail_segments = keys
+        .iter()
+        .filter_map(|key| wal_segment_id_from_key(key))
+        .filter_map(wal_segment_id_start_seq)
+        .filter(|start_seq| *start_seq > manifest_basis_seq)
+        .count();
+    u64::try_from(tail_segments)
+        .map_err(|_| CoreError::Store("WAL tail segment count overflow".to_owned()))
 }
 
 #[tracing::instrument(
@@ -568,5 +591,61 @@ mod tests {
             error,
             BasisLoadError::HeadChangedDuringLoad { object_key, .. } if object_key == head_key
         ));
+    }
+
+    #[tokio::test]
+    async fn head_summary_counts_only_position_named_wal_segments() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("primary").expect("valid namespace id");
+        let engine = NamespaceEngine::builder(Arc::clone(&store))
+            .namespace(namespace_id.clone())
+            .writer("writer-a")
+            .build()
+            .expect("engine");
+        engine
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap");
+        engine
+            .create_dir("/docs", WriteOptions::default())
+            .await
+            .expect("first commit");
+        engine
+            .create_dir("/more", WriteOptions::default())
+            .await
+            .expect("second commit");
+
+        // Foreign objects in the WAL prefix are skipped: a non-segment
+        // suffix, and a current-suffix name without a position prefix.
+        let prefix = loonfs_objectstore::keys::wal_segment_prefix(namespace_id.as_str());
+        for stray in ["random.tmp", "seg_legacy.wal.zst"] {
+            store
+                .put_if_absent(&format!("{prefix}{stray}"), Bytes::from_static(b"x"))
+                .await
+                .expect("plant stray object");
+        }
+
+        let summary = load_namespace_head_summary(store.as_ref(), &namespace_id)
+            .await
+            .expect("summary with strays");
+        assert_eq!(summary.wal_tail_segments, 2);
+
+        // A position-named object that lost a head race still counts:
+        // status is an inspection surface and may only over-trigger
+        // maintenance, never starve it.
+        let orphan_key = loonfs_objectstore::keys::wal_segment(
+            namespace_id.as_str(),
+            &loonfs_api::generate_wal_segment_id(ChangeSeq(9)),
+        );
+        store
+            .put_if_absent(&orphan_key, Bytes::from_static(b"x"))
+            .await
+            .expect("plant orphan segment");
+
+        let summary = load_namespace_head_summary(store.as_ref(), &namespace_id)
+            .await
+            .expect("summary with orphan");
+        assert_eq!(summary.wal_tail_segments, 3);
     }
 }

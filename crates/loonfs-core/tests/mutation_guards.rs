@@ -2329,6 +2329,187 @@ async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     );
 }
 
+/// A batch where the WAL write fails must report that failure for every
+/// outcome that depended on the batch publishing: the accepted candidate and
+/// the rejection decided against its speculative in-batch state. Before this
+/// contract the speculative rejection surfaced as a definitive `PathConflict`
+/// derived from a create that never became durable, so its client gave up
+/// instead of retrying. Rejections decided against the durable basis alone
+/// stand regardless of the batch outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Prefix("namespaces/demo/wal/".to_owned()),
+        InjectedCreateFailure::Transport {
+            message: "injected wal write failure",
+        },
+    );
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"batch bytes")
+        .await
+        .expect("stage content");
+
+    let batch = || {
+        vec![
+            // Rejected against the durable basis: nothing was accepted yet.
+            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                commit_id: CommitId::parse("reject-basis").expect("valid commit id"),
+                absolute_path: "/missing.txt".to_owned(),
+                recursive: false,
+            }),
+            // Accepted into the batch.
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("accept-a").expect("valid commit id"),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+            // Rejected only because of the accepted candidate's speculative
+            // in-batch create.
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+            // Alias of the basis-decided rejection.
+            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                commit_id: CommitId::parse("reject-basis").expect("valid commit id"),
+                absolute_path: "/missing.txt".to_owned(),
+                recursive: false,
+            }),
+        ]
+    };
+
+    let failed = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+
+    let basis_rejection = failed[0].as_ref().expect_err("basis-decided rejection");
+    assert_eq!(basis_rejection.code(), ErrorCode::PathNotFound);
+    let accepted = failed[1].as_ref().expect_err("accepted candidate fails");
+    assert!(matches!(accepted, CoreError::WalWrite(_)));
+    let speculative = failed[2].as_ref().expect_err("speculative rejection");
+    assert!(
+        matches!(speculative, CoreError::WalWrite(_)),
+        "rejection decided against unpublished in-batch state must take the \
+         batch error, got {speculative:?}"
+    );
+    let alias = failed[3].as_ref().expect_err("alias mirrors its primary");
+    assert_eq!(alias.code(), ErrorCode::PathNotFound);
+
+    // Nothing became durable, so the retry the batch error asks for derives
+    // every verdict from durable state.
+    let basis = load_verified_namespace_basis(&store, &namespace_id)
+        .await
+        .expect("load basis");
+    assert_eq!(basis.head.seq, ChangeSeq(0));
+
+    let retried = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    assert_eq!(
+        retried[0].as_ref().expect_err("still missing").code(),
+        ErrorCode::PathNotFound
+    );
+    let committed = retried[1].as_ref().expect("create lands on retry");
+    assert_eq!(committed.committed_seq, ChangeSeq(1));
+    assert_eq!(
+        retried[2]
+            .as_ref()
+            .expect_err("conflict against durably published state")
+            .code(),
+        ErrorCode::PathConflict
+    );
+    assert_eq!(
+        retried[3].as_ref().expect_err("still missing").code(),
+        ErrorCode::PathNotFound
+    );
+}
+
+/// Same contract when the batch dies at the head CAS instead of the WAL
+/// write: the stale-head error replaces the rejection decided against the
+/// accepted candidate's speculative state, while the basis-decided rejection
+/// stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"batch bytes")
+        .await
+        .expect("stage content");
+
+    let batch = || {
+        vec![
+            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                commit_id: CommitId::parse("reject-basis").expect("valid commit id"),
+                absolute_path: "/missing.txt".to_owned(),
+                recursive: false,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("accept-a").expect("valid commit id"),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+        ]
+    };
+
+    let failed = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    assert!(store.injected_stale_head());
+
+    assert_eq!(
+        failed[0]
+            .as_ref()
+            .expect_err("basis-decided rejection")
+            .code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        failed[1]
+            .as_ref()
+            .expect_err("accepted candidate fails")
+            .code(),
+        ErrorCode::StaleHead
+    );
+    let speculative = failed[2].as_ref().expect_err("speculative rejection");
+    assert_eq!(
+        speculative.code(),
+        ErrorCode::StaleHead,
+        "rejection decided against unpublished in-batch state must take the \
+         batch error, got {speculative:?}"
+    );
+
+    let retried = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    assert_eq!(
+        retried[0].as_ref().expect_err("still missing").code(),
+        ErrorCode::PathNotFound
+    );
+    assert_eq!(
+        retried[1]
+            .as_ref()
+            .expect("create lands on retry")
+            .committed_seq,
+        ChangeSeq(1)
+    );
+    assert_eq!(
+        retried[2]
+            .as_ref()
+            .expect_err("conflict against durably published state")
+            .code(),
+        ErrorCode::PathConflict
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
     let temp_dir = tempdir().expect("tempdir");

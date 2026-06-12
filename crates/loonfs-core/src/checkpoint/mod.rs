@@ -37,8 +37,8 @@ pub use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::load::{
-    load_verified_manifest_materialization, load_verified_manifest_tables_with_cache,
-    manifest_basis_head,
+    load_namespace_manifest_envelope, load_verified_manifest_materialization,
+    load_verified_manifest_tables_with_cache, manifest_basis_head,
 };
 pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::retention::advance_retention_floor;
