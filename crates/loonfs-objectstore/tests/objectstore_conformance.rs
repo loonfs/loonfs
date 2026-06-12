@@ -3,20 +3,22 @@ mod provider_env;
 use bytes::Bytes;
 use loonfs_api::ManifestId;
 use loonfs_objectstore::fs::LocalFsStore;
+use loonfs_objectstore::gcs::{GcsStore, GcsStoreConfig};
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
     namespace_head, namespace_lease, namespace_manifest, wal_segment, DerivedWorkClass,
 };
 use loonfs_objectstore::probes::run_contract_probes;
-use loonfs_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
+use loonfs_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS};
 use loonfs_objectstore::r2::{R2Store, R2StoreConfig};
 use loonfs_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use provider_env::{
     provider_env_example_contents, AwsS3ConformanceConfig, CloudflareR2ConformanceConfig,
-    AWS_S3_OPTIONAL_VARS, AWS_S3_REQUIRED_VARS, CLOUDFLARE_R2_OPTIONAL_VARS,
-    CLOUDFLARE_R2_REQUIRED_VARS,
+    GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS, AWS_S3_REQUIRED_VARS,
+    CLOUDFLARE_R2_OPTIONAL_VARS, CLOUDFLARE_R2_REQUIRED_VARS, GCP_GCS_OPTIONAL_VARS,
+    GCP_GCS_REQUIRED_VARS,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,7 @@ fn provider_profiles_exist() {
     assert_eq!(LOCAL_FS.name, "local-fs");
     assert_eq!(AWS_S3.name, "aws-s3");
     assert_eq!(CLOUDFLARE_R2.name, "cloudflare-r2");
+    assert_eq!(GCP_GCS.name, "gcp-gcs");
     assert_eq!(
         LOCAL_FS.active_contract.opaque_compare_token_for_cas,
         Expectation::VerifyByConformance
@@ -125,6 +128,40 @@ fn provider_profiles_exist() {
         Expectation::ExpectedYes
     );
     assert_eq!(
+        GCP_GCS.active_contract.opaque_compare_token_for_cas,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        GCP_GCS.active_contract.full_object_read_identity,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        GCP_GCS.active_contract.overwrite,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        GCP_GCS.active_contract.delete_idempotent,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        GCP_GCS
+            .active_contract
+            .head_reflects_latest_write_and_delete,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        GCP_GCS.active_contract.scoped_key_prefixing,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        GCP_GCS.active_contract.traversal_rejection,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        GCP_GCS.active_contract.sorted_list_prefix,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
         LOCAL_FS.future_capabilities.multipart_upload,
         Expectation::ExpectedNo
     );
@@ -134,6 +171,10 @@ fn provider_profiles_exist() {
     );
     assert_eq!(
         CLOUDFLARE_R2.future_capabilities.multipart_upload,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        GCP_GCS.future_capabilities.multipart_upload,
         Expectation::ExpectedYes
     );
 }
@@ -195,6 +236,8 @@ fn provider_env_example_covers_real_provider_contract() {
         .chain(AWS_S3_OPTIONAL_VARS.iter())
         .chain(CLOUDFLARE_R2_REQUIRED_VARS.iter())
         .chain(CLOUDFLARE_R2_OPTIONAL_VARS.iter())
+        .chain(GCP_GCS_REQUIRED_VARS.iter())
+        .chain(GCP_GCS_OPTIONAL_VARS.iter())
     {
         assert!(
             example.contains(name),
@@ -309,6 +352,21 @@ async fn cloudflare_r2_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
+    assert_provider_conformance(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_real_provider_conformance() {
+    let config = GcpGcsConformanceConfig::from_env()
+        .expect("load GCP GCS real-provider conformance environment");
+    let store = GcsStore::new(GcsStoreConfig {
+        bucket: config.bucket,
+        service_account_key_path: config.service_account_key_path,
+        application_credentials_path: config.application_credentials_path,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create GCP GCS object store");
     assert_provider_conformance(&store).await;
 }
 

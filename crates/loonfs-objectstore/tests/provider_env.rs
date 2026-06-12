@@ -32,6 +32,14 @@ pub(crate) const CLOUDFLARE_R2_REQUIRED_VARS: &[&str] = &[
 
 pub(crate) const CLOUDFLARE_R2_OPTIONAL_VARS: &[&str] = &["LOON_TEST_R2_PREFIX"];
 
+pub(crate) const GCP_GCS_REQUIRED_VARS: &[&str] = &["LOON_TEST_GCS_BUCKET"];
+
+pub(crate) const GCP_GCS_OPTIONAL_VARS: &[&str] = &[
+    "LOON_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH",
+    "LOON_TEST_GCS_APPLICATION_CREDENTIALS",
+    "LOON_TEST_GCS_PREFIX",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AwsS3ConformanceConfig {
     pub bucket: String,
@@ -50,6 +58,14 @@ pub(crate) struct CloudflareR2ConformanceConfig {
     pub endpoint: String,
     pub access_key_id: String,
     pub secret_access_key: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GcpGcsConformanceConfig {
+    pub bucket: String,
+    pub service_account_key_path: Option<String>,
+    pub application_credentials_path: Option<String>,
     pub prefix: String,
 }
 
@@ -84,6 +100,18 @@ impl CloudflareR2ConformanceConfig {
             access_key_id: required_env("LOON_TEST_R2_ACCESS_KEY_ID")?,
             secret_access_key: required_env("LOON_TEST_R2_SECRET_ACCESS_KEY")?,
             prefix: optional_env("LOON_TEST_R2_PREFIX").unwrap_or_else(|| default_prefix("r2")),
+        })
+    }
+}
+
+impl GcpGcsConformanceConfig {
+    pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
+        Ok(Self {
+            bucket: required_env("LOON_TEST_GCS_BUCKET")?,
+            service_account_key_path: optional_env("LOON_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH"),
+            application_credentials_path: optional_env("LOON_TEST_GCS_APPLICATION_CREDENTIALS"),
+            prefix: optional_env("LOON_TEST_GCS_PREFIX")
+                .unwrap_or_else(|| default_prefix("gcp-gcs")),
         })
     }
 }

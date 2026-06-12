@@ -246,9 +246,13 @@ fn map_put_mode(mode: PutMode) -> provider_store::PutMode {
         PutMode::Overwrite => provider_store::PutMode::Overwrite,
         PutMode::CreateIfAbsent => provider_store::PutMode::Create,
         PutMode::CompareAndSwap { expected_etag } => {
+            // The compare token is opaque and provider-issued: S3-family
+            // backends condition on `e_tag`, GCS conditions on `version`
+            // (its generation). Populate both so each backend reads the
+            // field it understands.
             provider_store::PutMode::Update(UpdateVersion {
-                e_tag: Some(expected_etag),
-                version: None,
+                e_tag: Some(expected_etag.clone()),
+                version: Some(expected_etag),
             })
         }
     }

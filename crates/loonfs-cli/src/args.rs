@@ -67,6 +67,8 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub account_id: Option<String>,
     #[arg(long)]
+    pub service_account_key_path: Option<String>,
+    #[arg(long)]
     pub key_prefix: Option<String>,
     #[arg(long)]
     pub force_path_style: bool,
@@ -114,6 +116,8 @@ pub(crate) struct ProfileCreateArgs {
     #[arg(long)]
     pub account_id: Option<String>,
     #[arg(long)]
+    pub service_account_key_path: Option<String>,
+    #[arg(long)]
     pub server_url: Option<String>,
     #[arg(long)]
     pub auth_token: Option<String>,
@@ -140,6 +144,8 @@ pub(crate) struct ProfileUpdateArgs {
     pub session_token: Option<String>,
     #[arg(long)]
     pub account_id: Option<String>,
+    #[arg(long)]
+    pub service_account_key_path: Option<String>,
     #[arg(long)]
     pub server_url: Option<String>,
     #[arg(long)]

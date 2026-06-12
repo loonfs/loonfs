@@ -1,5 +1,6 @@
 use http::Uri;
 use loonfs::RuntimeCacheConfig;
+use loonfs_objectstore::gcs::GcsStoreConfig;
 use loonfs_objectstore::r2::R2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
@@ -56,6 +57,12 @@ pub enum StoreConfig {
         endpoint_url: String,
         access_key_id: String,
         secret_access_key: String,
+        key_prefix: Option<String>,
+    },
+    GcpGcs {
+        bucket: String,
+        service_account_key_path: Option<String>,
+        application_credentials_path: Option<String>,
         key_prefix: Option<String>,
     },
 }
@@ -154,6 +161,21 @@ impl ServerConfig {
                 field: "store.key_prefix",
                 reason: err.to_string(),
             }),
+            StoreConfig::GcpGcs {
+                bucket,
+                service_account_key_path,
+                application_credentials_path,
+                key_prefix,
+            } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
+                bucket: bucket.clone(),
+                service_account_key_path: service_account_key_path.clone(),
+                application_credentials_path: application_credentials_path.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| ServerConfigError::InvalidField {
+                field: "store.key_prefix",
+                reason: err.to_string(),
+            }),
         }
     }
 
@@ -210,6 +232,9 @@ impl ServerConfig {
                 require_non_empty("store.access_key_id", access_key_id)?;
                 require_non_empty("store.secret_access_key", secret_access_key)?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
+            }
+            StoreConfig::GcpGcs { bucket, .. } => {
+                require_non_empty("store.bucket", bucket)?;
             }
         }
 
@@ -463,6 +488,28 @@ key_prefix = "demo"
 
         assert_invalid_field(aws_error, "store.endpoint_url");
         assert_invalid_field(r2_error, "store.endpoint_url");
+    }
+
+    #[test]
+    fn load_rejects_blank_gcs_bucket() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "gcp-gcs"
+bucket = " "
+key_prefix = "demo"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("blank gcs bucket");
+
+        assert_missing_field(error, "store.bucket");
     }
 
     #[test]

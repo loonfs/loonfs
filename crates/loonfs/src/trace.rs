@@ -28,6 +28,8 @@ pub enum TraceStoreKind {
     S3,
     /// Cloudflare R2.
     R2,
+    /// Google Cloud Storage.
+    Gcs,
     /// Backend not identified by the caller.
     Unknown,
 }
@@ -39,6 +41,7 @@ impl TraceStoreKind {
             Self::LocalFs => "local_fs",
             Self::S3 => "s3",
             Self::R2 => "r2",
+            Self::Gcs => "gcs",
             Self::Unknown => "unknown",
         }
     }
@@ -84,6 +87,7 @@ mod tests {
         assert_eq!(TraceStoreKind::LocalFs.as_str(), "local_fs");
         assert_eq!(TraceStoreKind::S3.as_str(), "s3");
         assert_eq!(TraceStoreKind::R2.as_str(), "r2");
+        assert_eq!(TraceStoreKind::Gcs.as_str(), "gcs");
         assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
         assert_eq!(CachePath::WarmReuse.as_str(), "warm_reuse");
         assert_eq!(CachePath::EtagProbe.as_str(), "etag_probe");
