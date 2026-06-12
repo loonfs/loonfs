@@ -621,9 +621,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     let wal = match wal_result {
         Ok(wal) => wal,
         Err(error) => {
-            for (index, _) in &accepted {
-                outcomes[*index] = Some(Err(error.clone()));
-            }
+            fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
             return PublishBatchAgainstBasisResult::not_cacheable(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
@@ -640,10 +638,8 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     let head_publish = match head_publish {
         Ok(value) => value,
         Err(error) => {
-            let message = format!("head publish preparation failed: {error:?}");
-            for (index, _) in accepted {
-                outcomes[index] = Some(Err(CoreError::Store(message.clone())));
-            }
+            let error = CoreError::Store(format!("head publish preparation failed: {error:?}"));
+            fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
             return PublishBatchAgainstBasisResult::not_cacheable(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
@@ -673,9 +669,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     let head_metadata = match head_metadata_result {
         Ok(metadata) => metadata,
         Err(error) => {
-            for (index, _) in &accepted {
-                outcomes[*index] = Some(Err(error.clone().into()));
-            }
+            fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error.into());
             return PublishBatchAgainstBasisResult::not_cacheable(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
@@ -1086,6 +1080,38 @@ fn commit_response_from_commit_receipt(
         commit_id: record.commit_id.clone(),
         committed_seq: record.committed_seq,
         results: record.results.clone(),
+    }
+}
+
+/// Fails every outcome that was contingent on this batch publishing durably.
+///
+/// The accepted candidates take the batch error: they never committed. So do
+/// rejections recorded after the first acceptance, because their verdicts
+/// were decided against session state advanced by tentatively accepted
+/// candidates — state that never became durable. Reporting them would hand a
+/// client a definitive semantic error (path conflict, missing path, stale
+/// revision, ...) it correctly treats as non-retryable, for a precondition
+/// that was never durably true (format.md section 3.1.5).
+///
+/// Rejections recorded before any acceptance were decided against the
+/// durable basis alone and stand. Idempotent `Ok` completions replay durable
+/// commit receipts and stand. Alias slots stay unfilled here and inherit
+/// their primary's final outcome.
+fn fail_outcomes_contingent_on_unpublished_batch(
+    outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
+    accepted: &[(usize, MaterializedCommit)],
+    error: &CoreError,
+) {
+    let Some(first_accepted_index) = accepted.first().map(|(index, _)| *index) else {
+        return;
+    };
+    for (index, _) in accepted {
+        outcomes[*index] = Some(Err(error.clone()));
+    }
+    for outcome in outcomes.iter_mut().skip(first_accepted_index + 1) {
+        if matches!(outcome, Some(Err(_))) {
+            *outcome = Some(Err(error.clone()));
+        }
     }
 }
 
