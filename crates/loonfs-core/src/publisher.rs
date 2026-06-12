@@ -1,4 +1,6 @@
-use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
+use crate::commit::{
+    core_commit_fingerprint_for_v0_request, CommitHeadPublishError, SemanticMutationIdentity,
+};
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
 use crate::namespace::basis::{
@@ -213,7 +215,7 @@ impl NamespaceCommitEngine {
             &basis,
         )
         .await;
-        if should_retry_reused_warm_rejection(basis_reuse_event, &published) {
+        if should_retry_reused_warm_stale_head(basis_reuse_event, &published) {
             self.invalidate();
             let cold_basis = match load_verified_namespace_basis(store, &self.namespace_id).await {
                 Ok(value) => value,
@@ -304,16 +306,23 @@ impl NamespaceCommitEngine {
     }
 }
 
-fn should_retry_reused_warm_rejection(
+/// A reused warm basis is only probed for freshness before the publish, so a
+/// racing writer can still advance the head between the probe and our
+/// compare-and-swap. That stale-head loss says nothing about the candidates
+/// themselves; retrying them once against a cold-loaded basis keeps the warm
+/// cache transparent to callers. Rejections decided against an etag-matched
+/// basis are as authoritative as a cold load and stand without a retry.
+fn should_retry_reused_warm_stale_head(
     basis_reuse_event: BasisReuseEvent,
     published: &crate::protocol::PublishBatchAgainstBasisResult,
 ) -> bool {
     basis_reuse_event == BasisReuseEvent::ReusedAfterHeadEtagMatch
-        && matches!(
-            published.basis_promotion,
-            crate::protocol::BasisPromotion::Unchanged(_)
-        )
-        && published.results.iter().any(Result::is_err)
+        && published.results.iter().any(|result| {
+            matches!(
+                result,
+                Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+            )
+        })
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitResponse, CoreError>> {
