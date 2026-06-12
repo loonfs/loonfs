@@ -720,6 +720,12 @@ The server may:
 Each request still has its own success or failure outcome. Tentative
 acceptance inside a batch is not success.
 
+A rejection judged against ephemeral state advanced by a tentative
+acceptance (step 2 in section 3.1.4) is contingent on that state publishing:
+if publication fails, the writer must report the publication failure for it,
+never the semantic rejection. Rejections judged against the durable basis
+alone stand regardless of the publication outcome.
+
 ### 3.2 Read protocol
 
 A read reconstructs the visible filesystem state from durable artifacts on

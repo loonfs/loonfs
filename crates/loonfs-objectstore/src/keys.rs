@@ -66,6 +66,14 @@ pub fn wal_segment(namespace: &str, segment_id: &str) -> String {
         .into_string()
 }
 
+pub fn wal_segment_prefix(namespace: &str) -> String {
+    ObjectLayout::new().wal_segment_prefix(namespace)
+}
+
+pub fn wal_segment_id_from_key(key: &str) -> Option<&str> {
+    ObjectLayout::new().wal_segment_id_from_key(key)
+}
+
 pub fn content_store_descriptor(content_store: &str) -> String {
     ObjectLayout::new()
         .content_store_descriptor(content_store)
@@ -144,7 +152,8 @@ mod tests {
         conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
         derived_progress, metadata_sst, namespace_descriptor, namespace_fork_state, namespace_head,
         namespace_lease, namespace_manifest, sha256_hex_from_digest, upload_session,
-        upload_session_prefix, wal_segment, DerivedWorkClass,
+        upload_session_prefix, wal_segment, wal_segment_id_from_key, wal_segment_prefix,
+        DerivedWorkClass,
     };
     use loonfs_api::ManifestId;
 
@@ -170,6 +179,20 @@ mod tests {
         assert_eq!(
             wal_segment("ns-1", "seg_00000000000000000000000000000001"),
             "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
+        );
+        assert_eq!(wal_segment_prefix("ns-1"), "namespaces/ns-1/wal/");
+        assert!(wal_segment("ns-1", "00000000000000000042-0123456789abcdef")
+            .starts_with(&wal_segment_prefix("ns-1")));
+        assert_eq!(
+            wal_segment_id_from_key(&wal_segment(
+                "ns-1",
+                "00000000000000000042-0123456789abcdef"
+            )),
+            Some("00000000000000000042-0123456789abcdef")
+        );
+        assert_eq!(
+            wal_segment_id_from_key("namespaces/ns-1/wal/random.tmp"),
+            None
         );
         assert_eq!(
             namespace_manifest("ns-1", ManifestId(400)),
