@@ -70,9 +70,8 @@ impl PaginationPolicy {
 
     /// Creates a policy from raw integers.
     pub fn from_values(default_limit: u32, max_limit: u32) -> Result<Self, PaginationPolicyError> {
-        let default_limit = NonZeroU32::new(default_limit).ok_or(
-            PaginationPolicyError::ZeroDefaultLimit,
-        )?;
+        let default_limit =
+            NonZeroU32::new(default_limit).ok_or(PaginationPolicyError::ZeroDefaultLimit)?;
         let max_limit = NonZeroU32::new(max_limit).ok_or(PaginationPolicyError::ZeroMaxLimit)?;
         Self::new(default_limit, max_limit)
     }
