@@ -463,7 +463,7 @@ impl NamespacePublisher {
                     .into_iter()
                     .map(|result| result.map_err(runtime_error_to_core))
                     .collect();
-                if !results.iter().any(is_head_publish_stale) {
+                if !results.iter().any(is_retryable_head_publish) {
                     break;
                 }
                 if attempt + 1 == HEAD_CAS_RETRY_LIMIT {
@@ -722,10 +722,16 @@ impl Drop for PublishAbortGuard {
     }
 }
 
-fn is_head_publish_stale(result: &CommitResult) -> bool {
+/// Retrying with the same commit ids is safe: candidates that actually
+/// committed replay their durable receipts. So an unknown head outcome is
+/// retried like a stale head, resolving it into a definite answer instead of
+/// handing `commit_outcome_unknown` to every waiter.
+fn is_retryable_head_publish(result: &CommitResult) -> bool {
     matches!(
         result,
-        Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+        Err(CoreError::HeadPublish(
+            CommitHeadPublishError::StaleHead | CommitHeadPublishError::OutcomeUnknown(_)
+        ))
     )
 }
 
@@ -811,6 +817,7 @@ mod tests {
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Condvar;
     use tempfile::tempdir;
 
@@ -1056,6 +1063,80 @@ mod tests {
                 .expect("head CAS gate task");
             }
             self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
+
+    /// Applies head CAS writes but reports a transport failure for the next
+    /// one: the commit lands durably while the acknowledgement is lost.
+    #[derive(Debug)]
+    struct LostHeadCasAckStore {
+        inner: LocalFsStore,
+        head_key: String,
+        lose_next_head_cas_ack: AtomicBool,
+    }
+
+    impl LostHeadCasAckStore {
+        fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+            Self {
+                inner: LocalFsStore::new(root.as_ref()).expect("store"),
+                head_key: namespace_head(namespace_id.as_str()),
+                lose_next_head_cas_ack: AtomicBool::new(false),
+            }
+        }
+
+        fn lose_next_head_cas_ack(&self) {
+            self.lose_next_head_cas_ack.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for LostHeadCasAckStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            let lose_ack = key == self.head_key
+                && matches!(mode, PutMode::CompareAndSwap { .. })
+                && self.lose_next_head_cas_ack.swap(false, Ordering::SeqCst);
+            let metadata = self.inner.put(key, bytes, mode).await?;
+            if lose_ack {
+                return Err(ObjectStoreError::Transport(
+                    "injected lost head CAS acknowledgement".to_owned(),
+                ));
+            }
+            Ok(metadata)
         }
 
         async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
@@ -1381,6 +1462,33 @@ mod tests {
                 ChangeSeq(index as u64 + 1)
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = Arc::new(LostHeadCasAckStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        let fs = test_fs(shared, &config);
+        create_namespace(&fs, &namespace_id).await;
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+
+        // The commit lands but the CAS acknowledgement is lost. The publisher
+        // retries with the same commit id and replays the durable receipt
+        // instead of reporting `commit_outcome_unknown` to the waiter.
+        store.lose_next_head_cas_ack();
+        let response = recv_commit(
+            admit_commit(
+                &publisher,
+                &namespace_id,
+                create_dir_request("unknown-ack", "unknown-ack"),
+            ),
+            "unknown-ack",
+        )
+        .await;
+        assert_eq!(response.committed_seq, ChangeSeq(1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

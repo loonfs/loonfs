@@ -1049,6 +1049,8 @@ fn runtime_publish_stale_head_invalidates_warm_basis() {
     ));
 
     raw_store.fail_head_cas();
+    // The warm-reused attempt loses its head CAS, retries once from a cold
+    // basis, and loses again: a persistent stale head is surfaced as such.
     let stale = fs
         .publish_namespace_mutations_batch_blocking(
             &namespace_id,
@@ -1072,10 +1074,100 @@ fn runtime_publish_stale_head_invalidates_warm_basis() {
     );
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_hits, 1);
+    assert_eq!(stats.publish_warm_basis_hits, 0);
+    assert_eq!(stats.publish_warm_basis_misses, 3);
+    assert_eq!(stats.publish_warm_basis_invalidations, 1);
+    assert_eq!(stats.publish_warm_basis_advances, 2);
+}
+
+#[test]
+fn runtime_publish_retries_warm_stale_head_race_from_cold_basis() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("publish-warm-race-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
+        &namespace_id,
+        vec![create_dir_candidate("race-prime", "/docs")],
+    ));
+
+    // A racing writer can advance the head between the warm-reuse etag probe
+    // and our CAS; the engine must absorb that loss with one cold retry
+    // instead of surfacing a stale-head error for a transient cache race.
+    raw_store.fail_next_head_cas();
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
+        &namespace_id,
+        vec![create_dir_candidate("race-child", "/docs/child")],
+    ));
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "stale-head retry should replan from a cold-loaded basis"
+    );
+    fs.stat_path_blocking(&namespace_id, "/docs/child")
+        .expect("retried publish is visible");
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_hits, 0);
     assert_eq!(stats.publish_warm_basis_misses, 2);
     assert_eq!(stats.publish_warm_basis_invalidations, 1);
     assert_eq!(stats.publish_warm_basis_advances, 2);
+}
+
+#[test]
+fn runtime_publish_warm_rejection_stands_without_cold_retry() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("publish-warm-reject-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
+        &namespace_id,
+        vec![create_dir_candidate("reject-prime", "/docs")],
+    ));
+
+    // A rejection decided against an etag-matched warm basis is as
+    // authoritative as a cold load: it must not trigger a cold replay.
+    raw_store.reset_wal_get_count();
+    let rejected = fs
+        .publish_namespace_mutations_batch_blocking(
+            &namespace_id,
+            vec![delete_candidate("reject-missing", "/missing")],
+        )
+        .into_iter()
+        .next()
+        .expect("one result");
+    assert_core_error_kind(rejected, ErrorCode::PathNotFound);
+    assert_eq!(
+        raw_store.wal_get_count(),
+        0,
+        "legitimate warm rejection should not cold-load the WAL"
+    );
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_hits, 1);
+    assert_eq!(stats.publish_warm_basis_misses, 1);
+    assert_eq!(stats.publish_warm_basis_invalidations, 0);
+    assert_eq!(stats.publish_warm_basis_advances, 1);
 }
 
 #[test]
@@ -2216,6 +2308,7 @@ struct HeadCasFailureStore {
     wal_prefix: String,
     manifest_prefix: String,
     fail_head_cas: AtomicBool,
+    fail_next_head_cas: AtomicBool,
     wal_get_count: AtomicUsize,
     manifest_get_count: AtomicUsize,
     head_get_count: AtomicUsize,
@@ -2229,6 +2322,7 @@ impl HeadCasFailureStore {
             wal_prefix: format!("namespaces/{namespace}/wal/"),
             manifest_prefix: format!("namespaces/{namespace}/manifest/"),
             fail_head_cas: AtomicBool::new(false),
+            fail_next_head_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
             manifest_get_count: AtomicUsize::new(0),
             head_get_count: AtomicUsize::new(0),
@@ -2241,6 +2335,10 @@ impl HeadCasFailureStore {
 
     fn allow_head_cas(&self) {
         self.fail_head_cas.store(false, Ordering::SeqCst);
+    }
+
+    fn fail_next_head_cas(&self) {
+        self.fail_next_head_cas.store(true, Ordering::SeqCst);
     }
 
     fn reset_wal_get_count(&self) {
@@ -2310,7 +2408,8 @@ impl ObjectStore for HeadCasFailureStore {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         if key == self.head_key
             && matches!(&mode, PutMode::CompareAndSwap { .. })
-            && self.fail_head_cas.load(Ordering::SeqCst)
+            && (self.fail_head_cas.load(Ordering::SeqCst)
+                || self.fail_next_head_cas.swap(false, Ordering::SeqCst))
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }
