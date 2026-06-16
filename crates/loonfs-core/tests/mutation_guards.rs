@@ -8,12 +8,13 @@ use loonfs_api::{
     sha256_digest,
     v0::{
         CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
-        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest, UploadMode,
     },
     wire::control::{
-        decode_control_object, ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState,
-        LeaseState, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
-        NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
+        decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
+        ControlObjectKind, HeadState, LeaseState, NamespaceDescriptorEnvelope,
+        NamespaceDescriptorState, NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
+        UploadSessionEnvelope, UploadSessionState,
     },
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
@@ -39,7 +40,7 @@ use loonfs_core::{
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_fork_state,
-    namespace_head, namespace_lease, namespace_manifest, upload_session_prefix,
+    namespace_head, namespace_lease, namespace_manifest, upload_session, upload_session_prefix,
 };
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -160,6 +161,17 @@ fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
     block_on(namespace_engine(store, namespace_id, context).begin_upload())
+}
+
+fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_ref: ContentRef,
+    context: &MutationContext,
+) -> Result<loonfs_api::v0::BeginDirectPutUploadTargetResponse, CoreError> {
+    block_on(
+        namespace_engine(store, namespace_id, context).begin_direct_put_upload_target(content_ref),
+    )
 }
 
 fn upload_content<S: ObjectStore + ?Sized>(
@@ -1233,6 +1245,32 @@ async fn begin_upload_rejects_missing_and_partial_namespace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let content_ref = ContentRef {
+        kind: ContentRefKind::Unsupported("future_kind".to_owned()),
+        digest: sha256_digest(b"hello"),
+        size_bytes: 5,
+    };
+    let error = begin_direct_put_upload_target(&store, &namespace_id, content_ref, &context)
+        .expect_err("unsupported direct_put content ref");
+
+    assert_eq!(error.code(), ErrorCode::InvalidUploadContent);
+    assert_eq!(
+        store
+            .list_prefix(&upload_session_prefix(namespace_id.as_str()))
+            .await
+            .expect("list upload sessions"),
+        Vec::<String>::new()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
@@ -1333,6 +1371,53 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     .expect_err("mismatched content ref");
     assert_eq!(mismatch.code(), ErrorCode::InvalidUploadContent);
     assert_eq!(store.content_blob_get_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn complete_upload_rejects_direct_put_session_without_bound_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let stored = store_bytes_as_content(&store, &namespace_id, b"hello")
+        .await
+        .expect("store content");
+
+    let upload_id = "upl_00000000000000000000000000000001";
+    let state = UploadSessionState {
+        namespace_id: namespace_id.clone(),
+        upload_id: upload_id.to_owned(),
+        mode: UploadMode::DirectPut,
+        direct_put_content_ref: None,
+        staged_content_ref: None,
+        completed: None,
+        created_at_ms: context.now_ms,
+    };
+    let envelope =
+        UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, "test", state)
+            .expect("upload session envelope");
+    let encoded = encode_control_object(&envelope).expect("encode upload session");
+    store
+        .put_if_absent(
+            &upload_session(namespace_id.as_str(), upload_id),
+            Bytes::from(encoded),
+        )
+        .await
+        .expect("write malformed upload session");
+
+    let error = complete_upload(
+        &store,
+        &namespace_id,
+        upload_id,
+        &CompleteUploadRequest {
+            content_ref: stored.content_ref,
+        },
+        &context,
+    )
+    .expect_err("direct_put session without target should fail closed");
+
+    assert_eq!(error.code(), ErrorCode::InvalidUploadContent);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

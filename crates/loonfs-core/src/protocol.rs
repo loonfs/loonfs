@@ -39,8 +39,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
 use loonfs_api::{
-    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentStoreId,
-    NameKey, NamespaceId,
+    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+    ContentStoreId, NameKey, NamespaceId,
 };
 use loonfs_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -146,6 +146,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
     ensure_upload_namespace_available(store, namespace_id).await?;
+    ensure_direct_put_content_ref_supported(&content_ref)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
@@ -165,6 +166,15 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
             object_key,
         },
     })
+}
+
+fn ensure_direct_put_content_ref_supported(content_ref: &ContentRef) -> Result<(), CoreError> {
+    if content_ref.kind != ContentRefKind::WholeFileV0 {
+        return Err(CoreError::InvalidUploadContent(
+            "direct_put only supports whole_file_v0 content refs".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn create_upload_session<S: ObjectStore + ?Sized>(
@@ -423,12 +433,15 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
         ));
     }
 
-    if let Some(expected) = &loaded.envelope.state.direct_put_content_ref {
-        if expected != &request.content_ref {
-            return Err(CoreError::InvalidUploadContent(
-                "completed content ref does not match direct_put target".to_owned(),
-            ));
-        }
+    let Some(expected) = &loaded.envelope.state.direct_put_content_ref else {
+        return Err(CoreError::InvalidUploadContent(
+            "direct_put session is missing its target content ref".to_owned(),
+        ));
+    };
+    if expected != &request.content_ref {
+        return Err(CoreError::InvalidUploadContent(
+            "completed content ref does not match direct_put target".to_owned(),
+        ));
     }
 
     // Bytes bypassed the LoonFS server; completion is the authority point where
