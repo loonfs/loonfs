@@ -11,7 +11,8 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
+        CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
+        UploadMode,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
     CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
@@ -352,6 +353,34 @@ impl Client {
                 content_ref: Some(content_ref),
             },
         )
+    }
+
+    pub fn upload_via_presigned_url(
+        &self,
+        access: &ObjectTransferAccess,
+        bytes: &[u8],
+    ) -> Result<(), ClientError> {
+        let (method, url, headers) = match access {
+            ObjectTransferAccess::PresignedUrl {
+                method,
+                url,
+                headers,
+                ..
+            } => (method, url, headers),
+        };
+        if method != "PUT" {
+            return Err(ClientError::Http(format!(
+                "unsupported presigned upload method `{method}`"
+            )));
+        }
+        let mut request = ureq::put(url);
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
+        request
+            .send_bytes(bytes)
+            .map(|_| ())
+            .map_err(|err| self.map_error(err))
     }
 
     pub fn upload_content(

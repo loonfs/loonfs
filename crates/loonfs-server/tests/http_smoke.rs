@@ -152,6 +152,7 @@ async fn config_endpoint_advertises_capabilities() {
         assert!(capabilities.supports("core.namespaces.create"));
         assert!(capabilities.supports("core.namespaces.fork"));
         assert!(capabilities.supports("core.namespaces.delete"));
+        assert!(!capabilities.supports("core.uploads.direct_put"));
 
         let cached = harness.client.capabilities().expect("cached capabilities");
         assert_eq!(cached, capabilities);

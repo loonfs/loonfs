@@ -18,10 +18,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta,
-    CommitOp, CommitOpResult, CommitPrecondition, CommitRequest, CommitResponse, CommittedChange,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, RenameMode,
-    UploadContentResponse, UploadMode,
+    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+    CommitAnnotations, CommitDelta, CommitOp, CommitOpResult, CommitPrecondition, CommitRequest,
+    CommitResponse, CommittedChange, CompleteUploadRequest, CompleteUploadResponse,
+    DirectPutUpload, ObjectTransferAccess, RenameMode, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,

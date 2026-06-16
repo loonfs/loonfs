@@ -8,8 +8,9 @@ use crate::options::{
 };
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
+    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+    CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
+    UploadContentResponse,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -528,6 +529,20 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             request,
+            &self.mutation_context(),
+        )
+        .await
+    }
+
+    /// Starts a direct_put upload session and returns the internal object key to sign.
+    pub async fn begin_direct_put_upload_target(
+        &self,
+        content_ref: ContentRef,
+    ) -> CoreResult<BeginDirectPutUploadTargetResponse> {
+        crate::protocol::begin_direct_put_upload_target(
+            &self.store,
+            &self.namespace_id,
+            content_ref,
             &self.mutation_context(),
         )
         .await

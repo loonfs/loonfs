@@ -28,10 +28,10 @@ use crate::storage::content::{
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
 use bytes::Bytes;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta,
-    CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse, CommittedChange,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, UploadContentResponse,
-    UploadMode,
+    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+    CommitDelta, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
+    CommittedChange, CompleteUploadRequest, CompleteUploadResponse, DirectPutUploadTarget,
+    UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind,
@@ -118,31 +118,52 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
 ) -> Result<BeginUploadResponse, CoreError> {
     ensure_upload_namespace_available(store, namespace_id).await?;
     let mode = request.mode.unwrap_or_default();
-    let direct_put = match mode {
-        UploadMode::ServiceProxied => None,
-        UploadMode::DirectPut => {
-            Some(build_direct_put_upload(store, namespace_id, &request).await?)
-        }
-    };
-    create_upload_session(store, namespace_id, mode, direct_put, context).await
+    if mode == UploadMode::DirectPut {
+        return Err(CoreError::InvalidUploadContent(
+            "direct_put requires a presigned URL issuer".to_owned(),
+        ));
+    }
+    let upload_id = create_upload_session(
+        store,
+        namespace_id,
+        UploadMode::ServiceProxied,
+        None,
+        context,
+    )
+    .await?;
+    Ok(BeginUploadResponse {
+        namespace_id: namespace_id.clone(),
+        upload_id,
+        mode: UploadMode::ServiceProxied,
+        direct_put: None,
+    })
 }
 
-async fn build_direct_put_upload<S: ObjectStore + ?Sized>(
+pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    request: &BeginUploadRequest,
-) -> Result<DirectPutUpload, CoreError> {
-    let content_ref = request.content_ref.clone().ok_or_else(|| {
-        CoreError::InvalidUploadContent(
-            "direct_put requires content_ref at begin_upload".to_owned(),
-        )
-    })?;
+    content_ref: ContentRef,
+    context: &MutationContext,
+) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
+    ensure_upload_namespace_available(store, namespace_id).await?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
-    Ok(DirectPutUpload {
-        content_ref,
-        object_key,
+    let upload_id = create_upload_session(
+        store,
+        namespace_id,
+        UploadMode::DirectPut,
+        Some(content_ref.clone()),
+        context,
+    )
+    .await?;
+    Ok(BeginDirectPutUploadTargetResponse {
+        namespace_id: namespace_id.clone(),
+        upload_id,
+        target: DirectPutUploadTarget {
+            content_ref,
+            object_key,
+        },
     })
 }
 
@@ -150,15 +171,15 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     mode: UploadMode,
-    direct_put: Option<DirectPutUpload>,
+    direct_put_content_ref: Option<ContentRef>,
     context: &MutationContext,
-) -> Result<BeginUploadResponse, CoreError> {
+) -> Result<String, CoreError> {
     let upload_id = generate_upload_id();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
         mode,
-        direct_put_content_ref: direct_put.as_ref().map(|upload| upload.content_ref.clone()),
+        direct_put_content_ref,
         staged_content_ref: None,
         completed: None,
         created_at_ms: context.now_ms,
@@ -176,13 +197,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         .put_if_absent(&object_key, Bytes::from(encoded))
         .await
         .map_err(|err| CoreError::Store(err.to_string()))?;
-
-    Ok(BeginUploadResponse {
-        namespace_id: namespace_id.clone(),
-        upload_id,
-        mode,
-        direct_put,
-    })
+    Ok(upload_id)
 }
 
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
@@ -265,7 +280,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         }
         if loaded.envelope.state.mode == UploadMode::DirectPut {
             return Err(CoreError::InvalidUploadContent(
-                "direct_put sessions are completed after the caller writes the object".to_owned(),
+                "direct_put sessions must be completed after using the presigned URL".to_owned(),
             ));
         }
 
@@ -416,8 +431,8 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
         }
     }
 
-    // This is the first LoonFS-controlled durability check for bytes that
-    // skipped the service-proxied upload endpoint.
+    // Bytes bypassed the LoonFS server; completion is the authority point where
+    // the server proves the object is durable and matches the signed content ref.
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     validate_durable_content_reference(store, &content_store_id, &request.content_ref)
         .await

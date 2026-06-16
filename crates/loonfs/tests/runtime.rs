@@ -13,7 +13,7 @@ use loonfs::{
     Fs, FsConfig, InodeId, MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult,
     ManifestId, MoveOptions, MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior,
     PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    UploadContentResponse, UploadMode,
+    UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::cache::load_verified_namespace_basis;
@@ -1339,11 +1339,9 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload(&namespace_id, content_ref.clone()))
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
         .expect("begin direct put");
-    assert_eq!(begin.mode, UploadMode::DirectPut);
-    let direct_put = begin.direct_put.expect("direct put target");
-    assert_eq!(direct_put.content_ref, content_ref);
+    assert_eq!(begin.target.content_ref, content_ref);
 
     let complete_request = CompleteUploadRequest {
         content_ref: content_ref.clone(),
@@ -1353,7 +1351,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         .is_err());
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
-    block_on(direct_store.put_if_absent(&direct_put.object_key, Bytes::copy_from_slice(bytes)))
+    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
     let completed = fs

@@ -227,8 +227,8 @@ pub struct UploadSessionState {
     pub upload_id: String,
     #[serde(default, skip_serializing_if = "UploadMode::is_service_proxied")]
     pub mode: UploadMode,
-    /// For direct_put sessions, the content ref the caller said it would write.
-    /// It is only marked staged after complete validates the object-store bytes.
+    /// For direct_put sessions, the content ref the presigned URL was minted for.
+    /// It becomes staged only after completion validates the durable object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put_content_ref: Option<ContentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

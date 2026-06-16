@@ -17,27 +17,35 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
+        CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
+        UploadContentResponse, UploadMode,
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
     ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
-    RevisionNo,
+    RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
+use loonfs_objectstore::presign::{
+    ObjectTransferIssuer, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
+};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
+const DIRECT_PUT_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<ServerConfig>,
     fs: Arc<Fs>,
     publisher: PublisherRegistry,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -76,10 +84,12 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Result<Router, Se
 fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
     let config = Arc::new(config);
     let publisher = PublisherRegistry::new(fs.clone());
+    let transfer_issuer = presigned_transfer_issuer(config.as_ref());
     let state = AppState {
         config,
         fs,
         publisher,
+        transfer_issuer,
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -241,7 +251,12 @@ async fn config_handler(
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    Ok(Json(state.fs.capabilities()))
+    let mut capabilities = state.fs.capabilities();
+    capabilities.features.insert(
+        FEATURE_UPLOADS_DIRECT_PUT.to_owned(),
+        state.transfer_issuer.is_some(),
+    );
+    Ok(Json(capabilities))
 }
 
 async fn delete_namespace_handler(
@@ -572,12 +587,128 @@ async fn begin_upload_handler(
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let request = request.map(|Json(request)| request).unwrap_or_default();
+    if request.mode.unwrap_or_default() == UploadMode::DirectPut {
+        return begin_direct_put_upload(state, namespace_id, request).await;
+    }
+
     let response = state
         .fs
         .begin_upload_with_request(&namespace_id, request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
+}
+
+async fn begin_direct_put_upload(
+    state: AppState,
+    namespace_id: NamespaceId,
+    request: BeginUploadRequest,
+) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+    let Some(issuer) = state.transfer_issuer.as_ref() else {
+        return Err(ApiResponseError::not_supported(
+            FEATURE_UPLOADS_DIRECT_PUT,
+            "direct_put requires a presigned URL capable object store",
+        ));
+    };
+    let Some(content_ref) = request.content_ref else {
+        return Err(ApiResponseError::runtime_for_namespace(
+            &namespace_id,
+            RuntimeError::Core(CoreError::InvalidUploadContent(
+                "direct_put requires content_ref at begin_upload".to_owned(),
+            )),
+        ));
+    };
+
+    let prepared = state
+        .fs
+        .begin_direct_put_upload_target(&namespace_id, content_ref)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let signed = issuer
+        .presign_put(
+            PresignedPutRequest {
+                object_key: &prepared.target.object_key,
+                required_headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
+                expires_in: DIRECT_PUT_URL_TTL,
+            },
+            direct_put_presign_time(),
+        )
+        .map_err(|err| {
+            ApiResponseError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::ServerError,
+                &err.to_string(),
+            )
+        })?;
+
+    Ok(Json(BeginUploadResponse {
+        namespace_id: prepared.namespace_id,
+        upload_id: prepared.upload_id,
+        mode: UploadMode::DirectPut,
+        direct_put: Some(DirectPutUpload {
+            content_ref: prepared.target.content_ref,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: signed.method,
+                url: signed.url,
+                headers: signed.headers,
+                expires_at_ms: signed.expires_at_ms,
+            },
+        }),
+    }))
+}
+
+#[allow(clippy::disallowed_methods)]
+fn direct_put_presign_time() -> SystemTime {
+    // Issuing a short-lived transfer capability is an explicit wall-clock boundary.
+    SystemTime::now()
+}
+
+fn presigned_transfer_issuer(config: &ServerConfig) -> Option<Arc<dyn ObjectTransferIssuer>> {
+    match &config.store {
+        StoreConfig::LocalFs { .. } => None,
+        StoreConfig::AwsS3 {
+            bucket,
+            region,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            key_prefix,
+            force_path_style,
+        } => Some(Arc::new(
+            S3CompatiblePresigner::new(S3PresignerConfig {
+                bucket: bucket.clone(),
+                region: region.clone(),
+                endpoint_url: endpoint_url.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: session_token.clone(),
+                key_prefix: key_prefix.clone(),
+                force_path_style: force_path_style.unwrap_or(false),
+            })
+            .expect("validated server config constructs S3 presigner"),
+        )),
+        StoreConfig::CloudflareR2 {
+            bucket,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+            key_prefix,
+            ..
+        } => Some(Arc::new(
+            S3CompatiblePresigner::new(S3PresignerConfig {
+                bucket: bucket.clone(),
+                region: "auto".to_owned(),
+                endpoint_url: Some(endpoint_url.clone()),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: None,
+                key_prefix: key_prefix.clone(),
+                force_path_style: false,
+            })
+            .expect("validated server config constructs R2 presigner"),
+        )),
+    }
 }
 
 async fn upload_content_handler(
@@ -738,6 +869,17 @@ impl ApiResponseError {
             body: ApiError {
                 code: code.as_str().to_owned(),
                 feature: None,
+                message: message.to_owned(),
+            },
+        }
+    }
+
+    fn not_supported(feature: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            body: ApiError {
+                code: ErrorCode::NotSupported.as_str().to_owned(),
+                feature: Some(feature.to_owned()),
                 message: message.to_owned(),
             },
         }

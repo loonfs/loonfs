@@ -12,16 +12,17 @@ use crate::trace::{TraceMode, TraceStoreKind};
 use crate::uploads::{UploadedContentProofCache, UploadedContentProofStore};
 use crate::DEFAULT_LEASE_DURATION_MS;
 use crate::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitPrecondition,
-    CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef,
-    CopyOptions, CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
+    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
+    ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
+    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
     NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
     RenameMode, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
-    UploadContentResponse, UploadMode,
+    UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -293,7 +294,7 @@ impl Fs {
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
-                (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true),
+                (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
             ]),
             limits: BTreeMap::new(),
         }
@@ -837,20 +838,16 @@ impl Fs {
             .await?)
     }
 
-    /// Convenience wrapper for direct_put upload sessions.
-    pub async fn begin_direct_put_upload(
+    /// Starts a direct_put upload session and returns the internal target for server-side signing.
+    pub async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
         content_ref: ContentRef,
-    ) -> Result<BeginUploadResponse> {
-        self.begin_upload_with_request(
-            namespace_id,
-            BeginUploadRequest {
-                mode: Some(UploadMode::DirectPut),
-                content_ref: Some(content_ref),
-            },
-        )
-        .await
+    ) -> Result<BeginDirectPutUploadTargetResponse> {
+        Ok(self
+            .namespace_engine(namespace_id)
+            .begin_direct_put_upload_target(content_ref)
+            .await?)
     }
 
     /// Uploads whole-file content into an upload session.
