@@ -17,7 +17,7 @@ cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
 
 ## Quickstart
 
-Start with an object storage bucket. This example uses S3 in embedded mode, where the CLI talks directly to the bucket without a LoonFS server:
+This example uses S3 in embedded mode, where the CLI talks directly to the bucket without a LoonFS server:
 
 ```bash
 loon init default --no-input \
