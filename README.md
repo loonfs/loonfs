@@ -1,6 +1,6 @@
 ![LoonFS Logo](assets/loonfs-wordmark-black.svg)
 
-LoonFS is a durable file-system built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives a number of valuable benefits including virtually unlimited storage, exceptional durability, and a high throughput ceiling. It is designed for many writers and readers and can be used across agents, sessions, and teams as an embedded engine or through a server host.
+LoonFS is a durable filesystem built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives a number of valuable benefits including virtually unlimited storage, exceptional durability, and a high throughput ceiling. It is designed for many writers and readers and can be used across sessions, agents, and teams as an embedded engine or through a remote server connection.
 
 ## Download
 
@@ -50,7 +50,7 @@ Visit loonfs.com/docs to learn more.
 
 ## Design philosophy
 
-LoonFS is built around a small, strict durable protocol. The object store is the source of truth; the runtime, clients, workers, and indexes exist to publish, read, compact, or derive from that truth.
+LoonFS is built around a correctness-first durable protocol. The object store is the source of truth; the runtime, clients, workers, and indexes exist to publish, read, compact, or derive from that truth.
 
 - **Correctness is the primary feature.** Prefer protocols with fewer valid states, explicit invariants, named failure modes, and deterministic tests.
 
