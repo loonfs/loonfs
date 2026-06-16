@@ -426,7 +426,13 @@ mod tests {
                 access: ObjectTransferAccess::PresignedUrl {
                     method: "PUT".to_owned(),
                     url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
-                    headers: BTreeMap::from([("if-none-match".to_owned(), "*".to_owned())]),
+                    headers: BTreeMap::from([
+                        ("if-none-match".to_owned(), "*".to_owned()),
+                        (
+                            "x-amz-checksum-sha256".to_owned(),
+                            "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=".to_owned(),
+                        ),
+                    ]),
                     expires_at_ms: 1,
                 },
             }),

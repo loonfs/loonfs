@@ -338,12 +338,19 @@ The response includes only a short-lived transfer capability, never raw object-s
       "kind": "presigned_url",
       "method": "PUT",
       "url": "https://...",
-      "headers": { "if-none-match": "*" },
+      "headers": {
+        "if-none-match": "*",
+        "x-amz-checksum-sha256": "..."
+      },
       "expires_at_ms": 1780000000000
     }
   }
 }
 ```
+
+The signed headers are part of the transfer capability. `if-none-match: *`
+keeps the immutable object create-only, and `x-amz-checksum-sha256` binds the
+object-store write to the SHA-256 digest in `content_ref`.
 
 After the client uploads bytes to the presigned URL, it calls complete with the same `content_ref`. Completion validates that the durable object exists and matches before the upload session can be committed.
 

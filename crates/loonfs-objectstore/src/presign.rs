@@ -415,10 +415,10 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: "content-stores/cs/blobs/sha256/ab/cd/digest",
-                    required_headers: BTreeMap::from([(
-                        "if-none-match".to_owned(),
-                        "*".to_owned(),
-                    )]),
+                    required_headers: BTreeMap::from([
+                        ("if-none-match".to_owned(), "*".to_owned()),
+                        ("x-amz-checksum-sha256".to_owned(), "checksum".to_owned()),
+                    ]),
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -430,12 +430,19 @@ mod tests {
             signed.headers.get("if-none-match").map(String::as_str),
             Some("*")
         );
+        assert_eq!(
+            signed
+                .headers
+                .get("x-amz-checksum-sha256")
+                .map(String::as_str),
+            Some("checksum")
+        );
         assert!(signed
             .url
             .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
         assert!(signed
             .url
-            .contains("X-Amz-SignedHeaders=host%3Bif-none-match"));
+            .contains("X-Amz-SignedHeaders=host%3Bif-none-match%3Bx-amz-checksum-sha256"));
         assert!(!signed.url.contains("secret"));
     }
 }
