@@ -27,9 +27,7 @@ use loonfs_api::{
     RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_objectstore::{
-    presign::{
-        ObjectTransferIssuer, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
-    },
+    presign::{ObjectTransferIssuer, PresignedPutRequest},
     ObjectStoreError,
 };
 use std::ffi::OsString;
@@ -74,19 +72,33 @@ struct DeleteNamespaceQuery {
 }
 
 pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
-    let store = Arc::new(config.object_store()?) as SharedStore;
-    app_with_store(config, store)
+    let store = config.object_store()?;
+    let transfer_issuer = store.transfer_issuer();
+    let store = Arc::new(store) as SharedStore;
+    app_with_store_and_transfer_issuer(config, store, transfer_issuer)
 }
 
+#[cfg(test)]
 fn app_with_store(config: ServerConfig, store: SharedStore) -> Result<Router, ServerConfigError> {
-    let fs = Arc::new(build_fs(&config, store)?);
-    Ok(app_with_fs(config, fs))
+    app_with_store_and_transfer_issuer(config, store, None)
 }
 
-fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
+fn app_with_store_and_transfer_issuer(
+    config: ServerConfig,
+    store: SharedStore,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+) -> Result<Router, ServerConfigError> {
+    let fs = Arc::new(build_fs(&config, store)?);
+    Ok(app_with_fs(config, fs, transfer_issuer))
+}
+
+fn app_with_fs(
+    config: ServerConfig,
+    fs: Arc<Fs>,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+) -> Router {
     let config = Arc::new(config);
     let publisher = PublisherRegistry::new(fs.clone());
-    let transfer_issuer = presigned_transfer_issuer(config.as_ref());
     let state = AppState {
         config,
         fs,
@@ -673,54 +685,6 @@ fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
 fn direct_put_presign_time() -> SystemTime {
     // Issuing a short-lived transfer capability is an explicit wall-clock boundary.
     SystemTime::now()
-}
-
-fn presigned_transfer_issuer(config: &ServerConfig) -> Option<Arc<dyn ObjectTransferIssuer>> {
-    match &config.store {
-        StoreConfig::LocalFs { .. } => None,
-        StoreConfig::AwsS3 {
-            bucket,
-            region,
-            endpoint_url,
-            access_key_id,
-            secret_access_key,
-            session_token,
-            key_prefix,
-            force_path_style,
-        } => Some(Arc::new(
-            S3CompatiblePresigner::new(S3PresignerConfig {
-                bucket: bucket.clone(),
-                region: region.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                session_token: session_token.clone(),
-                key_prefix: key_prefix.clone(),
-                force_path_style: force_path_style.unwrap_or(false),
-            })
-            .expect("validated server config constructs S3 presigner"),
-        )),
-        StoreConfig::CloudflareR2 {
-            bucket,
-            endpoint_url,
-            access_key_id,
-            secret_access_key,
-            key_prefix,
-            ..
-        } => Some(Arc::new(
-            S3CompatiblePresigner::new(S3PresignerConfig {
-                bucket: bucket.clone(),
-                region: "auto".to_owned(),
-                endpoint_url: Some(endpoint_url.clone()),
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                session_token: None,
-                key_prefix: key_prefix.clone(),
-                force_path_style: false,
-            })
-            .expect("validated server config constructs R2 presigner"),
-        )),
-    }
 }
 
 async fn upload_content_handler(
