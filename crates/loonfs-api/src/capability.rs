@@ -18,6 +18,8 @@ pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
 pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 /// Gates namespace deletion.
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
+/// Gates upload sessions that are completed from object-store writes done by the caller.
+pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 
 /// A deployment's self-description (API spec, "Capability discovery").
 ///

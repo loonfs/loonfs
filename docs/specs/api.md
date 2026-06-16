@@ -74,7 +74,8 @@ therefore identical for both backends.
     "core.namespaces.list": true,
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
-    "core.namespaces.delete": true
+    "core.namespaces.delete": true,
+    "core.uploads.direct_put": true
   },
   "limits": {}
 }
@@ -111,6 +112,7 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.uploads.direct_put` | Starting `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The caller writes bytes to the returned canonical content object key, then completes the upload session with the matching `content_ref`. |
 
 `admin/v0` currently has required ops only and no feature keys. `query.*` and
 `acl.*` keys are unregistered until their planes materialize.
@@ -309,6 +311,8 @@ A representative v0 binding is shown below.
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile; everything else
 shown belongs to `core/v0`.
+
+For `direct_put`, `POST /v0/namespaces/{ns}/uploads` accepts `{"mode":"direct_put","content_ref":...}` and returns a `direct_put.object_key`. The client writes the exact bytes for that `content_ref` to the object store at that key, then calls complete. Completion validates the durable object before marking the upload session complete.
 
 Long-running transfers may additionally expose session resources.
 Implementations may also expose workflow helper resources, but those helpers

@@ -9,9 +9,9 @@ use http::Uri;
 use loonfs_api::{
     v0::RenameMode,
     v0::{
-        BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        UploadContentResponse,
+        BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
+        CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
     CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
@@ -328,6 +328,30 @@ impl Client {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
         self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
+    }
+
+    pub fn begin_upload_with_request(
+        &self,
+        namespace: &str,
+        request: &BeginUploadRequest,
+    ) -> Result<BeginUploadResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
+        self.request_json::<_, BeginUploadResponse>(self.agent.post(&url), Some(request))
+    }
+
+    pub fn begin_direct_put(
+        &self,
+        namespace: &str,
+        content_ref: ContentRef,
+    ) -> Result<BeginUploadResponse, ClientError> {
+        self.begin_upload_with_request(
+            namespace,
+            &BeginUploadRequest {
+                mode: Some(UploadMode::DirectPut),
+                content_ref: Some(content_ref),
+            },
+        )
     }
 
     pub fn upload_content(

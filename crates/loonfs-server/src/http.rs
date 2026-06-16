@@ -15,9 +15,9 @@ use loonfs::{
 };
 use loonfs_api::{
     v0::{
-        BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        UploadContentResponse,
+        BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
+        CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
@@ -567,12 +567,14 @@ async fn begin_upload_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
+    request: Option<Json<BeginUploadRequest>>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
+    let request = request.map(|Json(request)| request).unwrap_or_default();
     let response = state
         .fs
-        .begin_upload(&namespace_id)
+        .begin_upload_with_request(&namespace_id, request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

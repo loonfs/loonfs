@@ -30,6 +30,39 @@ pub fn default_rename_mode() -> RenameMode {
 pub enum UploadMode {
     /// The service receives bytes and writes content to object storage.
     ServiceProxied,
+    /// The caller writes bytes directly to the content object key and then
+    /// completes the LoonFS upload session with the matching content ref.
+    DirectPut,
+}
+
+impl Default for UploadMode {
+    fn default() -> Self {
+        Self::ServiceProxied
+    }
+}
+
+impl UploadMode {
+    pub fn is_service_proxied(&self) -> bool {
+        matches!(self, Self::ServiceProxied)
+    }
+}
+
+/// Request for starting an upload session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeginUploadRequest {
+    /// Requested upload transport. Absent keeps the existing service-proxied path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<UploadMode>,
+    /// Required for `direct_put` so the server can return the canonical object key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ref: Option<ContentRef>,
+}
+
+/// Object-store target for a direct_put upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectPutUpload {
+    pub content_ref: ContentRef,
+    pub object_key: String,
 }
 
 /// Response for starting an upload session.
@@ -38,6 +71,8 @@ pub struct BeginUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
     pub mode: UploadMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_put: Option<DirectPutUpload>,
 }
 
 /// Response after uploading bytes into a session.
@@ -327,8 +362,29 @@ impl CommitPrecondition {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitDelta, CommitPrecondition};
+    use super::{BeginUploadRequest, CommitDelta, CommitPrecondition, UploadMode};
     use crate::{ChangeSeq, InodeId, InodeKind, NameKey};
+
+    #[test]
+    fn direct_put_upload_mode_serializes_as_expected() {
+        assert_eq!(
+            serde_json::to_string(&UploadMode::DirectPut).expect("serialize mode"),
+            r#""direct_put""#
+        );
+    }
+
+    #[test]
+    fn begin_upload_request_keeps_service_proxied_as_default() {
+        let request: BeginUploadRequest = serde_json::from_str("{}").expect("decode request");
+        assert_eq!(request.mode.unwrap_or_default(), UploadMode::ServiceProxied);
+
+        let encoded = serde_json::to_string(&BeginUploadRequest {
+            mode: Some(UploadMode::DirectPut),
+            content_ref: None,
+        })
+        .expect("serialize request");
+        assert_eq!(encoded, r#"{"mode":"direct_put"}"#);
+    }
 
     #[test]
     fn commit_precondition_name_key_serializes_as_plain_string() {

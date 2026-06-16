@@ -12,22 +12,22 @@ use crate::trace::{TraceMode, TraceStoreKind};
 use crate::uploads::{UploadedContentProofCache, UploadedContentProofStore};
 use crate::DEFAULT_LEASE_DURATION_MS;
 use crate::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
-    ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest,
-    CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitPrecondition,
+    CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef,
+    CopyOptions, CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions,
     DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
     NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
     RenameMode, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
-    UploadContentResponse,
+    UploadContentResponse, UploadMode,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROTOCOL_VERSION,
+    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{load_namespace_head_summary, MetadataTableCache};
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -293,6 +293,7 @@ impl Fs {
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
+                (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true),
             ]),
             limits: BTreeMap::new(),
         }
@@ -820,7 +821,36 @@ impl Fs {
 
     /// Starts a durable upload session for a namespace.
     pub async fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
-        Ok(self.namespace_engine(namespace_id).begin_upload().await?)
+        self.begin_upload_with_request(namespace_id, BeginUploadRequest::default())
+            .await
+    }
+
+    /// Starts a durable upload session with explicit transport options.
+    pub async fn begin_upload_with_request(
+        &self,
+        namespace_id: &NamespaceId,
+        request: BeginUploadRequest,
+    ) -> Result<BeginUploadResponse> {
+        Ok(self
+            .namespace_engine(namespace_id)
+            .begin_upload_with_request(request)
+            .await?)
+    }
+
+    /// Convenience wrapper for direct_put upload sessions.
+    pub async fn begin_direct_put_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+    ) -> Result<BeginUploadResponse> {
+        self.begin_upload_with_request(
+            namespace_id,
+            BeginUploadRequest {
+                mode: Some(UploadMode::DirectPut),
+                content_ref: Some(content_ref),
+            },
+        )
+        .await
     }
 
     /// Uploads whole-file content into an upload session.

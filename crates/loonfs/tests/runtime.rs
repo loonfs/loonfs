@@ -8,12 +8,12 @@ use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, CopyOptions, CreateCheckpointResponse,
-    CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    UploadContentResponse,
+    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
+    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode,
+    Fs, FsConfig, InodeId, MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult,
+    ManifestId, MoveOptions, MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::cache::load_verified_namespace_basis;
@@ -1327,6 +1327,53 @@ fn upload_flow_is_available_from_runtime() {
         .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
         .expect("repeat complete upload");
     assert_eq!(completed.content_ref, completed_again.content_ref);
+}
+
+#[test]
+fn direct_put_upload_flow_validates_durable_object_on_complete() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "direct-put-upload-test");
+    let namespace_id = namespace();
+    let bytes = b"direct uploaded";
+    let content_ref = ContentRef::whole_file_v0(bytes);
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin = block_on(fs.begin_direct_put_upload(&namespace_id, content_ref.clone()))
+        .expect("begin direct put");
+    assert_eq!(begin.mode, UploadMode::DirectPut);
+    let direct_put = begin.direct_put.expect("direct put target");
+    assert_eq!(direct_put.content_ref, content_ref);
+
+    let complete_request = CompleteUploadRequest {
+        content_ref: content_ref.clone(),
+    };
+    assert!(fs
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
+        .is_err());
+
+    let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
+    block_on(direct_store.put_if_absent(&direct_put.object_key, Bytes::copy_from_slice(bytes)))
+        .expect("write direct object");
+
+    let completed = fs
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
+        .expect("complete direct put");
+    assert_eq!(completed.content_ref, content_ref);
+
+    block_on(fs.put_file_content_ref(
+        &namespace_id,
+        "/docs/direct.txt",
+        content_ref,
+        PutFileOptions::default(),
+    ))
+    .expect("publish direct put content");
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/direct.txt")
+            .expect("read direct put file")
+            .bytes,
+        bytes
+    );
 }
 
 #[test]

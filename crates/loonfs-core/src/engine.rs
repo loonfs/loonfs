@@ -8,8 +8,8 @@ use crate::options::{
 };
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse, CompleteUploadRequest,
-    CompleteUploadResponse, UploadContentResponse,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -515,8 +515,22 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     /// Starts a durable upload session for this namespace.
     pub async fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
-        crate::protocol::begin_upload(&self.store, &self.namespace_id, &self.mutation_context())
+        self.begin_upload_with_request(BeginUploadRequest::default())
             .await
+    }
+
+    /// Starts a durable upload session with explicit transport options.
+    pub async fn begin_upload_with_request(
+        &self,
+        request: BeginUploadRequest,
+    ) -> CoreResult<BeginUploadResponse> {
+        crate::protocol::begin_upload(
+            &self.store,
+            &self.namespace_id,
+            request,
+            &self.mutation_context(),
+        )
+        .await
     }
 
     /// Uploads whole-file content into an upload session.

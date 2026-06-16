@@ -38,8 +38,10 @@ use loonfs_api::wire::wal::{
     WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, v0::CommitOpResult, ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken,
-    InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo,
+    sha256_digest,
+    v0::{CommitOpResult, UploadMode},
+    ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken, InodeId, InodeKind, ManifestId,
+    NamePolicy, NamespaceId, RevisionNo,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -550,6 +552,8 @@ fn control_objects_match_golden_bytes() {
         UploadSessionState {
             namespace_id: namespace_id(),
             upload_id: "up_0123456789abcdef0123456789abcdef".to_owned(),
+            mode: UploadMode::ServiceProxied,
+            direct_put_content_ref: None,
             staged_content_ref: Some(sample_content_ref()),
             completed: Some(CompletedUpload {
                 content_ref: sample_content_ref(),
