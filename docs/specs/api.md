@@ -325,7 +325,7 @@ For `direct_put`, the client requests a presigned upload capability:
 }
 ```
 
-The response includes only a short-lived transfer capability, never raw object-store credentials or a caller-managed object key:
+The response includes only a short-lived transfer capability, never raw object-store credentials or a caller-managed object key. Required headers are provider-issued and must be echoed by the client; for example, an S3-compatible deployment may return:
 
 ```json
 {
@@ -348,9 +348,11 @@ The response includes only a short-lived transfer capability, never raw object-s
 }
 ```
 
-The signed headers are part of the transfer capability. `if-none-match: *`
-keeps the immutable object create-only, and `x-amz-checksum-sha256` binds the
-object-store write to the SHA-256 digest in `content_ref`.
+The signed headers are part of the transfer capability. In the S3-compatible
+example, `if-none-match: *` keeps the immutable object create-only, and
+`x-amz-checksum-sha256` binds the object-store write to the SHA-256 digest in
+`content_ref`. Other providers may use different headers or decline
+`direct_put` support.
 
 After the client uploads bytes to the presigned URL, it calls complete with the same `content_ref`. Completion validates that the durable object exists and matches before the upload session can be committed.
 

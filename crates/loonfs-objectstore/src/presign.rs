@@ -1,10 +1,14 @@
 use crate::ObjectStoreError;
+use base64::Engine as _;
+use loonfs_api::{ContentRef, ContentRefKind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SHA256_BLOCK_BYTES: usize = 64;
+const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
+const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3PresignerConfig {
@@ -21,7 +25,7 @@ pub struct S3PresignerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresignedPutRequest<'a> {
     pub object_key: &'a str,
-    pub required_headers: BTreeMap<String, String>,
+    pub content_ref: &'a ContentRef,
     pub expires_in: Duration,
 }
 
@@ -142,12 +146,13 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         }
 
         let endpoint = self.endpoint(request.object_key)?;
+        let required_headers = s3_direct_put_required_headers(request.content_ref)?;
         let (short_date, amz_date) = aws_dates(now)?;
         let credential_scope = format!("{}/{}/s3/aws4_request", short_date, self.config.region);
         let credential = format!("{}/{}", self.config.access_key_id, credential_scope);
 
         let mut headers_to_sign = BTreeMap::from([("host".to_owned(), endpoint.host.clone())]);
-        for (name, value) in &request.required_headers {
+        for (name, value) in &required_headers {
             headers_to_sign.insert(name.to_ascii_lowercase(), normalize_header_value(value));
         }
         let signed_headers = headers_to_sign
@@ -199,10 +204,61 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         Ok(PresignedUrl {
             method: "PUT".to_owned(),
             url,
-            headers: request.required_headers,
+            headers: required_headers,
             expires_at_ms,
         })
     }
+}
+
+fn s3_direct_put_required_headers(
+    content_ref: &ContentRef,
+) -> Result<BTreeMap<String, String>, ObjectStoreError> {
+    Ok(BTreeMap::from([
+        (S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned()),
+        (
+            S3_SHA256_CHECKSUM_HEADER.to_owned(),
+            s3_sha256_checksum_header(content_ref)?,
+        ),
+    ]))
+}
+
+fn s3_sha256_checksum_header(content_ref: &ContentRef) -> Result<String, ObjectStoreError> {
+    if content_ref.kind != ContentRefKind::WholeFileV0 {
+        return Err(invalid_direct_put_content(
+            "direct_put only supports whole_file_v0 content refs",
+        ));
+    }
+
+    let digest_hex = content_ref.digest.strip_prefix("sha256:").ok_or_else(|| {
+        invalid_direct_put_content("direct_put content_ref digest must use sha256")
+    })?;
+    if digest_hex.len() != 64 {
+        return Err(invalid_direct_put_content(
+            "direct_put content_ref sha256 digest must be 64 hex characters",
+        ));
+    }
+    if !digest_hex
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_direct_put_content(
+            "direct_put content_ref sha256 digest must be lowercase hex",
+        ));
+    }
+
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        let start = index * 2;
+        *byte = u8::from_str_radix(&digest_hex[start..start + 2], 16).map_err(|_| {
+            invalid_direct_put_content("direct_put content_ref sha256 digest must be lowercase hex")
+        })?;
+    }
+
+    Ok(base64::engine::general_purpose::STANDARD.encode(digest))
+}
+
+fn invalid_direct_put_content(message: &str) -> ObjectStoreError {
+    ObjectStoreError::InvalidContentRef(message.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,7 +450,8 @@ mod tests {
     use super::{
         ObjectTransferIssuer, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
     };
-    use std::collections::BTreeMap;
+    use crate::ObjectStoreError;
+    use loonfs_api::{ContentRef, ContentRefKind};
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -415,10 +472,7 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: "content-stores/cs/blobs/sha256/ab/cd/digest",
-                    required_headers: BTreeMap::from([
-                        ("if-none-match".to_owned(), "*".to_owned()),
-                        ("x-amz-checksum-sha256".to_owned(), "checksum".to_owned()),
-                    ]),
+                    content_ref: &ContentRef::whole_file_v0(b"hello"),
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -435,7 +489,7 @@ mod tests {
                 .headers
                 .get("x-amz-checksum-sha256")
                 .map(String::as_str),
-            Some("checksum")
+            Some("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=")
         );
         assert!(signed
             .url
@@ -444,5 +498,39 @@ mod tests {
             .url
             .contains("X-Amz-SignedHeaders=host%3Bif-none-match%3Bx-amz-checksum-sha256"));
         assert!(!signed.url.contains("secret"));
+    }
+
+    #[test]
+    fn presigned_put_rejects_content_ref_without_s3_checksum_header() {
+        let signer = S3CompatiblePresigner::new(S3PresignerConfig {
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            access_key_id: "access".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            session_token: None,
+            key_prefix: None,
+            force_path_style: false,
+        })
+        .expect("signer");
+        let content_ref = ContentRef {
+            kind: ContentRefKind::Unsupported("future_kind".to_owned()),
+            digest: "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                .to_owned(),
+            size_bytes: 5,
+        };
+
+        let error = signer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: "content-stores/cs/blobs/sha256/2c/f2/digest",
+                    content_ref: &content_ref,
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .expect_err("unsupported content ref");
+
+        assert!(matches!(error, ObjectStoreError::InvalidContentRef(_)));
     }
 }

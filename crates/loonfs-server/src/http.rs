@@ -6,7 +6,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use base64::Engine as _;
 use loonfs::publish::PathMutationIntent;
 use loonfs::{
     payload_class, BootstrapNamespaceError, ChangeSeq, CoreError, CreateNamespaceOptions,
@@ -21,16 +20,18 @@ use loonfs_api::{
         CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
         UploadContentResponse, UploadMode,
     },
-    AdvanceRetentionResponse, ApiError, ContentRef, ContentRefKind, CreateCheckpointResponse,
-    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId,
-    ListFileRevisionsResponse, ListNamespacesResponse, NamespaceId, NamespaceIdValidationError,
-    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
+    FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
+    ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
+    RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
-use loonfs_objectstore::presign::{
-    ObjectTransferIssuer, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
+use loonfs_objectstore::{
+    presign::{
+        ObjectTransferIssuer, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
+    },
+    ObjectStoreError,
 };
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,7 +41,6 @@ use tracing::Instrument;
 type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 const DIRECT_PUT_URL_TTL: Duration = Duration::from_secs(15 * 60);
-const DIRECT_PUT_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
 #[derive(Clone)]
 struct AppState {
@@ -627,23 +627,16 @@ async fn begin_direct_put_upload(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let content_ref = prepared.target.content_ref;
-    let required_headers = direct_put_required_headers(&content_ref)?;
     let signed = issuer
         .presign_put(
             PresignedPutRequest {
                 object_key: &prepared.target.object_key,
-                required_headers,
+                content_ref: &content_ref,
                 expires_in: DIRECT_PUT_URL_TTL,
             },
             direct_put_presign_time(),
         )
-        .map_err(|err| {
-            ApiResponseError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::ServerError,
-                &err.to_string(),
-            )
-        })?;
+        .map_err(direct_put_issuer_error)?;
 
     Ok(Json(BeginUploadResponse {
         namespace_id: prepared.namespace_id,
@@ -661,59 +654,19 @@ async fn begin_direct_put_upload(
     }))
 }
 
-fn direct_put_required_headers(
-    content_ref: &ContentRef,
-) -> Result<BTreeMap<String, String>, ApiResponseError> {
-    Ok(BTreeMap::from([
-        ("if-none-match".to_owned(), "*".to_owned()),
-        (
-            DIRECT_PUT_CHECKSUM_HEADER.to_owned(),
-            direct_put_sha256_checksum_header(content_ref)?,
+fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
+    match error {
+        ObjectStoreError::InvalidContentRef(message) => ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidUploadContent,
+            &message,
         ),
-    ]))
-}
-
-fn direct_put_sha256_checksum_header(content_ref: &ContentRef) -> Result<String, ApiResponseError> {
-    if content_ref.kind != ContentRefKind::WholeFileV0 {
-        return Err(invalid_direct_put_content(
-            "direct_put only supports whole_file_v0 content refs",
-        ));
+        error => ApiResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::ServerError,
+            &error.to_string(),
+        ),
     }
-
-    let digest_hex = content_ref.digest.strip_prefix("sha256:").ok_or_else(|| {
-        invalid_direct_put_content("direct_put content_ref digest must use sha256")
-    })?;
-    if digest_hex.len() != 64 {
-        return Err(invalid_direct_put_content(
-            "direct_put content_ref sha256 digest must be 64 hex characters",
-        ));
-    }
-    if !digest_hex
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(invalid_direct_put_content(
-            "direct_put content_ref sha256 digest must be lowercase hex",
-        ));
-    }
-
-    let mut digest = [0_u8; 32];
-    for (index, byte) in digest.iter_mut().enumerate() {
-        let start = index * 2;
-        *byte = u8::from_str_radix(&digest_hex[start..start + 2], 16).map_err(|_| {
-            invalid_direct_put_content("direct_put content_ref sha256 digest must be lowercase hex")
-        })?;
-    }
-
-    Ok(base64::engine::general_purpose::STANDARD.encode(digest))
-}
-
-fn invalid_direct_put_content(message: &str) -> ApiResponseError {
-    ApiResponseError::new(
-        StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidUploadContent,
-        message,
-    )
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -1148,10 +1101,7 @@ mod tests {
         );
     }
 
-    use super::{
-        app_with_store, build_fs_with_metrics_jsonl_path, direct_put_required_headers,
-        direct_put_sha256_checksum_header, SharedStore, DIRECT_PUT_CHECKSUM_HEADER,
-    };
+    use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
     use super::{status_for_core_error_code, ErrorCode};
     use crate::config::RuntimeCacheConfigOverrides;
     use crate::{ServerConfig, StoreConfig};
@@ -1162,7 +1112,7 @@ mod tests {
         CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions, RuntimeCacheConfig,
         TraceMode, TraceStoreKind,
     };
-    use loonfs_api::{ChangeSeq, CommitId, ContentRef, ContentRefKind, NamespaceId};
+    use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
     use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
     use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
     use loonfs_objectstore::fs::LocalFsStore;
@@ -1175,51 +1125,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
-
-    #[test]
-    fn direct_put_required_headers_encode_sha256_checksum() {
-        let content_ref = ContentRef::whole_file_v0(b"hello");
-
-        let headers = direct_put_required_headers(&content_ref)
-            .unwrap_or_else(|error| panic!("direct put headers: {}", error.body.message));
-
-        assert_eq!(headers.get("if-none-match").map(String::as_str), Some("*"));
-        assert_eq!(
-            headers.get(DIRECT_PUT_CHECKSUM_HEADER).map(String::as_str),
-            Some("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=")
-        );
-    }
-
-    #[test]
-    fn direct_put_checksum_rejects_malformed_content_ref() {
-        let bad_kind = ContentRef {
-            kind: ContentRefKind::Unsupported("future_kind".to_owned()),
-            digest: "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                .to_owned(),
-            size_bytes: 5,
-        };
-        assert_eq!(
-            direct_put_sha256_checksum_header(&bad_kind)
-                .expect_err("unsupported content kind")
-                .body
-                .code,
-            ErrorCode::InvalidUploadContent.as_str()
-        );
-
-        let uppercase_digest = ContentRef {
-            kind: ContentRefKind::WholeFileV0,
-            digest: "sha256:2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"
-                .to_owned(),
-            size_bytes: 5,
-        };
-        assert_eq!(
-            direct_put_sha256_checksum_header(&uppercase_digest)
-                .expect_err("uppercase digest")
-                .body
-                .code,
-            ErrorCode::InvalidUploadContent.as_str()
-        );
-    }
 
     #[derive(Debug)]
     struct StaleHeadOnceStore {

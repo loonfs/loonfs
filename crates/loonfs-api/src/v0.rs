@@ -429,7 +429,7 @@ mod tests {
                     headers: BTreeMap::from([
                         ("if-none-match".to_owned(), "*".to_owned()),
                         (
-                            "x-amz-checksum-sha256".to_owned(),
+                            "x-provider-checksum".to_owned(),
                             "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=".to_owned(),
                         ),
                     ]),

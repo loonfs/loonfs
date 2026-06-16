@@ -60,6 +60,8 @@ pub enum ObjectStoreError {
     NotFound,
     #[error("invalid object key: {0}")]
     InvalidKey(String),
+    #[error("invalid content ref: {0}")]
+    InvalidContentRef(String),
     #[error("invalid byte range")]
     InvalidRange,
     #[error("precondition failed")]
