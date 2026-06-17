@@ -1319,6 +1319,7 @@ dependencies = [
  "futures",
  "http",
  "http-body-util",
+ "httparse",
  "humantime",
  "hyper",
  "itertools",
