@@ -54,6 +54,10 @@ impl ProviderObjectStore {
         Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey(err.to_string()))
     }
 
+    pub(crate) fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.to_path(key).map(|_| ())
+    }
+
     fn list_path(&self, prefix: &str) -> Result<Option<Path>, ObjectStoreError> {
         let scoped = scope_list_prefix(self.key_prefix.as_deref(), prefix)?;
         if scoped.is_empty() {
@@ -187,6 +191,7 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         let checksum_sha256 = self.sha256_checksum_metadata.then(|| sha256_digest(&bytes));
         let size_bytes = bytes.len() as u64;
+        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
         let options = PutOptions {
             mode: map_put_mode(mode),
             ..Default::default()
@@ -198,6 +203,9 @@ impl ObjectStore for ProviderObjectStore {
             .await
         {
             Ok(result) => Ok(Self::from_put_result(result, size_bytes, checksum_sha256)),
+            Err(err) if compare_and_swap && provider_not_found(&err) => {
+                Err(ObjectStoreError::PreconditionFailed)
+            }
             Err(err) => Err(map_provider_error(err)),
         }
     }
@@ -354,6 +362,16 @@ mod tests {
         assert!(matches!(
             store
                 .compare_and_swap(key, "stale", Bytes::from_static(b"two"))
+                .await,
+            Err(ObjectStoreError::PreconditionFailed)
+        ));
+        assert!(matches!(
+            store
+                .compare_and_swap(
+                    "namespaces/demo/control/missing-head.json",
+                    "missing",
+                    Bytes::from_static(b"two")
+                )
                 .await,
             Err(ObjectStoreError::PreconditionFailed)
         ));
