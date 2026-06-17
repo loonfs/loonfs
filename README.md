@@ -1,12 +1,17 @@
 ![LoonFS Logo](assets/loonfs-wordmark-black.svg)
 
-LoonFS is a durable filesystem built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives a number of valuable benefits including virtually unlimited storage, exceptional durability, and a high throughput ceiling. It is designed for many writers and readers and can be used across sessions, agents, and teams as an embedded engine or through a remote server connection.
+LoonFS is a durable filesystem built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives virtually unlimited storage and a high throughput ceiling. It is designed for use cases with many writers and readers, and can be used across sessions, agents, and teams as an embedded engine or through a remote server connection.
 
 ## Download
 
 You can use the [install script](https://github.com/loonfs/loonfs/blob/main/scripts/install-loon.sh) by running
 ```bash
 curl -fsSL https://install.loonfs.com | sh
+```
+
+If you use Homebrew as your package manager, you can also install it by running
+```bash
+brew install loonfs/tap/loon
 ```
 
 Or compile directly from source by checking out this repository and running
@@ -50,11 +55,10 @@ Visit loonfs.com/docs to learn more.
 
 ## Design philosophy
 
-LoonFS is built around a correctness-first durable protocol. The object store is the source of truth; the runtime, clients, workers, and indexes exist to publish, read, compact, or derive from that truth.
+LoonFS is built around a correctness-first protocol where the object store is the only source of truth.
 
-- **Correctness is the primary feature.** Prefer protocols with fewer valid states, explicit invariants, named failure modes, and deterministic tests.
+- **Correctness is the primary feature.** Favor designs with fewer valid states, explicit invariants, named failure modes, and deterministic tests.
 
 - **Durability and visibility are separate.** A write is not successful merely because bytes or WAL records exist. LoonFS distinguishes durable content, durable metadata, and visible committed state, with the namespace head serving as the visibility boundary.
 
-- **Serialize semantics, scale the rest.** Mutations are serialized in a transactional core which creates the namespace history. The system scales by separating data movement, metadata publication, background maintenance, and derived indexing.
-
+- **Serialize commits, scale the rest.** Every change runs through one transactional core with an ordered WAL. LoonFS keeps expensive work off the write path so it can scale independently: moving content bytes, publishing metadata to readers, background maintenance, and rebuilding derived indexes.
