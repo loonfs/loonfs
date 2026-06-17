@@ -43,15 +43,15 @@ Visit loonfs.com/docs to learn more.
 
 ## Core concepts
 
-- **Object storage is the only durable substrate.** LoonFS stores durable truth in object storage: immutable file content, immutable metadata history, materialized manifests/checkpoints, and a small number of mutable control objects. Caches, queues, workers, and local state are rebuildable from that substrate.
+- **Object storage is the only durable substrate.** LoonFS stores durable truth in object storage: immutable file content, immutable metadata history, materialized manifests/checkpoints, and a small number of mutable control objects. Caches, queues, workers, and local state are safely rebuildable from the object store.
 
 - **Namespaces are independent filesystem histories.** A namespace is the unit of visibility, metadata history, recovery, retention, and forking. 
 
-- **Inodes are identity, paths are views.** The durable identity of a filesystem item is `(namespace_id, inode_id)`. Paths are "views" derived from directory bindings and may change over time without changing the item’s identity.
+- **Inodes are identity, paths are views.** The identity of a filesystem item is `(namespace_id, inode_id)`. Paths are "views" derived from directory bindings and may change over time without changing the item’s identity.
 
-- **Commits are the unit of transactional change.** File bytes become durable before metadata can reference them. Metadata changes are recorded as logical commits, and a commit becomes visible only when the namespace head durably advances to include it.
+- **Commits are the unit of transactional change.** File bytes are written to object storage before metadata can reference them. Metadata changes are recorded as logical commits, and a commit becomes visible only when the namespace head durably advances to include it.
 
-- **Materialization and background work are derived, not authoritative.** Manifests, checkpoints, indexes, compaction, retention advancement, and garbage collection make the system faster, cheaper, or easier to recover, but they do not create a second source of filesystem truth.
+- **Materialization and background work are derived, not authoritative.** Manifests, checkpoints, indexes, compaction, retention advancement, and garbage collection make the system faster, cheaper, or easier to recover, but they do not create a second source of truth.
 
 ## Design philosophy
 
