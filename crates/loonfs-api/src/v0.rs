@@ -25,19 +25,14 @@ pub fn default_rename_mode() -> RenameMode {
 }
 
 /// Upload transport mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UploadMode {
     /// The service receives bytes and writes content to object storage.
+    #[default]
     ServiceProxied,
     /// The service mints a short-lived presigned PUT URL for the content object.
     DirectPut,
-}
-
-impl Default for UploadMode {
-    fn default() -> Self {
-        Self::ServiceProxied
-    }
 }
 
 impl UploadMode {
