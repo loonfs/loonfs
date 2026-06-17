@@ -1,6 +1,7 @@
 use crate::error::CliError;
 use http::Uri;
 use loonfs_api::NamespaceId;
+use loonfs_objectstore::abs::AbsStoreConfig;
 use loonfs_objectstore::gcs::GcsStoreConfig;
 use loonfs_objectstore::r2::R2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
@@ -75,6 +76,13 @@ pub(crate) enum StoreConfig {
         endpoint_url: String,
         access_key_id: String,
         secret_access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+    },
+    AzureAbs {
+        account_name: String,
+        container_name: String,
+        access_key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
@@ -221,6 +229,7 @@ impl StoreConfig {
             StoreConfig::LocalFs { .. } => "local-fs",
             StoreConfig::AwsS3 { .. } => "aws-s3",
             StoreConfig::CloudflareR2 { .. } => "cloudflare-r2",
+            StoreConfig::AzureAbs { .. } => "azure-abs",
             StoreConfig::GcpGcs { .. } => "gcp-gcs",
         }
     }
@@ -264,6 +273,18 @@ impl StoreConfig {
                 endpoint_url: endpoint_url.clone(),
                 access_key_id: access_key_id.clone(),
                 secret_access_key: secret_access_key.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                key_prefix,
+            } => ConfiguredObjectStore::azure_abs(AbsStoreConfig {
+                account_name: account_name.clone(),
+                container_name: container_name.clone(),
+                access_key: access_key.clone(),
                 key_prefix: key_prefix.clone(),
             })
             .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
@@ -317,6 +338,16 @@ impl StoreConfig {
                     secret_access_key,
                 )
             }
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                ..
+            } => {
+                require_non_empty(&store_field(profile_name, "account_name"), account_name)?;
+                require_non_empty(&store_field(profile_name, "container_name"), container_name)?;
+                require_non_empty(&store_field(profile_name, "access_key"), access_key)
+            }
             StoreConfig::GcpGcs {
                 bucket,
                 service_account_key_path,
@@ -363,6 +394,17 @@ impl StoreConfig {
                 endpoint_url: endpoint_url.clone(),
                 access_key_id: "REDACTED".to_owned(),
                 secret_access_key: "REDACTED".to_owned(),
+                key_prefix: key_prefix.clone(),
+            },
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                key_prefix,
+                ..
+            } => StoreConfig::AzureAbs {
+                account_name: account_name.clone(),
+                container_name: container_name.clone(),
+                access_key: "REDACTED".to_owned(),
                 key_prefix: key_prefix.clone(),
             },
             StoreConfig::GcpGcs { .. } => self.clone(),
