@@ -1,4 +1,5 @@
 use crate::config::{ServerConfig, ServerConfigError, StoreConfig};
+use crate::content_tokens::{mint_content_token, verify_content_token, ContentTokenError};
 use crate::publisher::PublisherRegistry;
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -18,7 +19,7 @@ use loonfs_api::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
         CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
-        UploadContentResponse, UploadMode,
+        UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
@@ -512,6 +513,7 @@ async fn filesystem_operation(
     let namespace_id = parse_namespace_id(namespace)?;
     let FilesystemOperationRequest {
         commit_id,
+        content_tokens,
         operation,
     } = request;
     let put_payload_class = match &operation {
@@ -529,12 +531,15 @@ async fn filesystem_operation(
             path,
             content_ref,
             behavior,
-        } => PathMutationIntent::PutFile {
-            commit_id,
-            absolute_path: path,
-            content_ref,
-            behavior: map_filesystem_put_behavior(behavior),
-        },
+        } => {
+            require_content_token(&state.config, &namespace_id, &content_ref, &content_tokens)?;
+            PathMutationIntent::PutFile {
+                commit_id,
+                absolute_path: path,
+                content_ref,
+                behavior: map_filesystem_put_behavior(behavior),
+            }
+        }
         FilesystemOperation::DeletePath { path } => PathMutationIntent::DeletePath {
             commit_id,
             absolute_path: path,
@@ -687,6 +692,40 @@ fn direct_put_presign_time() -> SystemTime {
     SystemTime::now()
 }
 
+fn require_content_token(
+    config: &ServerConfig,
+    namespace_id: &NamespaceId,
+    content_ref: &loonfs::ContentRef,
+    tokens: &[ValidatedContentToken],
+) -> Result<(), ApiResponseError> {
+    let Some(token) = tokens
+        .iter()
+        .find(|token| token.content_ref == *content_ref)
+    else {
+        return Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidUploadContent,
+            "missing validated content token",
+        ));
+    };
+    verify_content_token(
+        config.content_token_secret(),
+        namespace_id,
+        content_ref,
+        &token.token,
+        direct_put_presign_time(),
+    )
+    .map_err(content_token_error)
+}
+
+fn content_token_error(error: ContentTokenError) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidUploadContent,
+        &error.to_string(),
+    )
+}
+
 async fn upload_content_handler(
     State(state): State<AppState>,
     AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
@@ -712,11 +751,20 @@ async fn complete_upload_handler(
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = state
+    let mut response = state
         .fs
         .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    response.validated_content_token = Some(
+        mint_content_token(
+            state.config.content_token_secret(),
+            &namespace_id,
+            &response.content_ref,
+            direct_put_presign_time(),
+        )
+        .map_err(content_token_error)?,
+    );
     Ok(Json(response))
 }
 
@@ -1576,6 +1624,7 @@ mod tests {
         ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: Some("test-token".to_owned()),
+            content_token_secret: Some("test-content-token-secret".to_owned()),
             writer_id: writer_id.to_owned(),
             writer_version: format!("{writer_id}/0.1.0"),
             lease_duration_ms: 60_000,

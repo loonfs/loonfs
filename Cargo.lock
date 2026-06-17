@@ -1186,6 +1186,7 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "futures",
@@ -1197,6 +1198,7 @@ dependencies = [
  "loonfs-objectstore",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

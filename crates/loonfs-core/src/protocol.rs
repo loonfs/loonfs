@@ -362,6 +362,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
                     content_ref: completed.content_ref.clone(),
+                    validated_content_token: None,
                 });
             }
             return Err(CoreError::UploadAlreadyCompleted {
@@ -409,6 +410,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
                     content_ref: request.content_ref.clone(),
+                    validated_content_token: None,
                 });
             }
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
@@ -599,17 +601,23 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
             };
             let request = candidate_request.request;
             let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
-            if let Err(error) = validate_commit_content_references(
-                store,
-                &basis.content_store_id,
-                &request,
-                &resolved_restore_content_refs,
-                &mut content_validation,
-            )
-            .await
-            {
-                outcomes[index] = Some(Err(error));
-                continue;
+            // Path-oriented writes have already admitted any new external content
+            // before entering the serialized publisher. Copy/restore content refs
+            // come from namespace history. Keep the object-store validation only
+            // for lower-level explicit commits that bypass the path API.
+            if matches!(candidate, NamespaceMutationCandidate::Commit(_)) {
+                if let Err(error) = validate_commit_content_references(
+                    store,
+                    &basis.content_store_id,
+                    &request,
+                    &resolved_restore_content_refs,
+                    &mut content_validation,
+                )
+                .await
+                {
+                    outcomes[index] = Some(Err(error));
+                    continue;
+                }
             }
             let plan = {
                 let _span =

@@ -1155,6 +1155,7 @@ mod tests {
         Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
+            content_token_secret: None,
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
@@ -1637,6 +1638,7 @@ mod tests {
         let config = Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
+            content_token_secret: None,
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
@@ -1693,6 +1695,7 @@ mod tests {
         let config = Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
+            content_token_secret: None,
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,

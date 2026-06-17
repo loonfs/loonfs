@@ -1,6 +1,6 @@
 use crate::{
-    v0::RenameMode, ChangeSeq, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId,
-    RevisionNo,
+    v0::{RenameMode, ValidatedContentToken},
+    ChangeSeq, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +143,9 @@ pub enum FilesystemOperation {
 pub struct FilesystemOperationRequest {
     /// Caller-supplied idempotency key for this operation.
     pub commit_id: CommitId,
+    /// Proofs for any new external content refs introduced by this operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_tokens: Vec<ValidatedContentToken>,
     /// Operation to apply.
     pub operation: FilesystemOperation,
 }

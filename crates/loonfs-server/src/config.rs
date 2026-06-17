@@ -15,6 +15,7 @@ use thiserror::Error;
 pub struct ServerConfig {
     pub bind: String,
     pub auth_token: Option<String>,
+    pub content_token_secret: Option<String>,
     pub writer_id: String,
     pub writer_version: String,
     pub lease_duration_ms: u64,
@@ -87,6 +88,16 @@ pub enum ServerConfigError {
 }
 
 impl ServerConfig {
+    pub(crate) fn content_token_secret(&self) -> &str {
+        self.content_token_secret
+            .as_deref()
+            .or(self.auth_token.as_deref())
+            // Development/local deployments without auth still need deterministic
+            // local token signing. Authenticated servers should set auth_token or
+            // content_token_secret.
+            .unwrap_or(&self.writer_id)
+    }
+
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
         let mut config = RuntimeCacheConfig::default();
         if let Some(value) = self.runtime_cache.basis_cache_enabled {
@@ -216,6 +227,14 @@ impl ServerConfig {
             if token.trim().is_empty() {
                 return Err(ServerConfigError::InvalidField {
                     field: "auth_token",
+                    reason: "must not be empty".to_owned(),
+                });
+            }
+        }
+        if let Some(secret) = &self.content_token_secret {
+            if secret.trim().is_empty() {
+                return Err(ServerConfigError::InvalidField {
+                    field: "content_token_secret",
                     reason: "must not be empty".to_owned(),
                 });
             }

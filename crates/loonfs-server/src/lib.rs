@@ -6,6 +6,7 @@
 //! `loonfs` directly.
 
 mod config;
+mod content_tokens;
 mod http;
 mod publisher;
 mod trace;

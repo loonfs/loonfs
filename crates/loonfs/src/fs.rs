@@ -9,7 +9,6 @@ use crate::config::{default_writer_version, validate_config};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::uploads::{UploadedContentProofCache, UploadedContentProofStore};
 use crate::DEFAULT_LEASE_DURATION_MS;
 use crate::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
@@ -51,7 +50,6 @@ pub(crate) struct FsInner {
     pub(crate) commit_engines: Mutex<CommitEngineCache>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
-    pub(crate) uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
 }
 
@@ -192,7 +190,6 @@ impl Fs {
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
-                uploaded_content_proofs: Mutex::new(UploadedContentProofCache::default()),
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
         })
@@ -628,7 +625,7 @@ impl Fs {
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         validate_runtime_mutation_path(absolute_path)?;
-        let store = self.uploaded_content_proof_store(namespace_id);
+        let store = self.store();
         let stored = loonfs_core::content::store_bytes_as_content(&store, namespace_id, bytes)
             .await
             .map_err(RuntimeError::from);
@@ -857,9 +854,8 @@ impl Fs {
         upload_id: &str,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
-        let store = self.uploaded_content_proof_store(namespace_id);
         Ok(self
-            .namespace_engine_with_store(namespace_id, store)
+            .namespace_engine(namespace_id)
             .upload_content(upload_id, bytes)
             .await?)
     }
@@ -950,7 +946,7 @@ impl Fs {
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-        let store = self.uploaded_content_proof_store(namespace_id);
+        let store = self.store();
         if self.commit_engine_cache_enabled() {
             let engine = self.commit_engine(namespace_id);
             let publish = {
@@ -1092,17 +1088,6 @@ impl Fs {
             .lease_duration_ms(self.inner.config.lease_duration_ms)
             .build()
             .expect("validated runtime config should build namespace engine")
-    }
-
-    pub(crate) fn uploaded_content_proof_store<'a>(
-        &'a self,
-        namespace_id: &'a NamespaceId,
-    ) -> UploadedContentProofStore<'a> {
-        UploadedContentProofStore {
-            inner: self.store(),
-            namespace_id,
-            proofs: &self.inner.uploaded_content_proofs,
-        }
     }
 
     pub(crate) fn mutation_context(&self) -> MutationContext {

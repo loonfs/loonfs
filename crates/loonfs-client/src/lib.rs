@@ -12,7 +12,7 @@ use loonfs_api::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
         CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
-        UploadMode,
+        UploadMode, ValidatedContentToken,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
     CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
@@ -59,6 +59,12 @@ pub struct GetPathResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PutPathResult {
     pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedContent {
+    content_ref: ContentRef,
+    validated_content_token: ValidatedContentToken,
 }
 
 /// A path qualified by namespace.
@@ -458,7 +464,7 @@ impl Client {
         &self,
         namespace: &str,
         bytes: &[u8],
-    ) -> Result<ContentRef, ClientError> {
+    ) -> Result<StagedContent, ClientError> {
         let upload = self.begin_upload(namespace)?;
         let staged = self.upload_content(namespace, &upload.upload_id, bytes)?;
         let response = self.complete_upload(
@@ -468,7 +474,16 @@ impl Client {
                 content_ref: staged.content_ref,
             },
         )?;
-        Ok(response.content_ref)
+        let token = response.validated_content_token.ok_or_else(|| {
+            ClientError::Http("server completed upload without validated content token".to_owned())
+        })?;
+        Ok(StagedContent {
+            content_ref: response.content_ref.clone(),
+            validated_content_token: ValidatedContentToken {
+                content_ref: response.content_ref,
+                token,
+            },
+        })
     }
 
     pub fn put_file_bytes(
@@ -488,14 +503,15 @@ impl Client {
         commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
         let commit_id = parse_commit_id(commit_id)?;
-        let content_ref = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
+        let staged = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: vec![staged.validated_content_token],
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
-                    content_ref,
+                    content_ref: staged.content_ref,
                     behavior: if force {
                         FilesystemPutBehavior::ReplaceExisting
                     } else {
@@ -538,6 +554,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::CreateDir {
                     path: spec.absolute_path.clone(),
                 },
@@ -560,6 +577,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path.clone(),
                 },
@@ -593,6 +611,7 @@ impl Client {
             &from.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
@@ -628,6 +647,7 @@ impl Client {
             &from.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::CopyPath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
@@ -656,6 +676,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::RestoreRevision {
                     path: spec.absolute_path.clone(),
                     source_revision_no,

@@ -11,7 +11,6 @@ mod fs;
 mod options;
 mod time;
 mod trace;
-mod uploads;
 
 use std::sync::Arc;
 

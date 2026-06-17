@@ -1319,6 +1319,7 @@ fn test_config(
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         auth_token: Some("test-token".to_owned()),
+        content_token_secret: Some("test-content-token-secret".to_owned()),
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         lease_duration_ms,
@@ -1445,6 +1446,10 @@ fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8
     let repeated = client
         .complete_upload(namespace, &begin.upload_id, &complete_request)
         .expect("repeat complete upload");
-    assert_eq!(repeated, complete);
+    assert_eq!(repeated.namespace_id, complete.namespace_id);
+    assert_eq!(repeated.upload_id, complete.upload_id);
+    assert_eq!(repeated.content_ref, complete.content_ref);
+    assert!(complete.validated_content_token.is_some());
+    assert!(repeated.validated_content_token.is_some());
     complete.content_ref
 }

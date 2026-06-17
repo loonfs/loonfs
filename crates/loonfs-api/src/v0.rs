@@ -82,6 +82,14 @@ pub struct DirectPutUpload {
     pub access: ObjectTransferAccess,
 }
 
+/// Stateless proof that a LoonFS server already validated a content ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatedContentToken {
+    pub content_ref: ContentRef,
+    /// Opaque, server-signed token. Clients must not parse it.
+    pub token: String,
+}
+
 /// Internal server/runtime target used before the HTTP layer signs the URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectPutUploadTarget {
@@ -127,6 +135,8 @@ pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
     pub content_ref: ContentRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_content_token: Option<String>,
 }
 
 /// Explicit semantic commit request.
