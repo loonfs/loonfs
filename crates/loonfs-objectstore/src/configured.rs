@@ -1,4 +1,5 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::abs::{AbsStore, AbsStoreConfig};
 use crate::fs::LocalFsStore;
 use crate::gcs::{GcsStore, GcsStoreConfig};
 use crate::keyspace::{
@@ -17,6 +18,7 @@ pub enum ConfiguredObjectStoreKind {
     LocalFs,
     AwsS3,
     CloudflareR2,
+    AzureAbs,
     GcpGcs,
 }
 
@@ -34,6 +36,7 @@ enum ConfiguredObjectStoreInner {
     },
     AwsS3(AwsS3Store),
     CloudflareR2(R2Store),
+    AzureAbs(AbsStore),
     GcpGcs(GcsStore),
 }
 
@@ -67,6 +70,14 @@ impl ConfiguredObjectStore {
         })
     }
 
+    pub fn azure_abs(config: AbsStoreConfig) -> Result<Self, ObjectStoreError> {
+        let store = AbsStore::new(config)?;
+        Ok(Self {
+            kind: ConfiguredObjectStoreKind::AzureAbs,
+            inner: ConfiguredObjectStoreInner::AzureAbs(store),
+        })
+    }
+
     pub fn gcp_gcs(config: GcsStoreConfig) -> Result<Self, ObjectStoreError> {
         let store = GcsStore::new(config)?;
         Ok(Self {
@@ -91,6 +102,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.head(key).await,
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.head(key).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.head(key).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.head(key).await,
         }
     }
@@ -107,6 +119,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.head_with_checksum(key).await,
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.head_with_checksum(key).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.head_with_checksum(key).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.head_with_checksum(key).await,
         }
     }
@@ -120,6 +133,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.get_with_metadata(key).await,
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.get_with_metadata(key).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.get_with_metadata(key).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.get_with_metadata(key).await,
         }
     }
@@ -137,6 +151,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.get(key, range).await,
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.get(key, range).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.get(key, range).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.get(key, range).await,
         }
     }
@@ -155,6 +170,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.put(key, bytes, mode).await,
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.put(key, bytes, mode).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.put(key, bytes, mode).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.put(key, bytes, mode).await,
         }
     }
@@ -168,6 +184,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.delete(key).await,
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.delete(key).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.delete(key).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.delete(key).await,
         }
     }
@@ -201,6 +218,7 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.list_prefix_stream(prefix),
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.list_prefix_stream(prefix),
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.list_prefix_stream(prefix),
             ConfiguredObjectStoreInner::GcpGcs(store) => store.list_prefix_stream(prefix),
         }
     }
@@ -209,6 +227,7 @@ impl ObjectStore for ConfiguredObjectStore {
 #[cfg(test)]
 mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
+    use crate::abs::AbsStoreConfig;
     use crate::fs::LocalFsStore;
     use crate::gcs::GcsStoreConfig;
     use crate::keys::namespace_head;
@@ -221,6 +240,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const FAKE_ABS_ACCESS_KEY: &str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
     const FAKE_GCS_SERVICE_ACCOUNT_KEY: &str = r#"{"private_key":"private_key","private_key_id":"private_key_id","client_email":"client_email","disable_oauth":true}"#;
 
     #[tokio::test]
@@ -279,6 +299,15 @@ mod tests {
         })
         .expect("construct r2 store");
         assert_eq!(r2.kind(), ConfiguredObjectStoreKind::CloudflareR2);
+
+        let abs = ConfiguredObjectStore::azure_abs(AbsStoreConfig {
+            account_name: "account".to_owned(),
+            container_name: "container".to_owned(),
+            access_key: FAKE_ABS_ACCESS_KEY.to_owned(),
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct azure abs store");
+        assert_eq!(abs.kind(), ConfiguredObjectStoreKind::AzureAbs);
 
         let gcs_service_account_key_path =
             fake_gcs_service_account_key_file("configured-store-gcs-kind");
