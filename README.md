@@ -57,7 +57,7 @@ Visit loonfs.com/docs to learn more.
 
 LoonFS is built around a correctness-first protocol where the object store is the only source of truth.
 
-- **Correctness is the primary feature.** Favor designs with fewer valid states, explicit invariants, named failure modes, and deterministic tests.
+- **Correctness is the primary feature.** LoonFS favors designs with fewer valid states, explicit invariants, named failure modes, and deterministic tests.
 
 - **Durability and visibility are separate.** A write is not successful merely because bytes or WAL records exist. LoonFS distinguishes durable content, durable metadata, and visible committed state, with the namespace head serving as the visibility boundary.
 
