@@ -50,6 +50,9 @@ pub(super) struct CreateProfileSpec {
     session_token: Option<String>,
     force_path_style: bool,
     account_id: Option<String>,
+    account_name: Option<String>,
+    container_name: Option<String>,
+    access_key: Option<String>,
     service_account_key_path: Option<String>,
     server_url: Option<String>,
     auth_token: Option<String>,
@@ -69,6 +72,9 @@ pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec
         session_token: args.session_token,
         force_path_style: args.force_path_style,
         account_id: args.account_id,
+        account_name: args.account_name,
+        container_name: args.container_name,
+        access_key: args.access_key,
         service_account_key_path: args.service_account_key_path,
         server_url: args.server_url,
         auth_token: args.auth_token,
@@ -89,6 +95,9 @@ pub(super) fn create_profile_spec_from_create(args: ProfileCreateArgs) -> Create
         session_token: args.session_token,
         force_path_style: args.force_path_style,
         account_id: args.account_id,
+        account_name: args.account_name,
+        container_name: args.container_name,
+        access_key: args.access_key,
         service_account_key_path: args.service_account_key_path,
         server_url: args.server_url,
         auth_token: args.auth_token,
@@ -107,7 +116,7 @@ pub(super) fn build_profile_from_create_spec(
                 "unknown mode: `{other}` (expected embedded or remote)"
             )))
         }
-        None if runtime.interactive => prompt::prompt_choice("mode", &["embedded", "remote"])?,
+        None if runtime.interactive => prompt::prompt_choice("mode", &["embedded", "remote"] )?,
         None => {
             return Err(CliError::non_interactive_input_required("mode"));
         }
@@ -131,16 +140,17 @@ fn build_embedded_profile(
         Some("local-fs") => "local-fs",
         Some("aws-s3") => "aws-s3",
         Some("cloudflare-r2") => "cloudflare-r2",
+        Some("azure-abs") => "azure-abs",
         Some("gcp-gcs") => "gcp-gcs",
         Some(other) => {
             return Err(CliError::invalid_input(format!(
-            "unknown store kind: `{other}` (expected local-fs, aws-s3, cloudflare-r2, or gcp-gcs)"
-        )))
+                "unknown store kind: `{other}` (expected local-fs, aws-s3, cloudflare-r2, azure-abs, or gcp-gcs)"
+            )))
         }
         None if runtime.interactive => {
             return prompt::prompt_choice(
                 "store kind",
-                &["aws-s3", "cloudflare-r2", "gcp-gcs", "local-fs"],
+                &["aws-s3", "azure-abs", "cloudflare-r2", "gcp-gcs", "local-fs"],
             )
             .and_then(|choice| {
                 build_embedded_profile(
@@ -168,6 +178,9 @@ fn build_embedded_profile(
             reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "local-fs")?;
             reject_create_flag("session-token", spec.session_token.is_some(), "local-fs")?;
             reject_create_flag("account-id", spec.account_id.is_some(), "local-fs")?;
+            reject_create_flag("account-name", spec.account_name.is_some(), "local-fs")?;
+            reject_create_flag("container-name", spec.container_name.is_some(), "local-fs")?;
+            reject_create_flag("access-key", spec.access_key.is_some(), "local-fs")?;
             reject_create_flag(
                 "service-account-key-path",
                 spec.service_account_key_path.is_some(),
@@ -182,6 +195,9 @@ fn build_embedded_profile(
         "aws-s3" => {
             reject_create_flag("root", spec.root.is_some(), "aws-s3")?;
             reject_create_flag("account-id", spec.account_id.is_some(), "aws-s3")?;
+            reject_create_flag("account-name", spec.account_name.is_some(), "aws-s3")?;
+            reject_create_flag("container-name", spec.container_name.is_some(), "aws-s3")?;
+            reject_create_flag("access-key", spec.access_key.is_some(), "aws-s3")?;
             reject_create_flag(
                 "service-account-key-path",
                 spec.service_account_key_path.is_some(),
@@ -219,6 +235,9 @@ fn build_embedded_profile(
                 "cloudflare-r2",
             )?;
             reject_create_flag("force-path-style", spec.force_path_style, "cloudflare-r2")?;
+            reject_create_flag("account-name", spec.account_name.is_some(), "cloudflare-r2")?;
+            reject_create_flag("container-name", spec.container_name.is_some(), "cloudflare-r2")?;
+            reject_create_flag("access-key", spec.access_key.is_some(), "cloudflare-r2")?;
             reject_create_flag(
                 "service-account-key-path",
                 spec.service_account_key_path.is_some(),
@@ -245,6 +264,36 @@ fn build_embedded_profile(
                 key_prefix: spec.key_prefix,
             }
         }
+        "azure-abs" => {
+            reject_create_flag("root", spec.root.is_some(), "azure-abs")?;
+            reject_create_flag("bucket", spec.bucket.is_some(), "azure-abs")?;
+            reject_create_flag("region", spec.region.is_some(), "azure-abs")?;
+            reject_create_flag("access-key-id", spec.access_key_id.is_some(), "azure-abs")?;
+            reject_create_flag(
+                "secret-access-key",
+                spec.secret_access_key.is_some(),
+                "azure-abs",
+            )?;
+            reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "azure-abs")?;
+            reject_create_flag("session-token", spec.session_token.is_some(), "azure-abs")?;
+            reject_create_flag("account-id", spec.account_id.is_some(), "azure-abs")?;
+            reject_create_flag(
+                "service-account-key-path",
+                spec.service_account_key_path.is_some(),
+                "azure-abs",
+            )?;
+            reject_create_flag("force-path-style", spec.force_path_style, "azure-abs")?;
+            StoreConfig::AzureAbs {
+                account_name: require_or_prompt(spec.account_name.as_ref(), "account-name", runtime)?,
+                container_name: require_or_prompt(
+                    spec.container_name.as_ref(),
+                    "container-name",
+                    runtime,
+                )?,
+                access_key: require_or_prompt(spec.access_key.as_ref(), "access-key", runtime)?,
+                key_prefix: spec.key_prefix,
+            }
+        }
         "gcp-gcs" => {
             reject_create_flag("root", spec.root.is_some(), "gcp-gcs")?;
             reject_create_flag("region", spec.region.is_some(), "gcp-gcs")?;
@@ -257,6 +306,9 @@ fn build_embedded_profile(
             reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "gcp-gcs")?;
             reject_create_flag("session-token", spec.session_token.is_some(), "gcp-gcs")?;
             reject_create_flag("account-id", spec.account_id.is_some(), "gcp-gcs")?;
+            reject_create_flag("account-name", spec.account_name.is_some(), "gcp-gcs")?;
+            reject_create_flag("container-name", spec.container_name.is_some(), "gcp-gcs")?;
+            reject_create_flag("access-key", spec.access_key.is_some(), "gcp-gcs")?;
             reject_create_flag("force-path-style", spec.force_path_style, "gcp-gcs")?;
             StoreConfig::GcpGcs {
                 bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
@@ -299,6 +351,9 @@ fn build_remote_profile(
     reject_create_flag("session-token", spec.session_token.is_some(), "remote")?;
     reject_create_flag("force-path-style", spec.force_path_style, "remote")?;
     reject_create_flag("account-id", spec.account_id.is_some(), "remote")?;
+    reject_create_flag("account-name", spec.account_name.is_some(), "remote")?;
+    reject_create_flag("container-name", spec.container_name.is_some(), "remote")?;
+    reject_create_flag("access-key", spec.access_key.is_some(), "remote")?;
     reject_create_flag(
         "service-account-key-path",
         spec.service_account_key_path.is_some(),
@@ -364,6 +419,9 @@ pub(super) fn apply_update_flags(
                     reject_flag("endpoint-url", &args.endpoint_url, "local-fs")?;
                     reject_flag("session-token", &args.session_token, "local-fs")?;
                     reject_flag("account-id", &args.account_id, "local-fs")?;
+                    reject_flag("account-name", &args.account_name, "local-fs")?;
+                    reject_flag("container-name", &args.container_name, "local-fs")?;
+                    reject_flag("access-key", &args.access_key, "local-fs")?;
                     reject_flag(
                         "service-account-key-path",
                         &args.service_account_key_path,
@@ -373,6 +431,9 @@ pub(super) fn apply_update_flags(
                 StoreConfig::AwsS3 { .. } => {
                     reject_flag("root", &args.root, "aws-s3")?;
                     reject_flag("account-id", &args.account_id, "aws-s3")?;
+                    reject_flag("account-name", &args.account_name, "aws-s3")?;
+                    reject_flag("container-name", &args.container_name, "aws-s3")?;
+                    reject_flag("access-key", &args.access_key, "aws-s3")?;
                     reject_flag(
                         "service-account-key-path",
                         &args.service_account_key_path,
@@ -383,10 +444,28 @@ pub(super) fn apply_update_flags(
                     reject_flag("root", &args.root, "cloudflare-r2")?;
                     reject_flag("region", &args.region, "cloudflare-r2")?;
                     reject_flag("session-token", &args.session_token, "cloudflare-r2")?;
+                    reject_flag("account-name", &args.account_name, "cloudflare-r2")?;
+                    reject_flag("container-name", &args.container_name, "cloudflare-r2")?;
+                    reject_flag("access-key", &args.access_key, "cloudflare-r2")?;
                     reject_flag(
                         "service-account-key-path",
                         &args.service_account_key_path,
                         "cloudflare-r2",
+                    )?;
+                }
+                StoreConfig::AzureAbs { .. } => {
+                    reject_flag("root", &args.root, "azure-abs")?;
+                    reject_flag("bucket", &args.bucket, "azure-abs")?;
+                    reject_flag("region", &args.region, "azure-abs")?;
+                    reject_flag("access-key-id", &args.access_key_id, "azure-abs")?;
+                    reject_flag("secret-access-key", &args.secret_access_key, "azure-abs")?;
+                    reject_flag("endpoint-url", &args.endpoint_url, "azure-abs")?;
+                    reject_flag("session-token", &args.session_token, "azure-abs")?;
+                    reject_flag("account-id", &args.account_id, "azure-abs")?;
+                    reject_flag(
+                        "service-account-key-path",
+                        &args.service_account_key_path,
+                        "azure-abs",
                     )?;
                 }
                 StoreConfig::GcpGcs { .. } => {
@@ -397,6 +476,9 @@ pub(super) fn apply_update_flags(
                     reject_flag("endpoint-url", &args.endpoint_url, "gcp-gcs")?;
                     reject_flag("session-token", &args.session_token, "gcp-gcs")?;
                     reject_flag("account-id", &args.account_id, "gcp-gcs")?;
+                    reject_flag("account-name", &args.account_name, "gcp-gcs")?;
+                    reject_flag("container-name", &args.container_name, "gcp-gcs")?;
+                    reject_flag("access-key", &args.access_key, "gcp-gcs")?;
                 }
             }
         }
@@ -409,6 +491,9 @@ pub(super) fn apply_update_flags(
             reject_flag("endpoint-url", &args.endpoint_url, "remote")?;
             reject_flag("session-token", &args.session_token, "remote")?;
             reject_flag("account-id", &args.account_id, "remote")?;
+            reject_flag("account-name", &args.account_name, "remote")?;
+            reject_flag("container-name", &args.container_name, "remote")?;
+            reject_flag("access-key", &args.access_key, "remote")?;
             reject_flag("key-prefix", &args.key_prefix, "remote")?;
             reject_flag(
                 "service-account-key-path",
@@ -463,6 +548,17 @@ pub(super) fn apply_update_flags(
                     endpoint_url: args.endpoint_url.clone().unwrap_or(endpoint_url),
                     access_key_id: args.access_key_id.clone().unwrap_or(access_key_id),
                     secret_access_key: args.secret_access_key.clone().unwrap_or(secret_access_key),
+                    key_prefix: args.key_prefix.clone().or(key_prefix),
+                },
+                StoreConfig::AzureAbs {
+                    account_name,
+                    container_name,
+                    access_key,
+                    key_prefix,
+                } => StoreConfig::AzureAbs {
+                    account_name: args.account_name.clone().unwrap_or(account_name),
+                    container_name: args.container_name.clone().unwrap_or(container_name),
+                    access_key: args.access_key.clone().unwrap_or(access_key),
                     key_prefix: args.key_prefix.clone().or(key_prefix),
                 },
                 StoreConfig::GcpGcs {
@@ -566,6 +662,17 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                         "secret access key",
                         &secret_access_key,
                     )?,
+                    key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
+                },
+                StoreConfig::AzureAbs {
+                    account_name,
+                    container_name,
+                    access_key,
+                    key_prefix,
+                } => StoreConfig::AzureAbs {
+                    account_name: prompt::prompt_line_default("account name", &account_name)?,
+                    container_name: prompt::prompt_line_default("container name", &container_name)?,
+                    access_key: prompt::prompt_line_default("access key", &access_key)?,
                     key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
                 },
                 StoreConfig::GcpGcs {
