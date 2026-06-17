@@ -221,6 +221,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const FAKE_GCS_SERVICE_ACCOUNT_KEY: &str = r#"{"private_key":"private_key","private_key_id":"private_key_id","client_email":"client_email","disable_oauth":true}"#;
+
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {
         let temp_dir = unique_temp_dir("configured-store-local");
@@ -278,10 +280,11 @@ mod tests {
         .expect("construct r2 store");
         assert_eq!(r2.kind(), ConfiguredObjectStoreKind::CloudflareR2);
 
+        let gcs_service_account_key_path =
+            fake_gcs_service_account_key_file("configured-store-gcs-kind");
         let gcs = ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
             bucket: "bucket".to_owned(),
-            service_account_key_path: None,
-            application_credentials_path: None,
+            service_account_key_path: gcs_service_account_key_path.display().to_string(),
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct gcs store");
@@ -310,6 +313,12 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}"));
         fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    fn fake_gcs_service_account_key_file(label: &str) -> PathBuf {
+        let path = unique_temp_dir(label).join("service-account.json");
+        fs::write(&path, FAKE_GCS_SERVICE_ACCOUNT_KEY).expect("write fake service account key");
         path
     }
 }

@@ -7,6 +7,5 @@ lease_duration_ms = 60000
 [store]
 kind = "gcp-gcs"
 bucket = "your-bucket"
-# Optional; omit both to use the ambient Google credential chain.
 service_account_key_path = "/path/to/service-account.json"
 key_prefix = "loon-demo"

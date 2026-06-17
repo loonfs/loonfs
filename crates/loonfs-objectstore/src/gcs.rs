@@ -9,11 +9,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcsStoreConfig {
     pub bucket: String,
-    /// Service account key file. When absent, falls back to
-    /// `application_credentials_path`, then the ambient Google credential
-    /// chain (environment, application default credentials, metadata server).
-    pub service_account_key_path: Option<String>,
-    pub application_credentials_path: Option<String>,
+    pub service_account_key_path: String,
     pub key_prefix: Option<String>,
 }
 
@@ -36,14 +32,15 @@ impl GcsStore {
                 "bucket must not be empty".to_owned(),
             ));
         }
+        if config.service_account_key_path.trim().is_empty() {
+            return Err(ObjectStoreError::Transport(
+                "service account key path must not be empty".to_owned(),
+            ));
+        }
 
-        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(config.bucket);
-        if let Some(path) = config.service_account_key_path {
-            builder = builder.with_service_account_path(path);
-        }
-        if let Some(path) = config.application_credentials_path {
-            builder = builder.with_application_credentials(path);
-        }
+        let builder = GoogleCloudStorageBuilder::new()
+            .with_bucket_name(config.bucket)
+            .with_service_account_path(config.service_account_key_path);
 
         let provider = builder
             .build()
@@ -142,6 +139,11 @@ mod tests {
     use super::{GcsStore, GcsStoreConfig};
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const FAKE_SERVICE_ACCOUNT_KEY: &str = r#"{"private_key":"private_key","private_key_id":"private_key_id","client_email":"client_email","disable_oauth":true}"#;
 
     #[test]
     fn generation_compare_tokens_must_be_numeric() {
@@ -154,10 +156,10 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
+        let service_account_key_path = fake_service_account_key_file("gcs-invalid-key");
         let store = GcsStore::new(GcsStoreConfig {
             bucket: "bucket".to_owned(),
-            service_account_key_path: None,
-            application_credentials_path: None,
+            service_account_key_path: service_account_key_path.display().to_string(),
             key_prefix: None,
         })
         .expect("construct gcs store");
@@ -168,5 +170,34 @@ mod tests {
                 .await,
             Err(ObjectStoreError::InvalidKey(_))
         ));
+    }
+
+    #[test]
+    fn service_account_key_path_is_required() {
+        assert!(matches!(
+            GcsStore::new(GcsStoreConfig {
+                bucket: "bucket".to_owned(),
+                service_account_key_path: " ".to_owned(),
+                key_prefix: None,
+            }),
+            Err(ObjectStoreError::Transport(_))
+        ));
+    }
+
+    fn fake_service_account_key_file(label: &str) -> PathBuf {
+        let path = unique_temp_dir(label).join("service-account.json");
+        fs::write(&path, FAKE_SERVICE_ACCOUNT_KEY).expect("write fake service account key");
+        path
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }

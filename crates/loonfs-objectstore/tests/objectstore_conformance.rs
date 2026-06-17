@@ -363,7 +363,6 @@ async fn gcp_gcs_real_provider_conformance() {
     let store = GcsStore::new(GcsStoreConfig {
         bucket: config.bucket,
         service_account_key_path: config.service_account_key_path,
-        application_credentials_path: config.application_credentials_path,
         key_prefix: Some(config.prefix),
     })
     .expect("create GCP GCS object store");

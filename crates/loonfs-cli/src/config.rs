@@ -80,10 +80,7 @@ pub(crate) enum StoreConfig {
     },
     GcpGcs {
         bucket: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        service_account_key_path: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        application_credentials_path: Option<String>,
+        service_account_key_path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
@@ -273,12 +270,10 @@ impl StoreConfig {
             StoreConfig::GcpGcs {
                 bucket,
                 service_account_key_path,
-                application_credentials_path,
                 key_prefix,
             } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
                 bucket: bucket.clone(),
                 service_account_key_path: service_account_key_path.clone(),
-                application_credentials_path: application_credentials_path.clone(),
                 key_prefix: key_prefix.clone(),
             })
             .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
@@ -322,8 +317,16 @@ impl StoreConfig {
                     secret_access_key,
                 )
             }
-            StoreConfig::GcpGcs { bucket, .. } => {
-                require_non_empty(&store_field(profile_name, "bucket"), bucket)
+            StoreConfig::GcpGcs {
+                bucket,
+                service_account_key_path,
+                ..
+            } => {
+                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
+                require_non_empty(
+                    &store_field(profile_name, "service_account_key_path"),
+                    service_account_key_path,
+                )
             }
         }
     }

@@ -61,8 +61,7 @@ pub enum StoreConfig {
     },
     GcpGcs {
         bucket: String,
-        service_account_key_path: Option<String>,
-        application_credentials_path: Option<String>,
+        service_account_key_path: String,
         key_prefix: Option<String>,
     },
 }
@@ -164,12 +163,10 @@ impl ServerConfig {
             StoreConfig::GcpGcs {
                 bucket,
                 service_account_key_path,
-                application_credentials_path,
                 key_prefix,
             } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
                 bucket: bucket.clone(),
                 service_account_key_path: service_account_key_path.clone(),
-                application_credentials_path: application_credentials_path.clone(),
                 key_prefix: key_prefix.clone(),
             })
             .map_err(|err| ServerConfigError::InvalidField {
@@ -233,8 +230,13 @@ impl ServerConfig {
                 require_non_empty("store.secret_access_key", secret_access_key)?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
             }
-            StoreConfig::GcpGcs { bucket, .. } => {
+            StoreConfig::GcpGcs {
+                bucket,
+                service_account_key_path,
+                ..
+            } => {
                 require_non_empty("store.bucket", bucket)?;
+                require_non_empty("store.service_account_key_path", service_account_key_path)?;
             }
         }
 
@@ -503,6 +505,7 @@ lease_duration_ms = 60000
 [store]
 kind = "gcp-gcs"
 bucket = " "
+service_account_key_path = "/tmp/service-account.json"
 key_prefix = "demo"
 "#,
         );
