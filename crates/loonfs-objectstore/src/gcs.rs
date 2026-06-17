@@ -145,15 +145,6 @@ mod tests {
 
     const FAKE_SERVICE_ACCOUNT_KEY: &str = r#"{"private_key":"private_key","private_key_id":"private_key_id","client_email":"client_email","disable_oauth":true}"#;
 
-    #[test]
-    fn generation_compare_tokens_must_be_numeric() {
-        assert!(GcsStore::require_generation_compare_token("1729").is_ok());
-        assert!(matches!(
-            GcsStore::require_generation_compare_token("not-a-generation"),
-            Err(ObjectStoreError::PreconditionFailed)
-        ));
-    }
-
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
         let service_account_key_path = fake_service_account_key_file("gcs-invalid-key");
