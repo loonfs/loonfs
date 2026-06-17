@@ -1,5 +1,6 @@
 use http::Uri;
 use loonfs::RuntimeCacheConfig;
+use loonfs_objectstore::abs::AbsStoreConfig;
 use loonfs_objectstore::gcs::GcsStoreConfig;
 use loonfs_objectstore::r2::R2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
@@ -57,6 +58,12 @@ pub enum StoreConfig {
         endpoint_url: String,
         access_key_id: String,
         secret_access_key: String,
+        key_prefix: Option<String>,
+    },
+    AzureAbs {
+        account_name: String,
+        container_name: String,
+        access_key: String,
         key_prefix: Option<String>,
     },
     GcpGcs {
@@ -160,6 +167,21 @@ impl ServerConfig {
                 field: "store.key_prefix",
                 reason: err.to_string(),
             }),
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                key_prefix,
+            } => ConfiguredObjectStore::azure_abs(AbsStoreConfig {
+                account_name: account_name.clone(),
+                container_name: container_name.clone(),
+                access_key: access_key.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| ServerConfigError::InvalidField {
+                field: "store.key_prefix",
+                reason: err.to_string(),
+            }),
             StoreConfig::GcpGcs {
                 bucket,
                 service_account_key_path,
@@ -229,6 +251,16 @@ impl ServerConfig {
                 require_non_empty("store.access_key_id", access_key_id)?;
                 require_non_empty("store.secret_access_key", secret_access_key)?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
+            }
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                ..
+            } => {
+                require_non_empty("store.account_name", account_name)?;
+                require_non_empty("store.container_name", container_name)?;
+                require_non_empty("store.access_key", access_key)?;
             }
             StoreConfig::GcpGcs {
                 bucket,
@@ -490,6 +522,30 @@ key_prefix = "demo"
 
         assert_invalid_field(aws_error, "store.endpoint_url");
         assert_invalid_field(r2_error, "store.endpoint_url");
+    }
+
+    #[test]
+    fn load_rejects_blank_abs_access_key() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "azure-abs"
+account_name = "account"
+container_name = "container"
+access_key = " "
+key_prefix = "demo"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("blank abs access key");
+
+        assert_missing_field(error, "store.access_key");
     }
 
     #[test]
