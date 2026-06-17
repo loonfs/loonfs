@@ -1141,15 +1141,14 @@ fn ensure_commit_content_refs_admitted(
     for op in &request.ops {
         match op {
             CommitOp::CreateFile { content_ref, .. }
-            | CommitOp::ReplaceFile { content_ref, .. } => {
+            | CommitOp::ReplaceFile { content_ref, .. }
                 if !admitted_content_refs
                     .iter()
-                    .any(|admitted| admitted == content_ref)
-                {
-                    return Err(CoreError::InvalidUploadContent(
-                        "content ref was not admitted before publish".to_owned(),
-                    ));
-                }
+                    .any(|admitted| admitted == content_ref) =>
+            {
+                return Err(CoreError::InvalidUploadContent(
+                    "content ref was not admitted before publish".to_owned(),
+                ));
             }
             _ => {}
         }
