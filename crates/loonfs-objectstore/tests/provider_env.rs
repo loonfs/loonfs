@@ -32,6 +32,14 @@ pub(crate) const CLOUDFLARE_R2_REQUIRED_VARS: &[&str] = &[
 
 pub(crate) const CLOUDFLARE_R2_OPTIONAL_VARS: &[&str] = &["LOON_TEST_R2_PREFIX"];
 
+pub(crate) const AZURE_ABS_REQUIRED_VARS: &[&str] = &[
+    "LOON_TEST_AZURE_ABS_ACCOUNT_NAME",
+    "LOON_TEST_AZURE_ABS_CONTAINER_NAME",
+    "LOON_TEST_AZURE_ABS_ACCESS_KEY",
+];
+
+pub(crate) const AZURE_ABS_OPTIONAL_VARS: &[&str] = &["LOON_TEST_AZURE_ABS_PREFIX"];
+
 pub(crate) const GCP_GCS_REQUIRED_VARS: &[&str] = &[
     "LOON_TEST_GCS_BUCKET",
     "LOON_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH",
@@ -57,6 +65,14 @@ pub(crate) struct CloudflareR2ConformanceConfig {
     pub endpoint: String,
     pub access_key_id: String,
     pub secret_access_key: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AzureAbsConformanceConfig {
+    pub account_name: String,
+    pub container_name: String,
+    pub access_key: String,
     pub prefix: String,
 }
 
@@ -98,6 +114,18 @@ impl CloudflareR2ConformanceConfig {
             access_key_id: required_env("LOON_TEST_R2_ACCESS_KEY_ID")?,
             secret_access_key: required_env("LOON_TEST_R2_SECRET_ACCESS_KEY")?,
             prefix: optional_env("LOON_TEST_R2_PREFIX").unwrap_or_else(|| default_prefix("r2")),
+        })
+    }
+}
+
+impl AzureAbsConformanceConfig {
+    pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
+        Ok(Self {
+            account_name: required_env("LOON_TEST_AZURE_ABS_ACCOUNT_NAME")?,
+            container_name: required_env("LOON_TEST_AZURE_ABS_CONTAINER_NAME")?,
+            access_key: required_env("LOON_TEST_AZURE_ABS_ACCESS_KEY")?,
+            prefix: optional_env("LOON_TEST_AZURE_ABS_PREFIX")
+                .unwrap_or_else(|| default_prefix("azure-abs")),
         })
     }
 }
