@@ -2,6 +2,7 @@ mod provider_env;
 
 use bytes::Bytes;
 use loonfs_api::ManifestId;
+use loonfs_objectstore::abs::{AbsStore, AbsStoreConfig};
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::gcs::{GcsStore, GcsStoreConfig};
 use loonfs_objectstore::keys::{
@@ -9,14 +10,17 @@ use loonfs_objectstore::keys::{
     namespace_head, namespace_lease, namespace_manifest, wal_segment, DerivedWorkClass,
 };
 use loonfs_objectstore::probes::run_contract_probes;
-use loonfs_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS};
+use loonfs_objectstore::provider::{
+    Expectation, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS,
+};
 use loonfs_objectstore::r2::{R2Store, R2StoreConfig};
 use loonfs_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use provider_env::{
-    provider_env_example_contents, AwsS3ConformanceConfig, CloudflareR2ConformanceConfig,
-    GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS, AWS_S3_REQUIRED_VARS,
+    provider_env_example_contents, AwsS3ConformanceConfig, AzureAbsConformanceConfig,
+    CloudflareR2ConformanceConfig, GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS,
+    AWS_S3_REQUIRED_VARS, AZURE_ABS_OPTIONAL_VARS, AZURE_ABS_REQUIRED_VARS,
     CLOUDFLARE_R2_OPTIONAL_VARS, CLOUDFLARE_R2_REQUIRED_VARS, GCP_GCS_OPTIONAL_VARS,
     GCP_GCS_REQUIRED_VARS,
 };
@@ -29,6 +33,7 @@ fn provider_profiles_exist() {
     assert_eq!(LOCAL_FS.name, "local-fs");
     assert_eq!(AWS_S3.name, "aws-s3");
     assert_eq!(CLOUDFLARE_R2.name, "cloudflare-r2");
+    assert_eq!(AZURE_ABS.name, "azure-abs");
     assert_eq!(GCP_GCS.name, "gcp-gcs");
     assert_eq!(
         LOCAL_FS.active_contract.opaque_compare_token_for_cas,
@@ -128,6 +133,40 @@ fn provider_profiles_exist() {
         Expectation::ExpectedYes
     );
     assert_eq!(
+        AZURE_ABS.active_contract.opaque_compare_token_for_cas,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        AZURE_ABS.active_contract.full_object_read_identity,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        AZURE_ABS.active_contract.overwrite,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        AZURE_ABS.active_contract.delete_idempotent,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        AZURE_ABS
+            .active_contract
+            .head_reflects_latest_write_and_delete,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        AZURE_ABS.active_contract.scoped_key_prefixing,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AZURE_ABS.active_contract.traversal_rejection,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AZURE_ABS.active_contract.sorted_list_prefix,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
         GCP_GCS.active_contract.opaque_compare_token_for_cas,
         Expectation::VerifyByConformance
     );
@@ -171,6 +210,10 @@ fn provider_profiles_exist() {
     );
     assert_eq!(
         CLOUDFLARE_R2.future_capabilities.multipart_upload,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AZURE_ABS.future_capabilities.multipart_upload,
         Expectation::ExpectedYes
     );
     assert_eq!(
@@ -236,6 +279,8 @@ fn provider_env_example_covers_real_provider_contract() {
         .chain(AWS_S3_OPTIONAL_VARS.iter())
         .chain(CLOUDFLARE_R2_REQUIRED_VARS.iter())
         .chain(CLOUDFLARE_R2_OPTIONAL_VARS.iter())
+        .chain(AZURE_ABS_REQUIRED_VARS.iter())
+        .chain(AZURE_ABS_OPTIONAL_VARS.iter())
         .chain(GCP_GCS_REQUIRED_VARS.iter())
         .chain(GCP_GCS_OPTIONAL_VARS.iter())
     {
@@ -352,6 +397,21 @@ async fn cloudflare_r2_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
+    assert_provider_conformance(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_abs_real_provider_conformance() {
+    let config = AzureAbsConformanceConfig::from_env()
+        .expect("load Azure Blob Storage real-provider conformance environment");
+    let store = AbsStore::new(AbsStoreConfig {
+        account_name: config.account_name,
+        container_name: config.container_name,
+        access_key: config.access_key,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Azure Blob Storage object store");
     assert_provider_conformance(&store).await;
 }
 
