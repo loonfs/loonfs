@@ -50,6 +50,7 @@ pub(super) struct CreateProfileSpec {
     session_token: Option<String>,
     force_path_style: bool,
     account_id: Option<String>,
+    service_account_key_path: Option<String>,
     server_url: Option<String>,
     auth_token: Option<String>,
 }
@@ -68,6 +69,7 @@ pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec
         session_token: args.session_token,
         force_path_style: args.force_path_style,
         account_id: args.account_id,
+        service_account_key_path: args.service_account_key_path,
         server_url: args.server_url,
         auth_token: args.auth_token,
     }
@@ -87,6 +89,7 @@ pub(super) fn create_profile_spec_from_create(args: ProfileCreateArgs) -> Create
         session_token: args.session_token,
         force_path_style: args.force_path_style,
         account_id: args.account_id,
+        service_account_key_path: args.service_account_key_path,
         server_url: args.server_url,
         auth_token: args.auth_token,
     }
@@ -128,22 +131,26 @@ fn build_embedded_profile(
         Some("local-fs") => "local-fs",
         Some("aws-s3") => "aws-s3",
         Some("cloudflare-r2") => "cloudflare-r2",
+        Some("gcp-gcs") => "gcp-gcs",
         Some(other) => {
             return Err(CliError::invalid_input(format!(
-                "unknown store kind: `{other}` (expected local-fs, aws-s3, or cloudflare-r2)"
-            )))
+            "unknown store kind: `{other}` (expected local-fs, aws-s3, cloudflare-r2, or gcp-gcs)"
+        )))
         }
         None if runtime.interactive => {
-            return prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])
-                .and_then(|choice| {
-                    build_embedded_profile(
-                        CreateProfileSpec {
-                            store_kind: Some(choice),
-                            ..spec
-                        },
-                        runtime,
-                    )
-                });
+            return prompt::prompt_choice(
+                "store kind",
+                &["aws-s3", "cloudflare-r2", "gcp-gcs", "local-fs"],
+            )
+            .and_then(|choice| {
+                build_embedded_profile(
+                    CreateProfileSpec {
+                        store_kind: Some(choice),
+                        ..spec
+                    },
+                    runtime,
+                )
+            });
         }
         None => return Err(CliError::non_interactive_input_required("store-kind")),
     };
@@ -161,6 +168,11 @@ fn build_embedded_profile(
             reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "local-fs")?;
             reject_create_flag("session-token", spec.session_token.is_some(), "local-fs")?;
             reject_create_flag("account-id", spec.account_id.is_some(), "local-fs")?;
+            reject_create_flag(
+                "service-account-key-path",
+                spec.service_account_key_path.is_some(),
+                "local-fs",
+            )?;
             reject_create_flag("force-path-style", spec.force_path_style, "local-fs")?;
             StoreConfig::LocalFs {
                 root: require_or_prompt(spec.root.as_ref(), "root", runtime)?,
@@ -170,6 +182,11 @@ fn build_embedded_profile(
         "aws-s3" => {
             reject_create_flag("root", spec.root.is_some(), "aws-s3")?;
             reject_create_flag("account-id", spec.account_id.is_some(), "aws-s3")?;
+            reject_create_flag(
+                "service-account-key-path",
+                spec.service_account_key_path.is_some(),
+                "aws-s3",
+            )?;
             StoreConfig::AwsS3 {
                 bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
                 region: require_or_prompt_region(spec.region.as_ref(), runtime)?,
@@ -202,6 +219,11 @@ fn build_embedded_profile(
                 "cloudflare-r2",
             )?;
             reject_create_flag("force-path-style", spec.force_path_style, "cloudflare-r2")?;
+            reject_create_flag(
+                "service-account-key-path",
+                spec.service_account_key_path.is_some(),
+                "cloudflare-r2",
+            )?;
             StoreConfig::CloudflareR2 {
                 bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
                 account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
@@ -218,6 +240,29 @@ fn build_embedded_profile(
                 secret_access_key: require_or_prompt(
                     spec.secret_access_key.as_ref(),
                     "secret-access-key",
+                    runtime,
+                )?,
+                key_prefix: spec.key_prefix,
+            }
+        }
+        "gcp-gcs" => {
+            reject_create_flag("root", spec.root.is_some(), "gcp-gcs")?;
+            reject_create_flag("region", spec.region.is_some(), "gcp-gcs")?;
+            reject_create_flag("access-key-id", spec.access_key_id.is_some(), "gcp-gcs")?;
+            reject_create_flag(
+                "secret-access-key",
+                spec.secret_access_key.is_some(),
+                "gcp-gcs",
+            )?;
+            reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "gcp-gcs")?;
+            reject_create_flag("session-token", spec.session_token.is_some(), "gcp-gcs")?;
+            reject_create_flag("account-id", spec.account_id.is_some(), "gcp-gcs")?;
+            reject_create_flag("force-path-style", spec.force_path_style, "gcp-gcs")?;
+            StoreConfig::GcpGcs {
+                bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
+                service_account_key_path: require_or_prompt(
+                    spec.service_account_key_path.as_ref(),
+                    "service-account-key-path",
                     runtime,
                 )?,
                 key_prefix: spec.key_prefix,
@@ -254,6 +299,11 @@ fn build_remote_profile(
     reject_create_flag("session-token", spec.session_token.is_some(), "remote")?;
     reject_create_flag("force-path-style", spec.force_path_style, "remote")?;
     reject_create_flag("account-id", spec.account_id.is_some(), "remote")?;
+    reject_create_flag(
+        "service-account-key-path",
+        spec.service_account_key_path.is_some(),
+        "remote",
+    )?;
 
     Ok(ProfileConfig::Remote {
         server_url: require_or_prompt(spec.server_url.as_ref(), "server url", runtime)?,
@@ -314,15 +364,39 @@ pub(super) fn apply_update_flags(
                     reject_flag("endpoint-url", &args.endpoint_url, "local-fs")?;
                     reject_flag("session-token", &args.session_token, "local-fs")?;
                     reject_flag("account-id", &args.account_id, "local-fs")?;
+                    reject_flag(
+                        "service-account-key-path",
+                        &args.service_account_key_path,
+                        "local-fs",
+                    )?;
                 }
                 StoreConfig::AwsS3 { .. } => {
                     reject_flag("root", &args.root, "aws-s3")?;
                     reject_flag("account-id", &args.account_id, "aws-s3")?;
+                    reject_flag(
+                        "service-account-key-path",
+                        &args.service_account_key_path,
+                        "aws-s3",
+                    )?;
                 }
                 StoreConfig::CloudflareR2 { .. } => {
                     reject_flag("root", &args.root, "cloudflare-r2")?;
                     reject_flag("region", &args.region, "cloudflare-r2")?;
                     reject_flag("session-token", &args.session_token, "cloudflare-r2")?;
+                    reject_flag(
+                        "service-account-key-path",
+                        &args.service_account_key_path,
+                        "cloudflare-r2",
+                    )?;
+                }
+                StoreConfig::GcpGcs { .. } => {
+                    reject_flag("root", &args.root, "gcp-gcs")?;
+                    reject_flag("region", &args.region, "gcp-gcs")?;
+                    reject_flag("access-key-id", &args.access_key_id, "gcp-gcs")?;
+                    reject_flag("secret-access-key", &args.secret_access_key, "gcp-gcs")?;
+                    reject_flag("endpoint-url", &args.endpoint_url, "gcp-gcs")?;
+                    reject_flag("session-token", &args.session_token, "gcp-gcs")?;
+                    reject_flag("account-id", &args.account_id, "gcp-gcs")?;
                 }
             }
         }
@@ -336,6 +410,11 @@ pub(super) fn apply_update_flags(
             reject_flag("session-token", &args.session_token, "remote")?;
             reject_flag("account-id", &args.account_id, "remote")?;
             reject_flag("key-prefix", &args.key_prefix, "remote")?;
+            reject_flag(
+                "service-account-key-path",
+                &args.service_account_key_path,
+                "remote",
+            )?;
         }
     }
 
@@ -384,6 +463,18 @@ pub(super) fn apply_update_flags(
                     endpoint_url: args.endpoint_url.clone().unwrap_or(endpoint_url),
                     access_key_id: args.access_key_id.clone().unwrap_or(access_key_id),
                     secret_access_key: args.secret_access_key.clone().unwrap_or(secret_access_key),
+                    key_prefix: args.key_prefix.clone().or(key_prefix),
+                },
+                StoreConfig::GcpGcs {
+                    bucket,
+                    service_account_key_path,
+                    key_prefix,
+                } => StoreConfig::GcpGcs {
+                    bucket: args.bucket.clone().unwrap_or(bucket),
+                    service_account_key_path: args
+                        .service_account_key_path
+                        .clone()
+                        .unwrap_or(service_account_key_path),
                     key_prefix: args.key_prefix.clone().or(key_prefix),
                 },
             };
@@ -474,6 +565,18 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                     secret_access_key: prompt::prompt_line_default(
                         "secret access key",
                         &secret_access_key,
+                    )?,
+                    key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
+                },
+                StoreConfig::GcpGcs {
+                    bucket,
+                    service_account_key_path,
+                    key_prefix,
+                } => StoreConfig::GcpGcs {
+                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
+                    service_account_key_path: prompt::prompt_line_default(
+                        "service account key path",
+                        &service_account_key_path,
                     )?,
                     key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
                 },

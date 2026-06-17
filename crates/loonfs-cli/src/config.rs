@@ -1,6 +1,7 @@
 use crate::error::CliError;
 use http::Uri;
 use loonfs_api::NamespaceId;
+use loonfs_objectstore::gcs::GcsStoreConfig;
 use loonfs_objectstore::r2::R2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
@@ -74,6 +75,12 @@ pub(crate) enum StoreConfig {
         endpoint_url: String,
         access_key_id: String,
         secret_access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+    },
+    GcpGcs {
+        bucket: String,
+        service_account_key_path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
@@ -214,6 +221,7 @@ impl StoreConfig {
             StoreConfig::LocalFs { .. } => "local-fs",
             StoreConfig::AwsS3 { .. } => "aws-s3",
             StoreConfig::CloudflareR2 { .. } => "cloudflare-r2",
+            StoreConfig::GcpGcs { .. } => "gcp-gcs",
         }
     }
 
@@ -259,6 +267,16 @@ impl StoreConfig {
                 key_prefix: key_prefix.clone(),
             })
             .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
+            StoreConfig::GcpGcs {
+                bucket,
+                service_account_key_path,
+                key_prefix,
+            } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
+                bucket: bucket.clone(),
+                service_account_key_path: service_account_key_path.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
         }
     }
 
@@ -299,6 +317,17 @@ impl StoreConfig {
                     secret_access_key,
                 )
             }
+            StoreConfig::GcpGcs {
+                bucket,
+                service_account_key_path,
+                ..
+            } => {
+                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
+                require_non_empty(
+                    &store_field(profile_name, "service_account_key_path"),
+                    service_account_key_path,
+                )
+            }
         }
     }
 
@@ -336,6 +365,7 @@ impl StoreConfig {
                 secret_access_key: "REDACTED".to_owned(),
                 key_prefix: key_prefix.clone(),
             },
+            StoreConfig::GcpGcs { .. } => self.clone(),
         }
     }
 }

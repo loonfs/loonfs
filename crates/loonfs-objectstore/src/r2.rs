@@ -38,7 +38,11 @@ impl R2Store {
                 secret_access_key: config.secret_access_key,
                 session_token: None,
                 key_prefix: config.key_prefix,
-                force_path_style: false,
+                // The configured endpoint is the bucket-less account host;
+                // path style makes the client append the bucket. Virtual
+                // hosting would use the endpoint verbatim and address keys
+                // as buckets.
+                force_path_style: true,
                 sha256_checksum_metadata: false,
             })?,
         })
