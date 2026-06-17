@@ -85,21 +85,6 @@ pub struct ValidatedContentToken {
     pub token: String,
 }
 
-/// Internal server/runtime target used before the HTTP layer signs the URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectPutUploadTarget {
-    pub content_ref: ContentRef,
-    pub object_key: String,
-}
-
-/// Internal response for preparing a direct_put session before URL signing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BeginDirectPutUploadTargetResponse {
-    pub namespace_id: NamespaceId,
-    pub upload_id: String,
-    pub target: DirectPutUploadTarget,
-}
-
 /// Response for starting an upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeginUploadResponse {

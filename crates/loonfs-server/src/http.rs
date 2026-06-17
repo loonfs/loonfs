@@ -522,6 +522,13 @@ async fn filesystem_operation(
         )),
         _ => None,
     };
+    let admitted_content_refs = match &operation {
+        FilesystemOperation::PutFile { content_ref, .. } => {
+            require_content_token(&state.config, &namespace_id, content_ref, &content_tokens)?;
+            vec![content_ref.clone()]
+        }
+        _ => Vec::new(),
+    };
     let intent = match operation {
         FilesystemOperation::CreateDir { path } => PathMutationIntent::CreateDir {
             commit_id,
@@ -531,15 +538,12 @@ async fn filesystem_operation(
             path,
             content_ref,
             behavior,
-        } => {
-            require_content_token(&state.config, &namespace_id, &content_ref, &content_tokens)?;
-            PathMutationIntent::PutFile {
-                commit_id,
-                absolute_path: path,
-                content_ref,
-                behavior: map_filesystem_put_behavior(behavior),
-            }
-        }
+        } => PathMutationIntent::PutFile {
+            commit_id,
+            absolute_path: path,
+            content_ref,
+            behavior: map_filesystem_put_behavior(behavior),
+        },
         FilesystemOperation::DeletePath { path } => PathMutationIntent::DeletePath {
             commit_id,
             absolute_path: path,
@@ -577,15 +581,34 @@ async fn filesystem_operation(
             store_kind = trace_store_kind(&state.config.store).as_str(),
             payload_class,
         );
+        async {
+            if admitted_content_refs.is_empty() {
+                state
+                    .publisher
+                    .submit_path_intent(namespace_id.clone(), intent)
+                    .await
+            } else {
+                state
+                    .publisher
+                    .submit_admitted_path_intent(
+                        namespace_id.clone(),
+                        intent,
+                        admitted_content_refs,
+                    )
+                    .await
+            }
+        }
+        .instrument(span)
+        .await
+    } else if admitted_content_refs.is_empty() {
         state
             .publisher
             .submit_path_intent(namespace_id.clone(), intent)
-            .instrument(span)
             .await
     } else {
         state
             .publisher
-            .submit_path_intent(namespace_id.clone(), intent)
+            .submit_admitted_path_intent(namespace_id.clone(), intent, admitted_content_refs)
             .await
     };
     let response = response_result
@@ -1624,7 +1647,7 @@ mod tests {
         ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: Some("test-token".to_owned()),
-            content_token_secret: Some("test-content-token-secret".to_owned()),
+            content_token_secret: "test-content-token-secret".to_owned(),
             writer_id: writer_id.to_owned(),
             writer_version: format!("{writer_id}/0.1.0"),
             lease_duration_ms: 60_000,

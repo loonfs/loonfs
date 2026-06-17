@@ -6,6 +6,7 @@ use crate::commit::{
     PreparedCommit, SemanticMutationIdentity,
 };
 use crate::context::MutationContext;
+use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::basis::{
@@ -20,7 +21,9 @@ use crate::namespace::control::{
     load_namespace_head_control, load_namespace_lease_control,
 };
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
-use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
+use crate::path::write::{
+    path_intent_fingerprint_for_path_intent, PathMutationIntent, PublishPlanningSession,
+};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
     validate_durable_content_reference, write_immutable_object, ContentValidationTracker,
@@ -28,10 +31,9 @@ use crate::storage::content::{
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
 use bytes::Bytes;
 use loonfs_api::v0::{
-    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-    CommitDelta, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-    CommittedChange, CompleteUploadRequest, CompleteUploadResponse, DirectPutUploadTarget,
-    UploadContentResponse, UploadMode,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta,
+    CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse, CommittedChange,
+    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind,
@@ -601,23 +603,27 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
             };
             let request = candidate_request.request;
             let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
-            // Path-oriented writes have already admitted any new external content
-            // before entering the serialized publisher. Copy/restore content refs
-            // come from namespace history. Keep the object-store validation only
-            // for lower-level explicit commits that bypass the path API.
-            if matches!(candidate, NamespaceMutationCandidate::Commit(_)) {
-                if let Err(error) = validate_commit_content_references(
-                    store,
-                    &basis.content_store_id,
-                    &request,
-                    &resolved_restore_content_refs,
-                    &mut content_validation,
-                )
-                .await
-                {
-                    outcomes[index] = Some(Err(error));
-                    continue;
+            let content_result = match candidate {
+                NamespaceMutationCandidate::Commit(_)
+                | NamespaceMutationCandidate::Path(PathMutationIntent::PutFile { .. }) => {
+                    validate_commit_content_references(
+                        store,
+                        &basis.content_store_id,
+                        &request,
+                        &resolved_restore_content_refs,
+                        &mut content_validation,
+                    )
+                    .await
                 }
+                NamespaceMutationCandidate::AdmittedPath {
+                    admitted_content_refs,
+                    ..
+                } => ensure_commit_content_refs_admitted(&request, admitted_content_refs),
+                NamespaceMutationCandidate::Path(_) => Ok(()),
+            };
+            if let Err(error) = content_result {
+                outcomes[index] = Some(Err(error));
+                continue;
             }
             let plan = {
                 let _span =
@@ -862,7 +868,8 @@ fn prepare_candidate_request(
                 identity_source: CommitIdentitySource::CoreCommitRequest,
             })
         }
-        NamespaceMutationCandidate::Path(intent) => {
+        NamespaceMutationCandidate::Path(intent)
+        | NamespaceMutationCandidate::AdmittedPath { intent, .. } => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
                 outcomes[index] = Some(Err(error));
                 return None;
@@ -1124,6 +1131,29 @@ async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
             .await?;
     }
 
+    Ok(())
+}
+
+fn ensure_commit_content_refs_admitted(
+    request: &CoreCommitRequest,
+    admitted_content_refs: &[ContentRef],
+) -> Result<(), CoreError> {
+    for op in &request.ops {
+        match op {
+            CommitOp::CreateFile { content_ref, .. }
+            | CommitOp::ReplaceFile { content_ref, .. } => {
+                if !admitted_content_refs
+                    .iter()
+                    .any(|admitted| admitted == content_ref)
+                {
+                    return Err(CoreError::InvalidUploadContent(
+                        "content ref was not admitted before publish".to_owned(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 

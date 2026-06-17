@@ -8,9 +8,8 @@ use crate::options::{
 };
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::v0::{
-    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-    CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-    UploadContentResponse,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -23,6 +22,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
+
+/// Internal target used by server integrations before they mint a presigned URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectPutUploadTarget {
+    pub content_ref: ContentRef,
+    pub object_key: String,
+}
+
+/// Internal response for preparing a direct_put session before URL signing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginDirectPutUploadTargetResponse {
+    pub namespace_id: NamespaceId,
+    pub upload_id: String,
+    pub target: DirectPutUploadTarget,
+}
 
 /// A namespace-scoped core API.
 ///

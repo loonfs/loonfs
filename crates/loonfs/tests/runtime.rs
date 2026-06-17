@@ -1375,7 +1375,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 }
 
 #[test]
-fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
+fn upload_then_admitted_path_put_skips_blob_validation_call() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -1405,14 +1405,15 @@ fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
     raw_store.reset_content_blob_counters();
     let responses = fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
-        vec![NamespaceMutationCandidate::Path(
-            PathMutationIntent::PutFile {
+        vec![NamespaceMutationCandidate::AdmittedPath {
+            admitted_content_refs: vec![staged.content_ref.clone()],
+            intent: PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-checksum-upload").expect("valid commit id"),
                 absolute_path: "/docs/checksum.txt".to_owned(),
                 content_ref: staged.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
             },
-        )],
+        }],
     );
 
     assert!(responses[0].is_ok());
@@ -1421,7 +1422,7 @@ fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
 }
 
 #[test]
-fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call() {
+fn disabled_runtime_cache_still_skips_blob_validation_for_admitted_path_put() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -1452,14 +1453,15 @@ fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call()
     raw_store.reset_content_blob_counters();
     let responses = fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
-        vec![NamespaceMutationCandidate::Path(
-            PathMutationIntent::PutFile {
+        vec![NamespaceMutationCandidate::AdmittedPath {
+            admitted_content_refs: vec![staged.content_ref.clone()],
+            intent: PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-uncached-upload").expect("valid commit id"),
                 absolute_path: "/docs/uncached.txt".to_owned(),
                 content_ref: staged.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
             },
-        )],
+        }],
     );
 
     assert!(responses[0].is_ok());

@@ -17,10 +17,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-    CommitAnnotations, CommitDelta, CommitOp, CommitOpResult, CommitPrecondition, CommitRequest,
-    CommitResponse, CommittedChange, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutUpload, ObjectTransferAccess, RenameMode, UploadContentResponse, UploadMode,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta,
+    CommitOp, CommitOpResult, CommitPrecondition, CommitRequest, CommitResponse, CommittedChange,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
+    RenameMode, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
@@ -33,8 +33,8 @@ pub use loonfs_api::{
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
-    BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
-    PutFileBehavior,
+    BeginDirectPutUploadTargetResponse, BootstrapNamespaceError, DeleteNamespaceOptions,
+    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, PutFileBehavior,
 };
 
 /// Server-integration seam: the vocabulary a batching publisher uses to

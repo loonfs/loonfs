@@ -14,7 +14,7 @@ use crate::path::write::{
 };
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::LeaseState;
-use loonfs_api::{CommitId, MutationResult, NamespaceId};
+use loonfs_api::{CommitId, ContentRef, MutationResult, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -24,13 +24,17 @@ const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 pub enum NamespaceMutationCandidate {
     Commit(ApiCommitRequest),
     Path(PathMutationIntent),
+    AdmittedPath {
+        intent: PathMutationIntent,
+        admitted_content_refs: Vec<ContentRef>,
+    },
 }
 
 impl NamespaceMutationCandidate {
     pub fn commit_id(&self) -> &CommitId {
         match self {
             Self::Commit(request) => &request.commit_id,
-            Self::Path(intent) => intent.commit_id(),
+            Self::Path(intent) | Self::AdmittedPath { intent, .. } => intent.commit_id(),
         }
     }
 
@@ -42,8 +46,10 @@ impl NamespaceMutationCandidate {
             Self::Commit(request) => core_commit_fingerprint_for_v0_request(namespace_id, request)
                 .map(SemanticMutationIdentity::CoreCommit)
                 .map_err(|err| CoreError::Store(err.to_string())),
-            Self::Path(intent) => path_intent_fingerprint_for_path_intent(namespace_id, intent)
-                .map(SemanticMutationIdentity::PathIntent),
+            Self::Path(intent) | Self::AdmittedPath { intent, .. } => {
+                path_intent_fingerprint_for_path_intent(namespace_id, intent)
+                    .map(SemanticMutationIdentity::PathIntent)
+            }
         }
     }
 }

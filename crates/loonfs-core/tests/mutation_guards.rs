@@ -34,8 +34,8 @@ use loonfs_core::publish::{
     PathMutationIntent, PublishOptions,
 };
 use loonfs_core::{
-    BootstrapOptions, Error as CoreError, ErrorCode, ForkOptions, MutationContext, NamespaceEngine,
-    PutFileBehavior, ReadOptions, WriteOptions,
+    BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
+    ForkOptions, MutationContext, NamespaceEngine, PutFileBehavior, ReadOptions, WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
@@ -168,7 +168,7 @@ fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_ref: ContentRef,
     context: &MutationContext,
-) -> Result<loonfs_api::v0::BeginDirectPutUploadTargetResponse, CoreError> {
+) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
     block_on(
         namespace_engine(store, namespace_id, context).begin_direct_put_upload_target(content_ref),
     )

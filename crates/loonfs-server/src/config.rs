@@ -15,7 +15,7 @@ use thiserror::Error;
 pub struct ServerConfig {
     pub bind: String,
     pub auth_token: Option<String>,
-    pub content_token_secret: Option<String>,
+    pub content_token_secret: String,
     pub writer_id: String,
     pub writer_version: String,
     pub lease_duration_ms: u64,
@@ -89,13 +89,7 @@ pub enum ServerConfigError {
 
 impl ServerConfig {
     pub(crate) fn content_token_secret(&self) -> &str {
-        self.content_token_secret
-            .as_deref()
-            .or(self.auth_token.as_deref())
-            // Development/local deployments without auth still need deterministic
-            // local token signing. Authenticated servers should set auth_token or
-            // content_token_secret.
-            .unwrap_or(&self.writer_id)
+        &self.content_token_secret
     }
 
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
@@ -231,14 +225,7 @@ impl ServerConfig {
                 });
             }
         }
-        if let Some(secret) = &self.content_token_secret {
-            if secret.trim().is_empty() {
-                return Err(ServerConfigError::InvalidField {
-                    field: "content_token_secret",
-                    reason: "must not be empty".to_owned(),
-                });
-            }
-        }
+        require_non_empty("content_token_secret", &self.content_token_secret)?;
 
         match &self.store {
             StoreConfig::LocalFs { root, .. } => {
@@ -779,6 +766,15 @@ root = "/tmp/loonfs-server"
     fn write_config(contents: &str) -> std::path::PathBuf {
         let temp_dir = tempdir().expect("tempdir");
         let path = temp_dir.path().join("server.toml");
+        let contents = if contents.contains("content_token_secret") {
+            contents.to_owned()
+        } else {
+            contents.replacen(
+                "writer_id",
+                "content_token_secret = \"dev-content-token-secret\"\nwriter_id",
+                1,
+            )
+        };
         fs::write(&path, contents).expect("write config");
         let _ = temp_dir.keep();
         path

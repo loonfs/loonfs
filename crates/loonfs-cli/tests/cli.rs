@@ -921,6 +921,7 @@ impl Harness {
             r#"
 bind = "{bind}"
 auth_token = "test-token"
+content_token_secret = "test-content-token-secret"
 writer_id = "{name}"
 writer_version = "{name}/0.1.0"
 lease_duration_ms = 200

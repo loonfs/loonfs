@@ -354,7 +354,36 @@ example, `if-none-match: *` keeps the immutable object create-only, and
 `content_ref`. Other providers may use different headers or decline
 `direct_put` support.
 
-After the client uploads bytes to the presigned URL, it calls complete with the same `content_ref`. Completion validates that the durable object exists and matches before the upload session can be committed.
+After the client uploads bytes to the presigned URL, it calls complete with the same `content_ref`. Completion validates that the durable object exists and matches, then returns a short-lived validated content token:
+
+```json
+{
+  "namespace_id": "demo",
+  "upload_id": "upl_...",
+  "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+  "validated_content_token": "..."
+}
+```
+
+Path-oriented `put_file` operations that introduce new external content must carry the matching token. The token is an opaque server-signed proof; clients must not parse it.
+
+```json
+{
+  "commit_id": "commit-a",
+  "content_tokens": [
+    {
+      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "token": "..."
+    }
+  ],
+  "operation": {
+    "op": "put_file",
+    "path": "/docs/report.pdf",
+    "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+    "behavior": "create_only"
+  }
+}
+```
 
 Long-running transfers may additionally expose session resources.
 Implementations may also expose workflow helper resources, but those helpers

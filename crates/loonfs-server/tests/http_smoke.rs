@@ -1319,7 +1319,7 @@ fn test_config(
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         auth_token: Some("test-token".to_owned()),
-        content_token_secret: Some("test-content-token-secret".to_owned()),
+        content_token_secret: "test-content-token-secret".to_owned(),
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         lease_duration_ms,
