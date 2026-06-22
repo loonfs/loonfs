@@ -633,6 +633,7 @@ fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
         StoreConfig::AwsS3 { .. } => TraceStoreKind::S3,
         StoreConfig::CloudflareR2 { .. } => TraceStoreKind::R2,
         StoreConfig::GcpGcs { .. } => TraceStoreKind::Gcs,
+        StoreConfig::AzureAbs { .. } => TraceStoreKind::Abs,
     }
 }
 

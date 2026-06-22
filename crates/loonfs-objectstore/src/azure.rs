@@ -3,7 +3,7 @@ use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
+use object_store::azure::MicrosoftAzureBuilder;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +49,16 @@ impl AzureAbsStore {
             .with_container_name(config.container_name)
             .with_access_key(config.access_key);
         if let Some(endpoint_url) = config.endpoint_url {
-            if endpoint_url.trim().is_empty() {
+            let endpoint_url = endpoint_url.trim();
+            if endpoint_url.is_empty() {
                 return Err(ObjectStoreError::Transport(
                     "endpoint url must not be empty".to_owned(),
                 ));
             }
-            builder = builder.with_config(AzureConfigKey::Endpoint, endpoint_url);
+            if endpoint_url.starts_with("http://") {
+                builder = builder.with_allow_http(true);
+            }
+            builder = builder.with_endpoint(endpoint_url.to_owned());
         }
 
         let provider = builder
@@ -123,7 +127,8 @@ mod tests {
     use crate::ObjectStore;
     use crate::ObjectStoreError;
 
-    const AZURITE_ACCOUNT_KEY: &str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+    const AZURITE_ACCOUNT_KEY: &str =
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
     #[test]
     fn access_key_is_required() {
@@ -136,7 +141,21 @@ mod tests {
         })
         .expect_err("blank access key should be rejected");
 
-        assert!(matches!(error, ObjectStoreError::Transport(message) if message.contains("access key")));
+        assert!(
+            matches!(error, ObjectStoreError::Transport(message) if message.contains("access key"))
+        );
+    }
+
+    #[test]
+    fn http_endpoint_is_allowed_for_emulator() {
+        AzureAbsStore::new(AzureAbsStoreConfig {
+            account_name: "devstoreaccount1".to_owned(),
+            container_name: "container".to_owned(),
+            access_key: AZURITE_ACCOUNT_KEY.to_owned(),
+            endpoint_url: Some("http://127.0.0.1:10000/devstoreaccount1".to_owned()),
+            key_prefix: None,
+        })
+        .expect("construct azure store with HTTP endpoint");
     }
 
     #[tokio::test]

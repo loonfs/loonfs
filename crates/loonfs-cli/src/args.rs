@@ -67,6 +67,12 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub account_id: Option<String>,
     #[arg(long)]
+    pub account_name: Option<String>,
+    #[arg(long)]
+    pub container_name: Option<String>,
+    #[arg(long)]
+    pub access_key: Option<String>,
+    #[arg(long)]
     pub service_account_key_path: Option<String>,
     #[arg(long)]
     pub key_prefix: Option<String>,
@@ -116,6 +122,12 @@ pub(crate) struct ProfileCreateArgs {
     #[arg(long)]
     pub account_id: Option<String>,
     #[arg(long)]
+    pub account_name: Option<String>,
+    #[arg(long)]
+    pub container_name: Option<String>,
+    #[arg(long)]
+    pub access_key: Option<String>,
+    #[arg(long)]
     pub service_account_key_path: Option<String>,
     #[arg(long)]
     pub server_url: Option<String>,
@@ -144,6 +156,12 @@ pub(crate) struct ProfileUpdateArgs {
     pub session_token: Option<String>,
     #[arg(long)]
     pub account_id: Option<String>,
+    #[arg(long)]
+    pub account_name: Option<String>,
+    #[arg(long)]
+    pub container_name: Option<String>,
+    #[arg(long)]
+    pub access_key: Option<String>,
     #[arg(long)]
     pub service_account_key_path: Option<String>,
     #[arg(long)]
