@@ -8,7 +8,7 @@
 //! [`layout`], and the conformance [`probes`] that keep provider assumptions
 //! honest.
 
-pub mod azure;
+pub mod abs;
 mod configured;
 pub mod fs;
 pub mod gcs;

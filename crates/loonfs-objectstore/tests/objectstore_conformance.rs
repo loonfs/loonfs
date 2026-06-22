@@ -2,7 +2,7 @@ mod provider_env;
 
 use bytes::Bytes;
 use loonfs_api::ManifestId;
-use loonfs_objectstore::azure::{AzureAbsStore, AzureAbsStoreConfig};
+use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::gcs::{GcsStore, GcsStoreConfig};
 use loonfs_objectstore::keys::{

@@ -1,6 +1,6 @@
 use http::Uri;
 use loonfs::RuntimeCacheConfig;
-use loonfs_objectstore::azure::AzureAbsStoreConfig;
+use loonfs_objectstore::abs::AzureAbsStoreConfig;
 use loonfs_objectstore::gcs::GcsStoreConfig;
 use loonfs_objectstore::r2::R2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;

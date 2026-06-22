@@ -1,5 +1,5 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
-use crate::azure::{AzureAbsStore, AzureAbsStoreConfig};
+use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::fs::LocalFsStore;
 use crate::gcs::{GcsStore, GcsStoreConfig};
 use crate::keyspace::{
@@ -227,7 +227,7 @@ impl ObjectStore for ConfiguredObjectStore {
 #[cfg(test)]
 mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
-    use crate::azure::AzureAbsStoreConfig;
+    use crate::abs::AzureAbsStoreConfig;
     use crate::fs::LocalFsStore;
     use crate::gcs::GcsStoreConfig;
     use crate::keys::namespace_head;
