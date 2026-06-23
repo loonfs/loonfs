@@ -350,7 +350,9 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "wal", wal] if wal.ends_with(".wal.zst") => {
             parsed(DurableObjectFamily::WalSegment, Some(namespace))
         }
-        ["namespaces", namespace, "compaction", compactions] if compactions.ends_with(".plan.json") => {
+        ["namespaces", namespace, "compaction", compactions]
+            if compactions.ends_with(".plan.json") =>
+        {
             parsed(DurableObjectFamily::NamespaceCompactions, Some(namespace))
         }
         ["namespaces", namespace, "tables", "metadata", table] if table.ends_with(".sst.zst") => {

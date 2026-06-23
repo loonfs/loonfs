@@ -148,6 +148,7 @@ fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_objectstore::keys::wal_segment as wal_segment_key;
 
     #[test]
     fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {
@@ -236,10 +237,7 @@ mod tests {
         };
         let envelope = WalSegmentEnvelope::from_payload("test", payload).expect("wal envelope");
         PreparedWalSegment {
-            object_key: format!(
-                "namespaces/{}/wal/{segment_id}.wal.zst",
-                namespace_id.as_str(),
-            ),
+            object_key: wal_segment_key(namespace_id.as_str(), &segment_id),
             segment_id,
             envelope,
             encoded_bytes: Vec::new(),
