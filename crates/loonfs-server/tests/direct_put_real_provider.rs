@@ -2,17 +2,18 @@
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
 use loonfs_api::{
-    v0::{CompleteUploadRequest, ValidatedContentToken},
+    v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
     ChangeSeq, CommitId, ContentRef, FilesystemOperation, FilesystemOperationRequest,
     FilesystemOperationResponse, FilesystemPutBehavior,
 };
-use loonfs_client::{Client, ClientConfig, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const AUTH_TOKEN: &str = "test-token";
 const CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
+const SIGNED_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires real AWS S3 credentials"]
@@ -83,6 +84,10 @@ async fn direct_put_round_trip(config: ServerConfig) {
             .create_namespace(namespace)
             .expect("create namespace");
 
+        assert_wrong_direct_put_bytes_rejected(&harness.client, namespace);
+        assert_direct_put_requires_signed_checksum_header(&harness.client, namespace);
+        assert_direct_put_is_create_only(&harness.client, namespace);
+
         let begin = harness
             .client
             .begin_direct_put(namespace, content_ref.clone())
@@ -133,6 +138,118 @@ async fn direct_put_round_trip(config: ServerConfig) {
     })
     .await
     .expect("join blocking task");
+}
+
+fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace: &str) {
+    let bytes = b"expected direct put bytes\n";
+    let wrong_bytes = b"wrong direct put bytes\n";
+    let content_ref = ContentRef::whole_file_v0(bytes);
+    let begin = client
+        .begin_direct_put(namespace, content_ref.clone())
+        .expect("begin wrong-bytes direct put");
+    let direct_put = begin.direct_put.expect("wrong-bytes direct-put access");
+    assert_eq!(direct_put.content_ref, content_ref);
+
+    expect_client_rejection(
+        client.upload_via_presigned_url(&direct_put.access, wrong_bytes),
+        "wrong-bytes direct put",
+    );
+    expect_client_rejection(
+        client.complete_upload(
+            namespace,
+            &begin.upload_id,
+            &CompleteUploadRequest { content_ref },
+        ),
+        "complete wrong-bytes direct put",
+    );
+}
+
+fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace: &str) {
+    let bytes = b"direct put bytes without checksum header\n";
+    let content_ref = ContentRef::whole_file_v0(bytes);
+    let begin = client
+        .begin_direct_put(namespace, content_ref.clone())
+        .expect("begin missing-checksum direct put");
+    let direct_put = begin
+        .direct_put
+        .expect("missing-checksum direct-put access");
+    assert_eq!(direct_put.content_ref, content_ref);
+    let access_without_checksum =
+        presigned_access_without_header(&direct_put.access, SIGNED_CHECKSUM_HEADER);
+
+    expect_client_rejection(
+        client.upload_via_presigned_url(&access_without_checksum, bytes),
+        "missing-checksum direct put",
+    );
+    expect_client_rejection(
+        client.complete_upload(
+            namespace,
+            &begin.upload_id,
+            &CompleteUploadRequest { content_ref },
+        ),
+        "complete missing-checksum direct put",
+    );
+}
+
+fn assert_direct_put_is_create_only(client: &Client, namespace: &str) {
+    let bytes = b"duplicate direct put bytes\n";
+    let content_ref = ContentRef::whole_file_v0(bytes);
+    let begin = client
+        .begin_direct_put(namespace, content_ref.clone())
+        .expect("begin duplicate direct put");
+    let direct_put = begin.direct_put.expect("duplicate direct-put access");
+    assert_eq!(direct_put.content_ref, content_ref);
+
+    client
+        .upload_via_presigned_url(&direct_put.access, bytes)
+        .expect("first direct put succeeds");
+    expect_client_rejection(
+        client.upload_via_presigned_url(&direct_put.access, bytes),
+        "duplicate direct put",
+    );
+
+    let complete = client
+        .complete_upload(
+            namespace,
+            &begin.upload_id,
+            &CompleteUploadRequest { content_ref },
+        )
+        .expect("complete first direct put");
+    assert!(complete.validated_content_token.is_some());
+}
+
+fn presigned_access_without_header(
+    access: &ObjectTransferAccess,
+    header: &str,
+) -> ObjectTransferAccess {
+    match access {
+        ObjectTransferAccess::PresignedUrl {
+            method,
+            url,
+            headers,
+            expires_at_ms,
+        } => {
+            let mut headers = headers.clone();
+            assert!(
+                headers.remove(header).is_some(),
+                "presigned access did not include expected header `{header}`"
+            );
+            ObjectTransferAccess::PresignedUrl {
+                method: method.clone(),
+                url: url.clone(),
+                headers,
+                expires_at_ms: *expires_at_ms,
+            }
+        }
+    }
+}
+
+fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
+    match result {
+        Ok(_) => panic!("{context} unexpectedly succeeded"),
+        Err(ClientError::Api { .. } | ClientError::Http(_)) => {}
+        Err(error) => panic!("{context} failed with unexpected client-side error: {error}"),
+    }
 }
 
 struct TestServer {
