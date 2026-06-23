@@ -1,0 +1,127 @@
+use crate::ObjectStoreError;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const SHA256_BLOCK_BYTES: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AwsSigV4Dates {
+    pub(crate) short_date: String,
+    pub(crate) amz_date: String,
+}
+
+pub(crate) fn aws_dates(time: SystemTime) -> Result<AwsSigV4Dates, ObjectStoreError> {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| {
+            ObjectStoreError::Transport(format!("system time is before unix epoch: {err}"))
+        })?
+        .as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let short_date = format!("{year:04}{month:02}{day:02}");
+
+    Ok(AwsSigV4Dates {
+        amz_date: format!("{short_date}T{hour:02}{minute:02}{second:02}Z"),
+        short_date,
+    })
+}
+
+pub(crate) fn canonical_query_string(query: &BTreeMap<String, String>) -> String {
+    query
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                percent_encode_query(key),
+                percent_encode_query(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+pub(crate) fn percent_encode_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(percent_encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub(crate) fn percent_encode_segment(value: &str) -> String {
+    percent_encode_bytes(value.as_bytes())
+}
+
+pub(crate) fn normalize_header_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut normalized_key = if key.len() > SHA256_BLOCK_BYTES {
+        Sha256::digest(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    normalized_key.resize(SHA256_BLOCK_BYTES, 0);
+    let mut outer = [0x5c; SHA256_BLOCK_BYTES];
+    let mut inner = [0x36; SHA256_BLOCK_BYTES];
+    for (idx, byte) in normalized_key.iter().enumerate() {
+        outer[idx] ^= *byte;
+        inner[idx] ^= *byte;
+    }
+    let inner_hash = Sha256::new()
+        .chain_update(inner)
+        .chain_update(value)
+        .finalize();
+    Sha256::new()
+        .chain_update(outer)
+        .chain_update(inner_hash)
+        .finalize()
+        .to_vec()
+}
+
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
+}
+
+fn percent_encode_query(value: &str) -> String {
+    percent_encode_bytes(value.as_bytes())
+}
+
+fn percent_encode_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in bytes {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+// Howard Hinnant's civil date conversion, with days counted from 1970-01-01.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    (y + if m <= 2 { 1 } else { 0 }, m, d)
+}

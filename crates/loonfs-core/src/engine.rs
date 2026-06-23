@@ -8,8 +8,8 @@ use crate::options::{
 };
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse, CompleteUploadRequest,
-    CompleteUploadResponse, UploadContentResponse,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -22,6 +22,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
+
+/// Internal target used by server integrations before they mint a presigned URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectPutUploadTarget {
+    pub content_ref: ContentRef,
+    pub object_key: String,
+}
+
+/// Internal response for preparing a direct_put session before URL signing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginDirectPutUploadTargetResponse {
+    pub namespace_id: NamespaceId,
+    pub upload_id: String,
+    pub target: DirectPutUploadTarget,
+}
 
 /// A namespace-scoped core API.
 ///
@@ -515,8 +530,36 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     /// Starts a durable upload session for this namespace.
     pub async fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
-        crate::protocol::begin_upload(&self.store, &self.namespace_id, &self.mutation_context())
+        self.begin_upload_with_request(BeginUploadRequest::default())
             .await
+    }
+
+    /// Starts a durable upload session with explicit transport options.
+    pub async fn begin_upload_with_request(
+        &self,
+        request: BeginUploadRequest,
+    ) -> CoreResult<BeginUploadResponse> {
+        crate::protocol::begin_upload(
+            &self.store,
+            &self.namespace_id,
+            request,
+            &self.mutation_context(),
+        )
+        .await
+    }
+
+    /// Starts a direct_put upload session and returns the internal object key to sign.
+    pub async fn begin_direct_put_upload_target(
+        &self,
+        content_ref: ContentRef,
+    ) -> CoreResult<BeginDirectPutUploadTargetResponse> {
+        crate::protocol::begin_direct_put_upload_target(
+            &self.store,
+            &self.namespace_id,
+            content_ref,
+            &self.mutation_context(),
+        )
+        .await
     }
 
     /// Uploads whole-file content into an upload session.

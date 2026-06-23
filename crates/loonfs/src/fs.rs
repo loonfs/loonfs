@@ -9,14 +9,14 @@ use crate::config::{default_writer_version, validate_config};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::uploads::{UploadedContentProofCache, UploadedContentProofStore};
 use crate::DEFAULT_LEASE_DURATION_MS;
 use crate::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
-    ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest,
-    CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CoreError, CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
+    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
+    ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
+    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
     NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
@@ -26,8 +26,8 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     AbsolutePath, CapabilityDocument, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROTOCOL_VERSION,
+    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{load_namespace_head_summary, MetadataTableCache};
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -50,7 +50,6 @@ pub(crate) struct FsInner {
     pub(crate) commit_engines: Mutex<CommitEngineCache>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
-    pub(crate) uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
 }
 
@@ -191,7 +190,6 @@ impl Fs {
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
-                uploaded_content_proofs: Mutex::new(UploadedContentProofCache::default()),
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
         })
@@ -293,6 +291,7 @@ impl Fs {
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
+                (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
             ]),
             limits: BTreeMap::new(),
         }
@@ -626,7 +625,7 @@ impl Fs {
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         validate_runtime_mutation_path(absolute_path)?;
-        let store = self.uploaded_content_proof_store(namespace_id);
+        let store = self.store();
         let stored = loonfs_core::content::store_bytes_as_content(&store, namespace_id, bytes)
             .await
             .map_err(RuntimeError::from);
@@ -820,7 +819,32 @@ impl Fs {
 
     /// Starts a durable upload session for a namespace.
     pub async fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
-        Ok(self.namespace_engine(namespace_id).begin_upload().await?)
+        self.begin_upload_with_request(namespace_id, BeginUploadRequest::default())
+            .await
+    }
+
+    /// Starts a durable upload session with explicit transport options.
+    pub async fn begin_upload_with_request(
+        &self,
+        namespace_id: &NamespaceId,
+        request: BeginUploadRequest,
+    ) -> Result<BeginUploadResponse> {
+        Ok(self
+            .namespace_engine(namespace_id)
+            .begin_upload_with_request(request)
+            .await?)
+    }
+
+    /// Starts a direct_put upload session and returns the internal target for server-side signing.
+    pub async fn begin_direct_put_upload_target(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+    ) -> Result<BeginDirectPutUploadTargetResponse> {
+        Ok(self
+            .namespace_engine(namespace_id)
+            .begin_direct_put_upload_target(content_ref)
+            .await?)
     }
 
     /// Uploads whole-file content into an upload session.
@@ -830,9 +854,8 @@ impl Fs {
         upload_id: &str,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
-        let store = self.uploaded_content_proof_store(namespace_id);
         Ok(self
-            .namespace_engine_with_store(namespace_id, store)
+            .namespace_engine(namespace_id)
             .upload_content(upload_id, bytes)
             .await?)
     }
@@ -923,7 +946,7 @@ impl Fs {
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-        let store = self.uploaded_content_proof_store(namespace_id);
+        let store = self.store();
         if self.commit_engine_cache_enabled() {
             let engine = self.commit_engine(namespace_id);
             let publish = {
@@ -1065,17 +1088,6 @@ impl Fs {
             .lease_duration_ms(self.inner.config.lease_duration_ms)
             .build()
             .expect("validated runtime config should build namespace engine")
-    }
-
-    pub(crate) fn uploaded_content_proof_store<'a>(
-        &'a self,
-        namespace_id: &'a NamespaceId,
-    ) -> UploadedContentProofStore<'a> {
-        UploadedContentProofStore {
-            inner: self.store(),
-            namespace_id,
-            proofs: &self.inner.uploaded_content_proofs,
-        }
     }
 
     pub(crate) fn mutation_context(&self) -> MutationContext {

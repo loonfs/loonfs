@@ -8,12 +8,14 @@ use loonfs_api::{
     sha256_digest,
     v0::{
         CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
-        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest, UploadMode,
+        ValidatedContentToken,
     },
     wire::control::{
-        decode_control_object, ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState,
-        LeaseState, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
-        NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
+        decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
+        ControlObjectKind, HeadState, LeaseState, NamespaceDescriptorEnvelope,
+        NamespaceDescriptorState, NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
+        UploadSessionEnvelope, UploadSessionState,
     },
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
@@ -25,7 +27,7 @@ use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
     CommitValidationError, PreparedCommit,
 };
-use loonfs_core::content::store_bytes_as_content;
+use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
 use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::metadata::MetadataState;
 use loonfs_core::publish::{
@@ -33,13 +35,13 @@ use loonfs_core::publish::{
     PathMutationIntent, PublishOptions,
 };
 use loonfs_core::{
-    BootstrapOptions, Error as CoreError, ErrorCode, ForkOptions, MutationContext, NamespaceEngine,
-    PutFileBehavior, ReadOptions, WriteOptions,
+    BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
+    ForkOptions, MutationContext, NamespaceEngine, PutFileBehavior, ReadOptions, WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_fork_state,
-    namespace_head, namespace_lease, namespace_manifest, upload_session_prefix,
+    namespace_head, namespace_lease, namespace_manifest, upload_session, upload_session_prefix,
 };
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -160,6 +162,17 @@ fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
     block_on(namespace_engine(store, namespace_id, context).begin_upload())
+}
+
+fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_ref: ContentRef,
+    context: &MutationContext,
+) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
+    block_on(
+        namespace_engine(store, namespace_id, context).begin_direct_put_upload_target(content_ref),
+    )
 }
 
 fn upload_content<S: ObjectStore + ?Sized>(
@@ -1233,6 +1246,32 @@ async fn begin_upload_rejects_missing_and_partial_namespace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let content_ref = ContentRef {
+        kind: ContentRefKind::Unsupported("future_kind".to_owned()),
+        digest: sha256_digest(b"hello"),
+        size_bytes: 5,
+    };
+    let error = begin_direct_put_upload_target(&store, &namespace_id, content_ref, &context)
+        .expect_err("unsupported direct_put content ref");
+
+    assert_eq!(error.code(), ErrorCode::InvalidUploadContent);
+    assert_eq!(
+        store
+            .list_prefix(&upload_session_prefix(namespace_id.as_str()))
+            .await
+            .expect("list upload sessions"),
+        Vec::<String>::new()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
@@ -1336,6 +1375,53 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn complete_upload_rejects_direct_put_session_without_bound_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let stored = store_bytes_as_content(&store, &namespace_id, b"hello")
+        .await
+        .expect("store content");
+
+    let upload_id = "upl_00000000000000000000000000000001";
+    let state = UploadSessionState {
+        namespace_id: namespace_id.clone(),
+        upload_id: upload_id.to_owned(),
+        mode: UploadMode::DirectPut,
+        direct_put_content_ref: None,
+        staged_content_ref: None,
+        completed: None,
+        created_at_ms: context.now_ms,
+    };
+    let envelope =
+        UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, "test", state)
+            .expect("upload session envelope");
+    let encoded = encode_control_object(&envelope).expect("encode upload session");
+    store
+        .put_if_absent(
+            &upload_session(namespace_id.as_str(), upload_id),
+            Bytes::from(encoded),
+        )
+        .await
+        .expect("write malformed upload session");
+
+    let error = complete_upload(
+        &store,
+        &namespace_id,
+        upload_id,
+        &CompleteUploadRequest {
+            content_ref: stored.content_ref,
+        },
+        &context,
+    )
+    .expect_err("direct_put session without target should fail closed");
+
+    assert_eq!(error.code(), ErrorCode::InvalidUploadContent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_put_file_uses_checksum_metadata_for_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1434,6 +1520,108 @@ async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
 
     assert!(responses.iter().all(Result::is_ok));
     assert_eq!(store.content_blob_get_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn valid_content_admission_skips_durable_content_validation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"admitted")
+        .await
+        .expect("stage content");
+    let token = ValidatedContentToken {
+        content_ref: content.content_ref.clone(),
+        token: mint_content_token(
+            "test-content-token-secret",
+            &namespace_id,
+            &content.content_ref,
+            context.now_ms,
+        )
+        .expect("mint token"),
+    };
+    let admission = verify_content_token(
+        "test-content-token-secret",
+        &namespace_id,
+        &token,
+        context.now_ms,
+    )
+    .expect("verify token");
+
+    store.reset_content_blob_counters();
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![NamespaceMutationCandidate::PathWithContentAdmission {
+            intent: PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
+                absolute_path: "/docs/admitted.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            admissions: vec![admission],
+        }],
+        &context,
+    );
+
+    assert!(responses[0].is_ok());
+    assert_eq!(store.content_blob_get_count(), 0);
+    assert_eq!(store.content_blob_checksum_head_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_content_admission_falls_back_to_durable_validation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"expired")
+        .await
+        .expect("stage content");
+    let token = ValidatedContentToken {
+        content_ref: content.content_ref.clone(),
+        token: mint_content_token(
+            "test-content-token-secret",
+            &namespace_id,
+            &content.content_ref,
+            context.now_ms,
+        )
+        .expect("mint token"),
+    };
+    let admission = verify_content_token(
+        "test-content-token-secret",
+        &namespace_id,
+        &token,
+        context.now_ms,
+    )
+    .expect("verify token");
+    let mut expired_context = context.clone();
+    expired_context.now_ms += 60 * 60 * 1000 + 1;
+
+    store.reset_content_blob_counters();
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![NamespaceMutationCandidate::PathWithContentAdmission {
+            intent: PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("put-expired-admission").expect("valid commit id"),
+                absolute_path: "/docs/expired.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            admissions: vec![admission],
+        }],
+        &expired_context,
+    );
+
+    assert!(responses[0].is_ok());
+    assert_eq!(store.content_blob_get_count(), 0);
+    assert_eq!(store.content_blob_checksum_head_count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3959,6 +4147,60 @@ async fn restore_revision_resolves_same_request_source_before_durable_content_va
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idempotent_path_retry_returns_receipt_before_content_validation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+
+    let content = store_bytes_as_content(&store, &namespace_id(), b"idempotent")
+        .await
+        .expect("stage content");
+    let commit_id = CommitId::parse("idempotent-put-without-token").expect("valid commit id");
+    let first = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id(),
+        vec![NamespaceMutationCandidate::Path(
+            PathMutationIntent::PutFile {
+                commit_id: commit_id.clone(),
+                absolute_path: "/docs/idempotent.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        )],
+        &context,
+    )
+    .into_iter()
+    .next()
+    .expect("single response")
+    .expect("first commit");
+    store
+        .delete(&content.object_key)
+        .await
+        .expect("delete committed content blob");
+
+    let retry = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id(),
+        vec![NamespaceMutationCandidate::Path(
+            PathMutationIntent::PutFile {
+                commit_id,
+                absolute_path: "/docs/idempotent.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        )],
+        &context,
+    )
+    .into_iter()
+    .next()
+    .expect("single response")
+    .expect("idempotent retry should return existing receipt");
+
+    assert_eq!(retry.committed_seq, first.committed_seq);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn move_path_into_occupied_target_is_path_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -4713,6 +4955,7 @@ impl ObjectStore for ReplayReadGuardStore {
 struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
+    content_blob_checksum_heads: AtomicUsize,
 }
 
 impl ContentBlobGetCountingStore {
@@ -4720,6 +4963,7 @@ impl ContentBlobGetCountingStore {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
             content_blob_gets: AtomicUsize::new(0),
+            content_blob_checksum_heads: AtomicUsize::new(0),
         }
     }
 
@@ -4727,8 +4971,17 @@ impl ContentBlobGetCountingStore {
         self.content_blob_gets.load(Ordering::SeqCst)
     }
 
-    fn reset_content_blob_get_count(&self) {
+    fn content_blob_checksum_head_count(&self) -> usize {
+        self.content_blob_checksum_heads.load(Ordering::SeqCst)
+    }
+
+    fn reset_content_blob_counters(&self) {
         self.content_blob_gets.store(0, Ordering::SeqCst);
+        self.content_blob_checksum_heads.store(0, Ordering::SeqCst);
+    }
+
+    fn reset_content_blob_get_count(&self) {
+        self.reset_content_blob_counters();
     }
 
     fn record_content_blob_get(&self, key: &str) {
@@ -4748,6 +5001,10 @@ impl ObjectStore for ContentBlobGetCountingStore {
         &self,
         key: &str,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_checksum_heads
+                .fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.head_with_checksum(key).await
     }
 

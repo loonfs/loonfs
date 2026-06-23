@@ -8,11 +8,11 @@ use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, CopyOptions, CreateCheckpointResponse,
-    CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
+    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode,
+    Fs, FsConfig, InodeId, MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult,
+    ManifestId, MoveOptions, MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
     UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
@@ -1330,96 +1330,48 @@ fn upload_flow_is_available_from_runtime() {
 }
 
 #[test]
-fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
+fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "direct-put-upload-test");
     let namespace_id = namespace();
-    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("validated-content-checksum-test")
-        .build()
-        .expect("build runtime");
+    let bytes = b"direct uploaded";
+    let content_ref = ContentRef::whole_file_v0(bytes);
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = fs
-        .begin_upload_blocking(&namespace_id)
-        .expect("begin upload");
-    let staged = fs
-        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
-        .expect("upload content");
-    fs.complete_upload_blocking(
-        &namespace_id,
-        &begin.upload_id,
-        &CompleteUploadRequest {
-            content_ref: staged.content_ref.clone(),
-        },
-    )
-    .expect("complete upload");
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
+        .expect("begin direct put");
+    assert_eq!(begin.target.content_ref, content_ref);
 
-    raw_store.reset_content_blob_counters();
-    let responses = fs.publish_namespace_mutations_batch_blocking(
+    let complete_request = CompleteUploadRequest {
+        content_ref: content_ref.clone(),
+    };
+    assert!(fs
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
+        .is_err());
+
+    let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
+    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+        .expect("write direct object");
+
+    let completed = fs
+        .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
+        .expect("complete direct put");
+    assert_eq!(completed.content_ref, content_ref);
+
+    block_on(fs.put_file_content_ref(
         &namespace_id,
-        vec![NamespaceMutationCandidate::Path(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-checksum-upload").expect("valid commit id"),
-                absolute_path: "/docs/checksum.txt".to_owned(),
-                content_ref: staged.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
-            },
-        )],
+        "/docs/direct.txt",
+        content_ref,
+        PutFileOptions::default(),
+    ))
+    .expect("publish direct put content");
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/direct.txt")
+            .expect("read direct put file")
+            .bytes,
+        bytes
     );
-
-    assert!(responses[0].is_ok());
-    assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
-}
-
-#[test]
-fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("validated-content-checksum-disabled-test")
-        .runtime_cache(RuntimeCacheConfig::disabled())
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    let begin = fs
-        .begin_upload_blocking(&namespace_id)
-        .expect("begin upload");
-    let staged = fs
-        .upload_content_blocking(&namespace_id, &begin.upload_id, b"uploaded")
-        .expect("upload content");
-    fs.complete_upload_blocking(
-        &namespace_id,
-        &begin.upload_id,
-        &CompleteUploadRequest {
-            content_ref: staged.content_ref.clone(),
-        },
-    )
-    .expect("complete upload");
-
-    raw_store.reset_content_blob_counters();
-    let responses = fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![NamespaceMutationCandidate::Path(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-uncached-upload").expect("valid commit id"),
-                absolute_path: "/docs/uncached.txt".to_owned(),
-                content_ref: staged.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
-            },
-        )],
-    );
-
-    assert!(responses[0].is_ok());
-    assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
 #[test]
@@ -1549,13 +1501,13 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 }
 
 #[test]
-fn put_file_bytes_uses_memory_proof_without_blob_validation_call() {
+fn put_file_bytes_validates_content_ref_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("put-file-memory-proof-test")
+        .writer_id("put-file-content-validation-test")
         .build()
         .expect("build runtime");
 
@@ -1572,7 +1524,7 @@ fn put_file_bytes_uses_memory_proof_without_blob_validation_call() {
     .expect("put file bytes");
 
     assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 1);
 }
 
 #[test]

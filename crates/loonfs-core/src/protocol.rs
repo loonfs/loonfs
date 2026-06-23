@@ -5,7 +5,9 @@ use crate::commit::{
     CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
     PreparedCommit, SemanticMutationIdentity,
 };
+use crate::content::ContentAdmission;
 use crate::context::MutationContext;
+use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::basis::{
@@ -22,13 +24,15 @@ use crate::namespace::control::{
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
-use crate::storage::content::{write_immutable_object, ContentValidationTracker};
+use crate::storage::content::{
+    validate_durable_content_reference, write_immutable_object, ContentValidationTracker,
+};
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
 use bytes::Bytes;
 use loonfs_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,
-    CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, UploadContentResponse, UploadMode,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta,
+    CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse, CommittedChange,
+    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind,
@@ -36,8 +40,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
 use loonfs_api::{
-    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentStoreId,
-    NameKey, NamespaceId,
+    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+    ContentStoreId, NameKey, NamespaceId,
 };
 use loonfs_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -110,21 +114,83 @@ struct CandidateCoreRequest {
 pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    request: BeginUploadRequest,
     context: &MutationContext,
 ) -> Result<BeginUploadResponse, CoreError> {
     ensure_upload_namespace_available(store, namespace_id).await?;
-    create_upload_session(store, namespace_id, context).await
+    let mode = request.mode.unwrap_or_default();
+    if mode == UploadMode::DirectPut {
+        return Err(CoreError::InvalidUploadContent(
+            "direct_put requires a presigned URL issuer".to_owned(),
+        ));
+    }
+    let upload_id = create_upload_session(
+        store,
+        namespace_id,
+        UploadMode::ServiceProxied,
+        None,
+        context,
+    )
+    .await?;
+    Ok(BeginUploadResponse {
+        namespace_id: namespace_id.clone(),
+        upload_id,
+        mode: UploadMode::ServiceProxied,
+        direct_put: None,
+    })
+}
+
+pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_ref: ContentRef,
+    context: &MutationContext,
+) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
+    ensure_upload_namespace_available(store, namespace_id).await?;
+    ensure_direct_put_content_ref_supported(&content_ref)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
+        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
+    let upload_id = create_upload_session(
+        store,
+        namespace_id,
+        UploadMode::DirectPut,
+        Some(content_ref.clone()),
+        context,
+    )
+    .await?;
+    Ok(BeginDirectPutUploadTargetResponse {
+        namespace_id: namespace_id.clone(),
+        upload_id,
+        target: DirectPutUploadTarget {
+            content_ref,
+            object_key,
+        },
+    })
+}
+
+fn ensure_direct_put_content_ref_supported(content_ref: &ContentRef) -> Result<(), CoreError> {
+    if content_ref.kind != ContentRefKind::WholeFileV0 {
+        return Err(CoreError::InvalidUploadContent(
+            "direct_put only supports whole_file_v0 content refs".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    mode: UploadMode,
+    direct_put_content_ref: Option<ContentRef>,
     context: &MutationContext,
-) -> Result<BeginUploadResponse, CoreError> {
+) -> Result<String, CoreError> {
     let upload_id = generate_upload_id();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
+        mode,
+        direct_put_content_ref,
         staged_content_ref: None,
         completed: None,
         created_at_ms: context.now_ms,
@@ -142,12 +208,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         .put_if_absent(&object_key, Bytes::from(encoded))
         .await
         .map_err(|err| CoreError::Store(err.to_string()))?;
-
-    Ok(BeginUploadResponse {
-        namespace_id: namespace_id.clone(),
-        upload_id,
-        mode: UploadMode::ServiceProxied,
-    })
+    Ok(upload_id)
 }
 
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
@@ -228,6 +289,11 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
                 upload_id: upload_id.to_owned(),
             });
         }
+        if loaded.envelope.state.mode == UploadMode::DirectPut {
+            return Err(CoreError::InvalidUploadContent(
+                "direct_put sessions must be completed after using the presigned URL".to_owned(),
+            ));
+        }
 
         if let Some(existing) = &loaded.envelope.state.staged_content_ref {
             if existing == &content_ref {
@@ -297,6 +363,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
                     content_ref: completed.content_ref.clone(),
+                    validated_content_token: None,
                 });
             }
             return Err(CoreError::UploadAlreadyCompleted {
@@ -304,10 +371,9 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
             });
         }
 
-        let Some(staged_content_ref) = loaded.envelope.state.staged_content_ref.clone() else {
-            return Err(CoreError::InvalidUploadContent(
-                "upload content has not been staged".to_owned(),
-            ));
+        let staged_content_ref = match loaded.envelope.state.staged_content_ref.clone() {
+            Some(content_ref) => content_ref,
+            None => stage_direct_put_content_ref(store, namespace_id, &loaded, request).await?,
         };
         if staged_content_ref != request.content_ref {
             return Err(CoreError::InvalidUploadContent(
@@ -316,6 +382,9 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         }
 
         let mut next_state = loaded.envelope.state.clone();
+        if next_state.staged_content_ref.is_none() {
+            next_state.staged_content_ref = Some(staged_content_ref);
+        }
         next_state.completed = Some(CompletedUpload {
             content_ref: request.content_ref.clone(),
         });
@@ -342,6 +411,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
                     content_ref: request.content_ref.clone(),
+                    validated_content_token: None,
                 });
             }
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
@@ -352,6 +422,38 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     Err(CoreError::Store(
         "upload session compare-and-swap retry exhausted".to_owned(),
     ))
+}
+
+async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    loaded: &LoadedUploadSessionObject,
+    request: &CompleteUploadRequest,
+) -> Result<ContentRef, CoreError> {
+    if loaded.envelope.state.mode != UploadMode::DirectPut {
+        return Err(CoreError::InvalidUploadContent(
+            "upload content has not been staged".to_owned(),
+        ));
+    }
+
+    let Some(expected) = &loaded.envelope.state.direct_put_content_ref else {
+        return Err(CoreError::InvalidUploadContent(
+            "direct_put session is missing its target content ref".to_owned(),
+        ));
+    };
+    if expected != &request.content_ref {
+        return Err(CoreError::InvalidUploadContent(
+            "completed content ref does not match direct_put target".to_owned(),
+        ));
+    }
+
+    // Bytes bypassed the LoonFS server; completion is the authority point where
+    // the server proves the object is durable and matches the signed content ref.
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    validate_durable_content_reference(store, &content_store_id, &request.content_ref)
+        .await
+        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
+    Ok(request.content_ref.clone())
 }
 
 pub(crate) async fn commit_operations<S: ObjectStore + ?Sized>(
@@ -500,11 +602,17 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
             };
             let request = candidate_request.request;
             let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
+            let admissions = CommitContentAdmissions {
+                namespace_id,
+                admissions: candidate_content_admissions(candidate),
+                now_ms: context.now_ms,
+            };
             if let Err(error) = validate_commit_content_references(
                 store,
                 &basis.content_store_id,
                 &request,
                 &resolved_restore_content_refs,
+                admissions,
                 &mut content_validation,
             )
             .await
@@ -755,7 +863,8 @@ fn prepare_candidate_request(
                 identity_source: CommitIdentitySource::CoreCommitRequest,
             })
         }
-        NamespaceMutationCandidate::Path(intent) => {
+        NamespaceMutationCandidate::Path(intent)
+        | NamespaceMutationCandidate::PathWithContentAdmission { intent, .. } => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
                 outcomes[index] = Some(Err(error));
                 return None;
@@ -981,11 +1090,26 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
     })
 }
 
+struct CommitContentAdmissions<'a> {
+    namespace_id: &'a NamespaceId,
+    admissions: &'a [ContentAdmission],
+    now_ms: u64,
+}
+
+impl CommitContentAdmissions<'_> {
+    fn admits(&self, content_ref: &ContentRef) -> bool {
+        self.admissions
+            .iter()
+            .any(|admission| admission.admits(self.namespace_id, content_ref, self.now_ms))
+    }
+}
+
 async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     request: &CoreCommitRequest,
     resolved_restore_content_refs: &[Option<ContentRef>],
+    admissions: CommitContentAdmissions<'_>,
     content_validation: &mut ContentValidationTracker,
 ) -> Result<(), CoreError> {
     let mut content_refs = Vec::new();
@@ -1012,12 +1136,22 @@ async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     }
 
     for content_ref in content_refs {
+        if admissions.admits(content_ref) {
+            continue;
+        }
         content_validation
             .ensure_validated(store, content_store_id, content_ref)
             .await?;
     }
 
     Ok(())
+}
+
+fn candidate_content_admissions(candidate: &NamespaceMutationCandidate) -> &[ContentAdmission] {
+    match candidate {
+        NamespaceMutationCandidate::PathWithContentAdmission { admissions, .. } => admissions,
+        NamespaceMutationCandidate::Commit(_) | NamespaceMutationCandidate::Path(_) => &[],
+    }
 }
 
 async fn read_upload_session_object<S: ObjectStore + ?Sized>(

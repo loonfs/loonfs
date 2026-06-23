@@ -11,16 +11,16 @@ mod fs;
 mod options;
 mod time;
 mod trace;
-mod uploads;
 
 use std::sync::Arc;
 
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
-    CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, RenameMode, UploadContentResponse, UploadMode,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta,
+    CommitOp, CommitOpResult, CommitPrecondition, CommitRequest, CommitResponse, CommittedChange,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
+    RenameMode, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
@@ -28,13 +28,13 @@ pub use loonfs_api::{
     DeleteNamespaceResponse, DisplayName, FileRevision, FilesystemOperationResponse, InodeId,
     InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult,
     NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
-    BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
-    PutFileBehavior,
+    BeginDirectPutUploadTargetResponse, BootstrapNamespaceError, DeleteNamespaceOptions,
+    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, PutFileBehavior,
 };
 
 /// Server-integration seam: the vocabulary a batching publisher uses to

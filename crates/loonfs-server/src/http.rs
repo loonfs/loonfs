@@ -15,29 +15,40 @@ use loonfs::{
 };
 use loonfs_api::{
     v0::{
-        BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        UploadContentResponse,
+        BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
+        CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
+        UploadContentResponse, UploadMode, ValidatedContentToken,
     },
-    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
-    ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
-    RevisionNo,
+    AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
+    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId,
+    ListFileRevisionsResponse, ListNamespacesResponse, NamespaceId, NamespaceIdValidationError,
+    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+};
+use loonfs_core::content::{
+    mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
+};
+use loonfs_objectstore::{
+    presign::{ObjectTransferIssuer, PresignedPutRequest},
+    ObjectStoreError,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
+const DIRECT_PUT_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<ServerConfig>,
     fs: Arc<Fs>,
     publisher: PublisherRegistry,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -64,22 +75,38 @@ struct DeleteNamespaceQuery {
 }
 
 pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
-    let store = Arc::new(config.object_store()?) as SharedStore;
-    app_with_store(config, store)
+    let store = config.object_store()?;
+    let transfer_issuer = store.transfer_issuer();
+    let store = Arc::new(store) as SharedStore;
+    app_with_store_and_transfer_issuer(config, store, transfer_issuer)
 }
 
+#[cfg(test)]
 fn app_with_store(config: ServerConfig, store: SharedStore) -> Result<Router, ServerConfigError> {
-    let fs = Arc::new(build_fs(&config, store)?);
-    Ok(app_with_fs(config, fs))
+    app_with_store_and_transfer_issuer(config, store, None)
 }
 
-fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
+fn app_with_store_and_transfer_issuer(
+    config: ServerConfig,
+    store: SharedStore,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+) -> Result<Router, ServerConfigError> {
+    let fs = Arc::new(build_fs(&config, store)?);
+    Ok(app_with_fs(config, fs, transfer_issuer))
+}
+
+fn app_with_fs(
+    config: ServerConfig,
+    fs: Arc<Fs>,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+) -> Router {
     let config = Arc::new(config);
     let publisher = PublisherRegistry::new(fs.clone());
     let state = AppState {
         config,
         fs,
         publisher,
+        transfer_issuer,
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -241,7 +268,12 @@ async fn config_handler(
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    Ok(Json(state.fs.capabilities()))
+    let mut capabilities = state.fs.capabilities();
+    capabilities.features.insert(
+        FEATURE_UPLOADS_DIRECT_PUT.to_owned(),
+        state.transfer_issuer.is_some(),
+    );
+    Ok(Json(capabilities))
 }
 
 async fn delete_namespace_handler(
@@ -483,6 +515,7 @@ async fn filesystem_operation(
     let namespace_id = parse_namespace_id(namespace)?;
     let FilesystemOperationRequest {
         commit_id,
+        content_tokens,
         operation,
     } = request;
     let put_payload_class = match &operation {
@@ -490,6 +523,16 @@ async fn filesystem_operation(
             usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
         )),
         _ => None,
+    };
+    let content_admissions = match &operation {
+        FilesystemOperation::PutFile { content_ref, .. } => content_admissions_for_put(
+            &state.config,
+            &namespace_id,
+            content_ref,
+            &content_tokens,
+            current_unix_ms()?,
+        ),
+        _ => Vec::new(),
     };
     let intent = match operation {
         FilesystemOperation::CreateDir { path } => PathMutationIntent::CreateDir {
@@ -543,11 +586,25 @@ async fn filesystem_operation(
             store_kind = trace_store_kind(&state.config.store).as_str(),
             payload_class,
         );
-        state
-            .publisher
-            .submit_path_intent(namespace_id.clone(), intent)
-            .instrument(span)
-            .await
+        async {
+            if content_admissions.is_empty() {
+                state
+                    .publisher
+                    .submit_path_intent(namespace_id.clone(), intent)
+                    .await
+            } else {
+                state
+                    .publisher
+                    .submit_path_intent_with_content_admission(
+                        namespace_id.clone(),
+                        intent,
+                        content_admissions,
+                    )
+                    .await
+            }
+        }
+        .instrument(span)
+        .await
     } else {
         state
             .publisher
@@ -567,15 +624,139 @@ async fn begin_upload_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
+    request: Option<Json<BeginUploadRequest>>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
+    let request = request.map(|Json(request)| request).unwrap_or_default();
+    if request.mode.unwrap_or_default() == UploadMode::DirectPut {
+        return begin_direct_put_upload(state, namespace_id, request).await;
+    }
+
     let response = state
         .fs
-        .begin_upload(&namespace_id)
+        .begin_upload_with_request(&namespace_id, request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
+}
+
+async fn begin_direct_put_upload(
+    state: AppState,
+    namespace_id: NamespaceId,
+    request: BeginUploadRequest,
+) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+    let Some(issuer) = state.transfer_issuer.as_ref() else {
+        return Err(ApiResponseError::not_supported(
+            FEATURE_UPLOADS_DIRECT_PUT,
+            "direct_put requires a presigned URL capable object store",
+        ));
+    };
+    let Some(content_ref) = request.content_ref else {
+        return Err(ApiResponseError::runtime_for_namespace(
+            &namespace_id,
+            RuntimeError::Core(CoreError::InvalidUploadContent(
+                "direct_put requires content_ref at begin_upload".to_owned(),
+            )),
+        ));
+    };
+
+    let prepared = state
+        .fs
+        .begin_direct_put_upload_target(&namespace_id, content_ref)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let content_ref = prepared.target.content_ref;
+    let signed = issuer
+        .presign_put(
+            PresignedPutRequest {
+                object_key: &prepared.target.object_key,
+                content_ref: &content_ref,
+                expires_in: DIRECT_PUT_URL_TTL,
+            },
+            direct_put_presign_time(),
+        )
+        .map_err(direct_put_issuer_error)?;
+
+    Ok(Json(BeginUploadResponse {
+        namespace_id: prepared.namespace_id,
+        upload_id: prepared.upload_id,
+        mode: UploadMode::DirectPut,
+        direct_put: Some(DirectPutUpload {
+            content_ref,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: signed.method,
+                url: signed.url,
+                headers: signed.headers,
+                expires_at_ms: signed.expires_at_ms,
+            },
+        }),
+    }))
+}
+
+fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
+    match error {
+        ObjectStoreError::InvalidContentRef(message) => ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidUploadContent,
+            &message,
+        ),
+        error => ApiResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::ServerError,
+            &error.to_string(),
+        ),
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn direct_put_presign_time() -> SystemTime {
+    // Issuing a short-lived transfer capability is an explicit wall-clock boundary.
+    SystemTime::now()
+}
+
+fn content_admissions_for_put(
+    config: &ServerConfig,
+    namespace_id: &NamespaceId,
+    content_ref: &ContentRef,
+    tokens: &[ValidatedContentToken],
+    now_ms: u64,
+) -> Vec<ContentAdmission> {
+    tokens
+        .iter()
+        .filter(|token| token.content_ref == *content_ref)
+        .filter_map(|token| {
+            verify_content_token(config.content_token_secret(), namespace_id, token, now_ms).ok()
+        })
+        .collect()
+}
+
+fn content_token_error(error: ContentTokenError) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::ServerError,
+        &format!("failed to mint content token: {error}"),
+    )
+}
+
+#[allow(clippy::disallowed_methods)]
+fn current_unix_ms() -> Result<u64, ApiResponseError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            ApiResponseError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::ServerError,
+                &format!("system time is before unix epoch: {error}"),
+            )
+        })?;
+    u64::try_from(duration.as_millis()).map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::ServerError,
+            &format!("system time overflowed milliseconds: {error}"),
+        )
+    })
 }
 
 async fn upload_content_handler(
@@ -603,11 +784,20 @@ async fn complete_upload_handler(
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = state
+    let mut response = state
         .fs
         .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    response.validated_content_token = Some(
+        mint_content_token(
+            state.config.content_token_secret(),
+            &namespace_id,
+            &response.content_ref,
+            current_unix_ms()?,
+        )
+        .map_err(content_token_error)?,
+    );
     Ok(Json(response))
 }
 
@@ -736,6 +926,17 @@ impl ApiResponseError {
             body: ApiError {
                 code: code.as_str().to_owned(),
                 feature: None,
+                message: message.to_owned(),
+            },
+        }
+    }
+
+    fn not_supported(feature: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            body: ApiError {
+                code: ErrorCode::NotSupported.as_str().to_owned(),
+                feature: Some(feature.to_owned()),
                 message: message.to_owned(),
             },
         }
@@ -1456,6 +1657,7 @@ mod tests {
         ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: Some("test-token".to_owned()),
+            content_token_secret: "test-content-token-secret".to_owned(),
             writer_id: writer_id.to_owned(),
             writer_version: format!("{writer_id}/0.1.0"),
             lease_duration_ms: 60_000,

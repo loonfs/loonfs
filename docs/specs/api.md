@@ -74,7 +74,8 @@ therefore identical for both backends.
     "core.namespaces.list": true,
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
-    "core.namespaces.delete": true
+    "core.namespaces.delete": true,
+    "core.uploads.direct_put": false
   },
   "limits": {}
 }
@@ -111,6 +112,7 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. Raw object keys and caller-managed object-store writes are not part of this feature. |
 
 `admin/v0` currently has required ops only and no feature keys. `query.*` and
 `acl.*` keys are unregistered until their planes materialize.
@@ -309,6 +311,87 @@ A representative v0 binding is shown below.
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile; everything else
 shown belongs to `core/v0`.
+
+For `direct_put`, the client requests a presigned upload capability:
+
+```json
+{
+  "mode": "direct_put",
+  "content_ref": {
+    "kind": "whole_file_v0",
+    "digest": "sha256:...",
+    "size_bytes": 1234
+  }
+}
+```
+
+The response includes only a short-lived transfer capability, never raw object-store credentials or a caller-managed object key. Required headers are provider-issued and must be echoed by the client; for example, an S3-compatible deployment may return:
+
+```json
+{
+  "namespace_id": "demo",
+  "upload_id": "upl_...",
+  "mode": "direct_put",
+  "direct_put": {
+    "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+    "access": {
+      "kind": "presigned_url",
+      "method": "PUT",
+      "url": "https://...",
+      "headers": {
+        "if-none-match": "*",
+        "x-amz-checksum-sha256": "..."
+      },
+      "expires_at_ms": 1780000000000
+    }
+  }
+}
+```
+
+The signed headers are part of the transfer capability. In the S3-compatible
+example, `if-none-match: *` keeps the immutable object create-only, and
+`x-amz-checksum-sha256` binds the object-store write to the SHA-256 digest in
+`content_ref`. Other providers may use different headers or decline
+`direct_put` support.
+
+After the client uploads bytes to the presigned URL, it calls complete with the
+same `content_ref`. Completion validates that the durable object exists and
+matches. A server may return a short-lived `validated_content_token` for the
+completed content ref; the token is opaque to clients.
+
+```json
+{
+  "namespace_id": "demo",
+  "upload_id": "upl_...",
+  "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 }
+}
+```
+
+Path-oriented `put_file` operations then reference the completed `content_ref`.
+Publishing validates the durable content reference before metadata becomes
+visible. If the client has a matching `validated_content_token`, it may include
+that token in `content_tokens` so the server can skip repeated durable-content
+validation on the hot publish path. Missing, malformed, expired, or non-matching
+tokens are ignored and the server falls back to normal durable-content
+validation.
+
+```json
+{
+  "commit_id": "commit-a",
+  "content_tokens": [
+    {
+      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "token": "opaque-server-token"
+    }
+  ],
+  "operation": {
+    "op": "put_file",
+    "path": "/docs/report.pdf",
+    "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+    "behavior": "create_only"
+  }
+}
+```
 
 Long-running transfers may additionally expose session resources.
 Implementations may also expose workflow helper resources, but those helpers
@@ -528,7 +611,9 @@ The semantic rule is:
   `content_ref`;
 - `complete` finalizes the upload session only when the expected `content_ref`
   exactly matches the service-computed staged ref; and
-- the returned `content_ref` is then safe to reference from a commit.
+- the returned `content_ref` is then safe to reference from a commit. Remote
+  servers may also return an opaque `validated_content_token` for hot-path
+  admission; the token is an optimization hint, not a correctness requirement.
 
 Repeating `PUT /content` with the same bytes for the same upload id is
 idempotent. Repeating it with different bytes is a conflict. Completing an
@@ -582,7 +667,8 @@ Representative complete-upload response:
     "kind": "whole_file_v0",
     "digest": "sha256:7ab...",
     "size_bytes": 20591
-  }
+  },
+  "validated_content_token": "opaque-server-token"
 }
 ```
 
@@ -947,7 +1033,7 @@ matter.
 | Concern | Server | Client |
 | --- | --- | --- |
 | Path resolution | Authoritative | Supplies user intent by path when using the filesystem surface. |
-| Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. |
+| Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. A server may issue short-lived content admission tokens after validation to avoid repeating expensive checks. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. Clients may forward admission tokens when provided, but must tolerate slow-path validation. |
 | Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
 | Namespace visibility | Authoritative | Observes committed results. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |

@@ -3,6 +3,7 @@ use loonfs::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, Run
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
+use loonfs_core::content::ContentAdmission;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Notify};
@@ -53,6 +54,19 @@ impl PublisherRegistry {
     ) -> CommitResult {
         self.submit_candidate(namespace_id, NamespaceMutationCandidate::Path(intent))
             .await
+    }
+
+    pub(crate) async fn submit_path_intent_with_content_admission(
+        &self,
+        namespace_id: NamespaceId,
+        intent: PathMutationIntent,
+        admissions: Vec<ContentAdmission>,
+    ) -> CommitResult {
+        self.submit_candidate(
+            namespace_id,
+            NamespaceMutationCandidate::PathWithContentAdmission { intent, admissions },
+        )
+        .await
     }
 
     pub(crate) async fn submit_delete(
@@ -748,7 +762,8 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
 fn operation_class(candidate: &NamespaceMutationCandidate) -> &'static str {
     match candidate {
         NamespaceMutationCandidate::Commit(_) => "explicit_commit",
-        NamespaceMutationCandidate::Path(_) => "path_mutation",
+        NamespaceMutationCandidate::Path(_)
+        | NamespaceMutationCandidate::PathWithContentAdmission { .. } => "path_mutation",
     }
 }
 
@@ -1155,6 +1170,7 @@ mod tests {
         Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
+            content_token_secret: "test-content-token-secret".to_owned(),
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
@@ -1637,6 +1653,7 @@ mod tests {
         let config = Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
+            content_token_secret: "test-content-token-secret".to_owned(),
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
@@ -1693,6 +1710,7 @@ mod tests {
         let config = Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
+            content_token_secret: "test-content-token-secret".to_owned(),
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,

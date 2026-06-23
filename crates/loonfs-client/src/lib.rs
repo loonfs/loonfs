@@ -9,9 +9,10 @@ use http::Uri;
 use loonfs_api::{
     v0::RenameMode,
     v0::{
-        BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        UploadContentResponse,
+        BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
+        CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
+        UploadMode, ValidatedContentToken,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
     CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
@@ -58,6 +59,12 @@ pub struct GetPathResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PutPathResult {
     pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedContent {
+    content_ref: ContentRef,
+    validated_content_token: Option<ValidatedContentToken>,
 }
 
 /// A path qualified by namespace.
@@ -330,6 +337,58 @@ impl Client {
         self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
     }
 
+    pub fn begin_upload_with_request(
+        &self,
+        namespace: &str,
+        request: &BeginUploadRequest,
+    ) -> Result<BeginUploadResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
+        self.request_json::<_, BeginUploadResponse>(self.agent.post(&url), Some(request))
+    }
+
+    pub fn begin_direct_put(
+        &self,
+        namespace: &str,
+        content_ref: ContentRef,
+    ) -> Result<BeginUploadResponse, ClientError> {
+        self.begin_upload_with_request(
+            namespace,
+            &BeginUploadRequest {
+                mode: Some(UploadMode::DirectPut),
+                content_ref: Some(content_ref),
+            },
+        )
+    }
+
+    pub fn upload_via_presigned_url(
+        &self,
+        access: &ObjectTransferAccess,
+        bytes: &[u8],
+    ) -> Result<(), ClientError> {
+        let (method, url, headers) = match access {
+            ObjectTransferAccess::PresignedUrl {
+                method,
+                url,
+                headers,
+                ..
+            } => (method, url, headers),
+        };
+        if method != "PUT" {
+            return Err(ClientError::Http(format!(
+                "unsupported presigned upload method `{method}`"
+            )));
+        }
+        let mut request = ureq::put(url);
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
+        request
+            .send_bytes(bytes)
+            .map(|_| ())
+            .map_err(|err| self.map_error(err))
+    }
+
     pub fn upload_content(
         &self,
         namespace: &str,
@@ -405,7 +464,7 @@ impl Client {
         &self,
         namespace: &str,
         bytes: &[u8],
-    ) -> Result<ContentRef, ClientError> {
+    ) -> Result<StagedContent, ClientError> {
         let upload = self.begin_upload(namespace)?;
         let staged = self.upload_content(namespace, &upload.upload_id, bytes)?;
         let response = self.complete_upload(
@@ -415,7 +474,17 @@ impl Client {
                 content_ref: staged.content_ref,
             },
         )?;
-        Ok(response.content_ref)
+        let validated_content_token =
+            response
+                .validated_content_token
+                .map(|token| ValidatedContentToken {
+                    content_ref: response.content_ref.clone(),
+                    token,
+                });
+        Ok(StagedContent {
+            content_ref: response.content_ref,
+            validated_content_token,
+        })
     }
 
     pub fn put_file_bytes(
@@ -435,14 +504,15 @@ impl Client {
         commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
         let commit_id = parse_commit_id(commit_id)?;
-        let content_ref = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
+        let staged = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: staged.validated_content_token.into_iter().collect(),
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
-                    content_ref,
+                    content_ref: staged.content_ref,
                     behavior: if force {
                         FilesystemPutBehavior::ReplaceExisting
                     } else {
@@ -485,6 +555,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::CreateDir {
                     path: spec.absolute_path.clone(),
                 },
@@ -507,6 +578,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path.clone(),
                 },
@@ -540,6 +612,7 @@ impl Client {
             &from.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
@@ -575,6 +648,7 @@ impl Client {
             &from.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::CopyPath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
@@ -603,6 +677,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
+                content_tokens: Vec::new(),
                 operation: FilesystemOperation::RestoreRevision {
                     path: spec.absolute_path.clone(),
                     source_revision_no,

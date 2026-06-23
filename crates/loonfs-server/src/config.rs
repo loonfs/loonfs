@@ -6,15 +6,17 @@ use loonfs_objectstore::r2::CloudflareR2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
 use serde::Deserialize;
+use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ServerConfig {
     pub bind: String,
     pub auth_token: Option<String>,
+    pub content_token_secret: String,
     pub writer_id: String,
     pub writer_version: String,
     pub lease_duration_ms: u64,
@@ -35,7 +37,7 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum StoreConfig {
     LocalFs {
@@ -74,6 +76,99 @@ pub enum StoreConfig {
     },
 }
 
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind", &self.bind)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("content_token_secret", &"<redacted>")
+            .field("writer_id", &self.writer_id)
+            .field("writer_version", &self.writer_version)
+            .field("lease_duration_ms", &self.lease_duration_ms)
+            .field("runtime_cache", &self.runtime_cache)
+            .field("store", &self.store)
+            .finish()
+    }
+}
+
+impl fmt::Debug for StoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreConfig::LocalFs { root, key_prefix } => f
+                .debug_struct("LocalFs")
+                .field("root", root)
+                .field("key_prefix", key_prefix)
+                .finish(),
+            StoreConfig::AwsS3 {
+                bucket,
+                region,
+                endpoint_url,
+                access_key_id: _,
+                secret_access_key: _,
+                session_token,
+                key_prefix,
+                force_path_style,
+            } => f
+                .debug_struct("AwsS3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("endpoint_url", endpoint_url)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field(
+                    "session_token",
+                    &session_token.as_ref().map(|_| "<redacted>"),
+                )
+                .field("key_prefix", key_prefix)
+                .field("force_path_style", force_path_style)
+                .finish(),
+            StoreConfig::CloudflareR2 {
+                bucket,
+                account_id,
+                endpoint_url,
+                access_key_id: _,
+                secret_access_key: _,
+                key_prefix,
+            } => f
+                .debug_struct("CloudflareR2")
+                .field("bucket", bucket)
+                .field("account_id", account_id)
+                .field("endpoint_url", endpoint_url)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field("key_prefix", key_prefix)
+                .finish(),
+            StoreConfig::GcpGcs {
+                bucket,
+                service_account_key_path,
+                key_prefix,
+            } => f
+                .debug_struct("GcpGcs")
+                .field("bucket", bucket)
+                .field("service_account_key_path", service_account_key_path)
+                .field("key_prefix", key_prefix)
+                .finish(),
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key: _,
+                endpoint_url,
+                key_prefix,
+            } => f
+                .debug_struct("AzureAbs")
+                .field("account_name", account_name)
+                .field("container_name", container_name)
+                .field("access_key", &"<redacted>")
+                .field("endpoint_url", endpoint_url)
+                .field("key_prefix", key_prefix)
+                .finish(),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ServerConfigError {
     #[error("failed to read config: {0}")]
@@ -87,6 +182,10 @@ pub enum ServerConfigError {
 }
 
 impl ServerConfig {
+    pub(crate) fn content_token_secret(&self) -> &str {
+        &self.content_token_secret
+    }
+
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
         let mut config = RuntimeCacheConfig::default();
         if let Some(value) = self.runtime_cache.basis_cache_enabled {
@@ -220,7 +319,7 @@ impl ServerConfig {
                 });
             }
         }
-
+        require_non_empty("content_token_secret", &self.content_token_secret)?;
         match &self.store {
             StoreConfig::LocalFs { root, .. } => {
                 require_non_empty("store.root", root)?;
@@ -644,6 +743,39 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
+    fn server_config_debug_redacts_secrets() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "debug-auth-token"
+content_token_secret = "debug-content-token-secret"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+access_key_id = "debug-access-key-id"
+secret_access_key = "debug-secret-access-key"
+session_token = "debug-session-token"
+key_prefix = "demo"
+force_path_style = false
+"#,
+        );
+        let config = load_server_config(&path).expect("load config");
+
+        let rendered = format!("{config:?}");
+
+        assert!(!rendered.contains("debug-auth-token"));
+        assert!(!rendered.contains("debug-content-token-secret"));
+        assert!(!rendered.contains("debug-access-key-id"));
+        assert!(!rendered.contains("debug-secret-access-key"));
+        assert!(!rendered.contains("debug-session-token"));
+    }
+
+    #[test]
     fn load_uses_default_runtime_cache_when_omitted() {
         let path = write_config(
             r#"
@@ -760,6 +892,15 @@ root = "/tmp/loonfs-server"
     fn write_config(contents: &str) -> std::path::PathBuf {
         let temp_dir = tempdir().expect("tempdir");
         let path = temp_dir.path().join("server.toml");
+        let contents = if contents.contains("content_token_secret") {
+            contents.to_owned()
+        } else {
+            contents.replacen(
+                "writer_id",
+                "content_token_secret = \"dev-content-token-secret\"\nwriter_id",
+                1,
+            )
+        };
         fs::write(&path, contents).expect("write config");
         let _ = temp_dir.keep();
         path

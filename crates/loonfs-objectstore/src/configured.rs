@@ -5,6 +5,7 @@ use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
+use crate::presign::{ObjectTransferIssuer, S3CompatiblePresigner, S3PresignerConfig};
 use crate::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
 use crate::ObjectStoreError;
@@ -12,6 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfiguredObjectStoreKind {
@@ -26,6 +28,7 @@ pub enum ConfiguredObjectStoreKind {
 pub struct ConfiguredObjectStore {
     kind: ConfiguredObjectStoreKind,
     inner: ConfiguredObjectStoreInner,
+    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 }
 
 #[derive(Debug)]
@@ -51,22 +54,45 @@ impl ConfiguredObjectStore {
                 store: LocalFsStore::new(root)?,
                 key_prefix: normalize_key_prefix(key_prefix)?,
             },
+            transfer_issuer: None,
         })
     }
 
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self, ObjectStoreError> {
+        let transfer_issuer = Some(Arc::new(S3CompatiblePresigner::new(S3PresignerConfig {
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+            endpoint_url: config.endpoint_url.clone(),
+            access_key_id: config.access_key_id.clone(),
+            secret_access_key: config.secret_access_key.clone(),
+            session_token: config.session_token.clone(),
+            key_prefix: config.key_prefix.clone(),
+            force_path_style: config.force_path_style,
+        })?) as Arc<dyn ObjectTransferIssuer>);
         let store = AwsS3Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::AwsS3,
             inner: ConfiguredObjectStoreInner::AwsS3(store),
+            transfer_issuer,
         })
     }
 
     pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self, ObjectStoreError> {
+        let transfer_issuer = Some(Arc::new(S3CompatiblePresigner::new(S3PresignerConfig {
+            bucket: config.bucket.clone(),
+            region: "auto".to_owned(),
+            endpoint_url: Some(config.endpoint_url.clone()),
+            access_key_id: config.access_key_id.clone(),
+            secret_access_key: config.secret_access_key.clone(),
+            session_token: None,
+            key_prefix: config.key_prefix.clone(),
+            force_path_style: true,
+        })?) as Arc<dyn ObjectTransferIssuer>);
         let store = CloudflareR2Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::CloudflareR2,
             inner: ConfiguredObjectStoreInner::CloudflareR2(store),
+            transfer_issuer,
         })
     }
 
@@ -75,6 +101,7 @@ impl ConfiguredObjectStore {
         Ok(Self {
             kind: ConfiguredObjectStoreKind::GcpGcs,
             inner: ConfiguredObjectStoreInner::GcpGcs(store),
+            transfer_issuer: None,
         })
     }
 
@@ -83,11 +110,16 @@ impl ConfiguredObjectStore {
         Ok(Self {
             kind: ConfiguredObjectStoreKind::AzureAbs,
             inner: ConfiguredObjectStoreInner::AzureAbs(store),
+            transfer_issuer: None,
         })
     }
 
     pub fn kind(&self) -> ConfiguredObjectStoreKind {
         self.kind
+    }
+
+    pub fn transfer_issuer(&self) -> Option<Arc<dyn ObjectTransferIssuer>> {
+        self.transfer_issuer.clone()
     }
 }
 
@@ -231,14 +263,16 @@ mod tests {
     use crate::fs::LocalFsStore;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::namespace_head;
+    use crate::presign::PresignedPutRequest;
     use crate::r2::CloudflareR2StoreConfig;
     use crate::s3::AwsS3StoreConfig;
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
+    use loonfs_api::ContentRef;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
@@ -276,6 +310,7 @@ mod tests {
         let local = ConfiguredObjectStore::local_fs(unique_temp_dir("configured-store-kind"), None)
             .expect("construct local store");
         assert_eq!(local.kind(), ConfiguredObjectStoreKind::LocalFs);
+        assert!(local.transfer_issuer().is_none());
 
         let s3 = ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
             bucket: "bucket".to_owned(),
@@ -289,17 +324,19 @@ mod tests {
         })
         .expect("construct s3 store");
         assert_eq!(s3.kind(), ConfiguredObjectStoreKind::AwsS3);
+        assert!(s3.transfer_issuer().is_some());
 
         let r2 = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://example.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "access".to_owned(),
+            access_key_id: "debug-access-key".to_owned(),
             secret_access_key: "secret".to_owned(),
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");
         assert_eq!(r2.kind(), ConfiguredObjectStoreKind::CloudflareR2);
+        assert!(r2.transfer_issuer().is_some());
 
         let gcs_service_account_key_path =
             fake_gcs_service_account_key_file("configured-store-gcs-kind");
@@ -310,6 +347,7 @@ mod tests {
         })
         .expect("construct gcs store");
         assert_eq!(gcs.kind(), ConfiguredObjectStoreKind::GcpGcs);
+        assert!(gcs.transfer_issuer().is_none());
 
         let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
@@ -320,6 +358,55 @@ mod tests {
         })
         .expect("construct azure store");
         assert_eq!(azure.kind(), ConfiguredObjectStoreKind::AzureAbs);
+        assert!(azure.transfer_issuer().is_none());
+    }
+
+    #[test]
+    fn cloudflare_r2_presigner_uses_path_style_account_endpoint() {
+        let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
+            bucket: "bucket".to_owned(),
+            account_id: "account".to_owned(),
+            endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct r2 store");
+        let issuer = store.transfer_issuer().expect("r2 presigner");
+
+        let signed = issuer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: "content-stores/cs/blobs/sha256/ab/cd/digest",
+                    content_ref: &ContentRef::whole_file_v0(b"hello"),
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .expect("presign");
+
+        assert!(signed.url.starts_with(
+            "https://account.r2.cloudflarestorage.com/bucket/tenant-a/content-stores/"
+        ));
+        assert!(!signed.url.starts_with("https://bucket.account."));
+    }
+
+    #[test]
+    fn configured_object_store_debug_redacts_presigner_credentials() {
+        let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
+            bucket: "bucket".to_owned(),
+            account_id: "account".to_owned(),
+            endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "debug-secret".to_owned(),
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct r2 store");
+
+        let rendered = format!("{store:?}");
+
+        assert!(!rendered.contains("debug-secret"));
+        assert!(!rendered.contains("debug-access-key"));
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use crate::commit::{
     core_commit_fingerprint_for_v0_request, CommitHeadPublishError, SemanticMutationIdentity,
 };
+use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
 use crate::namespace::basis::{
@@ -24,13 +25,19 @@ const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 pub enum NamespaceMutationCandidate {
     Commit(ApiCommitRequest),
     Path(PathMutationIntent),
+    PathWithContentAdmission {
+        intent: PathMutationIntent,
+        admissions: Vec<ContentAdmission>,
+    },
 }
 
 impl NamespaceMutationCandidate {
     pub fn commit_id(&self) -> &CommitId {
         match self {
             Self::Commit(request) => &request.commit_id,
-            Self::Path(intent) => intent.commit_id(),
+            Self::Path(intent) | Self::PathWithContentAdmission { intent, .. } => {
+                intent.commit_id()
+            }
         }
     }
 
@@ -42,8 +49,10 @@ impl NamespaceMutationCandidate {
             Self::Commit(request) => core_commit_fingerprint_for_v0_request(namespace_id, request)
                 .map(SemanticMutationIdentity::CoreCommit)
                 .map_err(|err| CoreError::Store(err.to_string())),
-            Self::Path(intent) => path_intent_fingerprint_for_path_intent(namespace_id, intent)
-                .map(SemanticMutationIdentity::PathIntent),
+            Self::Path(intent) | Self::PathWithContentAdmission { intent, .. } => {
+                path_intent_fingerprint_for_path_intent(namespace_id, intent)
+                    .map(SemanticMutationIdentity::PathIntent)
+            }
         }
     }
 }

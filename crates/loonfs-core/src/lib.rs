@@ -81,6 +81,7 @@ pub mod publish {
 pub mod inspection;
 
 pub use context::MutationContext;
+pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{Error, ErrorCode, ErrorKind, Result};
 pub use namespace::{list_namespaces, BootstrapNamespaceError};

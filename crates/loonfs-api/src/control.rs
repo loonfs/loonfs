@@ -1,5 +1,6 @@
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
+use crate::v0::UploadMode;
 use crate::{
     ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken, InodeId, ManifestId, NamePolicy,
     NamespaceId,
@@ -224,6 +225,12 @@ pub struct CompletedUpload {
 pub struct UploadSessionState {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
+    #[serde(default, skip_serializing_if = "UploadMode::is_service_proxied")]
+    pub mode: UploadMode,
+    /// For direct_put sessions, the content ref the presigned URL was minted for.
+    /// It becomes staged only after completion validates the durable object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_put_content_ref: Option<ContentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_content_ref: Option<ContentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -40,6 +40,13 @@ impl fmt::Debug for S3CompatibleStore {
 impl S3CompatibleStore {
     pub(crate) fn new(config: S3CompatibleConfig) -> Result<Self, ObjectStoreError> {
         validate_config(&config)?;
+        let endpoint_url = config
+            .endpoint_url
+            .as_deref()
+            .map(|endpoint| {
+                object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
+            })
+            .transpose()?;
 
         let mut builder = AmazonS3Builder::new()
             .with_bucket_name(config.bucket)
@@ -48,7 +55,7 @@ impl S3CompatibleStore {
             .with_secret_access_key(config.secret_access_key)
             .with_virtual_hosted_style_request(!config.force_path_style);
 
-        if let Some(endpoint_url) = config.endpoint_url {
+        if let Some(endpoint_url) = endpoint_url {
             let allow_http = endpoint_url.starts_with("http://");
             builder = builder
                 .with_endpoint(endpoint_url)
@@ -149,9 +156,62 @@ fn validate_config(config: &S3CompatibleConfig) -> Result<(), ObjectStoreError> 
     Ok(())
 }
 
+fn object_store_endpoint_url(
+    bucket: &str,
+    endpoint_url: &str,
+    force_path_style: bool,
+) -> Result<String, ObjectStoreError> {
+    if force_path_style {
+        return Ok(endpoint_url.to_owned());
+    }
+
+    let parsed = parse_endpoint_url(endpoint_url)?;
+    let bucket_prefix = format!("{}.", bucket.trim());
+    if parsed.authority.starts_with(&bucket_prefix) {
+        return Ok(endpoint_url.to_owned());
+    }
+
+    Ok(format!(
+        "{}://{}.{}/{}",
+        parsed.scheme, bucket, parsed.authority, parsed.path
+    )
+    .trim_end_matches('/')
+    .to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedEndpoint<'a> {
+    scheme: &'a str,
+    authority: &'a str,
+    path: &'a str,
+}
+
+fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>, ObjectStoreError> {
+    let (scheme, rest) = value
+        .strip_prefix("https://")
+        .map(|rest| ("https", rest))
+        .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
+        .ok_or_else(|| {
+            ObjectStoreError::Transport(
+                "endpoint url must start with http:// or https://".to_owned(),
+            )
+        })?;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.is_empty() {
+        return Err(ObjectStoreError::Transport(
+            "endpoint url must include authority".to_owned(),
+        ));
+    }
+    Ok(ParsedEndpoint {
+        scheme,
+        authority,
+        path: path.trim_end_matches('/'),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{S3CompatibleConfig, S3CompatibleStore};
+    use super::{object_store_endpoint_url, S3CompatibleConfig, S3CompatibleStore};
 
     fn test_config() -> S3CompatibleConfig {
         S3CompatibleConfig {
@@ -180,5 +240,32 @@ mod tests {
         let mut config = test_config();
         config.access_key_id.clear();
         assert!(S3CompatibleStore::new(config).is_err());
+    }
+
+    #[test]
+    fn virtual_hosted_endpoint_inserts_bucket_when_endpoint_is_bucketless() {
+        let endpoint =
+            object_store_endpoint_url("bucket", "https://s3.us-east-2.amazonaws.com", false)
+                .expect("endpoint");
+
+        assert_eq!(endpoint, "https://bucket.s3.us-east-2.amazonaws.com");
+    }
+
+    #[test]
+    fn virtual_hosted_endpoint_preserves_bucket_specific_endpoint() {
+        let endpoint =
+            object_store_endpoint_url("bucket", "https://bucket.s3.us-east-2.amazonaws.com", false)
+                .expect("endpoint");
+
+        assert_eq!(endpoint, "https://bucket.s3.us-east-2.amazonaws.com");
+    }
+
+    #[test]
+    fn path_style_endpoint_stays_bucketless() {
+        let endpoint =
+            object_store_endpoint_url("bucket", "https://s3.us-east-2.amazonaws.com", true)
+                .expect("endpoint");
+
+        assert_eq!(endpoint, "https://s3.us-east-2.amazonaws.com");
     }
 }

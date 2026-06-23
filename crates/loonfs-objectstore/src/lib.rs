@@ -16,6 +16,7 @@ pub mod keys;
 mod keyspace;
 pub mod layout;
 pub mod metrics;
+pub mod presign;
 pub mod probes;
 pub mod provider;
 mod provider_object_store;

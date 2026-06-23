@@ -47,6 +47,7 @@ pub enum ObjectStoreResultClass {
     Ok,
     NotFound,
     InvalidKey,
+    InvalidContentRef,
     InvalidRange,
     PreconditionFailed,
     Conflict,
@@ -522,6 +523,7 @@ fn classify_error(error: &ObjectStoreError) -> ObjectStoreResultClass {
     match error {
         ObjectStoreError::NotFound => ObjectStoreResultClass::NotFound,
         ObjectStoreError::InvalidKey(_) => ObjectStoreResultClass::InvalidKey,
+        ObjectStoreError::InvalidContentRef(_) => ObjectStoreResultClass::InvalidContentRef,
         ObjectStoreError::InvalidRange => ObjectStoreResultClass::InvalidRange,
         ObjectStoreError::PreconditionFailed => ObjectStoreResultClass::PreconditionFailed,
         ObjectStoreError::Conflict => ObjectStoreResultClass::Conflict,
