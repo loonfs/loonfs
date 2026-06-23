@@ -9,6 +9,10 @@ lease_duration_ms = 60000
 kind = "aws-s3"
 bucket = "your-bucket"
 region = "us-east-1"
+# endpoint_url is optional for AWS S3. If you set a custom endpoint with
+# force_path_style = false, LoonFS accepts either a bucket-specific endpoint
+# like "https://your-bucket.s3.us-east-1.amazonaws.com" or a bucket-less
+# regional endpoint like "https://s3.us-east-1.amazonaws.com".
 access_key_id = "YOUR_ACCESS_KEY_ID"
 secret_access_key = "YOUR_SECRET_ACCESS_KEY"
 key_prefix = "loon-demo"

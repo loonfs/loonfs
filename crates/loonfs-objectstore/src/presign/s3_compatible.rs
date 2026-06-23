@@ -93,9 +93,15 @@ impl S3CompatiblePresigner {
                         ),
                     })
                 } else {
+                    let bucket_prefix = format!("{}.", self.config.bucket);
+                    let host = if parsed.authority.starts_with(&bucket_prefix) {
+                        parsed.authority
+                    } else {
+                        format!("{}.{}", self.config.bucket, parsed.authority)
+                    };
                     Ok(S3Endpoint {
                         scheme: parsed.scheme,
-                        host: format!("{}.{}", self.config.bucket, parsed.authority),
+                        host,
                         canonical_uri: format!("{}/{}", parsed.base_path, encoded_key),
                     })
                 }
@@ -420,6 +426,37 @@ mod tests {
             .expect_err("unsupported content ref");
 
         assert!(matches!(error, ObjectStoreError::InvalidContentRef(_)));
+    }
+
+    #[test]
+    fn presigned_put_accepts_bucket_specific_custom_endpoint() {
+        let signer = S3CompatiblePresigner::new(S3PresignerConfig {
+            bucket: "bucket".to_owned(),
+            region: "us-east-2".to_owned(),
+            endpoint_url: Some("https://bucket.s3.us-east-2.amazonaws.com".to_owned()),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            session_token: None,
+            key_prefix: Some("tenant-a".to_owned()),
+            force_path_style: false,
+        })
+        .expect("signer");
+
+        let signed = signer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: "content-stores/cs/blobs/sha256/ab/cd/digest",
+                    content_ref: &ContentRef::whole_file_v0(b"hello"),
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .expect("presign");
+
+        assert!(signed
+            .url
+            .starts_with("https://bucket.s3.us-east-2.amazonaws.com/tenant-a/content-stores/"));
+        assert!(!signed.url.contains("bucket.bucket"));
     }
 
     #[test]
