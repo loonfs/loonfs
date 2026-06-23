@@ -48,8 +48,8 @@ The required durable object families and standard key patterns are:
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
-| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/tables/metadata/{table_id}.sst` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest.json` |
+| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/tables/metadata/{table_id}.sst.zst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Conflict artifacts** | Immutable | Preserve rejected-write context for later inspection. | `namespaces/{namespace_id}/conflicts/{conflict_id}.json` |
 | **Derived progress** | Mutable | Record how far one background work class has processed namespace history. | `namespaces/{namespace_id}/derived/{work_class}/progress.json` |
@@ -80,11 +80,11 @@ collection:
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
 | **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compaction/{compactions_id}.plan` |
-| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
-| **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/compacted/{table_id}.sst` |
-| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
-| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest\|compaction}.boundary` |
+| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compaction/{compactions_id}.plan.json` |
+| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest.json` |
+| **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/compacted/{table_id}.sst.zst` |
+| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary.json` |
+| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest\|compaction}.boundary.json` |
 | **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
 
 GC boundary files are sequenced cleanup cursors for manifest and compaction
@@ -142,6 +142,19 @@ surfaces:
   verifies and adopts the existing object or reloads — it never overwrites.
   In every case the ordered name is an inspection and reclamation hint;
   recovery authority is the head and its references, never a listing.
+- Every durable object key ends with a suffix that names its wire encoding, so
+  a listing is self-describing and a reader picks the decoder by suffix without
+  opening the object. Two encodings map to two suffixes: `.json` for the
+  uncompressed-JSON families (control objects, namespace and index manifests,
+  compaction plans, GC boundaries) and `.zst` for the zstd-compressed CBOR
+  families (WAL segments `*.wal.zst`, metadata and index SSTs `*.sst.zst`).
+  Family-positioned names place the family tag before the encoding suffix —
+  `{position}.manifest.json`, `{position}.plan.json`, `{stream}.boundary.json`
+  — and fixed-name control objects already carry it (`head.json`, `lease.json`,
+  `descriptor.json`). The sole exception is content blobs, whose key leaf is the
+  bare 64-character lowercase SHA-256 hex (section 2.4.1): the digest is the
+  identity and the bytes are opaque user content, not a LoonFS envelope, so no
+  suffix is appended.
 - Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs. They use the durable slug grammar:
@@ -1103,7 +1116,10 @@ Two rules make these envelopes evolvable:
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
 payload as a byte string. Control-object versions are tracked per kind so one
-kind's payload schema can change without invalidating the others.
+kind's payload schema can change without invalidating the others. Each
+family's encoding fixes its object-key suffix (section 1.3): the JSON families
+end in `.json`, the zstd-compressed CBOR families in `.zst` (`*.wal.zst`,
+`*.sst.zst`).
 
 ### 4.3 Evolution rules
 

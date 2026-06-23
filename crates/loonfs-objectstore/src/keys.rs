@@ -196,11 +196,11 @@ mod tests {
         );
         assert_eq!(
             namespace_manifest("ns-1", ManifestId(400)),
-            "namespaces/ns-1/manifest/00000000000000000400.manifest"
+            "namespaces/ns-1/manifest/00000000000000000400.manifest.json"
         );
         assert_eq!(
             metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
-            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),

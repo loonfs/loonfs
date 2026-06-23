@@ -208,19 +208,19 @@ fn key_builders_cover_locked_object_families() {
     );
     assert_eq!(
         namespace_manifest("ns-1", ManifestId(420)),
-        "namespaces/ns-1/manifest/00000000000000000420.manifest"
+        "namespaces/ns-1/manifest/00000000000000000420.manifest.json"
     );
     assert_eq!(
         metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
-        "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
+        "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst"
     );
     assert_eq!(
         metadata_sst("source-ns", "tbl_00000000000000000000000000000002"),
-        "namespaces/source-ns/tables/metadata/tbl_00000000000000000000000000000002.sst"
+        "namespaces/source-ns/tables/metadata/tbl_00000000000000000000000000000002.sst.zst"
     );
     assert_eq!(
         metadata_sst("ns-1", "tbl_ffffffffffffffffffffffffffffffff"),
-        "namespaces/ns-1/tables/metadata/tbl_ffffffffffffffffffffffffffffffff.sst"
+        "namespaces/ns-1/tables/metadata/tbl_ffffffffffffffffffffffffffffffff.sst.zst"
     );
     assert_eq!(
         derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
