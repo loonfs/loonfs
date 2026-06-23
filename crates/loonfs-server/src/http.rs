@@ -14,6 +14,7 @@ use loonfs::{
     TraceStoreKind,
 };
 use loonfs_api::{
+    decode_directory_cursor, decode_namespaces_cursor, encode_namespaces_cursor,
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
@@ -21,9 +22,10 @@ use loonfs_api::{
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
-    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId,
+    CreateNamespaceRequest, DirectoryPageCursor, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId, LimitError,
     ListFileRevisionsResponse, ListNamespacesResponse, NamespaceId, NamespaceIdValidationError,
+    NamespacesPageCursor, PageCursorError, PageRequest, PaginationPolicy,
     RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_core::content::{
@@ -54,6 +56,19 @@ struct AppState {
 #[derive(Debug, serde::Deserialize)]
 struct PathQuery {
     path: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PageQuery {
+    limit: Option<u32>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PathPageQuery {
+    path: String,
+    limit: Option<u32>,
+    cursor: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -312,17 +327,27 @@ async fn create_namespace(
 
 async fn list_namespaces_handler(
     State(state): State<AppState>,
+    Query(query): Query<PageQuery>,
     headers: HeaderMap,
 ) -> Result<Json<ListNamespacesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let namespaces = state
+    let page = state
         .fs
-        .list_namespaces()
+        .list_namespaces_page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor: decode_namespaces_page_cursor(query.cursor)?,
+        })
         .await
         .map_err(ApiResponseError::runtime)?;
+    let next_cursor = page
+        .next_cursor
+        .as_ref()
+        .map(encode_namespaces_cursor)
+        .transpose()
+        .map_err(page_cursor_response_error)?;
     Ok(Json(ListNamespacesResponse {
-        namespaces,
-        next_cursor: None,
+        namespaces: page.items,
+        next_cursor,
     }))
 }
 
@@ -347,14 +372,21 @@ async fn list_entries(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<PathPageQuery>,
 ) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let listing = state
         .fs
-        .list_path_entries(&namespace_id, &path)
+        .list_path_entries_page(
+            &namespace_id,
+            &path,
+            PageRequest {
+                limit: resolve_page_limit(query.limit)?,
+                cursor: decode_directory_page_cursor(query.cursor)?,
+            },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(listing))
@@ -915,6 +947,48 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
             &format!("invalid revision_no `{value}`: {err}"),
         )
     })
+}
+
+fn resolve_page_limit(limit: Option<u32>) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {
+    PaginationPolicy::default()
+        .resolve_limit(limit)
+        .map_err(limit_response_error)
+}
+
+fn decode_namespaces_page_cursor(
+    cursor: Option<String>,
+) -> Result<Option<NamespacesPageCursor>, ApiResponseError> {
+    cursor
+        .as_deref()
+        .map(decode_namespaces_cursor)
+        .transpose()
+        .map_err(page_cursor_response_error)
+}
+
+fn decode_directory_page_cursor(
+    cursor: Option<String>,
+) -> Result<Option<DirectoryPageCursor>, ApiResponseError> {
+    cursor
+        .as_deref()
+        .map(decode_directory_cursor)
+        .transpose()
+        .map_err(page_cursor_response_error)
+}
+
+fn limit_response_error(error: LimitError) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidConfig,
+        &error.to_string(),
+    )
+}
+
+fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidCursor,
+        &error.to_string(),
+    )
 }
 
 struct ApiResponseError {

@@ -294,7 +294,7 @@ impl Fs {
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
                 (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
             ]),
-            limits: BTreeMap::new(),
+            limits: PaginationPolicy::default().capability_limits(),
         }
     }
 

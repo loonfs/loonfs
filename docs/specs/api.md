@@ -77,7 +77,10 @@ therefore identical for both backends.
     "core.namespaces.delete": true,
     "core.uploads.direct_put": false
   },
-  "limits": {}
+  "limits": {
+    "pagination.default_limit": 1000,
+    "pagination.max_limit": 1000
+  }
 }
 ```
 
