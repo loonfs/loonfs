@@ -3,6 +3,7 @@ use loonfs_api::ContentRef;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+mod aws_sigv4;
 mod s3_compatible;
 
 pub use s3_compatible::{S3CompatiblePresigner, S3PresignerConfig};

@@ -1,13 +1,16 @@
 use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
+use crate::presign::aws_sigv4::{
+    aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,
+    percent_encode_path, percent_encode_segment,
+};
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::{ContentRef, ContentRefKind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-const SHA256_BLOCK_BYTES: usize = 64;
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
@@ -143,8 +146,11 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
 
         let endpoint = self.endpoint(request.object_key)?;
         let required_headers = s3_direct_put_required_headers(request.content_ref)?;
-        let (short_date, amz_date) = aws_dates(now)?;
-        let credential_scope = format!("{}/{}/s3/aws4_request", short_date, self.config.region);
+        let dates = aws_dates(now)?;
+        let credential_scope = format!(
+            "{}/{}/s3/aws4_request",
+            dates.short_date, self.config.region
+        );
         let credential = format!("{}/{}", self.config.access_key_id, credential_scope);
 
         let mut headers_to_sign = BTreeMap::from([("host".to_owned(), endpoint.host.clone())]);
@@ -165,7 +171,7 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         let mut query = BTreeMap::from([
             ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
             ("X-Amz-Credential".to_owned(), credential),
-            ("X-Amz-Date".to_owned(), amz_date.clone()),
+            ("X-Amz-Date".to_owned(), dates.amz_date.clone()),
             (
                 "X-Amz-Expires".to_owned(),
                 request.expires_in.as_secs().to_string(),
@@ -183,11 +189,11 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         let hashed_request = hex_lower(&Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-            amz_date, credential_scope, hashed_request
+            dates.amz_date, credential_scope, hashed_request
         );
         let signing_key = signing_key(
             &self.config.secret_access_key,
-            &short_date,
+            &dates.short_date,
             &self.config.region,
         );
         let signature = hex_lower(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
@@ -314,89 +320,8 @@ fn scope_object_key(prefix: Option<&str>, key: &str) -> Result<String, ObjectSto
     })
 }
 
-fn canonical_query_string(query: &BTreeMap<String, String>) -> String {
-    query
-        .iter()
-        .map(|(key, value)| {
-            format!(
-                "{}={}",
-                percent_encode_query(key),
-                percent_encode_query(value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn percent_encode_path(value: &str) -> String {
-    value
-        .split('/')
-        .map(percent_encode_segment)
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn percent_encode_segment(value: &str) -> String {
-    percent_encode_bytes(value.as_bytes())
-}
-
-fn percent_encode_query(value: &str) -> String {
-    percent_encode_bytes(value.as_bytes())
-}
-
-fn percent_encode_bytes(bytes: &[u8]) -> String {
-    let mut out = String::new();
-    for byte in bytes {
-        match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
-fn normalize_header_value(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn aws_dates(time: SystemTime) -> Result<(String, String), ObjectStoreError> {
-    let seconds = time
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| {
-            ObjectStoreError::Transport(format!("system time is before unix epoch: {err}"))
-        })?
-        .as_secs() as i64;
-    let days = seconds.div_euclid(86_400);
-    let seconds_of_day = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
-    let short = format!("{year:04}{month:02}{day:02}");
-    Ok((
-        short.clone(),
-        format!("{short}T{hour:02}{minute:02}{second:02}Z"),
-    ))
-}
-
-// Howard Hinnant's civil date conversion, with days counted from 1970-01-01.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    (y + if m <= 2 { 1 } else { 0 }, m, d)
-}
-
 fn unix_ms(time: SystemTime) -> Result<u64, ObjectStoreError> {
-    let duration = time.duration_since(UNIX_EPOCH).map_err(|err| {
+    let duration = time.duration_since(std::time::UNIX_EPOCH).map_err(|err| {
         ObjectStoreError::Transport(format!("system time is before unix epoch: {err}"))
     })?;
     Ok(duration.as_millis() as u64)
@@ -407,38 +332,6 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, b"s3");
     hmac_sha256(&k_service, b"aws4_request")
-}
-
-fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let mut normalized_key = if key.len() > SHA256_BLOCK_BYTES {
-        Sha256::digest(key).to_vec()
-    } else {
-        key.to_vec()
-    };
-    normalized_key.resize(SHA256_BLOCK_BYTES, 0);
-    let mut outer = [0x5c; SHA256_BLOCK_BYTES];
-    let mut inner = [0x36; SHA256_BLOCK_BYTES];
-    for (idx, byte) in normalized_key.iter().enumerate() {
-        outer[idx] ^= *byte;
-        inner[idx] ^= *byte;
-    }
-    let inner_hash = Sha256::new()
-        .chain_update(inner)
-        .chain_update(value)
-        .finalize();
-    Sha256::new()
-        .chain_update(outer)
-        .chain_update(inner_hash)
-        .finalize()
-        .to_vec()
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    out
 }
 
 #[cfg(test)]
