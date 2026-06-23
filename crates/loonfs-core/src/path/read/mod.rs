@@ -6,9 +6,11 @@ mod resolver;
 mod revision_reader;
 mod row_decode;
 
-pub(crate) use listing::list_path_from_basis;
+pub(crate) use listing::{list_path_from_basis, list_path_page_from_basis};
 pub(crate) use materialized_view::{
     list_path_from_materialized_tables, list_path_from_materialized_tables_at_head_with_cache,
+    list_path_page_from_materialized_tables,
+    list_path_page_from_materialized_tables_at_head_with_cache,
     resolve_path_from_materialized_tables,
     resolve_path_from_materialized_tables_at_head_with_cache,
 };

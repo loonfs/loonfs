@@ -32,6 +32,8 @@ use thiserror::Error;
 pub struct VerifiedNamespaceBasis {
     pub namespace_descriptor: NamespaceDescriptorState,
     pub content_store_id: ContentStoreId,
+    /// Oldest namespace sequence this basis can answer snapshot reads for.
+    pub snapshot_floor_seq: ChangeSeq,
     pub head: HeadState,
     pub head_etag: String,
     pub lease: LeaseState,
@@ -67,6 +69,7 @@ impl VerifiedNamespaceBasis {
             + self.namespace_descriptor.namespace_id.as_str().len()
             + self.namespace_descriptor.content_store_id.as_str().len()
             + self.content_store_id.as_str().len()
+            + size_of::<ChangeSeq>()
             + self.head.namespace_id.as_str().len()
             + self.head_etag.len()
             + wal_tip_decoded_bytes(self.head.visible_wal_tip.as_ref())
@@ -281,6 +284,7 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
     Ok(VerifiedNamespaceBasis {
         namespace_descriptor: catalog_entry.namespace_descriptor,
         content_store_id: catalog_entry.content_store_id,
+        snapshot_floor_seq: initial_head.seq,
         head,
         head_etag,
         lease: loaded_lease.envelope.state,

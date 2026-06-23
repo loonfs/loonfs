@@ -1,4 +1,8 @@
-use super::{manifest_index, row_decode::unbind_matches_binding};
+use super::{
+    listing::{invalid_cursor, page_head_seq, validate_directory_cursor},
+    manifest_index,
+    row_decode::unbind_matches_binding,
+};
 use crate::checkpoint::{
     load_verified_manifest_tables_with_cache, manifest_basis_head, MetadataTableCache,
     VerifiedMetadataTables,
@@ -17,7 +21,8 @@ use crate::wal::{
 };
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    AbsolutePath, AuthoritativePathEntry, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    AbsolutePath, AuthoritativePathEntry, DirectoryPageCursor, DisplayName, InodeId, InodeKind,
+    NameKey, NamespaceId, Page, PageRequest,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -76,6 +81,39 @@ pub(crate) async fn list_path_from_materialized_tables_at_head_with_cache<
     Ok(Some(view.list_path(absolute_path).await?))
 }
 
+pub(crate) async fn list_path_page_from_materialized_tables_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    absolute_path: &str,
+    table_cache: Option<&MetadataTableCache>,
+    request: PageRequest<DirectoryPageCursor>,
+) -> Result<Option<Page<AuthoritativePathEntry, DirectoryPageCursor>>, CoreError> {
+    if request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.head_seq != head.seq)
+        .unwrap_or(false)
+    {
+        return Err(invalid_cursor(
+            "cursor snapshot does not match the requested materialized head",
+        ));
+    }
+    let Some(view) = MaterializedLatestView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        table_cache,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(view.list_path_page(absolute_path, request).await?))
+}
+
 pub(crate) async fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -85,6 +123,26 @@ pub(crate) async fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
         return Ok(None);
     };
     Ok(Some(view.list_path(absolute_path).await?))
+}
+
+pub(crate) async fn list_path_page_from_materialized_tables<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    request: PageRequest<DirectoryPageCursor>,
+) -> Result<Option<Page<AuthoritativePathEntry, DirectoryPageCursor>>, CoreError> {
+    let Some(view) = MaterializedLatestView::load(store, namespace_id).await? else {
+        return Ok(None);
+    };
+    if request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.head_seq != view.head.seq)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    Ok(Some(view.list_path_page(absolute_path, request).await?))
 }
 
 struct MaterializedLatestView<'a, S: ObjectStore + ?Sized> {
@@ -220,6 +278,115 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             );
         }
         Ok(entries)
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        err,
+        skip_all,
+        fields(phase = "walk_path")
+    )]
+    async fn list_path_page(
+        &self,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
+        let page_head_seq = page_head_seq(
+            self.head.seq,
+            self.head.retention_floor_seq,
+            request.cursor.as_ref(),
+        )?;
+        if page_head_seq != self.head.seq {
+            return Err(invalid_cursor(
+                "materialized listing can only page at its loaded head",
+            ));
+        }
+
+        let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+        let resolved = self.resolve_visible_path(&absolute_path).await?;
+        if let Some(cursor) = request.cursor.as_ref() {
+            validate_directory_cursor(cursor, &resolved)?;
+        }
+
+        if resolved.inode_kind == InodeKind::File {
+            if request.cursor.is_some() {
+                return Err(invalid_cursor(
+                    "directory cursor cannot resume a file listing",
+                ));
+            }
+            return Ok(Page {
+                items: vec![self.build_authoritative_path_entry(&resolved).await?],
+                next_cursor: None,
+            });
+        }
+        if resolved.inode_kind != InodeKind::Dir {
+            return Err(CoreError::ExpectedDirectory {
+                path: resolved.absolute_path,
+                kind: resolved.inode_kind,
+            });
+        }
+
+        let mut children = self.visible_children(resolved.inode_id).await?;
+        children.sort_by(|left, right| left.name_key.cmp(&right.name_key));
+        let start_after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.last_name_key.as_str());
+        let mut children = children
+            .into_iter()
+            .filter(|child| {
+                start_after
+                    .map(|last_name_key| child.name_key.as_str() > last_name_key)
+                    .unwrap_or(true)
+            })
+            .take(request.limit.limit_plus_one())
+            .collect::<Vec<_>>();
+        let has_more = children.len() > request.limit.as_usize();
+        if has_more {
+            children.truncate(request.limit.as_usize());
+        }
+
+        let next_cursor = if has_more {
+            let last = children
+                .last()
+                .expect("non-zero page limit with more children must return an item");
+            Some(DirectoryPageCursor {
+                head_seq: page_head_seq,
+                dir_inode_id: resolved.inode_id,
+                last_name_key: NameKey::try_new(last.name_key.clone()).map_err(|error| {
+                    CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))
+                })?,
+            })
+        } else {
+            None
+        };
+
+        let mut entries = Vec::with_capacity(children.len());
+        for direntry in children {
+            let child = self
+                .visible_inode(direntry.child_inode_id)
+                .await?
+                .expect("visible child listing should resolve inode");
+            let child_path = AbsolutePath::parse(&resolved.absolute_path)
+                .map_err(map_path_error_to_core)?
+                .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
+            entries.push(
+                self.build_authoritative_path_entry(&ResolvedVisiblePath {
+                    absolute_path: child_path.as_str().to_owned(),
+                    inode_id: direntry.child_inode_id,
+                    inode_kind: child.inode_kind,
+                    parent_inode_id: Some(direntry.parent_inode_id),
+                    display_name: direntry.display_name,
+                })
+                .await?,
+            );
+        }
+
+        Ok(Page {
+            items: entries,
+            next_cursor,
+        })
     }
 
     async fn resolve_visible_path(

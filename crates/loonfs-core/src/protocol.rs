@@ -787,6 +787,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     let promoted_basis = head_metadata.etag.map(|head_etag| VerifiedNamespaceBasis {
         namespace_descriptor: basis.namespace_descriptor.clone(),
         content_store_id: basis.content_store_id.clone(),
+        snapshot_floor_seq: basis.snapshot_floor_seq,
         head: head_publish.resulting_head.clone(),
         head_etag,
         lease: basis.lease.clone(),

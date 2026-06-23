@@ -13,8 +13,9 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult,
-    NamespaceId, NamespaceSummary, RevisionNo,
+    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, InodeId, ListFileRevisionsResponse,
+    MutationResult, NamespaceId, NamespaceSummary, NamespacesPageCursor, Page, PageRequest,
+    RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -166,6 +167,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         catalog::list_namespaces(&self.store).await
     }
 
+    /// Lists one page of complete namespaces visible in the object store.
+    pub async fn list_namespaces_page(
+        &self,
+        request: PageRequest<NamespacesPageCursor>,
+    ) -> CoreResult<Page<NamespaceSummary, NamespacesPageCursor>> {
+        catalog::list_namespaces_page(&self.store, request).await
+    }
+
     /// Resolves one absolute path to the authoritative entry at the current head.
     pub async fn resolve_path(
         &self,
@@ -242,6 +251,48 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         }
         let basis = self.basis_for_read_options(options).await?;
         crate::path::query::list_path_from_basis(&basis, path)
+    }
+
+    /// Lists one page of children for a directory path.
+    pub async fn list_path_page(
+        &self,
+        path: impl AsRef<str>,
+        options: ReadOptions,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::PreferMaterialized => {
+                if let Some(entries) = crate::path::query::list_path_page_from_materialized_tables(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                    request.clone(),
+                )
+                .await?
+                {
+                    return Ok(entries);
+                }
+            }
+            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
+                if let Some(entries) =
+                    crate::path::query::list_path_page_from_materialized_tables_at_head_with_cache(
+                        &self.store,
+                        &self.namespace_id,
+                        head,
+                        path,
+                        table_cache.as_deref(),
+                        request.clone(),
+                    )
+                    .await?
+                {
+                    return Ok(entries);
+                }
+            }
+            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+        }
+        let basis = self.basis_for_read_options(options).await?;
+        crate::path::query::list_path_page_from_basis(&basis, path, request)
     }
 
     /// Reads the current bytes for a file path.

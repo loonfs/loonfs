@@ -25,9 +25,10 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    AbsolutePath, CapabilityDocument, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    encode_directory_cursor, AbsolutePath, CapabilityDocument, DirectoryPageCursor, EffectiveLimit,
+    NamespacesPageCursor, Page, PageRequest, PaginationPolicy, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{load_namespace_head_summary, MetadataTableCache};
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -299,7 +300,27 @@ impl Fs {
 
     /// Lists complete namespaces visible in the object store.
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
-        Ok(loonfs_core::list_namespaces(self.store()).await?)
+        let limit = default_page_limit();
+        let mut cursor = None;
+        let mut namespaces = Vec::new();
+        loop {
+            let page = self
+                .list_namespaces_page(PageRequest { limit, cursor })
+                .await?;
+            namespaces.extend(page.items);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(namespaces);
+            }
+        }
+    }
+
+    /// Lists one page of complete namespaces in namespace id order.
+    pub async fn list_namespaces_page(
+        &self,
+        request: PageRequest<NamespacesPageCursor>,
+    ) -> Result<Page<NamespaceSummary, NamespacesPageCursor>> {
+        Ok(loonfs_core::list_namespaces_page(self.store(), request).await?)
     }
 
     /// Summarizes a namespace's current head: manifest, latest checkpoint,
@@ -472,45 +493,118 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<ListPathEntriesResponse> {
+        let limit = default_page_limit();
+        let mut cursor = None;
+        let mut entries = Vec::new();
+        let mut envelope = None;
+        loop {
+            let (page, next_cursor) = self
+                .list_path_entries_page_typed(
+                    namespace_id,
+                    absolute_path,
+                    PageRequest { limit, cursor },
+                )
+                .await?;
+            let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
+                namespace_id: page.namespace_id.clone(),
+                absolute_path: page.absolute_path.clone(),
+                head_seq: page.head_seq,
+                entries: Vec::new(),
+                next_cursor: None,
+            });
+            entries.extend(page.entries);
+            cursor = next_cursor;
+            if cursor.is_none() {
+                entries.sort_by(|left, right| {
+                    left.display_name
+                        .cmp(&right.display_name)
+                        .then(left.inode_id.0.cmp(&right.inode_id.0))
+                });
+                envelope_ref.entries = entries;
+                return Ok(envelope.expect("first page initializes response envelope"));
+            }
+        }
+    }
+
+    /// Lists one page of a directory together with the head the page was read from.
+    pub async fn list_path_entries_page(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> Result<ListPathEntriesResponse> {
+        let (mut response, next_cursor) = self
+            .list_path_entries_page_typed(namespace_id, absolute_path, request)
+            .await?;
+        response.next_cursor = next_cursor
+            .as_ref()
+            .map(encode_directory_cursor)
+            .transpose()
+            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        Ok(response)
+    }
+
+    async fn list_path_entries_page_typed(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
-        let head_seq = head.state.seq;
-        let entries = if head.state.current_manifest_id.is_some() {
-            let entries = engine
-                .list_path(
-                    absolute_path,
+        let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
+        let use_materialized = head.state.current_manifest_id.is_some()
+            && request
+                .cursor
+                .as_ref()
+                .map(|cursor| cursor.head_seq == head.state.seq)
+                .unwrap_or(true);
+        let page = if use_materialized {
+            let page = engine
+                .list_path_page(
+                    listed_path.as_str(),
                     loonfs_core::ReadOptions::materialized_tables_at_head(
                         head.state.clone(),
                         Some(Arc::clone(&self.inner.metadata_table_cache)),
                     ),
+                    request,
                 )
                 .await?;
             self.inner
                 .cache_stats
                 .record_metadata_read_source(MetadataReadSource::MaterializedTables);
-            entries
+            page
         } else {
             let basis = self.basis_for_read_at_head(namespace_id, &head).await?;
-            let entries = engine
-                .list_path(
-                    absolute_path,
+            let page = engine
+                .list_path_page(
+                    listed_path.as_str(),
                     loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                    request,
                 )
                 .await?;
             self.inner
                 .cache_stats
                 .record_metadata_read_source(MetadataReadSource::FullBasisFallback);
-            entries
+            page
         };
-        Ok(ListPathEntriesResponse {
+        let head_seq = page
+            .items
+            .first()
+            .map(|entry| entry.head_seq)
+            .or(request_head_seq)
+            .unwrap_or(head.state.seq);
+        let next_cursor = page.next_cursor;
+        let response = ListPathEntriesResponse {
             namespace_id: namespace_id.clone(),
             absolute_path: listed_path.as_str().to_owned(),
             head_seq,
-            entries,
+            entries: page.items,
             next_cursor: None,
-        })
+        };
+        Ok((response, next_cursor))
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
@@ -1119,6 +1213,12 @@ fn validate_runtime_mutation_path(absolute_path: &str) -> Result<()> {
         return Err(RuntimeError::Core(CoreError::RootMutationForbidden));
     }
     Ok(())
+}
+
+fn default_page_limit() -> EffectiveLimit {
+    PaginationPolicy::default()
+        .resolve_limit(None)
+        .expect("default pagination policy must resolve its default limit")
 }
 
 #[cfg(test)]

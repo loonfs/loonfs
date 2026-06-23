@@ -5,7 +5,10 @@ use crate::namespace::control::{
 };
 use loonfs_api::wire::control::NamespaceDescriptorState;
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError, NamespaceSummary};
+use loonfs_api::{
+    ContentStoreId, NamespaceId, NamespaceIdValidationError, NamespaceSummary,
+    NamespacesPageCursor, Page, PageRequest,
+};
 use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -117,6 +120,40 @@ pub(crate) async fn list_namespaces<S: ObjectStore + ?Sized>(
         .into_iter()
         .map(|namespace_id| NamespaceSummary { namespace_id })
         .collect())
+}
+
+pub(crate) async fn list_namespaces_page<S: ObjectStore + ?Sized>(
+    store: &S,
+    request: PageRequest<NamespacesPageCursor>,
+) -> Result<Page<NamespaceSummary, NamespacesPageCursor>, CoreError> {
+    let mut namespaces = list_namespaces(store).await?;
+    namespaces.sort_by(|left, right| left.namespace_id.as_str().cmp(right.namespace_id.as_str()));
+
+    let start_after = request.cursor.map(|cursor| cursor.last_namespace_id);
+    let mut items = namespaces
+        .into_iter()
+        .filter(|summary| {
+            start_after
+                .as_ref()
+                .map(|last| summary.namespace_id.as_str() > last.as_str())
+                .unwrap_or(true)
+        })
+        .take(request.limit.limit_plus_one())
+        .collect::<Vec<_>>();
+
+    let has_more = items.len() > request.limit.as_usize();
+    if has_more {
+        items.truncate(request.limit.as_usize());
+    }
+    let next_cursor = has_more.then(|| NamespacesPageCursor {
+        last_namespace_id: items
+            .last()
+            .expect("non-zero page limit with more results must return an item")
+            .namespace_id
+            .clone(),
+    });
+
+    Ok(Page { items, next_cursor })
 }
 
 pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
