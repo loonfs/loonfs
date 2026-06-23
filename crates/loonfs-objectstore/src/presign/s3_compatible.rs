@@ -1,10 +1,11 @@
+use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::{ContentRef, ContentRefKind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SHA256_BLOCK_BYTES: usize = 64;
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
@@ -38,29 +39,6 @@ impl fmt::Debug for S3PresignerConfig {
             .field("force_path_style", &self.force_path_style)
             .finish()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PresignedPutRequest<'a> {
-    pub object_key: &'a str,
-    pub content_ref: &'a ContentRef,
-    pub expires_in: Duration,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PresignedUrl {
-    pub method: String,
-    pub url: String,
-    pub headers: BTreeMap<String, String>,
-    pub expires_at_ms: u64,
-}
-
-pub trait ObjectTransferIssuer: Send + Sync + std::fmt::Debug {
-    fn presign_put(
-        &self,
-        request: PresignedPutRequest<'_>,
-        now: SystemTime,
-    ) -> Result<PresignedUrl, ObjectStoreError>;
 }
 
 #[derive(Debug, Clone)]
@@ -465,15 +443,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ObjectTransferIssuer, PresignedPutRequest, S3CompatiblePresigner, S3PresignerConfig,
-    };
+    use super::{S3CompatiblePresigner, S3PresignerConfig};
+    use crate::presign::{ObjectTransferIssuer, PresignedPutRequest};
     use crate::ObjectStoreError;
     use loonfs_api::{ContentRef, ContentRefKind};
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
-    fn presigned_put_scopes_key_and_signs_required_header() {
+    fn presigned_put_scopes_key_and_signs_s3_compatible_required_headers() {
         let signer = S3CompatiblePresigner::new(S3PresignerConfig {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
