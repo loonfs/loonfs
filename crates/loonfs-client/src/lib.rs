@@ -64,7 +64,7 @@ pub struct PutPathResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StagedContent {
     content_ref: ContentRef,
-    validated_content_token: ValidatedContentToken,
+    validated_content_token: Option<ValidatedContentToken>,
 }
 
 /// A path qualified by namespace.
@@ -474,15 +474,16 @@ impl Client {
                 content_ref: staged.content_ref,
             },
         )?;
-        let token = response.validated_content_token.ok_or_else(|| {
-            ClientError::Http("server completed upload without validated content token".to_owned())
-        })?;
+        let validated_content_token =
+            response
+                .validated_content_token
+                .map(|token| ValidatedContentToken {
+                    content_ref: response.content_ref.clone(),
+                    token,
+                });
         Ok(StagedContent {
-            content_ref: response.content_ref.clone(),
-            validated_content_token: ValidatedContentToken {
-                content_ref: response.content_ref,
-                token,
-            },
+            content_ref: response.content_ref,
+            validated_content_token,
         })
     }
 
@@ -508,7 +509,7 @@ impl Client {
             &spec.namespace,
             &FilesystemOperationRequest {
                 commit_id,
-                content_tokens: vec![staged.validated_content_token],
+                content_tokens: staged.validated_content_token.into_iter().collect(),
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
                     content_ref: staged.content_ref,

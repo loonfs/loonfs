@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 loonfs-api = { path = "../loonfs-api" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
+base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
 serde.workspace = true

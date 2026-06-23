@@ -5,6 +5,7 @@ use crate::commit::{
     CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
     PreparedCommit, SemanticMutationIdentity,
 };
+use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::CoreError;
@@ -21,9 +22,7 @@ use crate::namespace::control::{
     load_namespace_head_control, load_namespace_lease_control,
 };
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
-use crate::path::write::{
-    path_intent_fingerprint_for_path_intent, PathMutationIntent, PublishPlanningSession,
-};
+use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
     validate_durable_content_reference, write_immutable_object, ContentValidationTracker,
@@ -603,25 +602,21 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
             };
             let request = candidate_request.request;
             let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
-            let content_result = match candidate {
-                NamespaceMutationCandidate::Commit(_)
-                | NamespaceMutationCandidate::Path(PathMutationIntent::PutFile { .. }) => {
-                    validate_commit_content_references(
-                        store,
-                        &basis.content_store_id,
-                        &request,
-                        &resolved_restore_content_refs,
-                        &mut content_validation,
-                    )
-                    .await
-                }
-                NamespaceMutationCandidate::AdmittedPath {
-                    admitted_content_refs,
-                    ..
-                } => ensure_commit_content_refs_admitted(&request, admitted_content_refs),
-                NamespaceMutationCandidate::Path(_) => Ok(()),
+            let admissions = CommitContentAdmissions {
+                namespace_id,
+                admissions: candidate_content_admissions(candidate),
+                now_ms: context.now_ms,
             };
-            if let Err(error) = content_result {
+            if let Err(error) = validate_commit_content_references(
+                store,
+                &basis.content_store_id,
+                &request,
+                &resolved_restore_content_refs,
+                admissions,
+                &mut content_validation,
+            )
+            .await
+            {
                 outcomes[index] = Some(Err(error));
                 continue;
             }
@@ -869,7 +864,7 @@ fn prepare_candidate_request(
             })
         }
         NamespaceMutationCandidate::Path(intent)
-        | NamespaceMutationCandidate::AdmittedPath { intent, .. } => {
+        | NamespaceMutationCandidate::PathWithContentAdmission { intent, .. } => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
                 outcomes[index] = Some(Err(error));
                 return None;
@@ -1095,11 +1090,26 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
     })
 }
 
+struct CommitContentAdmissions<'a> {
+    namespace_id: &'a NamespaceId,
+    admissions: &'a [ContentAdmission],
+    now_ms: u64,
+}
+
+impl CommitContentAdmissions<'_> {
+    fn admits(&self, content_ref: &ContentRef) -> bool {
+        self.admissions
+            .iter()
+            .any(|admission| admission.admits(self.namespace_id, content_ref, self.now_ms))
+    }
+}
+
 async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     request: &CoreCommitRequest,
     resolved_restore_content_refs: &[Option<ContentRef>],
+    admissions: CommitContentAdmissions<'_>,
     content_validation: &mut ContentValidationTracker,
 ) -> Result<(), CoreError> {
     let mut content_refs = Vec::new();
@@ -1126,6 +1136,9 @@ async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     }
 
     for content_ref in content_refs {
+        if admissions.admits(content_ref) {
+            continue;
+        }
         content_validation
             .ensure_validated(store, content_store_id, content_ref)
             .await?;
@@ -1134,26 +1147,11 @@ async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn ensure_commit_content_refs_admitted(
-    request: &CoreCommitRequest,
-    admitted_content_refs: &[ContentRef],
-) -> Result<(), CoreError> {
-    for op in &request.ops {
-        match op {
-            CommitOp::CreateFile { content_ref, .. }
-            | CommitOp::ReplaceFile { content_ref, .. }
-                if !admitted_content_refs
-                    .iter()
-                    .any(|admitted| admitted == content_ref) =>
-            {
-                return Err(CoreError::InvalidUploadContent(
-                    "content ref was not admitted before publish".to_owned(),
-                ));
-            }
-            _ => {}
-        }
+fn candidate_content_admissions(candidate: &NamespaceMutationCandidate) -> &[ContentAdmission] {
+    match candidate {
+        NamespaceMutationCandidate::PathWithContentAdmission { admissions, .. } => admissions,
+        NamespaceMutationCandidate::Commit(_) | NamespaceMutationCandidate::Path(_) => &[],
     }
-    Ok(())
 }
 
 async fn read_upload_session_object<S: ObjectStore + ?Sized>(

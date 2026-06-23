@@ -5,14 +5,15 @@ use bytes::Bytes;
 use loonfs_api::{
     v0::{
         CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
-        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest, ValidatedContentToken,
     },
     validate_checkpoint_id,
     wire::control::{
         decode_control_object, encode_control_object, ControlObjectKind, LeaseStateEnvelope,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
-    InodeId, InodeKind, ManifestId, RevisionNo,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
+    FilesystemPutBehavior, InodeId, InodeKind, ManifestId, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_objectstore::keys::{namespace_lease, namespace_manifest};
@@ -588,6 +589,77 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     })
     .await
     .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-current",
+        "http-bad-content-token",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        let begin = harness
+            .client
+            .begin_upload(namespace)
+            .expect("begin upload");
+        let staged = harness
+            .client
+            .upload_content(namespace, &begin.upload_id, b"token fallback")
+            .expect("upload content");
+        let completed = harness
+            .client
+            .complete_upload(
+                namespace,
+                &begin.upload_id,
+                &CompleteUploadRequest {
+                    content_ref: staged.content_ref,
+                },
+            )
+            .expect("complete upload");
+
+        let request = FilesystemOperationRequest {
+            commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: completed.content_ref.clone(),
+                token: "not.a.valid.token".to_owned(),
+            }],
+            operation: FilesystemOperation::PutFile {
+                path: "/bad-token.txt".to_owned(),
+                content_ref: completed.content_ref,
+                behavior: FilesystemPutBehavior::CreateOnly,
+            },
+        };
+        let response = ureq::post(&format!(
+            "{}/v0/namespaces/{namespace}/filesystem/operations",
+            harness.server_url
+        ))
+        .set("authorization", "Bearer test-token")
+        .send_json(request)
+        .expect("bad token should fall back to content validation");
+        let response: FilesystemOperationResponse =
+            serde_json::from_reader(response.into_reader()).expect("decode operation response");
+        assert_eq!(response.committed_seq, ChangeSeq(1));
+
+        let target = NamespacePath::parse("demo:/bad-token.txt").expect("target");
+        assert_eq!(
+            harness.client.read_file_bytes(&target).expect("read file"),
+            b"token fallback"
+        );
+    })
+    .await
+    .expect("blocking task");
 
     harness.server.abort();
 }

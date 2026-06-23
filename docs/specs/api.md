@@ -354,18 +354,26 @@ example, `if-none-match: *` keeps the immutable object create-only, and
 `content_ref`. Other providers may use different headers or decline
 `direct_put` support.
 
-After the client uploads bytes to the presigned URL, it calls complete with the same `content_ref`. Completion validates that the durable object exists and matches, then returns a short-lived validated content token:
+After the client uploads bytes to the presigned URL, it calls complete with the
+same `content_ref`. Completion validates that the durable object exists and
+matches. A server may return a short-lived `validated_content_token` for the
+completed content ref; the token is opaque to clients.
 
 ```json
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
-  "validated_content_token": "..."
+  "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 }
 }
 ```
 
-Path-oriented `put_file` operations that introduce new external content must carry the matching token. The token is an opaque server-signed proof; clients must not parse it.
+Path-oriented `put_file` operations then reference the completed `content_ref`.
+Publishing validates the durable content reference before metadata becomes
+visible. If the client has a matching `validated_content_token`, it may include
+that token in `content_tokens` so the server can skip repeated durable-content
+validation on the hot publish path. Missing, malformed, expired, or non-matching
+tokens are ignored and the server falls back to normal durable-content
+validation.
 
 ```json
 {
@@ -373,7 +381,7 @@ Path-oriented `put_file` operations that introduce new external content must car
   "content_tokens": [
     {
       "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
-      "token": "..."
+      "token": "opaque-server-token"
     }
   ],
   "operation": {
@@ -603,7 +611,9 @@ The semantic rule is:
   `content_ref`;
 - `complete` finalizes the upload session only when the expected `content_ref`
   exactly matches the service-computed staged ref; and
-- the returned `content_ref` is then safe to reference from a commit.
+- the returned `content_ref` is then safe to reference from a commit. Remote
+  servers may also return an opaque `validated_content_token` for hot-path
+  admission; the token is an optimization hint, not a correctness requirement.
 
 Repeating `PUT /content` with the same bytes for the same upload id is
 idempotent. Repeating it with different bytes is a conflict. Completing an
@@ -657,7 +667,8 @@ Representative complete-upload response:
     "kind": "whole_file_v0",
     "digest": "sha256:7ab...",
     "size_bytes": 20591
-  }
+  },
+  "validated_content_token": "opaque-server-token"
 }
 ```
 
@@ -1022,7 +1033,7 @@ matter.
 | Concern | Server | Client |
 | --- | --- | --- |
 | Path resolution | Authoritative | Supplies user intent by path when using the filesystem surface. |
-| Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. |
+| Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. A server may issue short-lived content admission tokens after validation to avoid repeating expensive checks. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. Clients may forward admission tokens when provided, but must tolerate slow-path validation. |
 | Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
 | Namespace visibility | Authoritative | Observes committed results. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |

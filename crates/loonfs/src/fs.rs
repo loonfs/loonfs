@@ -630,8 +630,7 @@ impl Fs {
             .await
             .map_err(RuntimeError::from);
         let content_ref = stored?.content_ref;
-        let admitted_content_ref = content_ref.clone();
-        self.publish_admitted_path_intent(
+        self.publish_path_intent(
             namespace_id,
             PathMutationIntent::PutFile {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
@@ -639,7 +638,6 @@ impl Fs {
                 content_ref,
                 behavior: options.behavior,
             },
-            vec![admitted_content_ref],
         )
         .await
     }
@@ -924,32 +922,6 @@ impl Fs {
             .publish_namespace_mutations_batch(
                 namespace_id,
                 vec![NamespaceMutationCandidate::Path(intent)],
-            )
-            .await;
-        let response = results.pop().unwrap_or_else(|| {
-            Err(RuntimeError::Core(CoreError::Store(
-                "empty path mutation batch".to_owned(),
-            )))
-        })?;
-        Ok(MutationResult {
-            namespace_id: response.namespace_id,
-            committed_seq: response.committed_seq,
-        })
-    }
-
-    async fn publish_admitted_path_intent(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
-        admitted_content_refs: Vec<ContentRef>,
-    ) -> Result<MutationResult> {
-        let mut results = self
-            .publish_namespace_mutations_batch(
-                namespace_id,
-                vec![NamespaceMutationCandidate::AdmittedPath {
-                    intent,
-                    admitted_content_refs,
-                }],
             )
             .await;
         let response = results.pop().unwrap_or_else(|| {

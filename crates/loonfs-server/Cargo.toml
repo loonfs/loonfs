@@ -13,7 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
-base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 http.workspace = true
@@ -22,7 +21,6 @@ loonfs-core = { path = "../loonfs-core" }
 loonfs = { path = "../loonfs" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
 serde.workspace = true
-sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

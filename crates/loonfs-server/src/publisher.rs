@@ -1,8 +1,9 @@
 use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loonfs_api::{CommitId, ContentRef, NamespaceId};
+use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
+use loonfs_core::content::ContentAdmission;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Notify};
@@ -55,18 +56,15 @@ impl PublisherRegistry {
             .await
     }
 
-    pub(crate) async fn submit_admitted_path_intent(
+    pub(crate) async fn submit_path_intent_with_content_admission(
         &self,
         namespace_id: NamespaceId,
         intent: PathMutationIntent,
-        admitted_content_refs: Vec<ContentRef>,
+        admissions: Vec<ContentAdmission>,
     ) -> CommitResult {
         self.submit_candidate(
             namespace_id,
-            NamespaceMutationCandidate::AdmittedPath {
-                intent,
-                admitted_content_refs,
-            },
+            NamespaceMutationCandidate::PathWithContentAdmission { intent, admissions },
         )
         .await
     }
@@ -764,9 +762,8 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
 fn operation_class(candidate: &NamespaceMutationCandidate) -> &'static str {
     match candidate {
         NamespaceMutationCandidate::Commit(_) => "explicit_commit",
-        NamespaceMutationCandidate::Path(_) | NamespaceMutationCandidate::AdmittedPath { .. } => {
-            "path_mutation"
-        }
+        NamespaceMutationCandidate::Path(_)
+        | NamespaceMutationCandidate::PathWithContentAdmission { .. } => "path_mutation",
     }
 }
 

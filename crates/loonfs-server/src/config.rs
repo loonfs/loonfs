@@ -226,7 +226,6 @@ impl ServerConfig {
             }
         }
         require_non_empty("content_token_secret", &self.content_token_secret)?;
-
         match &self.store {
             StoreConfig::LocalFs { root, .. } => {
                 require_non_empty("store.root", root)?;

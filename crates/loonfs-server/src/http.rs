@@ -1,5 +1,4 @@
 use crate::config::{ServerConfig, ServerConfigError, StoreConfig};
-use crate::content_tokens::{mint_content_token, verify_content_token, ContentTokenError};
 use crate::publisher::PublisherRegistry;
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -21,11 +20,14 @@ use loonfs_api::{
         CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
-    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
-    ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
-    RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+    AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
+    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId,
+    ListFileRevisionsResponse, ListNamespacesResponse, NamespaceId, NamespaceIdValidationError,
+    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+};
+use loonfs_core::content::{
+    mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
 };
 use loonfs_objectstore::{
     presign::{ObjectTransferIssuer, PresignedPutRequest},
@@ -34,7 +36,7 @@ use loonfs_objectstore::{
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
@@ -522,11 +524,14 @@ async fn filesystem_operation(
         )),
         _ => None,
     };
-    let admitted_content_refs = match &operation {
-        FilesystemOperation::PutFile { content_ref, .. } => {
-            require_content_token(&state.config, &namespace_id, content_ref, &content_tokens)?;
-            vec![content_ref.clone()]
-        }
+    let content_admissions = match &operation {
+        FilesystemOperation::PutFile { content_ref, .. } => content_admissions_for_put(
+            &state.config,
+            &namespace_id,
+            content_ref,
+            &content_tokens,
+            current_unix_ms()?,
+        ),
         _ => Vec::new(),
     };
     let intent = match operation {
@@ -582,7 +587,7 @@ async fn filesystem_operation(
             payload_class,
         );
         async {
-            if admitted_content_refs.is_empty() {
+            if content_admissions.is_empty() {
                 state
                     .publisher
                     .submit_path_intent(namespace_id.clone(), intent)
@@ -590,25 +595,20 @@ async fn filesystem_operation(
             } else {
                 state
                     .publisher
-                    .submit_admitted_path_intent(
+                    .submit_path_intent_with_content_admission(
                         namespace_id.clone(),
                         intent,
-                        admitted_content_refs,
+                        content_admissions,
                     )
                     .await
             }
         }
         .instrument(span)
         .await
-    } else if admitted_content_refs.is_empty() {
-        state
-            .publisher
-            .submit_path_intent(namespace_id.clone(), intent)
-            .await
     } else {
         state
             .publisher
-            .submit_admitted_path_intent(namespace_id.clone(), intent, admitted_content_refs)
+            .submit_path_intent(namespace_id.clone(), intent)
             .await
     };
     let response = response_result
@@ -715,38 +715,48 @@ fn direct_put_presign_time() -> SystemTime {
     SystemTime::now()
 }
 
-fn require_content_token(
+fn content_admissions_for_put(
     config: &ServerConfig,
     namespace_id: &NamespaceId,
-    content_ref: &loonfs::ContentRef,
+    content_ref: &ContentRef,
     tokens: &[ValidatedContentToken],
-) -> Result<(), ApiResponseError> {
-    let Some(token) = tokens
+    now_ms: u64,
+) -> Vec<ContentAdmission> {
+    tokens
         .iter()
-        .find(|token| token.content_ref == *content_ref)
-    else {
-        return Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidUploadContent,
-            "missing validated content token",
-        ));
-    };
-    verify_content_token(
-        config.content_token_secret(),
-        namespace_id,
-        content_ref,
-        &token.token,
-        direct_put_presign_time(),
-    )
-    .map_err(content_token_error)
+        .filter(|token| token.content_ref == *content_ref)
+        .filter_map(|token| {
+            verify_content_token(config.content_token_secret(), namespace_id, token, now_ms).ok()
+        })
+        .collect()
 }
 
 fn content_token_error(error: ContentTokenError) -> ApiResponseError {
     ApiResponseError::new(
-        StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidUploadContent,
-        &error.to_string(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::ServerError,
+        &format!("failed to mint content token: {error}"),
     )
+}
+
+#[allow(clippy::disallowed_methods)]
+fn current_unix_ms() -> Result<u64, ApiResponseError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            ApiResponseError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::ServerError,
+                &format!("system time is before unix epoch: {error}"),
+            )
+        })?;
+    u64::try_from(duration.as_millis()).map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::ServerError,
+            &format!("system time overflowed milliseconds: {error}"),
+        )
+    })
 }
 
 async fn upload_content_handler(
@@ -784,7 +794,7 @@ async fn complete_upload_handler(
             state.config.content_token_secret(),
             &namespace_id,
             &response.content_ref,
-            direct_put_presign_time(),
+            current_unix_ms()?,
         )
         .map_err(content_token_error)?,
     );
