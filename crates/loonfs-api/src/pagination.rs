@@ -152,7 +152,10 @@ pub enum LimitError {
     ExceedsMax { requested: u32, max_limit: u32 },
 }
 
-/// Request envelope for engine-level page methods.
+/// Typed request envelope for internal runtime/core page methods.
+///
+/// This is not a direct wire response type. HTTP handlers parse public query
+/// fields into this shape after validating `limit` and decoding `cursor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageRequest<C> {
     /// Enforced page size.
@@ -161,7 +164,10 @@ pub struct PageRequest<C> {
     pub cursor: Option<C>,
 }
 
-/// Result envelope for engine-level page methods.
+/// Typed result envelope for internal runtime/core page methods.
+///
+/// This is not a direct wire response type. HTTP handlers encode
+/// `next_cursor` into the public response envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page<T, C> {
     /// Returned items.
@@ -178,24 +184,22 @@ pub struct NamespacesPageCursor {
 }
 
 /// Cursor for one directory listing snapshot.
+///
+/// Directory pagination advances in canonical `name_key` order.
+///
+/// The cursor intentionally contains only the snapshot (`head_seq`), listed
+/// directory identity (`dir_inode_id`), and resume position (`last_name_key`).
+/// HTTP clients must pass the URL namespace and `path` on every page.
+/// Runtime/server code resolves that path at `head_seq` and rejects the cursor
+/// unless it names `dir_inode_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryPageCursor {
-    /// Namespace being listed.
-    pub namespace_id: NamespaceId,
-    /// Canonical absolute path of the listed directory.
-    pub absolute_path: String,
-    /// Directory inode resolved at `head_seq`.
-    pub dir_inode_id: InodeId,
     /// Snapshot sequence captured by the first page.
     pub head_seq: ChangeSeq,
-    /// Last name key returned to the client.
+    /// Directory inode resolved at `head_seq`.
+    pub dir_inode_id: InodeId,
+    /// Last canonical name key returned to the client.
     pub last_name_key: NameKey,
-    /// Last child inode id returned to the client.
-    pub last_child_inode_id: InodeId,
-    /// Bind sequence for the last returned direntry.
-    pub last_bind_seq: ChangeSeq,
-    /// Bind delta index for the last returned direntry.
-    pub last_bind_delta_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,14 +211,9 @@ enum EncodedPageCursor {
     },
     Directory {
         v: u8,
-        namespace_id: NamespaceId,
-        absolute_path: String,
-        dir_inode_id: InodeId,
         head_seq: ChangeSeq,
+        dir_inode_id: InodeId,
         last_name_key: NameKey,
-        last_child_inode_id: InodeId,
-        last_bind_seq: ChangeSeq,
-        last_bind_delta_index: u32,
     },
 }
 
@@ -270,14 +269,9 @@ pub fn decode_namespaces_cursor(value: &str) -> Result<NamespacesPageCursor, Pag
 pub fn encode_directory_cursor(cursor: &DirectoryPageCursor) -> Result<String, PageCursorError> {
     encode_cursor(&EncodedPageCursor::Directory {
         v: PAGE_CURSOR_VERSION,
-        namespace_id: cursor.namespace_id.clone(),
-        absolute_path: cursor.absolute_path.clone(),
-        dir_inode_id: cursor.dir_inode_id,
         head_seq: cursor.head_seq,
+        dir_inode_id: cursor.dir_inode_id,
         last_name_key: cursor.last_name_key.clone(),
-        last_child_inode_id: cursor.last_child_inode_id,
-        last_bind_seq: cursor.last_bind_seq,
-        last_bind_delta_index: cursor.last_bind_delta_index,
     })
 }
 
@@ -285,24 +279,14 @@ pub fn encode_directory_cursor(cursor: &DirectoryPageCursor) -> Result<String, P
 pub fn decode_directory_cursor(value: &str) -> Result<DirectoryPageCursor, PageCursorError> {
     match decode_cursor(value)? {
         EncodedPageCursor::Directory {
-            namespace_id,
-            absolute_path,
-            dir_inode_id,
             head_seq,
+            dir_inode_id,
             last_name_key,
-            last_child_inode_id,
-            last_bind_seq,
-            last_bind_delta_index,
             ..
         } => Ok(DirectoryPageCursor {
-            namespace_id,
-            absolute_path,
-            dir_inode_id,
             head_seq,
+            dir_inode_id,
             last_name_key,
-            last_child_inode_id,
-            last_bind_seq,
-            last_bind_delta_index,
         }),
         other => Err(PageCursorError::WrongKind {
             expected: "directory",
@@ -450,14 +434,9 @@ mod tests {
     #[test]
     fn directory_cursor_round_trips() {
         let cursor = DirectoryPageCursor {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            absolute_path: "/docs".to_owned(),
-            dir_inode_id: InodeId(7),
             head_seq: ChangeSeq(11),
+            dir_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
-            last_child_inode_id: InodeId(9),
-            last_bind_seq: ChangeSeq(10),
-            last_bind_delta_index: 2,
         };
 
         let encoded = encode_directory_cursor(&cursor).expect("encode cursor");
@@ -487,6 +466,23 @@ mod tests {
         assert_eq!(
             decode_namespaces_cursor("not-hex"),
             Err(PageCursorError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn unsupported_cursor_version_is_rejected() {
+        let encoded = encode_cursor(&EncodedPageCursor::Namespaces {
+            v: PAGE_CURSOR_VERSION + 1,
+            last_namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+        })
+        .expect("encode cursor");
+
+        assert_eq!(
+            decode_namespaces_cursor(&encoded),
+            Err(PageCursorError::UnsupportedVersion {
+                expected: PAGE_CURSOR_VERSION,
+                actual: PAGE_CURSOR_VERSION + 1,
+            })
         );
     }
 }

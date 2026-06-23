@@ -53,8 +53,11 @@ pub struct NamespaceSummary {
 /// Response for namespace listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListNamespacesResponse {
-    /// Complete namespaces visible to the store.
+    /// Complete namespaces visible to the store for this page.
     pub namespaces: Vec<NamespaceSummary>,
+    /// Cursor for the next page, if more namespaces remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Status summary for one namespace.

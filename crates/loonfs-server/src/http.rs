@@ -320,7 +320,10 @@ async fn list_namespaces_handler(
         .list_namespaces()
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(ListNamespacesResponse { namespaces }))
+    Ok(Json(ListNamespacesResponse {
+        namespaces,
+        next_cursor: None,
+    }))
 }
 
 async fn fork_namespace_handler(
@@ -1038,6 +1041,7 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::InvalidUploadId
         | ErrorCode::InvalidInodeId
         | ErrorCode::InvalidRevisionNo
+        | ErrorCode::InvalidCursor
         | ErrorCode::InvalidConfig
         | ErrorCode::UnsupportedRenameMode
         | ErrorCode::InvalidUploadContent => StatusCode::BAD_REQUEST,

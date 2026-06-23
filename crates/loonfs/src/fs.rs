@@ -509,6 +509,7 @@ impl Fs {
             absolute_path: listed_path.as_str().to_owned(),
             head_seq,
             entries,
+            next_cursor: None,
         })
     }
 
