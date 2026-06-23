@@ -694,7 +694,7 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                 } => StoreConfig::AzureAbs {
                     account_name: prompt::prompt_line_default("account name", &account_name)?,
                     container_name: prompt::prompt_line_default("container name", &container_name)?,
-                    access_key: prompt::prompt_line_default("access key", &access_key)?,
+                    access_key: prompt::prompt_secret_keep_current("access key", &access_key)?,
                     endpoint_url: prompt::prompt_optional("endpoint url", endpoint_url.as_deref())?,
                     key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
                 },
