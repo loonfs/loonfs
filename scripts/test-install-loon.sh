@@ -4,7 +4,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 version=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')
-target="${LOON_TEST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
+target="${LOONFS_TEST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
 
 tmpdir=$(mktemp -d)
 cleanup() {
@@ -50,17 +50,17 @@ cp "$artifact_dir/SHA256SUMS" "$pinned_dir/"
 
 latest_install_dir="$tmpdir/install-latest"
 pinned_install_dir="$tmpdir/install-pinned"
-LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --install-dir "$latest_install_dir"
-LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$pinned_install_dir"
+LOONFS_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --install-dir "$latest_install_dir"
+LOONFS_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$pinned_install_dir"
 
 "$latest_install_dir/loon" version | grep -Fx "$version" >/dev/null
 "$pinned_install_dir/loon" version | grep -Fx "$version" >/dev/null
 
 printf '0000000000000000000000000000000000000000000000000000000000000000  loon-%s.tar.gz\n' "$target" > "$pinned_dir/SHA256SUMS"
 expect_failure "checksum failure" \
-    env LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" \
+    env LOONFS_RELEASE_URL_ROOT="file://$tmpdir/releases" \
     "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$tmpdir/install-bad"
 
 expect_failure "unsupported platform failure" \
-    env LOON_INSTALL_OS="Linux" LOON_INSTALL_ARCH="riscv64" \
+    env LOONFS_INSTALL_OS="Linux" LOONFS_INSTALL_ARCH="riscv64" \
     "$repo_root/scripts/install-loon.sh" --install-dir "$tmpdir/install-unsupported"

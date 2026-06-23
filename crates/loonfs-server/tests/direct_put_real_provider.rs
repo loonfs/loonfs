@@ -207,13 +207,13 @@ struct CloudflareR2DirectPutConfig {
 impl AwsS3DirectPutConfig {
     fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
-            bucket: required_env("LOON_TEST_S3_BUCKET")?,
-            region: required_env("LOON_TEST_S3_REGION")?,
-            endpoint: optional_env("LOON_TEST_S3_ENDPOINT"),
-            access_key_id: required_env("LOON_TEST_S3_ACCESS_KEY_ID")?,
-            secret_access_key: required_env("LOON_TEST_S3_SECRET_ACCESS_KEY")?,
-            session_token: optional_env("LOON_TEST_S3_SESSION_TOKEN"),
-            prefix: direct_put_prefix("aws-s3", optional_env("LOON_TEST_S3_PREFIX")),
+            bucket: required_env("LOONFS_TEST_S3_BUCKET")?,
+            region: required_env("LOONFS_TEST_S3_REGION")?,
+            endpoint: optional_env("LOONFS_TEST_S3_ENDPOINT"),
+            access_key_id: required_env("LOONFS_TEST_S3_ACCESS_KEY_ID")?,
+            secret_access_key: required_env("LOONFS_TEST_S3_SECRET_ACCESS_KEY")?,
+            session_token: optional_env("LOONFS_TEST_S3_SESSION_TOKEN"),
+            prefix: direct_put_prefix("aws-s3", optional_env("LOONFS_TEST_S3_PREFIX")),
         })
     }
 }
@@ -221,12 +221,12 @@ impl AwsS3DirectPutConfig {
 impl CloudflareR2DirectPutConfig {
     fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
-            bucket: required_env("LOON_TEST_R2_BUCKET")?,
-            account_id: required_env("LOON_TEST_R2_ACCOUNT_ID")?,
-            endpoint: required_env("LOON_TEST_R2_ENDPOINT")?,
-            access_key_id: required_env("LOON_TEST_R2_ACCESS_KEY_ID")?,
-            secret_access_key: required_env("LOON_TEST_R2_SECRET_ACCESS_KEY")?,
-            prefix: direct_put_prefix("r2", optional_env("LOON_TEST_R2_PREFIX")),
+            bucket: required_env("LOONFS_TEST_R2_BUCKET")?,
+            account_id: required_env("LOONFS_TEST_R2_ACCOUNT_ID")?,
+            endpoint: required_env("LOONFS_TEST_R2_ENDPOINT")?,
+            access_key_id: required_env("LOONFS_TEST_R2_ACCESS_KEY_ID")?,
+            secret_access_key: required_env("LOONFS_TEST_R2_SECRET_ACCESS_KEY")?,
+            prefix: direct_put_prefix("r2", optional_env("LOONFS_TEST_R2_PREFIX")),
         })
     }
 }

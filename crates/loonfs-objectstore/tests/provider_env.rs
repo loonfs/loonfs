@@ -10,43 +10,43 @@ pub(crate) const PROVIDER_ENV_EXAMPLE_RELATIVE_PATH: &str =
     "tests/provider-conformance.env.example";
 
 pub(crate) const AWS_S3_REQUIRED_VARS: &[&str] = &[
-    "LOON_TEST_S3_BUCKET",
-    "LOON_TEST_S3_REGION",
-    "LOON_TEST_S3_ACCESS_KEY_ID",
-    "LOON_TEST_S3_SECRET_ACCESS_KEY",
+    "LOONFS_TEST_S3_BUCKET",
+    "LOONFS_TEST_S3_REGION",
+    "LOONFS_TEST_S3_ACCESS_KEY_ID",
+    "LOONFS_TEST_S3_SECRET_ACCESS_KEY",
 ];
 
 pub(crate) const AWS_S3_OPTIONAL_VARS: &[&str] = &[
-    "LOON_TEST_S3_ENDPOINT",
-    "LOON_TEST_S3_SESSION_TOKEN",
-    "LOON_TEST_S3_PREFIX",
+    "LOONFS_TEST_S3_ENDPOINT",
+    "LOONFS_TEST_S3_SESSION_TOKEN",
+    "LOONFS_TEST_S3_PREFIX",
 ];
 
 pub(crate) const CLOUDFLARE_R2_REQUIRED_VARS: &[&str] = &[
-    "LOON_TEST_R2_BUCKET",
-    "LOON_TEST_R2_ACCOUNT_ID",
-    "LOON_TEST_R2_ENDPOINT",
-    "LOON_TEST_R2_ACCESS_KEY_ID",
-    "LOON_TEST_R2_SECRET_ACCESS_KEY",
+    "LOONFS_TEST_R2_BUCKET",
+    "LOONFS_TEST_R2_ACCOUNT_ID",
+    "LOONFS_TEST_R2_ENDPOINT",
+    "LOONFS_TEST_R2_ACCESS_KEY_ID",
+    "LOONFS_TEST_R2_SECRET_ACCESS_KEY",
 ];
 
-pub(crate) const CLOUDFLARE_R2_OPTIONAL_VARS: &[&str] = &["LOON_TEST_R2_PREFIX"];
+pub(crate) const CLOUDFLARE_R2_OPTIONAL_VARS: &[&str] = &["LOONFS_TEST_R2_PREFIX"];
 
 pub(crate) const GCP_GCS_REQUIRED_VARS: &[&str] = &[
-    "LOON_TEST_GCS_BUCKET",
-    "LOON_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH",
+    "LOONFS_TEST_GCS_BUCKET",
+    "LOONFS_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH",
 ];
 
-pub(crate) const GCP_GCS_OPTIONAL_VARS: &[&str] = &["LOON_TEST_GCS_PREFIX"];
+pub(crate) const GCP_GCS_OPTIONAL_VARS: &[&str] = &["LOONFS_TEST_GCS_PREFIX"];
 
 pub(crate) const AZURE_ABS_REQUIRED_VARS: &[&str] = &[
-    "LOON_TEST_ABS_ACCOUNT_NAME",
-    "LOON_TEST_ABS_CONTAINER_NAME",
-    "LOON_TEST_ABS_ACCESS_KEY",
+    "LOONFS_TEST_ABS_ACCOUNT_NAME",
+    "LOONFS_TEST_ABS_CONTAINER_NAME",
+    "LOONFS_TEST_ABS_ACCESS_KEY",
 ];
 
 pub(crate) const AZURE_ABS_OPTIONAL_VARS: &[&str] =
-    &["LOON_TEST_ABS_ENDPOINT", "LOON_TEST_ABS_PREFIX"];
+    &["LOONFS_TEST_ABS_ENDPOINT", "LOONFS_TEST_ABS_PREFIX"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AwsS3ConformanceConfig {
@@ -96,13 +96,14 @@ pub(crate) enum ProviderEnvError {
 impl AwsS3ConformanceConfig {
     pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
-            bucket: required_env("LOON_TEST_S3_BUCKET")?,
-            region: required_env("LOON_TEST_S3_REGION")?,
-            endpoint: optional_env("LOON_TEST_S3_ENDPOINT"),
-            access_key_id: required_env("LOON_TEST_S3_ACCESS_KEY_ID")?,
-            secret_access_key: required_env("LOON_TEST_S3_SECRET_ACCESS_KEY")?,
-            session_token: optional_env("LOON_TEST_S3_SESSION_TOKEN"),
-            prefix: optional_env("LOON_TEST_S3_PREFIX").unwrap_or_else(|| default_prefix("aws-s3")),
+            bucket: required_env("LOONFS_TEST_S3_BUCKET")?,
+            region: required_env("LOONFS_TEST_S3_REGION")?,
+            endpoint: optional_env("LOONFS_TEST_S3_ENDPOINT"),
+            access_key_id: required_env("LOONFS_TEST_S3_ACCESS_KEY_ID")?,
+            secret_access_key: required_env("LOONFS_TEST_S3_SECRET_ACCESS_KEY")?,
+            session_token: optional_env("LOONFS_TEST_S3_SESSION_TOKEN"),
+            prefix: optional_env("LOONFS_TEST_S3_PREFIX")
+                .unwrap_or_else(|| default_prefix("aws-s3")),
         })
     }
 }
@@ -110,12 +111,12 @@ impl AwsS3ConformanceConfig {
 impl CloudflareR2ConformanceConfig {
     pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
-            bucket: required_env("LOON_TEST_R2_BUCKET")?,
-            account_id: required_env("LOON_TEST_R2_ACCOUNT_ID")?,
-            endpoint: required_env("LOON_TEST_R2_ENDPOINT")?,
-            access_key_id: required_env("LOON_TEST_R2_ACCESS_KEY_ID")?,
-            secret_access_key: required_env("LOON_TEST_R2_SECRET_ACCESS_KEY")?,
-            prefix: optional_env("LOON_TEST_R2_PREFIX").unwrap_or_else(|| default_prefix("r2")),
+            bucket: required_env("LOONFS_TEST_R2_BUCKET")?,
+            account_id: required_env("LOONFS_TEST_R2_ACCOUNT_ID")?,
+            endpoint: required_env("LOONFS_TEST_R2_ENDPOINT")?,
+            access_key_id: required_env("LOONFS_TEST_R2_ACCESS_KEY_ID")?,
+            secret_access_key: required_env("LOONFS_TEST_R2_SECRET_ACCESS_KEY")?,
+            prefix: optional_env("LOONFS_TEST_R2_PREFIX").unwrap_or_else(|| default_prefix("r2")),
         })
     }
 }
@@ -123,9 +124,9 @@ impl CloudflareR2ConformanceConfig {
 impl GcpGcsConformanceConfig {
     pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
-            bucket: required_env("LOON_TEST_GCS_BUCKET")?,
-            service_account_key_path: required_env("LOON_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH")?,
-            prefix: optional_env("LOON_TEST_GCS_PREFIX")
+            bucket: required_env("LOONFS_TEST_GCS_BUCKET")?,
+            service_account_key_path: required_env("LOONFS_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH")?,
+            prefix: optional_env("LOONFS_TEST_GCS_PREFIX")
                 .unwrap_or_else(|| default_prefix("gcp-gcs")),
         })
     }
@@ -134,11 +135,11 @@ impl GcpGcsConformanceConfig {
 impl AzureAbsConformanceConfig {
     pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
-            account_name: required_env("LOON_TEST_ABS_ACCOUNT_NAME")?,
-            container_name: required_env("LOON_TEST_ABS_CONTAINER_NAME")?,
-            access_key: required_env("LOON_TEST_ABS_ACCESS_KEY")?,
-            endpoint: optional_env("LOON_TEST_ABS_ENDPOINT"),
-            prefix: optional_env("LOON_TEST_ABS_PREFIX")
+            account_name: required_env("LOONFS_TEST_ABS_ACCOUNT_NAME")?,
+            container_name: required_env("LOONFS_TEST_ABS_CONTAINER_NAME")?,
+            access_key: required_env("LOONFS_TEST_ABS_ACCESS_KEY")?,
+            endpoint: optional_env("LOONFS_TEST_ABS_ENDPOINT"),
+            prefix: optional_env("LOONFS_TEST_ABS_PREFIX")
                 .unwrap_or_else(|| default_prefix("azure-abs")),
         })
     }

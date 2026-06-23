@@ -16,8 +16,8 @@ esac
 
 set -eu
 
-REPO_SLUG="${LOON_REPO_SLUG:-loonfs/loonfs}"
-INSTALL_DIR="${LOON_INSTALL_DIR:-$HOME/.local/bin}"
+REPO_SLUG="${LOONFS_REPO_SLUG:-loonfs/loonfs}"
+INSTALL_DIR="${LOONFS_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION=""
 WITH_SKILL=""
 tmpdir=""
@@ -73,8 +73,8 @@ download() {
 }
 
 detect_target() {
-    os="${LOON_INSTALL_OS:-$(uname -s)}"
-    arch="${LOON_INSTALL_ARCH:-$(uname -m)}"
+    os="${LOONFS_INSTALL_OS:-$(uname -s)}"
+    arch="${LOONFS_INSTALL_ARCH:-$(uname -m)}"
 
     case "$os/$arch" in
         Darwin/arm64)
@@ -155,7 +155,7 @@ supported: claude-code, codex, agents-md"
     else
         skill_ref="main"
     fi
-    src_url="${LOON_SKILL_URL_ROOT:-https://raw.githubusercontent.com/$REPO_SLUG}/$skill_ref/$src_path"
+    src_url="${LOONFS_SKILL_URL_ROOT:-https://raw.githubusercontent.com/$REPO_SLUG}/$skill_ref/$src_path"
 
     mkdir -p "$dest_dir"
     download "$src_url" "$dest_file"
@@ -208,9 +208,9 @@ main() {
     archive_name="loon-$target.tar.gz"
 
     if [ -n "$VERSION" ]; then
-        base_url="${LOON_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/download/$VERSION"
+        base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/download/$VERSION"
     else
-        base_url="${LOON_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/latest/download"
+        base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/latest/download"
     fi
 
     tmpdir=$(mktemp -d)
