@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use dialoguer::{Confirm, FuzzySelect, Input, Select};
+use dialoguer::{Confirm, FuzzySelect, Input, Password, Select};
 
 pub(crate) fn prompt_line(label: &str) -> Result<String, CliError> {
     Input::new()
@@ -14,6 +14,19 @@ pub(crate) fn prompt_line_default(label: &str, default: &str) -> Result<String, 
         .default(default.to_owned())
         .interact_text()
         .map_err(|err| CliError::io(std::io::Error::other(err)))
+}
+
+pub(crate) fn prompt_secret_keep_current(label: &str, current: &str) -> Result<String, CliError> {
+    let value = Password::new()
+        .with_prompt(format!("{label} (hidden, enter to keep current)"))
+        .allow_empty_password(true)
+        .interact()
+        .map_err(|err| CliError::io(std::io::Error::other(err)))?;
+    if value.is_empty() {
+        Ok(current.to_owned())
+    } else {
+        Ok(value)
+    }
 }
 
 pub(crate) fn prompt_optional(

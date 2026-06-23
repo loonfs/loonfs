@@ -123,3 +123,25 @@ pub const GCP_GCS: ProviderProfile = ProviderProfile {
         multipart_upload: Expectation::ExpectedYes,
     },
 };
+
+pub const AZURE_ABS: ProviderProfile = ProviderProfile {
+    name: "azure-abs",
+    active_contract: ActiveContractProfile {
+        create_if_absent: Expectation::VerifyByConformance,
+        compare_and_swap_small_object: Expectation::VerifyByConformance,
+        opaque_compare_token_for_cas: Expectation::VerifyByConformance,
+        full_object_read_identity: Expectation::VerifyByConformance,
+        overwrite: Expectation::VerifyByConformance,
+        delete_idempotent: Expectation::VerifyByConformance,
+        head_reflects_latest_write_and_delete: Expectation::VerifyByConformance,
+        strong_list_after_write: Expectation::ExpectedYes,
+        strong_list_after_delete: Expectation::ExpectedYes,
+        range_read: Expectation::ExpectedYes,
+        scoped_key_prefixing: Expectation::ExpectedYes,
+        traversal_rejection: Expectation::ExpectedYes,
+        sorted_list_prefix: Expectation::ExpectedYes,
+    },
+    future_capabilities: FutureCapabilityProfile {
+        multipart_upload: Expectation::ExpectedYes,
+    },
+};

@@ -30,6 +30,8 @@ pub enum TraceStoreKind {
     R2,
     /// Google Cloud Storage.
     Gcs,
+    /// Azure Blob Storage.
+    Abs,
     /// Backend not identified by the caller.
     Unknown,
 }
@@ -42,6 +44,7 @@ impl TraceStoreKind {
             Self::S3 => "s3",
             Self::R2 => "r2",
             Self::Gcs => "gcs",
+            Self::Abs => "abs",
             Self::Unknown => "unknown",
         }
     }
@@ -88,6 +91,7 @@ mod tests {
         assert_eq!(TraceStoreKind::S3.as_str(), "s3");
         assert_eq!(TraceStoreKind::R2.as_str(), "r2");
         assert_eq!(TraceStoreKind::Gcs.as_str(), "gcs");
+        assert_eq!(TraceStoreKind::Abs.as_str(), "abs");
         assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
         assert_eq!(CachePath::WarmReuse.as_str(), "warm_reuse");
         assert_eq!(CachePath::EtagProbe.as_str(), "etag_probe");

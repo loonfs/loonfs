@@ -1,7 +1,8 @@
 use http::Uri;
 use loonfs::RuntimeCacheConfig;
-use loonfs_objectstore::gcs::GcsStoreConfig;
-use loonfs_objectstore::r2::R2StoreConfig;
+use loonfs_objectstore::abs::AzureAbsStoreConfig;
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::r2::CloudflareR2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
 use serde::Deserialize;
@@ -62,6 +63,13 @@ pub enum StoreConfig {
     GcpGcs {
         bucket: String,
         service_account_key_path: String,
+        key_prefix: Option<String>,
+    },
+    AzureAbs {
+        account_name: String,
+        container_name: String,
+        access_key: String,
+        endpoint_url: Option<String>,
         key_prefix: Option<String>,
     },
 }
@@ -148,7 +156,7 @@ impl ServerConfig {
                 access_key_id,
                 secret_access_key,
                 key_prefix,
-            } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
+            } => ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
                 bucket: bucket.clone(),
                 account_id: account_id.clone(),
                 endpoint_url: endpoint_url.clone(),
@@ -164,9 +172,26 @@ impl ServerConfig {
                 bucket,
                 service_account_key_path,
                 key_prefix,
-            } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
+            } => ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
                 bucket: bucket.clone(),
                 service_account_key_path: service_account_key_path.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| ServerConfigError::InvalidField {
+                field: "store.key_prefix",
+                reason: err.to_string(),
+            }),
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                endpoint_url,
+                key_prefix,
+            } => ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
+                account_name: account_name.clone(),
+                container_name: container_name.clone(),
+                access_key: access_key.clone(),
+                endpoint_url: endpoint_url.clone(),
                 key_prefix: key_prefix.clone(),
             })
             .map_err(|err| ServerConfigError::InvalidField {
@@ -237,6 +262,20 @@ impl ServerConfig {
             } => {
                 require_non_empty("store.bucket", bucket)?;
                 require_non_empty("store.service_account_key_path", service_account_key_path)?;
+            }
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                endpoint_url,
+                ..
+            } => {
+                require_non_empty("store.account_name", account_name)?;
+                require_non_empty("store.container_name", container_name)?;
+                require_non_empty("store.access_key", access_key)?;
+                if let Some(url) = endpoint_url {
+                    validate_optional_absolute_http_url("store.endpoint_url", url)?;
+                }
             }
         }
 
@@ -335,6 +374,9 @@ mod tests {
     use super::{load_server_config, ServerConfigError};
     use std::fs;
     use tempfile::tempdir;
+
+    const AZURITE_ACCOUNT_KEY: &str =
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
     #[test]
     fn load_rejects_invalid_bind() {
@@ -484,12 +526,31 @@ secret_access_key = "secret"
 key_prefix = "demo"
 "#,
         );
+        let azure_path = write_config(&format!(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "azure-abs"
+account_name = "devstoreaccount1"
+container_name = "container"
+access_key = "{AZURITE_ACCOUNT_KEY}"
+endpoint_url = "not a url"
+key_prefix = "demo"
+"#
+        ));
 
         let aws_error = load_server_config(&aws_path).expect_err("invalid aws endpoint");
         let r2_error = load_server_config(&r2_path).expect_err("invalid r2 endpoint");
+        let azure_error = load_server_config(&azure_path).expect_err("invalid azure endpoint");
 
         assert_invalid_field(aws_error, "store.endpoint_url");
         assert_invalid_field(r2_error, "store.endpoint_url");
+        assert_invalid_field(azure_error, "store.endpoint_url");
     }
 
     #[test]
@@ -513,6 +574,52 @@ key_prefix = "demo"
         let error = load_server_config(&path).expect_err("blank gcs bucket");
 
         assert_missing_field(error, "store.bucket");
+    }
+
+    #[test]
+    fn load_accepts_azure_abs_store() {
+        let path = write_config(&format!(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "azure-abs"
+account_name = "devstoreaccount1"
+container_name = "container"
+access_key = "{AZURITE_ACCOUNT_KEY}"
+endpoint_url = "http://127.0.0.1:10000/devstoreaccount1"
+key_prefix = "demo"
+"#
+        ));
+
+        load_server_config(&path).expect("load azure config");
+    }
+
+    #[test]
+    fn load_rejects_blank_azure_account_name() {
+        let path = write_config(&format!(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "azure-abs"
+account_name = " "
+container_name = "container"
+access_key = "{AZURITE_ACCOUNT_KEY}"
+"#
+        ));
+
+        let error = load_server_config(&path).expect_err("blank azure account name");
+
+        assert_missing_field(error, "store.account_name");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct R2StoreConfig {
+pub struct CloudflareR2StoreConfig {
     pub bucket: String,
     pub account_id: String,
     pub endpoint_url: String,
@@ -16,12 +16,12 @@ pub struct R2StoreConfig {
 }
 
 #[derive(Debug)]
-pub struct R2Store {
+pub struct CloudflareR2Store {
     inner: S3CompatibleStore,
 }
 
-impl R2Store {
-    pub fn new(config: R2StoreConfig) -> Result<Self, ObjectStoreError> {
+impl CloudflareR2Store {
+    pub fn new(config: CloudflareR2StoreConfig) -> Result<Self, ObjectStoreError> {
         if config.account_id.trim().is_empty() {
             return Err(ObjectStoreError::Transport(
                 "account id must not be empty".to_owned(),
@@ -50,7 +50,7 @@ impl R2Store {
 }
 
 #[async_trait]
-impl ObjectStore for R2Store {
+impl ObjectStore for CloudflareR2Store {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }

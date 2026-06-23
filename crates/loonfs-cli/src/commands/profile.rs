@@ -103,6 +103,9 @@ fn run_profile_update(
             || args.endpoint_url.is_some()
             || args.session_token.is_some()
             || args.account_id.is_some()
+            || args.account_name.is_some()
+            || args.container_name.is_some()
+            || args.access_key.is_some()
             || args.key_prefix.is_some()
             || args.server_url.is_some()
             || args.auth_token.is_some();

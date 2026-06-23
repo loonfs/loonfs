@@ -1,8 +1,9 @@
 use crate::error::CliError;
 use http::Uri;
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::gcs::GcsStoreConfig;
-use loonfs_objectstore::r2::R2StoreConfig;
+use loonfs_objectstore::abs::AzureAbsStoreConfig;
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::r2::CloudflareR2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,15 @@ pub(crate) enum StoreConfig {
     GcpGcs {
         bucket: String,
         service_account_key_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+    },
+    AzureAbs {
+        account_name: String,
+        container_name: String,
+        access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_url: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
@@ -222,6 +232,7 @@ impl StoreConfig {
             StoreConfig::AwsS3 { .. } => "aws-s3",
             StoreConfig::CloudflareR2 { .. } => "cloudflare-r2",
             StoreConfig::GcpGcs { .. } => "gcp-gcs",
+            StoreConfig::AzureAbs { .. } => "azure-abs",
         }
     }
 
@@ -258,7 +269,7 @@ impl StoreConfig {
                 access_key_id,
                 secret_access_key,
                 key_prefix,
-            } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
+            } => ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
                 bucket: bucket.clone(),
                 account_id: account_id.clone(),
                 endpoint_url: endpoint_url.clone(),
@@ -271,9 +282,23 @@ impl StoreConfig {
                 bucket,
                 service_account_key_path,
                 key_prefix,
-            } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
+            } => ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
                 bucket: bucket.clone(),
                 service_account_key_path: service_account_key_path.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                endpoint_url,
+                key_prefix,
+            } => ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
+                account_name: account_name.clone(),
+                container_name: container_name.clone(),
+                access_key: access_key.clone(),
+                endpoint_url: endpoint_url.clone(),
                 key_prefix: key_prefix.clone(),
             })
             .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
@@ -328,6 +353,16 @@ impl StoreConfig {
                     service_account_key_path,
                 )
             }
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                access_key,
+                ..
+            } => {
+                require_non_empty(&store_field(profile_name, "account_name"), account_name)?;
+                require_non_empty(&store_field(profile_name, "container_name"), container_name)?;
+                require_non_empty(&store_field(profile_name, "access_key"), access_key)
+            }
         }
     }
 
@@ -366,6 +401,19 @@ impl StoreConfig {
                 key_prefix: key_prefix.clone(),
             },
             StoreConfig::GcpGcs { .. } => self.clone(),
+            StoreConfig::AzureAbs {
+                account_name,
+                container_name,
+                endpoint_url,
+                key_prefix,
+                ..
+            } => StoreConfig::AzureAbs {
+                account_name: account_name.clone(),
+                container_name: container_name.clone(),
+                access_key: "REDACTED".to_owned(),
+                endpoint_url: endpoint_url.clone(),
+                key_prefix: key_prefix.clone(),
+            },
         }
     }
 }
