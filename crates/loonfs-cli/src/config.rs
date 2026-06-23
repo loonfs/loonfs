@@ -2,8 +2,8 @@ use crate::error::CliError;
 use http::Uri;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::abs::AzureAbsStoreConfig;
-use loonfs_objectstore::gcs::GcsStoreConfig;
-use loonfs_objectstore::r2::R2StoreConfig;
+use loonfs_objectstore::gcs::GcpGcsStoreConfig;
+use loonfs_objectstore::r2::CloudflareR2StoreConfig;
 use loonfs_objectstore::s3::AwsS3StoreConfig;
 use loonfs_objectstore::ConfiguredObjectStore;
 use serde::{Deserialize, Serialize};
@@ -269,7 +269,7 @@ impl StoreConfig {
                 access_key_id,
                 secret_access_key,
                 key_prefix,
-            } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
+            } => ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
                 bucket: bucket.clone(),
                 account_id: account_id.clone(),
                 endpoint_url: endpoint_url.clone(),
@@ -282,7 +282,7 @@ impl StoreConfig {
                 bucket,
                 service_account_key_path,
                 key_prefix,
-            } => ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
+            } => ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
                 bucket: bucket.clone(),
                 service_account_key_path: service_account_key_path.clone(),
                 key_prefix: key_prefix.clone(),

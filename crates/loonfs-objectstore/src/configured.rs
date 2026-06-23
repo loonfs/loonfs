@@ -1,11 +1,11 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::fs::LocalFsStore;
-use crate::gcs::{GcsStore, GcsStoreConfig};
+use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
-use crate::r2::{R2Store, R2StoreConfig};
+use crate::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
 use crate::ObjectStoreError;
 use async_trait::async_trait;
@@ -35,8 +35,8 @@ enum ConfiguredObjectStoreInner {
         key_prefix: Option<String>,
     },
     AwsS3(AwsS3Store),
-    CloudflareR2(R2Store),
-    GcpGcs(GcsStore),
+    CloudflareR2(CloudflareR2Store),
+    GcpGcs(GcpGcsStore),
     AzureAbs(AzureAbsStore),
 }
 
@@ -62,16 +62,16 @@ impl ConfiguredObjectStore {
         })
     }
 
-    pub fn cloudflare_r2(config: R2StoreConfig) -> Result<Self, ObjectStoreError> {
-        let store = R2Store::new(config)?;
+    pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self, ObjectStoreError> {
+        let store = CloudflareR2Store::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::CloudflareR2,
             inner: ConfiguredObjectStoreInner::CloudflareR2(store),
         })
     }
 
-    pub fn gcp_gcs(config: GcsStoreConfig) -> Result<Self, ObjectStoreError> {
-        let store = GcsStore::new(config)?;
+    pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self, ObjectStoreError> {
+        let store = GcpGcsStore::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::GcpGcs,
             inner: ConfiguredObjectStoreInner::GcpGcs(store),
@@ -229,9 +229,9 @@ mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
     use crate::abs::AzureAbsStoreConfig;
     use crate::fs::LocalFsStore;
-    use crate::gcs::GcsStoreConfig;
+    use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::namespace_head;
-    use crate::r2::R2StoreConfig;
+    use crate::r2::CloudflareR2StoreConfig;
     use crate::s3::AwsS3StoreConfig;
     use crate::ObjectStore;
     use crate::ObjectStoreError;
@@ -290,7 +290,7 @@ mod tests {
         .expect("construct s3 store");
         assert_eq!(s3.kind(), ConfiguredObjectStoreKind::AwsS3);
 
-        let r2 = ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
+        let r2 = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://example.r2.cloudflarestorage.com".to_owned(),
@@ -303,7 +303,7 @@ mod tests {
 
         let gcs_service_account_key_path =
             fake_gcs_service_account_key_file("configured-store-gcs-kind");
-        let gcs = ConfiguredObjectStore::gcp_gcs(GcsStoreConfig {
+        let gcs = ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: gcs_service_account_key_path.display().to_string(),
             key_prefix: Some("tenant-a".to_owned()),

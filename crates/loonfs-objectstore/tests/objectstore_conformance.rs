@@ -4,7 +4,7 @@ use bytes::Bytes;
 use loonfs_api::ManifestId;
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::fs::LocalFsStore;
-use loonfs_objectstore::gcs::{GcsStore, GcsStoreConfig};
+use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
     namespace_head, namespace_lease, namespace_manifest, wal_segment, DerivedWorkClass,
@@ -13,7 +13,7 @@ use loonfs_objectstore::probes::run_contract_probes;
 use loonfs_objectstore::provider::{
     Expectation, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS,
 };
-use loonfs_objectstore::r2::{R2Store, R2StoreConfig};
+use loonfs_objectstore::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use loonfs_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ByteRange, ObjectStore};
@@ -362,7 +362,7 @@ async fn aws_s3_real_provider_conformance() {
 async fn cloudflare_r2_real_provider_conformance() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = R2Store::new(R2StoreConfig {
+    let store = CloudflareR2Store::new(CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
@@ -379,7 +379,7 @@ async fn cloudflare_r2_real_provider_conformance() {
 async fn gcp_gcs_real_provider_conformance() {
     let config = GcpGcsConformanceConfig::from_env()
         .expect("load GCP GCS real-provider conformance environment");
-    let store = GcsStore::new(GcsStoreConfig {
+    let store = GcpGcsStore::new(GcpGcsStoreConfig {
         bucket: config.bucket,
         service_account_key_path: config.service_account_key_path,
         key_prefix: Some(config.prefix),

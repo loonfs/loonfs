@@ -7,7 +7,7 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GcsStoreConfig {
+pub struct GcpGcsStoreConfig {
     pub bucket: String,
     pub service_account_key_path: String,
     pub key_prefix: Option<String>,
@@ -21,12 +21,12 @@ pub struct GcsStoreConfig {
 /// preconditions. The native API is therefore the only correct backend, and
 /// this adapter hands out the generation as the opaque compare token.
 #[derive(Debug)]
-pub struct GcsStore {
+pub struct GcpGcsStore {
     inner: ProviderObjectStore,
 }
 
-impl GcsStore {
-    pub fn new(config: GcsStoreConfig) -> Result<Self, ObjectStoreError> {
+impl GcpGcsStore {
+    pub fn new(config: GcpGcsStoreConfig) -> Result<Self, ObjectStoreError> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Transport(
                 "bucket must not be empty".to_owned(),
@@ -72,7 +72,7 @@ impl GcsStore {
 }
 
 #[async_trait]
-impl ObjectStore for GcsStore {
+impl ObjectStore for GcpGcsStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         Ok(self
             .inner
@@ -136,7 +136,7 @@ impl ObjectStore for GcsStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{GcsStore, GcsStoreConfig};
+    use super::{GcpGcsStore, GcpGcsStoreConfig};
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
     use std::fs;
@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
         let service_account_key_path = fake_service_account_key_file("gcs-invalid-key");
-        let store = GcsStore::new(GcsStoreConfig {
+        let store = GcpGcsStore::new(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
             service_account_key_path: service_account_key_path.display().to_string(),
             key_prefix: None,
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn service_account_key_path_is_required() {
         assert!(matches!(
-            GcsStore::new(GcsStoreConfig {
+            GcpGcsStore::new(GcpGcsStoreConfig {
                 bucket: "bucket".to_owned(),
                 service_account_key_path: " ".to_owned(),
                 key_prefix: None,
