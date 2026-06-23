@@ -86,7 +86,7 @@ impl ConfiguredObjectStore {
             secret_access_key: config.secret_access_key.clone(),
             session_token: None,
             key_prefix: config.key_prefix.clone(),
-            force_path_style: false,
+            force_path_style: true,
         })?) as Arc<dyn ObjectTransferIssuer>);
         let store = CloudflareR2Store::new(config)?;
         Ok(Self {
@@ -263,14 +263,16 @@ mod tests {
     use crate::fs::LocalFsStore;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::namespace_head;
+    use crate::presign::PresignedPutRequest;
     use crate::r2::CloudflareR2StoreConfig;
     use crate::s3::AwsS3StoreConfig;
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
+    use loonfs_api::ContentRef;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
@@ -328,7 +330,7 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://example.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "access".to_owned(),
+            access_key_id: "debug-access-key".to_owned(),
             secret_access_key: "secret".to_owned(),
             key_prefix: Some("tenant-a".to_owned()),
         })
@@ -357,6 +359,54 @@ mod tests {
         .expect("construct azure store");
         assert_eq!(azure.kind(), ConfiguredObjectStoreKind::AzureAbs);
         assert!(azure.transfer_issuer().is_none());
+    }
+
+    #[test]
+    fn cloudflare_r2_presigner_uses_path_style_account_endpoint() {
+        let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
+            bucket: "bucket".to_owned(),
+            account_id: "account".to_owned(),
+            endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct r2 store");
+        let issuer = store.transfer_issuer().expect("r2 presigner");
+
+        let signed = issuer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: "content-stores/cs/blobs/sha256/ab/cd/digest",
+                    content_ref: &ContentRef::whole_file_v0(b"hello"),
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .expect("presign");
+
+        assert!(signed.url.starts_with(
+            "https://account.r2.cloudflarestorage.com/bucket/tenant-a/content-stores/"
+        ));
+        assert!(!signed.url.starts_with("https://bucket.account."));
+    }
+
+    #[test]
+    fn configured_object_store_debug_redacts_presigner_credentials() {
+        let store = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
+            bucket: "bucket".to_owned(),
+            account_id: "account".to_owned(),
+            endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "debug-secret".to_owned(),
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct r2 store");
+
+        let rendered = format!("{store:?}");
+
+        assert!(!rendered.contains("debug-secret"));
+        assert!(!rendered.contains("debug-access-key"));
     }
 
     #[tokio::test]

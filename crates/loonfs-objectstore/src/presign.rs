@@ -3,14 +3,14 @@ use base64::Engine as _;
 use loonfs_api::{ContentRef, ContentRefKind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SHA256_BLOCK_BYTES: usize = 64;
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct S3PresignerConfig {
     pub bucket: String,
     pub region: String,
@@ -20,6 +20,24 @@ pub struct S3PresignerConfig {
     pub session_token: Option<String>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
+}
+
+impl fmt::Debug for S3PresignerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3PresignerConfig")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint_url", &self.endpoint_url)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("key_prefix", &self.key_prefix)
+            .field("force_path_style", &self.force_path_style)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,7 +524,7 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
-            access_key_id: "access".to_owned(),
+            access_key_id: "debug-access-key".to_owned(),
             secret_access_key: "secret".to_owned(),
             session_token: None,
             key_prefix: None,
@@ -532,5 +550,30 @@ mod tests {
             .expect_err("unsupported content ref");
 
         assert!(matches!(error, ObjectStoreError::InvalidContentRef(_)));
+    }
+
+    #[test]
+    fn presigner_debug_redacts_credentials() {
+        let config = S3PresignerConfig {
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            access_key_id: "access".to_owned(),
+            secret_access_key: "debug-secret".to_owned(),
+            session_token: Some("debug-session-token".to_owned()),
+            key_prefix: Some("tenant-a".to_owned()),
+            force_path_style: false,
+        };
+
+        let config_debug = format!("{config:?}");
+        let signer = S3CompatiblePresigner::new(config).expect("signer");
+        let signer_debug = format!("{signer:?}");
+
+        for rendered in [config_debug, signer_debug] {
+            assert!(!rendered.contains("debug-secret"));
+            assert!(!rendered.contains("debug-access-key"));
+            assert!(!rendered.contains("debug-session-token"));
+            assert!(rendered.contains("<redacted>"));
+        }
     }
 }
