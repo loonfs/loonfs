@@ -55,10 +55,11 @@ impl AzureAbsStore {
                     "endpoint url must not be empty".to_owned(),
                 ));
             }
+            let endpoint_url = normalize_http_endpoint_scheme(endpoint_url);
             if endpoint_url.starts_with("http://") {
                 builder = builder.with_allow_http(true);
             }
-            builder = builder.with_endpoint(endpoint_url.to_owned());
+            builder = builder.with_endpoint(endpoint_url);
         }
 
         let provider = builder
@@ -72,6 +73,14 @@ impl AzureAbsStore {
             },
         )?;
         Ok(Self { inner })
+    }
+}
+
+fn normalize_http_endpoint_scheme(endpoint_url: &str) -> String {
+    match endpoint_url.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => format!("http://{rest}"),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => format!("https://{rest}"),
+        _ => endpoint_url.to_owned(),
     }
 }
 
@@ -156,6 +165,18 @@ mod tests {
             key_prefix: None,
         })
         .expect("construct azure store with HTTP endpoint");
+    }
+
+    #[test]
+    fn http_endpoint_scheme_is_case_insensitive_for_emulator() {
+        AzureAbsStore::new(AzureAbsStoreConfig {
+            account_name: "devstoreaccount1".to_owned(),
+            container_name: "container".to_owned(),
+            access_key: AZURITE_ACCOUNT_KEY.to_owned(),
+            endpoint_url: Some("HTTP://127.0.0.1:10000/devstoreaccount1".to_owned()),
+            key_prefix: None,
+        })
+        .expect("construct azure store with uppercase HTTP endpoint");
     }
 
     #[tokio::test]
