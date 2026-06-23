@@ -350,7 +350,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 owner_namespace_id: namespace_id(),
                 table_id: "tbl_0123456789abcdef0123456789abcdef".to_owned(),
                 object_key:
-                    "namespaces/demo/tables/metadata/tbl_0123456789abcdef0123456789abcdef.sst"
+                    "namespaces/demo/tables/metadata/tbl_0123456789abcdef0123456789abcdef.sst.zst"
                         .to_owned(),
                 run_seq: ChangeSeq(2),
                 level: 0,

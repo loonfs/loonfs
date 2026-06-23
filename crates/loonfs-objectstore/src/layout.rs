@@ -221,7 +221,7 @@ impl ObjectLayout {
         manifest_id: ManifestId,
     ) -> NamespaceManifestKey {
         NamespaceManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/manifest/{:020}.manifest",
+            "namespaces/{namespace}/manifest/{:020}.manifest.json",
             manifest_id.0
         )))
     }
@@ -232,13 +232,13 @@ impl ObjectLayout {
         compactions_id: u64,
     ) -> NamespaceCompactionsKey {
         NamespaceCompactionsKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/compaction/{compactions_id:020}.plan"
+            "namespaces/{namespace}/compaction/{compactions_id:020}.plan.json"
         )))
     }
 
     pub fn metadata_sst(&self, namespace: &str, table_id: &str) -> CompactedMetadataSstKey {
         CompactedMetadataSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/tables/metadata/{table_id}.sst"
+            "namespaces/{namespace}/tables/metadata/{table_id}.sst.zst"
         )))
     }
 
@@ -248,7 +248,7 @@ impl ObjectLayout {
         table_id: &str,
     ) -> CompactedMetadataSstKey {
         CompactedMetadataSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/tables/metadata/{table_id}.sst"
+            "namespaces/{namespace}/tables/metadata/{table_id}.sst.zst"
         )))
     }
 
@@ -260,7 +260,7 @@ impl ObjectLayout {
         table_id: &str,
     ) -> CompactedIndexSstKey {
         CompactedIndexSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/{instance}/compacted/{table_id}.sst"
+            "namespaces/{namespace}/indexes/{family}/{instance}/compacted/{table_id}.sst.zst"
         )))
     }
 
@@ -272,7 +272,7 @@ impl ObjectLayout {
         manifest_id: ManifestId,
     ) -> IndexManifestKey {
         IndexManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/{instance}/manifest/{:020}.manifest",
+            "namespaces/{namespace}/indexes/{family}/{instance}/manifest/{:020}.manifest.json",
             manifest_id.0
         )))
     }
@@ -284,7 +284,7 @@ impl ObjectLayout {
         instance: &str,
     ) -> IndexGcBoundaryKey {
         IndexGcBoundaryKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/{instance}/gc/manifest.boundary"
+            "namespaces/{namespace}/indexes/{family}/{instance}/gc/manifest.boundary.json"
         )))
     }
 
@@ -294,7 +294,7 @@ impl ObjectLayout {
         boundary: NamespaceGcBoundaryKind,
     ) -> NamespaceGcBoundaryKey {
         NamespaceGcBoundaryKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/gc/{}.boundary",
+            "namespaces/{namespace}/gc/{}.boundary.json",
             boundary.as_str()
         )))
     }
@@ -344,35 +344,37 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "conflicts", conflict] if conflict.ends_with(".json") => {
             parsed(DurableObjectFamily::ConflictArtifact, Some(namespace))
         }
-        ["namespaces", namespace, "manifest", manifest] if manifest.ends_with(".manifest") => {
+        ["namespaces", namespace, "manifest", manifest] if manifest.ends_with(".manifest.json") => {
             parsed(DurableObjectFamily::NamespaceManifest, Some(namespace))
         }
         ["namespaces", namespace, "wal", wal] if wal.ends_with(".wal.zst") => {
             parsed(DurableObjectFamily::WalSegment, Some(namespace))
         }
-        ["namespaces", namespace, "compaction", compactions] if compactions.ends_with(".plan") => {
+        ["namespaces", namespace, "compaction", compactions]
+            if compactions.ends_with(".plan.json") =>
+        {
             parsed(DurableObjectFamily::NamespaceCompactions, Some(namespace))
         }
-        ["namespaces", namespace, "tables", "metadata", table] if table.ends_with(".sst") => {
+        ["namespaces", namespace, "tables", "metadata", table] if table.ends_with(".sst.zst") => {
             parsed(DurableObjectFamily::CompactedMetadataSst, Some(namespace))
         }
         ["namespaces", namespace, "indexes", _, _, "compacted", table]
-            if table.ends_with(".sst") =>
+            if table.ends_with(".sst.zst") =>
         {
             parsed(DurableObjectFamily::CompactedIndexSst, Some(namespace))
         }
         ["namespaces", namespace, "indexes", _, _, "manifest", manifest]
-            if manifest.ends_with(".manifest") =>
+            if manifest.ends_with(".manifest.json") =>
         {
             parsed(DurableObjectFamily::IndexManifest, Some(namespace))
         }
-        ["namespaces", namespace, "indexes", _, _, "gc", "manifest.boundary"] => {
+        ["namespaces", namespace, "indexes", _, _, "gc", "manifest.boundary.json"] => {
             parsed(DurableObjectFamily::IndexGcBoundary, Some(namespace))
         }
         ["namespaces", namespace, "gc", boundary]
             if matches!(
                 *boundary,
-                "wal.boundary" | "manifest.boundary" | "compaction.boundary"
+                "wal.boundary.json" | "manifest.boundary.json" | "compaction.boundary.json"
             ) =>
         {
             parsed(DurableObjectFamily::NamespaceGcBoundary, Some(namespace))
@@ -457,27 +459,27 @@ mod tests {
         );
         assert_eq!(
             layout.namespace_manifest("ns-1", ManifestId(400)).as_str(),
-            "namespaces/ns-1/manifest/00000000000000000400.manifest"
+            "namespaces/ns-1/manifest/00000000000000000400.manifest.json"
         );
         assert_eq!(
             layout.namespace_manifest("ns-1", ManifestId(42)).as_str(),
-            "namespaces/ns-1/manifest/00000000000000000042.manifest"
+            "namespaces/ns-1/manifest/00000000000000000042.manifest.json"
         );
         assert_eq!(
             layout.namespace_compactions("ns-1", 42).as_str(),
-            "namespaces/ns-1/compaction/00000000000000000042.plan"
+            "namespaces/ns-1/compaction/00000000000000000042.plan.json"
         );
         assert_eq!(
             layout
                 .metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             layout
                 .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
             layout
@@ -488,23 +490,23 @@ mod tests {
                     "tbl_00000000000000000000000000000002",
                 )
                 .as_str(),
-            "namespaces/ns-1/indexes/grep/default/compacted/tbl_00000000000000000000000000000002.sst"
+            "namespaces/ns-1/indexes/grep/default/compacted/tbl_00000000000000000000000000000002.sst.zst"
         );
         assert_eq!(
             layout
                 .index_manifest("ns-1", "grep", "default", ManifestId(17))
                 .as_str(),
-            "namespaces/ns-1/indexes/grep/default/manifest/00000000000000000017.manifest"
+            "namespaces/ns-1/indexes/grep/default/manifest/00000000000000000017.manifest.json"
         );
         assert_eq!(
             layout.index_gc_boundary("ns-1", "grep", "default").as_str(),
-            "namespaces/ns-1/indexes/grep/default/gc/manifest.boundary"
+            "namespaces/ns-1/indexes/grep/default/gc/manifest.boundary.json"
         );
         assert_eq!(
             layout
                 .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Manifest)
                 .as_str(),
-            "namespaces/ns-1/gc/manifest.boundary"
+            "namespaces/ns-1/gc/manifest.boundary.json"
         );
         assert_eq!(
             layout
