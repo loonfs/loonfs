@@ -126,20 +126,35 @@ pub(crate) async fn list_namespaces_page<S: ObjectStore + ?Sized>(
     store: &S,
     request: PageRequest<NamespacesPageCursor>,
 ) -> Result<Page<NamespaceSummary, NamespacesPageCursor>, CoreError> {
-    let mut namespaces = list_namespaces(store).await?;
-    namespaces.sort_by(|left, right| left.namespace_id.as_str().cmp(right.namespace_id.as_str()));
-
     let start_after = request.cursor.map(|cursor| cursor.last_namespace_id);
-    let mut items = namespaces
-        .into_iter()
-        .filter(|summary| {
-            start_after
-                .as_ref()
-                .map(|last| summary.namespace_id.as_str() > last.as_str())
-                .unwrap_or(true)
-        })
-        .take(request.limit.limit_plus_one())
-        .collect::<Vec<_>>();
+    let keys = store
+        .list_prefix("namespaces/")
+        .await
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    let mut items = Vec::with_capacity(request.limit.limit_plus_one());
+    for key in keys {
+        let Some(namespace_id) = namespace_id_from_descriptor_key(&key)? else {
+            continue;
+        };
+        if start_after
+            .as_ref()
+            .map(|last| namespace_id.as_str() <= last.as_str())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        load_namespace_descriptor(store, &namespace_id).await?;
+        let head = read_head_object(store, &namespace_id)
+            .await
+            .map_err(|error| CoreError::Basis(error.into()))?;
+        if head.envelope.state.state == NamespaceState::Deleted {
+            continue;
+        }
+        items.push(NamespaceSummary { namespace_id });
+        if items.len() == request.limit.limit_plus_one() {
+            break;
+        }
+    }
 
     let has_more = items.len() > request.limit.as_usize();
     if has_more {
@@ -154,6 +169,19 @@ pub(crate) async fn list_namespaces_page<S: ObjectStore + ?Sized>(
     });
 
     Ok(Page { items, next_cursor })
+}
+
+fn namespace_id_from_descriptor_key(key: &str) -> Result<Option<NamespaceId>, CoreError> {
+    let Some(rest) = key.strip_prefix("namespaces/") else {
+        return Ok(None);
+    };
+    let Some((namespace, leaf)) = rest.split_once('/') else {
+        return Ok(None);
+    };
+    if leaf != "descriptor.json" {
+        return Ok(None);
+    }
+    Ok(Some(NamespaceId::parse(namespace)?))
 }
 
 pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(

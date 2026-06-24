@@ -300,19 +300,7 @@ impl Fs {
 
     /// Lists complete namespaces visible in the object store.
     pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
-        let limit = default_page_limit();
-        let mut cursor = None;
-        let mut namespaces = Vec::new();
-        loop {
-            let page = self
-                .list_namespaces_page(PageRequest { limit, cursor })
-                .await?;
-            namespaces.extend(page.items);
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                return Ok(namespaces);
-            }
-        }
+        Ok(loonfs_core::list_namespaces(self.store()).await?)
     }
 
     /// Lists one page of complete namespaces in namespace id order.

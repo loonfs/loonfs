@@ -327,21 +327,17 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             });
         }
 
-        let mut children = self.visible_children(resolved.inode_id).await?;
-        children.sort_by(|left, right| left.name_key.cmp(&right.name_key));
         let start_after = request
             .cursor
             .as_ref()
             .map(|cursor| cursor.last_name_key.as_str());
-        let mut children = children
-            .into_iter()
-            .filter(|child| {
-                start_after
-                    .map(|last_name_key| child.name_key.as_str() > last_name_key)
-                    .unwrap_or(true)
-            })
-            .take(request.limit.limit_plus_one())
-            .collect::<Vec<_>>();
+        let mut children = self
+            .visible_children_page_by_name_key(
+                resolved.inode_id,
+                start_after,
+                request.limit.limit_plus_one(),
+            )
+            .await?;
         let has_more = children.len() > request.limit.as_usize();
         if has_more {
             children.truncate(request.limit.as_usize());
@@ -533,6 +529,61 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 .cmp(&right.display_name)
                 .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
         });
+        Ok(children)
+    }
+
+    async fn visible_children_page_by_name_key(
+        &self,
+        parent_inode_id: InodeId,
+        start_after_name_key: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(parent) = self.visible_inode(parent_inode_id).await? else {
+            return Ok(Vec::new());
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
+        candidates.extend(
+            self.wal_tail_rows
+                .direntry_binds()
+                .iter()
+                .filter(|direntry| direntry.parent_inode_id == parent_inode_id)
+                .cloned(),
+        );
+        candidates.sort_by(|left, right| left.name_key.cmp(&right.name_key));
+
+        let mut seen_name_keys = std::collections::BTreeSet::new();
+        let mut children = Vec::with_capacity(limit);
+        for candidate in candidates {
+            if start_after_name_key
+                .map(|last_name_key| candidate.name_key.as_str() <= last_name_key)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if !seen_name_keys.insert(candidate.name_key.clone()) {
+                continue;
+            }
+            let Some(active) = self
+                .visible_child(parent_inode_id, &candidate.name_key)
+                .await?
+            else {
+                continue;
+            };
+            if self.visible_inode(active.child_inode_id).await?.is_none() {
+                continue;
+            }
+            children.push(active);
+            if children.len() == limit {
+                break;
+            }
+        }
         Ok(children)
     }
 

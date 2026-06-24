@@ -3,13 +3,14 @@ use super::{
     SubtreeTombstoneRecord,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Bound;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataIndexes {
     indexed_seq: ChangeSeq,
     inode_by_id: HashMap<InodeId, InodeRecord>,
-    active_child_by_parent_name: HashMap<(InodeId, String), DirentryBindRecord>,
+    active_child_by_parent_name: BTreeMap<(InodeId, String), DirentryBindRecord>,
     /// Latest bind ever recorded per (parent, name), kept even after the
     /// binding is unbound. Tombstone-ancestry checks need to see dead
     /// bindings, which the active map deliberately drops.
@@ -27,7 +28,7 @@ impl Default for MetadataIndexes {
         Self {
             indexed_seq: ChangeSeq(0),
             inode_by_id: HashMap::new(),
-            active_child_by_parent_name: HashMap::new(),
+            active_child_by_parent_name: BTreeMap::new(),
             latest_bind_by_parent_name: HashMap::new(),
             active_parent_by_child: HashMap::new(),
             unbound_binding_keys: HashSet::new(),
@@ -133,11 +134,24 @@ impl MetadataIndexes {
     }
 
     pub(super) fn active_children(&self, parent_inode_id: InodeId) -> Vec<DirentryBindRecord> {
-        self.active_child_by_parent_name
-            .values()
-            .filter(|direntry| direntry.parent_inode_id == parent_inode_id)
+        self.active_children_after_name_key(parent_inode_id, None)
             .cloned()
             .collect()
+    }
+
+    pub(super) fn active_children_after_name_key<'a>(
+        &'a self,
+        parent_inode_id: InodeId,
+        start_after_name_key: Option<&str>,
+    ) -> impl Iterator<Item = &'a DirentryBindRecord> + 'a {
+        let lower_bound = match start_after_name_key {
+            Some(name_key) => Bound::Excluded((parent_inode_id, name_key.to_owned())),
+            None => Bound::Excluded((parent_inode_id, String::new())),
+        };
+        self.active_child_by_parent_name
+            .range((lower_bound, Bound::Unbounded))
+            .take_while(move |((candidate_parent, _), _)| *candidate_parent == parent_inode_id)
+            .map(|(_, record)| record)
     }
 
     pub(super) fn active_parent_for_child(
@@ -376,7 +390,7 @@ fn remove_active_parent_if_same(
 }
 
 fn remove_active_child_if_same(
-    active_child_by_parent_name: &mut HashMap<(InodeId, String), DirentryBindRecord>,
+    active_child_by_parent_name: &mut BTreeMap<(InodeId, String), DirentryBindRecord>,
     record: &DirentryBindRecord,
 ) {
     let key = (record.parent_inode_id, record.name_key.clone());

@@ -118,10 +118,16 @@ pub(crate) fn list_path_page_from_basis(
         });
     }
 
-    let mut children = basis
-        .metadata_state
-        .visible_children(resolved.inode_id, page_head_seq);
-    children.sort_by(|left, right| left.name_key.cmp(&right.name_key));
+    let start_after = request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.last_name_key.as_str());
+    let children = basis.metadata_state.visible_children_page_by_name_key(
+        resolved.inode_id,
+        page_head_seq,
+        start_after,
+        request.limit.limit_plus_one(),
+    );
     page_directory_children(
         &basis.head.namespace_id,
         page_head_seq,
@@ -185,19 +191,7 @@ fn page_directory_children(
     children: Vec<DirentryBindRecord>,
     request: PageRequest<DirectoryPageCursor>,
 ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
-    let start_after = request
-        .cursor
-        .as_ref()
-        .map(|cursor| cursor.last_name_key.as_str());
-    let mut children = children
-        .into_iter()
-        .filter(|child| {
-            start_after
-                .map(|last_name_key| child.name_key.as_str() > last_name_key)
-                .unwrap_or(true)
-        })
-        .take(request.limit.limit_plus_one())
-        .collect::<Vec<_>>();
+    let mut children = children;
     let has_more = children.len() > request.limit.as_usize();
     if has_more {
         children.truncate(request.limit.as_usize());

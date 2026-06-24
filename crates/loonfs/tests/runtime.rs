@@ -12,9 +12,9 @@ use loonfs::{
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
     DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
-    NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutFileBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    UploadContentResponse,
+    NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest, PaginationPolicy,
+    PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    TraceMode, TraceStoreKind, UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::cache::load_verified_namespace_basis;
@@ -1317,6 +1317,46 @@ fn namespace_pages_resume_by_namespace_id_and_omit_deleted_namespaces() {
             .map(|summary| summary.namespace_id.as_str())
             .collect::<Vec<_>>(),
         vec!["alpha", "charlie", "delta"]
+    );
+}
+
+#[test]
+fn namespace_pages_do_not_read_skipped_namespace_heads() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(HeadCasFailureStore::new(temp_dir.path(), "ns-000"));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("namespace-page-read-count")
+        .build()
+        .expect("build runtime");
+
+    for index in 0..20 {
+        let namespace_id =
+            NamespaceId::parse(format!("ns-{index:03}")).expect("valid namespace id");
+        fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+            .expect("create namespace");
+    }
+
+    raw_store.reset_control_get_counts();
+    let page = block_on(fs.list_namespaces_page(PageRequest {
+        limit: page_limit(2),
+        cursor: Some(NamespacesPageCursor {
+            last_namespace_id: NamespaceId::parse("ns-009").expect("valid namespace id"),
+        }),
+    }))
+    .expect("list namespace page");
+
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|summary| summary.namespace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ns-010", "ns-011"]
+    );
+    assert_eq!(
+        raw_store.head_get_count(),
+        0,
+        "page should not read namespace heads before the cursor"
     );
 }
 

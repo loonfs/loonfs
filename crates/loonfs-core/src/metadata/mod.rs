@@ -807,6 +807,72 @@ impl MetadataState {
         children
     }
 
+    pub fn visible_children_page_by_name_key(
+        &self,
+        parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+        start_after_name_key: Option<&str>,
+        limit: usize,
+    ) -> Vec<DirentryBindRecord> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        if base_seq >= self.indexed_seq() {
+            return self.visible_children_page_by_name_key_at_head(
+                parent_inode_id,
+                start_after_name_key,
+                limit,
+            );
+        }
+
+        let mut children = self.visible_children(parent_inode_id, base_seq);
+        children.sort_by(|left, right| left.name_key.cmp(&right.name_key));
+        children
+            .into_iter()
+            .filter(|child| {
+                start_after_name_key
+                    .map(|last_name_key| child.name_key.as_str() > last_name_key)
+                    .unwrap_or(true)
+            })
+            .take(limit)
+            .collect()
+    }
+
+    pub fn visible_children_page_by_name_key_at_head(
+        &self,
+        parent_inode_id: InodeId,
+        start_after_name_key: Option<&str>,
+        limit: usize,
+    ) -> Vec<DirentryBindRecord> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
+            return Vec::new();
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Vec::new();
+        }
+
+        let mut children = Vec::with_capacity(limit);
+        for direntry in self
+            .indexes
+            .active_children_after_name_key(parent_inode_id, start_after_name_key)
+        {
+            if self
+                .visible_inode_at_head(direntry.child_inode_id)
+                .is_none()
+            {
+                continue;
+            }
+            children.push(direntry.clone());
+            if children.len() == limit {
+                break;
+            }
+        }
+        children
+    }
+
     pub fn visible_children_at_head(&self, parent_inode_id: InodeId) -> Vec<DirentryBindRecord> {
         let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
             return Vec::new();
