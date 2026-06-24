@@ -5,7 +5,7 @@ use super::{
 };
 use crate::checkpoint::{
     load_verified_manifest_tables_with_cache, manifest_basis_head, MetadataTableCache,
-    VerifiedMetadataTables,
+    VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
 };
 use crate::error::CoreError;
 use crate::metadata::{
@@ -16,81 +16,111 @@ use crate::namespace::basis::BasisLoadError;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
+use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadRequest,
 };
-use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
-    AbsolutePath, AuthoritativePathEntry, DirectoryPageCursor, DisplayName, InodeId, InodeKind,
-    NameKey, NamespaceId, Page, PageRequest,
+    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ContentStoreId,
+    DirectoryPageCursor, DisplayName, FileRevision, InodeId, InodeKind, ListFileRevisionsResponse,
+    NameKey, NamespaceId, Page, PageRequest, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
 
-pub(crate) async fn resolve_path_from_materialized_tables_at_head_with_cache<
+const DEFAULT_MAX_READ_WAL_TAIL_SEGMENTS: u64 = 32;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ManifestPlusTailCacheContext<'a> {
+    head_etag: Option<&'a str>,
+    table_cache: Option<&'a MetadataTableCache>,
+    tail_cache: Option<&'a WalTailProjectionCache>,
+    max_wal_tail_segments: u64,
+}
+
+impl<'a> ManifestPlusTailCacheContext<'a> {
+    pub(crate) fn new(
+        head_etag: Option<&'a str>,
+        table_cache: Option<&'a MetadataTableCache>,
+        tail_cache: Option<&'a WalTailProjectionCache>,
+        max_wal_tail_segments: u64,
+    ) -> Self {
+        Self {
+            head_etag,
+            table_cache,
+            tail_cache,
+            max_wal_tail_segments,
+        }
+    }
+
+    fn cold() -> Self {
+        Self {
+            head_etag: None,
+            table_cache: None,
+            tail_cache: None,
+            max_wal_tail_segments: DEFAULT_MAX_READ_WAL_TAIL_SEGMENTS,
+        }
+    }
+}
+
+pub(crate) async fn resolve_path_from_manifest_plus_tail_at_head_with_cache<
     S: ObjectStore + ?Sized,
 >(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
     absolute_path: &str,
-    table_cache: Option<&MetadataTableCache>,
-) -> Result<Option<AuthoritativePathEntry>, CoreError> {
-    let Some(view) = MaterializedLatestView::load_at_head_with_cache(
+) -> Result<AuthoritativePathEntry, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
         store,
         namespace_id,
         head.clone(),
-        table_cache,
+        cache_context,
     )
-    .await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(view.resolve_path(absolute_path).await?))
+    .await?;
+    view.resolve_path(absolute_path).await
 }
 
-pub(crate) async fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) async fn resolve_path_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<Option<AuthoritativePathEntry>, CoreError> {
-    let Some(view) = MaterializedLatestView::load(store, namespace_id).await? else {
-        return Ok(None);
-    };
-    Ok(Some(view.resolve_path(absolute_path).await?))
+) -> Result<AuthoritativePathEntry, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.resolve_path(absolute_path).await
 }
 
-pub(crate) async fn list_path_from_materialized_tables_at_head_with_cache<
+pub(crate) async fn list_path_from_manifest_plus_tail_at_head_with_cache<
     S: ObjectStore + ?Sized,
 >(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
     absolute_path: &str,
-    table_cache: Option<&MetadataTableCache>,
-) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
-    let Some(view) = MaterializedLatestView::load_at_head_with_cache(
+) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
         store,
         namespace_id,
         head.clone(),
-        table_cache,
+        cache_context,
     )
-    .await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(view.list_path(absolute_path).await?))
+    .await?;
+    view.list_path(absolute_path).await
 }
 
-pub(crate) async fn list_path_page_from_materialized_tables_at_head_with_cache<
+pub(crate) async fn list_path_page_from_manifest_plus_tail_at_head_with_cache<
     S: ObjectStore + ?Sized,
 >(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
     absolute_path: &str,
-    table_cache: Option<&MetadataTableCache>,
     request: PageRequest<DirectoryPageCursor>,
-) -> Result<Option<Page<AuthoritativePathEntry, DirectoryPageCursor>>, CoreError> {
+) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
     if request
         .cursor
         .as_ref()
@@ -101,84 +131,235 @@ pub(crate) async fn list_path_page_from_materialized_tables_at_head_with_cache<
             "cursor snapshot does not match the requested materialized head",
         ));
     }
-    let Some(view) = MaterializedLatestView::load_at_head_with_cache(
+    let view = ManifestPlusTailView::load_at_head_with_cache(
         store,
         namespace_id,
         head.clone(),
-        table_cache,
+        cache_context,
     )
-    .await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(view.list_path_page(absolute_path, request).await?))
+    .await?;
+    view.list_path_page(absolute_path, request).await
 }
 
-pub(crate) async fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_path_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
-    let Some(view) = MaterializedLatestView::load(store, namespace_id).await? else {
-        return Ok(None);
-    };
-    Ok(Some(view.list_path(absolute_path).await?))
+) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.list_path(absolute_path).await
 }
 
-pub(crate) async fn list_path_page_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) async fn list_path_page_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     request: PageRequest<DirectoryPageCursor>,
-) -> Result<Option<Page<AuthoritativePathEntry, DirectoryPageCursor>>, CoreError> {
-    let Some(view) = MaterializedLatestView::load(store, namespace_id).await? else {
-        return Ok(None);
-    };
+) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
     if request
         .cursor
         .as_ref()
         .map(|cursor| cursor.head_seq != view.head.seq)
         .unwrap_or(false)
     {
-        return Ok(None);
+        return Err(invalid_cursor(
+            "cursor snapshot does not match the current namespace head",
+        ));
     }
-    Ok(Some(view.list_path_page(absolute_path, request).await?))
+    view.list_path_page(absolute_path, request).await
 }
 
-struct MaterializedLatestView<'a, S: ObjectStore + ?Sized> {
+pub(crate) async fn read_file_bytes_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    absolute_path: &str,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.read_file_bytes(store, absolute_path).await
+}
+
+pub(crate) async fn read_file_bytes_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.read_file_bytes(store, absolute_path).await
+}
+
+pub(crate) async fn list_file_revisions_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    absolute_path: &str,
+) -> Result<ListFileRevisionsResponse, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.list_file_revisions(absolute_path).await
+}
+
+pub(crate) async fn list_file_revisions_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<ListFileRevisionsResponse, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.list_file_revisions(absolute_path).await
+}
+
+pub(crate) async fn list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    inode_id: InodeId,
+) -> Result<ListFileRevisionsResponse, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.list_file_revisions_for_inode(inode_id).await
+}
+
+pub(crate) async fn list_file_revisions_for_inode_from_manifest_plus_tail<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<ListFileRevisionsResponse, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.list_file_revisions_for_inode(inode_id).await
+}
+
+pub(crate) async fn read_file_revision_bytes_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    absolute_path: &str,
+    revision_no: RevisionNo,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.read_file_revision_bytes(store, absolute_path, revision_no)
+        .await
+}
+
+pub(crate) async fn read_file_revision_bytes_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    revision_no: RevisionNo,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.read_file_revision_bytes(store, absolute_path, revision_no)
+        .await
+}
+
+pub(crate) async fn read_file_revision_bytes_for_inode_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+) -> Result<Vec<u8>, CoreError> {
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.read_file_revision_bytes_for_inode(store, inode_id, revision_no)
+        .await
+}
+
+pub(crate) async fn read_file_revision_bytes_for_inode_from_manifest_plus_tail<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+) -> Result<Vec<u8>, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    view.read_file_revision_bytes_for_inode(store, inode_id, revision_no)
+        .await
+}
+
+pub(crate) struct ManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
     namespace_id: NamespaceId,
+    content_store_id: ContentStoreId,
     head: HeadState,
     tables: VerifiedMetadataTables<'a, S>,
-    wal_tail_rows: MetadataState,
+    wal_tail_rows: Arc<MetadataState>,
 }
 
-impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
-    async fn load(store: &'a S, namespace_id: &NamespaceId) -> Result<Option<Self>, CoreError> {
+impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
+    pub(crate) async fn load(store: &'a S, namespace_id: &NamespaceId) -> Result<Self, CoreError> {
         let loaded_head = read_head_object(store, namespace_id)
             .await
             .map_err(BasisLoadError::LoadHead)?;
-        Self::load_at_head(store, namespace_id, loaded_head.envelope.state).await
+        Self::load_at_head_with_cache(
+            store,
+            namespace_id,
+            loaded_head.envelope.state,
+            ManifestPlusTailCacheContext::cold(),
+        )
+        .await
     }
 
-    async fn load_at_head(
+    pub(crate) async fn load_at_head_with_cache(
         store: &'a S,
         namespace_id: &NamespaceId,
         head: HeadState,
-    ) -> Result<Option<Self>, CoreError> {
-        Self::load_at_head_with_cache(store, namespace_id, head, None).await
-    }
-
-    async fn load_at_head_with_cache(
-        store: &'a S,
-        namespace_id: &NamespaceId,
-        head: HeadState,
-        table_cache: Option<&'a MetadataTableCache>,
-    ) -> Result<Option<Self>, CoreError> {
+        cache_context: ManifestPlusTailCacheContext<'a>,
+    ) -> Result<Self, CoreError> {
         if &head.namespace_id != namespace_id {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "head namespace `{}` does not match requested namespace `{}`",
                 head.namespace_id, namespace_id
             )));
+        }
+        if head.state == NamespaceState::Deleted {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: namespace_id.clone(),
+            });
         }
         let manifest_id = head.current_manifest_id.ok_or_else(|| {
             CoreError::NamespaceCorrupt(format!(
@@ -186,14 +367,38 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 namespace_id.as_str()
             ))
         })?;
-        let _catalog_entry = load_namespace_catalog_entry(store, namespace_id)
+        let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
             .await
             .map_err(BasisLoadError::from)?;
-        let tables =
-            load_verified_manifest_tables_with_cache(store, table_cache, namespace_id, manifest_id)
-                .await
-                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+        let tables = load_verified_manifest_tables_with_cache(
+            store,
+            cache_context.table_cache,
+            namespace_id,
+            manifest_id,
+        )
+        .await
+        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
         let manifest_head = manifest_basis_head(&head, tables.manifest());
+        let cache_key = cache_context
+            .head_etag
+            .map(|etag| WalTailProjectionCacheKey {
+                namespace_id: namespace_id.clone(),
+                manifest_id,
+                manifest_head_seq: manifest_head.seq,
+                head_seq: head.seq,
+                head_etag: etag.to_owned(),
+            });
+        if let (Some(cache), Some(key)) = (cache_context.tail_cache, cache_key.as_ref()) {
+            if let Some(wal_tail_rows) = cache.get(key) {
+                return Ok(Self {
+                    namespace_id: namespace_id.clone(),
+                    content_store_id: catalog_entry.content_store_id,
+                    head,
+                    tables,
+                    wal_tail_rows,
+                });
+            }
+        }
         let wal_chain = load_validated_wal_chain(
             store,
             WalChainLoadRequest {
@@ -206,6 +411,17 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         )
         .await
         .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
+        let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
+        if wal_tail_segments > cache_context.max_wal_tail_segments {
+            return Err(CoreError::MetadataTailTooLong {
+                namespace_id: namespace_id.clone(),
+                manifest_id,
+                manifest_head_seq: manifest_head.seq,
+                head_seq: head.seq,
+                wal_tail_segments,
+                max_wal_tail_segments: cache_context.max_wal_tail_segments,
+            });
+        }
         let replayed = {
             let _span =
                 tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
@@ -216,12 +432,17 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             )
             .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))
         }?;
-        Ok(Some(Self {
+        let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);
+        if let (Some(cache), Some(key)) = (cache_context.tail_cache, cache_key) {
+            cache.insert(key, Arc::clone(&wal_tail_rows));
+        }
+        Ok(Self {
             namespace_id: namespace_id.clone(),
+            content_store_id: catalog_entry.content_store_id,
             head,
             tables,
-            wal_tail_rows: replayed.resulting_metadata_state,
-        }))
+            wal_tail_rows,
+        })
     }
 
     #[tracing::instrument(
@@ -281,6 +502,123 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             );
         }
         Ok(entries)
+    }
+
+    pub(crate) async fn read_file_bytes(
+        &self,
+        store: &S,
+        absolute_path: &str,
+    ) -> Result<AuthoritativeFileBytes, CoreError> {
+        let entry = self.resolve_path(absolute_path).await?;
+        if entry.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: entry.absolute_path,
+                kind: entry.inode_kind,
+            });
+        }
+        let content_ref = entry
+            .content_ref
+            .clone()
+            .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
+        let read = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
+        Ok(AuthoritativeFileBytes {
+            entry,
+            bytes: read.bytes,
+        })
+    }
+
+    pub(crate) async fn list_file_revisions(
+        &self,
+        absolute_path: &str,
+    ) -> Result<ListFileRevisionsResponse, CoreError> {
+        let entry = self.resolve_path(absolute_path).await?;
+        if entry.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: entry.absolute_path,
+                kind: entry.inode_kind,
+            });
+        }
+        self.list_file_revisions_for_inode(entry.inode_id).await
+    }
+
+    pub(crate) async fn list_file_revisions_for_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<ListFileRevisionsResponse, CoreError> {
+        let inode = self
+            .inode_at_seq(inode_id)
+            .await?
+            .ok_or_else(|| CoreError::MissingPath(inode_id.to_string()))?;
+        if inode.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: inode_id.to_string(),
+                kind: inode.inode_kind,
+            });
+        }
+
+        let mut revisions = self.revisions_for_inode(inode_id).await?;
+        revisions.extend(
+            self.wal_tail_rows
+                .revisions()
+                .iter()
+                .filter(|revision| revision.inode_id == inode_id)
+                .cloned(),
+        );
+        let mut revisions = revisions
+            .into_iter()
+            .filter(|revision| revision.committed_seq <= self.head.seq)
+            .map(|revision| FileRevision {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: revision.committed_seq,
+                content_ref: revision.content_ref,
+            })
+            .collect::<Vec<_>>();
+        revisions.sort_by_key(|revision| revision.revision_no);
+
+        Ok(ListFileRevisionsResponse {
+            namespace_id: self.namespace_id.clone(),
+            inode_id,
+            head_seq: self.head.seq,
+            revisions,
+        })
+    }
+
+    pub(crate) async fn read_file_revision_bytes(
+        &self,
+        store: &S,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<AuthoritativeFileBytes, CoreError> {
+        let mut entry = self.resolve_path(absolute_path).await?;
+        if entry.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: entry.absolute_path,
+                kind: entry.inode_kind,
+            });
+        }
+        let revision = self.revision_for_inode(entry.inode_id, revision_no).await?;
+        entry.revision_no = Some(revision.revision_no);
+        entry.size_bytes = Some(revision.content_ref.size_bytes);
+        entry.content_ref = Some(revision.content_ref.clone());
+        let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
+            .await?;
+        Ok(AuthoritativeFileBytes {
+            entry,
+            bytes: read.bytes,
+        })
+    }
+
+    pub(crate) async fn read_file_revision_bytes_for_inode(
+        &self,
+        store: &S,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CoreError> {
+        let revision = self.revision_for_inode(inode_id, revision_no).await?;
+        let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
+            .await?;
+        Ok(read.bytes)
     }
 
     #[tracing::instrument(
@@ -806,6 +1144,41 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         inode_id: InodeId,
     ) -> Result<Vec<RevisionRecord>, CoreError> {
         manifest_index::revisions_for_inode(&self.tables, inode_id).await
+    }
+
+    async fn revision_for_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<RevisionRecord, CoreError> {
+        let inode = self
+            .inode_at_seq(inode_id)
+            .await?
+            .ok_or_else(|| CoreError::MissingPath(inode_id.to_string()))?;
+        if inode.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: inode_id.to_string(),
+                kind: inode.inode_kind,
+            });
+        }
+        let mut revisions = self.revisions_for_inode(inode_id).await?;
+        revisions.extend(
+            self.wal_tail_rows
+                .revisions()
+                .iter()
+                .filter(|revision| revision.inode_id == inode_id)
+                .cloned(),
+        );
+        revisions
+            .into_iter()
+            .filter(|revision| {
+                revision.revision_no == revision_no && revision.committed_seq <= self.head.seq
+            })
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
+            .ok_or(CoreError::MissingRevision {
+                inode_id,
+                revision_no,
+            })
     }
 
     async fn tombstones_for_root(

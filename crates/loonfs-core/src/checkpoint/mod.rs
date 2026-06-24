@@ -31,7 +31,10 @@ mod scan;
 mod tests;
 mod validate;
 
-pub use self::cache::{MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats};
+pub use self::cache::{
+    MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
+    WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+};
 pub use self::error::{ManifestLoadError, ManifestLoadErrorKind};
 pub use self::runs::MetadataLsmPolicy;
 

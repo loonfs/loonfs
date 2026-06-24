@@ -1,5 +1,6 @@
 use crate::{
-    checkpoint::MetadataTableCache, namespace::basis::VerifiedNamespaceBasis,
+    checkpoint::{MetadataTableCache, WalTailProjectionCache},
+    namespace::basis::VerifiedNamespaceBasis,
     path::write::PutFileBehavior,
 };
 use loonfs_api::wire::control::HeadState;
@@ -29,30 +30,20 @@ pub struct DeleteNamespaceOptions {
 }
 
 /// Controls where read operations get their namespace view.
-///
-/// The default prefers materialized metadata tables when they are available,
-/// then falls back to rebuilding the full verified basis.
 #[derive(Debug, Clone)]
 pub struct ReadOptions {
     source: ReadSource,
 }
 
 impl ReadOptions {
-    /// Prefers fast materialized tables, with safe fallback to full basis reads.
-    pub fn prefer_materialized() -> Self {
+    /// Reads from the current manifest plus the visible WAL tail.
+    pub fn manifest_plus_tail() -> Self {
         Self {
-            source: ReadSource::PreferMaterialized,
+            source: ReadSource::ManifestPlusTail,
         }
     }
 
-    /// Forces a complete verified basis reconstruction before reading.
-    pub fn full_basis() -> Self {
-        Self {
-            source: ReadSource::FullBasis,
-        }
-    }
-
-    /// Reuses a caller-supplied verified basis.
+    /// Reuses a caller-supplied verified basis for maintenance/debug callers.
     ///
     /// This is useful when several reads should share the same namespace view.
     pub fn verified_basis(basis: Arc<VerifiedNamespaceBasis>) -> Self {
@@ -61,18 +52,24 @@ impl ReadOptions {
         }
     }
 
-    /// Reads from materialized tables pinned to an already-loaded head.
+    /// Reads from a manifest-plus-tail view pinned to an already-loaded head.
     ///
     /// Runtime code uses this when it has already validated the head and wants
-    /// to reuse table cache state.
-    pub fn materialized_tables_at_head(
+    /// to reuse cache state.
+    pub fn manifest_plus_tail_at_head(
         head: HeadState,
+        head_etag: String,
         table_cache: Option<Arc<MetadataTableCache>>,
+        tail_cache: Option<Arc<WalTailProjectionCache>>,
+        max_wal_tail_segments: u64,
     ) -> Self {
         Self {
-            source: ReadSource::MaterializedTablesAtHead {
+            source: ReadSource::ManifestPlusTailAtHead {
                 head: Box::new(head),
+                head_etag,
                 table_cache,
+                tail_cache,
+                max_wal_tail_segments,
             },
         }
     }
@@ -89,25 +86,29 @@ impl ReadOptions {
 
 impl Default for ReadOptions {
     fn default() -> Self {
-        Self::prefer_materialized()
+        Self::manifest_plus_tail()
     }
 }
 
 /// Source used by [`ReadOptions`].
 #[derive(Debug, Clone)]
 pub enum ReadSource {
-    /// Use materialized tables when possible, otherwise rebuild the full basis.
-    PreferMaterialized,
-    /// Always rebuild the full verified namespace basis.
-    FullBasis,
+    /// Use the current manifest and bounded WAL tail.
+    ManifestPlusTail,
     /// Use this already-verified namespace basis.
     VerifiedBasis(Arc<VerifiedNamespaceBasis>),
-    /// Use materialized tables for a specific already-loaded head.
-    MaterializedTablesAtHead {
+    /// Use manifest-plus-tail for a specific already-loaded head.
+    ManifestPlusTailAtHead {
         /// The namespace head to read against.
         head: Box<HeadState>,
+        /// Durable head object ETag that validated this head.
+        head_etag: String,
         /// Optional decoded table cache.
         table_cache: Option<Arc<MetadataTableCache>>,
+        /// Optional WAL-tail projection cache.
+        tail_cache: Option<Arc<WalTailProjectionCache>>,
+        /// Maximum visible WAL tail segments this read may project.
+        max_wal_tail_segments: u64,
     },
 }
 

@@ -1,3 +1,4 @@
+use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
@@ -28,6 +29,20 @@ const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 fn default_page_limit() -> EffectiveLimit {
     EffectiveLimit::new(NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap_or(NonZeroU32::MIN))
+}
+
+fn manifest_plus_tail_cache_context<'a>(
+    head_etag: &'a str,
+    table_cache: &'a Option<Arc<MetadataTableCache>>,
+    tail_cache: &'a Option<Arc<WalTailProjectionCache>>,
+    max_wal_tail_segments: u64,
+) -> crate::path::query::ManifestPlusTailCacheContext<'a> {
+    crate::path::query::ManifestPlusTailCacheContext::new(
+        Some(head_etag),
+        table_cache.as_deref(),
+        tail_cache.as_deref(),
+        max_wal_tail_segments,
+    )
 }
 
 /// Internal target used by server integrations before they mint a presigned URL.
@@ -189,35 +204,41 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<AuthoritativePathEntry> {
         let path = path.as_ref();
         match options.source() {
-            ReadSource::PreferMaterialized => {
-                if let Some(entry) = crate::path::query::resolve_path_from_materialized_tables(
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::resolve_path_from_manifest_plus_tail(
                     &self.store,
                     &self.namespace_id,
                     path,
                 )
-                .await?
-                {
-                    return Ok(entry);
-                }
+                .await
             }
-            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
-                if let Some(entry) =
-                    crate::path::query::resolve_path_from_materialized_tables_at_head_with_cache(
-                        &self.store,
-                        &self.namespace_id,
-                        head,
-                        path,
-                        table_cache.as_deref(),
-                    )
-                    .await?
-                {
-                    return Ok(entry);
-                }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::resolve_path_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                )
+                .await
             }
-            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::resolve_path_from_basis(&basis, path)
+            }
         }
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::resolve_path_from_basis(&basis, path)
     }
 
     /// Lists the children of a directory path.
@@ -228,35 +249,41 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<Vec<AuthoritativePathEntry>> {
         let path = path.as_ref();
         match options.source() {
-            ReadSource::PreferMaterialized => {
-                if let Some(entries) = crate::path::query::list_path_from_materialized_tables(
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::list_path_from_manifest_plus_tail(
                     &self.store,
                     &self.namespace_id,
                     path,
                 )
-                .await?
-                {
-                    return Ok(entries);
-                }
+                .await
             }
-            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
-                if let Some(entries) =
-                    crate::path::query::list_path_from_materialized_tables_at_head_with_cache(
-                        &self.store,
-                        &self.namespace_id,
-                        head,
-                        path,
-                        table_cache.as_deref(),
-                    )
-                    .await?
-                {
-                    return Ok(entries);
-                }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::list_path_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                )
+                .await
             }
-            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::list_path_from_basis(&basis, path)
+            }
         }
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::list_path_from_basis(&basis, path)
     }
 
     /// Lists one page of children for a directory path.
@@ -268,37 +295,43 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
         let path = path.as_ref();
         match options.source() {
-            ReadSource::PreferMaterialized => {
-                if let Some(entries) = crate::path::query::list_path_page_from_materialized_tables(
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::list_path_page_from_manifest_plus_tail(
                     &self.store,
                     &self.namespace_id,
                     path,
-                    request.clone(),
+                    request,
                 )
-                .await?
-                {
-                    return Ok(entries);
-                }
+                .await
             }
-            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
-                if let Some(entries) =
-                    crate::path::query::list_path_page_from_materialized_tables_at_head_with_cache(
-                        &self.store,
-                        &self.namespace_id,
-                        head,
-                        path,
-                        table_cache.as_deref(),
-                        request.clone(),
-                    )
-                    .await?
-                {
-                    return Ok(entries);
-                }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::list_path_page_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                    request,
+                )
+                .await
             }
-            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::list_path_page_from_basis(&basis, path, request)
+            }
         }
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::list_path_page_from_basis(&basis, path, request)
     }
 
     /// Reads the current bytes for a file path.
@@ -310,8 +343,43 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path.as_ref()).await
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::read_file_bytes_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::read_file_bytes_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                )
+                .await
+            }
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path).await
+            }
+        }
     }
 
     /// Lists retained revisions for the file currently visible at `path`.
@@ -320,8 +388,43 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::list_file_revisions_from_basis(&basis, path.as_ref())
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::list_file_revisions_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::list_file_revisions_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                )
+                .await
+            }
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::list_file_revisions_from_basis(&basis, path)
+            }
+        }
     }
 
     /// Lists retained revisions for a file inode, independent of its current path.
@@ -330,8 +433,42 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         inode_id: InodeId,
         options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::list_file_revisions_for_inode_from_basis(&basis, inode_id)
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::list_file_revisions_for_inode_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    inode_id,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    inode_id,
+                )
+                .await
+            }
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::list_file_revisions_for_inode_from_basis(&basis, inode_id)
+            }
+        }
     }
 
     /// Reads a retained revision for the file currently visible at `path`.
@@ -341,14 +478,51 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         revision_no: RevisionNo,
         options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::read_file_revision_bytes_from_basis(
-            &self.store,
-            &basis,
-            path.as_ref(),
-            revision_no,
-        )
-        .await
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::read_file_revision_bytes_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                    revision_no,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::read_file_revision_bytes_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                    revision_no,
+                )
+                .await
+            }
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::read_file_revision_bytes_from_basis(
+                    &self.store,
+                    &basis,
+                    path,
+                    revision_no,
+                )
+                .await
+            }
+        }
     }
 
     /// Reads a retained revision by stable inode id.
@@ -358,14 +532,50 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         revision_no: RevisionNo,
         options: ReadOptions,
     ) -> CoreResult<Vec<u8>> {
-        let basis = self.basis_for_read_options(options).await?;
-        crate::path::query::read_file_revision_bytes_for_inode_from_basis(
-            &self.store,
-            &basis,
-            inode_id,
-            revision_no,
-        )
-        .await
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::read_file_revision_bytes_for_inode_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    inode_id,
+                    revision_no,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::read_file_revision_bytes_for_inode_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    inode_id,
+                    revision_no,
+                )
+                .await
+            }
+            ReadSource::VerifiedBasis(_) => {
+                let basis = self.basis_for_read_options(options).await?;
+                crate::path::query::read_file_revision_bytes_for_inode_from_basis(
+                    &self.store,
+                    &basis,
+                    inode_id,
+                    revision_no,
+                )
+                .await
+            }
+        }
     }
 
     /// Writes file bytes to a path.
@@ -691,11 +901,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<Arc<VerifiedNamespaceBasis>> {
         match options.into_source() {
             ReadSource::VerifiedBasis(basis) => Ok(basis),
-            ReadSource::PreferMaterialized
-            | ReadSource::FullBasis
-            | ReadSource::MaterializedTablesAtHead { .. } => Ok(Arc::new(
-                load_verified_namespace_basis(&self.store, &self.namespace_id).await?,
-            )),
+            ReadSource::ManifestPlusTail | ReadSource::ManifestPlusTailAtHead { .. } => Ok(
+                Arc::new(load_verified_namespace_basis(&self.store, &self.namespace_id).await?),
+            ),
         }
     }
 
@@ -850,7 +1058,7 @@ mod tests {
         assert_eq!(engine.lease_duration_ms(), DEFAULT_LEASE_DURATION_MS);
         assert!(matches!(
             engine.read_options().source(),
-            ReadSource::PreferMaterialized
+            ReadSource::ManifestPlusTail
         ));
         assert_eq!(engine.write_options(), &WriteOptions::default());
         assert_eq!(engine.commit_options(), &CommitOptions::default());

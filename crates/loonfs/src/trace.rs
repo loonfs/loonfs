@@ -52,18 +52,12 @@ impl TraceStoreKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CachePath {
-    WarmReuse,
-    EtagProbe,
-    ColdReconstruct,
     MaterializedTables,
 }
 
 impl CachePath {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::WarmReuse => "warm_reuse",
-            Self::EtagProbe => "etag_probe",
-            Self::ColdReconstruct => "cold_reconstruct",
             Self::MaterializedTables => "materialized_tables",
         }
     }
@@ -93,9 +87,6 @@ mod tests {
         assert_eq!(TraceStoreKind::Gcs.as_str(), "gcs");
         assert_eq!(TraceStoreKind::Abs.as_str(), "abs");
         assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
-        assert_eq!(CachePath::WarmReuse.as_str(), "warm_reuse");
-        assert_eq!(CachePath::EtagProbe.as_str(), "etag_probe");
-        assert_eq!(CachePath::ColdReconstruct.as_str(), "cold_reconstruct");
         assert_eq!(
             CachePath::MaterializedTables.as_str(),
             "materialized_tables"

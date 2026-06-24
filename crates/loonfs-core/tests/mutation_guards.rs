@@ -54,8 +54,7 @@ use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MetadataReadSource {
-    MaterializedTables,
-    FullBasisFallback,
+    ManifestPlusTail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,24 +492,13 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataRead<loonfs_api::AuthoritativePathEntry>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let head = block_on(load_namespace_head_control(store, namespace_id))
-        .map_err(BasisLoadError::LoadHead)?
-        .state;
-    if head.current_manifest_id.is_some() {
-        let value = block_on(engine.resolve_path(
-            absolute_path,
-            ReadOptions::materialized_tables_at_head(head.clone(), None),
-        ))?;
-        return Ok(MetadataRead {
-            value,
-            source: MetadataReadSource::MaterializedTables,
-        });
-    }
-    let basis = block_on(load_verified_namespace_basis(store, namespace_id))?;
+        .map_err(BasisLoadError::LoadHead)?;
     Ok(MetadataRead {
-        value: block_on(
-            engine.resolve_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis))),
-        )?,
-        source: MetadataReadSource::FullBasisFallback,
+        value: block_on(engine.resolve_path(
+            absolute_path,
+            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None, 32),
+        ))?,
+        source: MetadataReadSource::ManifestPlusTail,
     })
 }
 
@@ -521,24 +509,13 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataRead<Vec<loonfs_api::AuthoritativePathEntry>>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let head = block_on(load_namespace_head_control(store, namespace_id))
-        .map_err(BasisLoadError::LoadHead)?
-        .state;
-    if head.current_manifest_id.is_some() {
-        let value = block_on(engine.list_path(
-            absolute_path,
-            ReadOptions::materialized_tables_at_head(head.clone(), None),
-        ))?;
-        return Ok(MetadataRead {
-            value,
-            source: MetadataReadSource::MaterializedTables,
-        });
-    }
-    let basis = block_on(load_verified_namespace_basis(store, namespace_id))?;
+        .map_err(BasisLoadError::LoadHead)?;
     Ok(MetadataRead {
-        value: block_on(
-            engine.list_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis))),
-        )?,
-        source: MetadataReadSource::FullBasisFallback,
+        value: block_on(engine.list_path(
+            absolute_path,
+            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None, 32),
+        ))?,
+        source: MetadataReadSource::ManifestPlusTail,
     })
 }
 
@@ -1698,8 +1675,8 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
     let list = list_path_with_read_source(&store, &namespace_id, "/docs")
         .expect("list with initial manifest");
 
-    assert_eq!(stat.source, MetadataReadSource::MaterializedTables);
-    assert_eq!(list.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(stat.source, MetadataReadSource::ManifestPlusTail);
+    assert_eq!(list.source, MetadataReadSource::ManifestPlusTail);
     assert_eq!(stat.value.size_bytes, Some(4));
     assert_eq!(list.value.len(), 1);
 }
@@ -1804,15 +1781,15 @@ async fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay
         resolve_path_with_read_source(&store, &namespace_id, "/DOCS/MOVED.TXT")
             .expect("materialized casefold stat");
 
-    assert_eq!(actual_stat.source, MetadataReadSource::MaterializedTables);
-    assert_eq!(actual_list.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(actual_stat.source, MetadataReadSource::ManifestPlusTail);
+    assert_eq!(actual_list.source, MetadataReadSource::ManifestPlusTail);
     assert_eq!(
         actual_file_list.source,
-        MetadataReadSource::MaterializedTables
+        MetadataReadSource::ManifestPlusTail
     );
     assert_eq!(
         actual_casefold_stat.source,
-        MetadataReadSource::MaterializedTables
+        MetadataReadSource::ManifestPlusTail
     );
     assert_eq!(actual_stat.value, expected_stat);
     assert_eq!(actual_casefold_stat.value, expected_stat);
@@ -1861,7 +1838,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
         .expect("materialized stat");
 
-    assert_eq!(actual.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(actual.source, MetadataReadSource::ManifestPlusTail);
     assert_eq!(actual.value, expected);
     assert_eq!(actual.value.absolute_path, "/docs/report");
     assert_eq!(actual.value.size_bytes, Some(5));

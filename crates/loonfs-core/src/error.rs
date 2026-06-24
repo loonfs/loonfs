@@ -7,7 +7,7 @@ use crate::namespace::lease::LeaseAcquireError;
 use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::wal::{WalBuildError, WalChainLoadError};
 use loonfs_api::{
-    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
+    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind, ManifestId,
     NamespaceId, NamespaceIdValidationError,
 };
 use thiserror::Error;
@@ -95,6 +95,17 @@ pub enum CoreError {
     RebootstrapRequired {
         after_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
+    },
+    #[error(
+        "metadata WAL tail after manifest `{manifest_id:?}` is too long: {wal_tail_segments} segments exceeds max {max_wal_tail_segments}"
+    )]
+    MetadataTailTooLong {
+        namespace_id: NamespaceId,
+        manifest_id: ManifestId,
+        manifest_head_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+        wal_tail_segments: u64,
+        max_wal_tail_segments: u64,
     },
     #[error(
         "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
@@ -197,6 +208,7 @@ impl CoreError {
             CoreError::InvalidUploadContent(_) => ErrorCode::InvalidUploadContent,
             CoreError::InvalidCursor(_) => ErrorCode::InvalidCursor,
             CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
+            CoreError::MetadataTailTooLong { .. } => ErrorCode::MetadataTailTooLong,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists(_) => ErrorCode::PathConflict,

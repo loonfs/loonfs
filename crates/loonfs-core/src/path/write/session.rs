@@ -13,8 +13,7 @@ use loonfs_api::NamespaceId;
 /// The session owns the batch's evolving head and metadata state: it is
 /// derived from the basis once per publish attempt, every path mutation is
 /// planned against it, every accepted commit is applied back into it, and it
-/// is either promoted into the next cached basis or discarded with the
-/// attempt. Keeping head and state behind one seam guarantees planner reads
+/// is discarded after the attempt. Keeping head and state behind one seam guarantees planner reads
 /// always observe the same sequence the indexes are built at.
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
@@ -57,10 +56,6 @@ impl PublishPlanningSession {
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
         Ok(())
-    }
-
-    pub(crate) fn into_metadata_state(self) -> MetadataState {
-        self.metadata_state
     }
 }
 

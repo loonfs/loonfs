@@ -46,7 +46,6 @@ use loonfs_api::{
 use loonfs_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::Instrument;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
@@ -54,42 +53,11 @@ const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstBasisResult {
     pub(crate) results: Vec<Result<ApiCommitResponse, CoreError>>,
-    pub(crate) basis_promotion: BasisPromotion,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum BasisPromotion {
-    Unchanged(Arc<VerifiedNamespaceBasis>),
-    Advanced(Arc<VerifiedNamespaceBasis>),
-    NotCacheable,
 }
 
 impl PublishBatchAgainstBasisResult {
-    fn unchanged(
-        results: Vec<Result<ApiCommitResponse, CoreError>>,
-        basis: &VerifiedNamespaceBasis,
-    ) -> Self {
-        Self {
-            results,
-            basis_promotion: BasisPromotion::Unchanged(Arc::new(basis.clone())),
-        }
-    }
-
-    fn advanced(
-        results: Vec<Result<ApiCommitResponse, CoreError>>,
-        basis: VerifiedNamespaceBasis,
-    ) -> Self {
-        Self {
-            results,
-            basis_promotion: BasisPromotion::Advanced(Arc::new(basis)),
-        }
-    }
-
-    fn not_cacheable(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
-        Self {
-            results,
-            basis_promotion: BasisPromotion::NotCacheable,
-        }
+    fn new(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
+        Self { results }
     }
 }
 
@@ -547,11 +515,11 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     basis: &VerifiedNamespaceBasis,
 ) -> PublishBatchAgainstBasisResult {
     if candidates.is_empty() {
-        return PublishBatchAgainstBasisResult::unchanged(Vec::new(), basis);
+        return PublishBatchAgainstBasisResult::new(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     if basis.head.namespace_id != *namespace_id {
-        return PublishBatchAgainstBasisResult::not_cacheable(
+        return PublishBatchAgainstBasisResult::new(
             (0..candidates.len())
                 .map(|_| {
                     Err(CoreError::Store(
@@ -687,10 +655,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
     drop(prepare_span);
 
     if accepted.is_empty() {
-        return PublishBatchAgainstBasisResult::unchanged(
-            finish_batch_outcomes_with_aliases(outcomes, &aliases),
-            basis,
-        );
+        return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
+            outcomes, &aliases,
+        ));
     }
     let records = accepted
         .iter()
@@ -730,9 +697,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         Ok(wal) => wal,
         Err(error) => {
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
-            return PublishBatchAgainstBasisResult::not_cacheable(
-                finish_batch_outcomes_with_aliases(outcomes, &aliases),
-            );
+            return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
+                outcomes, &aliases,
+            ));
         }
     };
 
@@ -748,9 +715,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         Err(error) => {
             let error = CoreError::Store(format!("head publish preparation failed: {error:?}"));
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
-            return PublishBatchAgainstBasisResult::not_cacheable(
-                finish_batch_outcomes_with_aliases(outcomes, &aliases),
-            );
+            return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
+                outcomes, &aliases,
+            ));
         }
     };
     let head_cas_span = tracing::info_span!(
@@ -774,25 +741,15 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         },
     );
     drop(head_cas_span);
-    let head_metadata = match head_metadata_result {
-        Ok(metadata) => metadata,
+    match head_metadata_result {
+        Ok(_) => {}
         Err(error) => {
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error.into());
-            return PublishBatchAgainstBasisResult::not_cacheable(
-                finish_batch_outcomes_with_aliases(outcomes, &aliases),
-            );
+            return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
+                outcomes, &aliases,
+            ));
         }
-    };
-
-    let promoted_basis = head_metadata.etag.map(|head_etag| VerifiedNamespaceBasis {
-        namespace_descriptor: basis.namespace_descriptor.clone(),
-        content_store_id: basis.content_store_id.clone(),
-        snapshot_floor_seq: basis.snapshot_floor_seq,
-        head: head_publish.resulting_head.clone(),
-        head_etag,
-        lease: basis.lease.clone(),
-        metadata_state: session.into_metadata_state(),
-    });
+    }
 
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
@@ -803,10 +760,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         }));
     }
     let results = finish_batch_outcomes_with_aliases(outcomes, &aliases);
-    match promoted_basis {
-        Some(basis) => PublishBatchAgainstBasisResult::advanced(results, basis),
-        None => PublishBatchAgainstBasisResult::not_cacheable(results),
-    }
+    PublishBatchAgainstBasisResult::new(results)
 }
 
 #[allow(clippy::too_many_arguments)]
