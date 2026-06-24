@@ -45,6 +45,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ureq = { version = "2.10", features = ["json"] }
+utoipa = { version = "5.5", features = ["macros"] }
 urlencoding = "2"
 unicode-casefold = "0.2"
 unicode-normalization = "0.1"

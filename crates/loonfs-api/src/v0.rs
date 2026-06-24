@@ -10,6 +10,7 @@ pub type CommitAnnotations = BTreeMap<String, Value>;
 
 /// Rename behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RenameMode {
     /// Move only if the destination name is absent.
@@ -26,6 +27,7 @@ pub fn default_rename_mode() -> RenameMode {
 
 /// Upload transport mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum UploadMode {
     /// The service receives bytes and writes content to object storage.
@@ -43,6 +45,7 @@ impl UploadMode {
 
 /// Request for starting an upload session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BeginUploadRequest {
     /// Requested upload transport. Absent keeps the existing service-proxied path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +57,7 @@ pub struct BeginUploadRequest {
 
 /// Client-facing direct transfer capability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectTransferAccess {
     /// Short-lived URL plus required headers for one object-store write.
@@ -72,6 +76,7 @@ pub enum ObjectTransferAccess {
 
 /// Presigned direct_put upload details. The raw object key is intentionally not public.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectPutUpload {
     pub content_ref: ContentRef,
     pub access: ObjectTransferAccess,
@@ -79,6 +84,7 @@ pub struct DirectPutUpload {
 
 /// Stateless proof that a LoonFS server already validated a content ref.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ValidatedContentToken {
     pub content_ref: ContentRef,
     /// Opaque, server-signed token. Clients must not parse it.
@@ -87,6 +93,7 @@ pub struct ValidatedContentToken {
 
 /// Response for starting an upload session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BeginUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
@@ -97,6 +104,7 @@ pub struct BeginUploadResponse {
 
 /// Response after uploading bytes into a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadContentResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
@@ -105,12 +113,14 @@ pub struct UploadContentResponse {
 
 /// Request to complete an upload with the expected content ref.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CompleteUploadRequest {
     pub content_ref: ContentRef,
 }
 
 /// Response after an upload session is completed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
@@ -124,6 +134,7 @@ pub struct CompleteUploadResponse {
 /// Use this lower-level shape when you need one commit id, optional
 /// preconditions, and multiple ordered operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommitRequest {
     /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
@@ -137,11 +148,13 @@ pub struct CommitRequest {
     pub message: Option<String>,
     /// Optional structured metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub annotations: Option<CommitAnnotations>,
 }
 
 /// Response for a committed explicit request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommitResponse {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
@@ -151,6 +164,7 @@ pub struct CommitResponse {
 
 /// Semantic operation inside a commit request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOp {
     /// Create a directory under a parent inode.
@@ -192,6 +206,7 @@ pub enum CommitOp {
 
 /// Race check evaluated before a commit is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommitPrecondition {
     /// File inode is still at this revision.
@@ -220,6 +235,7 @@ pub enum CommitPrecondition {
 
 /// Per-operation result returned after a commit succeeds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOpResult {
     CreateDir {
@@ -264,6 +280,7 @@ pub enum CommitOpResult {
 /// Most clients should use semantic operation results. Sync and projection
 /// clients can apply deltas directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "delta", rename_all = "snake_case")]
 pub enum CommitDelta {
     CreateInode {
@@ -305,6 +322,7 @@ pub enum CommitDelta {
 
 /// One committed change in namespace order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommittedChange {
     /// Namespace sequence for this logical commit.
     pub seq: ChangeSeq,
@@ -313,6 +331,7 @@ pub struct CommittedChange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub annotations: Option<CommitAnnotations>,
     /// Semantic operation results.
     pub ops: Vec<CommitOpResult>,
@@ -322,6 +341,7 @@ pub struct CommittedChange {
 
 /// Change-feed response after a cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ChangesResponse {
     pub namespace_id: NamespaceId,
     pub after_seq: ChangeSeq,

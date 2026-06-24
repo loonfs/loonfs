@@ -1,0 +1,3623 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "LoonFS HTTP API",
+    "description": "Static OpenAPI document for the LoonFS v0 HTTP API.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.1.1"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Server health check",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/checkpoint": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "create_checkpoint_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Checkpoint created or reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCheckpointResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Checkpoint unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/retention/advance": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "advance_retention_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retention floor advanced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdvanceRetentionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/config": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "config_handler",
+        "responses": {
+          "200": {
+            "description": "Capability document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityDocument"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces": {
+      "get": {
+        "tags": [
+          "namespaces"
+        ],
+        "operationId": "list_namespaces_handler",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque namespace-list page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListNamespacesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "operationId": "create_namespace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNamespaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Namespace created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Namespace already exists or is partial",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace id was deleted and retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}": {
+      "get": {
+        "tags": [
+          "namespaces"
+        ],
+        "operationId": "namespace_status_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "namespaces"
+        ],
+        "operationId": "delete_namespace_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expected_head_seq",
+            "in": "query",
+            "description": "Delete only if the namespace head is still at this sequence",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteNamespaceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Delete conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace already deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/changes": {
+      "get": {
+        "tags": [
+          "commits"
+        ],
+        "operationId": "list_changes_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "description": "Return committed changes after this sequence",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid change cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/commits": {
+      "post": {
+        "tags": [
+          "commits"
+        ],
+        "operationId": "commit_operations_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Commit accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid commit request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Commit conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Commit unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/filesystem/content": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "operationId": "get_content",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute file path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_no",
+            "in": "query",
+            "description": "Optional prior revision number",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, path, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/filesystem/list": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "operationId": "list_entries",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute filesystem path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque directory-list page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory listing page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPathEntriesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path, limit, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/filesystem/operations": {
+      "post": {
+        "tags": [
+          "filesystem"
+        ],
+        "operationId": "filesystem_operation",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FilesystemOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Filesystem operation committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilesystemOperationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Commit unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/filesystem/revisions": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "operationId": "list_path_revisions",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute file path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File revisions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListFileRevisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/filesystem/stat": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "operationId": "stat_entry",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Absolute filesystem path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authoritative path entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthoritativePathEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/forks": {
+      "post": {
+        "tags": [
+          "namespaces"
+        ],
+        "operationId": "fork_namespace_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Source namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForkNamespaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Namespace forked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Fork conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Source namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions": {
+      "get": {
+        "tags": [
+          "inodes"
+        ],
+        "operationId": "list_inode_revisions",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "File inode id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File revisions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListFileRevisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or inode not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content": {
+      "get": {
+        "tags": [
+          "inodes"
+        ],
+        "operationId": "get_inode_revision_content",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "File inode id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision_no",
+            "in": "path",
+            "description": "File revision number",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revision bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id or revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, inode, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore": {
+      "post": {
+        "tags": [
+          "inodes"
+        ],
+        "operationId": "restore_inode_revision",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inode_id",
+            "in": "path",
+            "description": "File inode id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source_revision_no",
+            "in": "path",
+            "description": "Revision number to restore",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreFileRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Restore commit response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inode id, revision, or request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, inode, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Commit conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/uploads": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "operationId": "begin_upload_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload session started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeginUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Requested upload mode is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/uploads/{upload_id}/complete": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "operationId": "complete_upload_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid completion request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Upload completion conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/uploads/{upload_id}/content": {
+      "put": {
+        "tags": [
+          "uploads"
+        ],
+        "operationId": "upload_content_handler",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload content accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadContentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Upload content conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdvanceRetentionResponse": {
+        "type": "object",
+        "description": "Result of advancing the retention floor.",
+        "required": [
+          "namespace_id",
+          "retention_floor_seq"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose retention floor changed."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "New minimum sequence for incremental replay."
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "HTTP error body used by LoonFS APIs.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable reason from the [`ErrorCode`] registry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use [`ApiError::error_code`] for\ntyped access."
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `not_supported` errors, the capability-document feature key the\nclient should reconcile against."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error message."
+          }
+        }
+      },
+      "AuthoritativePathEntry": {
+        "type": "object",
+        "description": "Authoritative metadata for one visible path.\n\nThis is the result shape for stat/list style reads. File entries include\nrevision and content summary fields; directory entries leave those empty.",
+        "required": [
+          "namespace_id",
+          "absolute_path",
+          "inode_id",
+          "inode_kind",
+          "head_seq",
+          "display_name"
+        ],
+        "properties": {
+          "absolute_path": {
+            "type": "string",
+            "description": "Absolute path as rendered from stored display names."
+          },
+          "content_ref": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Current content reference, for files."
+              }
+            ]
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Stored display name for this path component."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this answer was read from."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Stable inode identity for this item."
+          },
+          "inode_kind": {
+            "$ref": "#/components/schemas/InodeKind",
+            "description": "Whether the item is a file or directory."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "parent_inode_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Parent directory inode, or `None` for the root."
+              }
+            ]
+          },
+          "revision_no": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Current file revision number, for files."
+              }
+            ]
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Current file size in bytes, for files.",
+            "minimum": 0
+          }
+        }
+      },
+      "BeginUploadRequest": {
+        "type": "object",
+        "description": "Request for starting an upload session.",
+        "properties": {
+          "content_ref": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Required for `direct_put`; the server signs exactly this content object."
+              }
+            ]
+          },
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UploadMode",
+                "description": "Requested upload transport. Absent keeps the existing service-proxied path."
+              }
+            ]
+          }
+        }
+      },
+      "BeginUploadResponse": {
+        "type": "object",
+        "description": "Response for starting an upload session.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "mode"
+        ],
+        "properties": {
+          "direct_put": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DirectPutUpload"
+              }
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/UploadMode"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId"
+          },
+          "upload_id": {
+            "type": "string"
+          }
+        }
+      },
+      "CapabilityDocument": {
+        "type": "object",
+        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nA remote client fetches this from `GET /v0/config` and caches it; an\nembedded engine exposes the same document as a constant. SDK gating logic\nis therefore identical for both backends: check [`supports`] or\n[`has_profile`], and treat a `not_supported` error as authoritative when\nthe two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
+        "required": [
+          "protocol_version",
+          "profiles"
+        ],
+        "properties": {
+          "features": {
+            "type": "object",
+            "description": "Named features and whether this deployment supports them. An absent\nkey means unsupported.",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "description": "Advisory numeric limits clients may use to pre-validate requests.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Advertised profiles, each `plane/version`. All-or-nothing: every\nrequired op of an advertised profile is implemented."
+          },
+          "protocol_version": {
+            "type": "string",
+            "description": "The protocol generation, currently `v0`."
+          }
+        }
+      },
+      "ChangeSeq": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Monotonically increasing namespace commit sequence number.\n\nThis is the global visibility order for a namespace.",
+        "minimum": 0
+      },
+      "ChangesResponse": {
+        "type": "object",
+        "description": "Change-feed response after a cursor.",
+        "required": [
+          "namespace_id",
+          "after_seq",
+          "through_seq",
+          "changes"
+        ],
+        "properties": {
+          "after_seq": {
+            "$ref": "#/components/schemas/ChangeSeq"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommittedChange"
+            }
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId"
+          },
+          "through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq"
+          }
+        }
+      },
+      "CommitDelta": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "inode_id",
+              "inode_kind",
+              "delta"
+            ],
+            "properties": {
+              "delta": {
+                "type": "string",
+                "enum": [
+                  "create_inode"
+                ]
+              },
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "inode_kind": {
+                "$ref": "#/components/schemas/InodeKind"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "parent_inode",
+              "name_key",
+              "display_name",
+              "child_inode",
+              "delta"
+            ],
+            "properties": {
+              "child_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "delta": {
+                "type": "string",
+                "enum": [
+                  "bind_direntry"
+                ]
+              },
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "name_key": {
+                "$ref": "#/components/schemas/NameKey"
+              },
+              "parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "parent_inode",
+              "name_key",
+              "child_inode",
+              "bind_seq",
+              "bind_delta_index",
+              "delta"
+            ],
+            "properties": {
+              "bind_delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "bind_seq": {
+                "$ref": "#/components/schemas/ChangeSeq"
+              },
+              "child_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "delta": {
+                "type": "string",
+                "enum": [
+                  "unbind_direntry"
+                ]
+              },
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "name_key": {
+                "$ref": "#/components/schemas/NameKey"
+              },
+              "parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "inode_id",
+              "revision_no",
+              "content_ref",
+              "delta"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "delta": {
+                "type": "string",
+                "enum": [
+                  "append_file_revision"
+                ]
+              },
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "root_inode",
+              "delta"
+            ],
+            "properties": {
+              "delta": {
+                "type": "string",
+                "enum": [
+                  "tombstone_subtree"
+                ]
+              },
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "root_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "Durable metadata fact exposed through the change feed.\n\nMost clients should use semantic operation results. Sync and projection\nclients can apply deltas directly."
+      },
+      "CommitId": {
+        "type": "string",
+        "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request."
+      },
+      "CommitOp": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Create a directory under a parent inode.",
+            "required": [
+              "parent_inode",
+              "display_name",
+              "op"
+            ],
+            "properties": {
+              "display_name": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "create_dir"
+                ]
+              },
+              "parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Create a file under a parent inode.",
+            "required": [
+              "parent_inode",
+              "display_name",
+              "content_ref",
+              "op"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "create_file"
+                ]
+              },
+              "parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Append a new revision to an existing file.",
+            "required": [
+              "inode_id",
+              "base_revision_no",
+              "content_ref",
+              "op"
+            ],
+            "properties": {
+              "base_revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              },
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "replace_file"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Restore a prior revision as a new current revision.",
+            "required": [
+              "inode_id",
+              "source_revision_no",
+              "base_revision_no",
+              "op"
+            ],
+            "properties": {
+              "base_revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "restore_revision"
+                ]
+              },
+              "source_revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Delete a file inode.",
+            "required": [
+              "inode_id",
+              "op"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "delete_file"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Rename or move an inode.",
+            "required": [
+              "inode_id",
+              "new_parent_inode",
+              "new_display_name",
+              "op"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/RenameMode"
+              },
+              "new_display_name": {
+                "type": "string"
+              },
+              "new_parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "rename"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Delete a directory subtree.",
+            "required": [
+              "root_inode",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "delete_subtree"
+                ]
+              },
+              "root_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              }
+            }
+          }
+        ],
+        "description": "Semantic operation inside a commit request."
+      },
+      "CommitOpResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "inode_id",
+              "op"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "create_dir"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "inode_id",
+              "revision_no",
+              "content_ref",
+              "op"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "create_file"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "inode_id",
+              "revision_no",
+              "content_ref",
+              "op"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "replace_file"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "inode_id",
+              "source_revision_no",
+              "revision_no",
+              "content_ref",
+              "op"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "restore_revision"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              },
+              "source_revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "inode_id",
+              "op"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "delete_file"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "inode_id",
+              "op"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "rename"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "op_index",
+              "root_inode",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "delete_subtree"
+                ]
+              },
+              "op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "root_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              }
+            }
+          }
+        ],
+        "description": "Per-operation result returned after a commit succeeds."
+      },
+      "CommitPrecondition": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "File inode is still at this revision.",
+            "required": [
+              "inode_id",
+              "revision_no",
+              "type"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "inode_revision_is"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Inode ancestors have not been subtree-deleted.",
+            "required": [
+              "inode_id",
+              "type"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ancestors_not_subtree_deleted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Directory child name is still absent.",
+            "required": [
+              "parent_inode",
+              "name_key",
+              "type"
+            ],
+            "properties": {
+              "name_key": {
+                "$ref": "#/components/schemas/NameKey"
+              },
+              "parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "child_name_absent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Directory binding is still exactly the binding the caller saw.",
+            "required": [
+              "parent_inode",
+              "name_key",
+              "child_inode",
+              "bind_seq",
+              "bind_delta_index",
+              "type"
+            ],
+            "properties": {
+              "bind_delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "bind_seq": {
+                "$ref": "#/components/schemas/ChangeSeq"
+              },
+              "child_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "name_key": {
+                "$ref": "#/components/schemas/NameKey"
+              },
+              "parent_inode": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "binding_is"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Directory is still empty.",
+            "required": [
+              "inode_id",
+              "type"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "directory_empty"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Race check evaluated before a commit is accepted."
+      },
+      "CommitRequest": {
+        "type": "object",
+        "description": "Explicit semantic commit request.\n\nUse this lower-level shape when you need one commit id, optional\npreconditions, and multiple ordered operations.",
+        "required": [
+          "commit_id",
+          "ops"
+        ],
+        "properties": {
+          "annotations": {
+            "type": "object",
+            "description": "Optional structured metadata."
+          },
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Client idempotency key for this logical commit."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable note."
+          },
+          "ops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommitOp"
+            },
+            "description": "Ordered semantic operations."
+          },
+          "preconditions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommitPrecondition"
+            },
+            "description": "Optional race checks evaluated before mutation."
+          }
+        }
+      },
+      "CommitResponse": {
+        "type": "object",
+        "description": "Response for a committed explicit request.",
+        "required": [
+          "namespace_id",
+          "commit_id",
+          "committed_seq",
+          "results"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId"
+          },
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommitOpResult"
+            }
+          }
+        }
+      },
+      "CommittedChange": {
+        "type": "object",
+        "description": "One committed change in namespace order.",
+        "required": [
+          "seq",
+          "commit_id",
+          "ops",
+          "deltas"
+        ],
+        "properties": {
+          "annotations": {
+            "type": "object"
+          },
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Client idempotency key for this logical commit."
+          },
+          "deltas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommitDelta"
+            },
+            "description": "Materialized metadata deltas."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommitOpResult"
+            },
+            "description": "Semantic operation results."
+          },
+          "seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence for this logical commit."
+          }
+        }
+      },
+      "CompleteUploadRequest": {
+        "type": "object",
+        "description": "Request to complete an upload with the expected content ref.",
+        "required": [
+          "content_ref"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          }
+        }
+      },
+      "CompleteUploadResponse": {
+        "type": "object",
+        "description": "Response after an upload session is completed.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "content_ref"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId"
+          },
+          "upload_id": {
+            "type": "string"
+          },
+          "validated_content_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ContentRef": {
+        "type": "object",
+        "description": "Pointer to immutable file content.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
+        "required": [
+          "kind",
+          "digest",
+          "size_bytes"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string",
+            "description": "Digest string, currently `sha256:<64 lowercase hex>`."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Content strategy used by the referenced object."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Complete byte length of the referenced file content.",
+            "minimum": 0
+          }
+        }
+      },
+      "ContentStoreId": {
+        "type": "string",
+        "description": "Durable id for an immutable content store.\n\nContent stores own file bytes. Namespaces point at content stores."
+      },
+      "CreateCheckpointResponse": {
+        "type": "object",
+        "description": "Result of creating or reusing a checkpoint.",
+        "required": [
+          "namespace_id",
+          "checkpoint_id",
+          "checkpoint_seq",
+          "manifest_id"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "type": "string",
+            "description": "Durable checkpoint id."
+          },
+          "checkpoint_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence covered by the checkpoint."
+          },
+          "current_manifest_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManifestId",
+                "description": "Head's current manifest pointer after the operation."
+              }
+            ]
+          },
+          "latest_checkpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Latest checkpoint id recorded on the head after the operation."
+          },
+          "manifest_id": {
+            "$ref": "#/components/schemas/ManifestId",
+            "description": "Manifest pinned by the checkpoint."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was checkpointed."
+          }
+        }
+      },
+      "CreateNamespaceRequest": {
+        "type": "object",
+        "description": "Request to create a namespace.",
+        "required": [
+          "namespace_id"
+        ],
+        "properties": {
+          "namespace_id": {
+            "type": "string",
+            "description": "Durable namespace id to create."
+          }
+        }
+      },
+      "DeleteNamespaceResponse": {
+        "type": "object",
+        "description": "Result of deleting a namespace.",
+        "required": [
+          "namespace_id",
+          "head_seq"
+        ],
+        "properties": {
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The head's last committed sequence; the delete linearized\nimmediately after it, so this is where history ended."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose history ended."
+          }
+        }
+      },
+      "DirectPutUpload": {
+        "type": "object",
+        "description": "Presigned direct_put upload details. The raw object key is intentionally not public.",
+        "required": [
+          "content_ref",
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess"
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          }
+        }
+      },
+      "FileRevision": {
+        "type": "object",
+        "description": "One immutable file revision.",
+        "required": [
+          "inode_id",
+          "revision_no",
+          "committed_seq",
+          "content_ref"
+        ],
+        "properties": {
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace sequence that created this revision."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content stored for this revision."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "File inode that owns this revision."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision number within the file inode."
+          }
+        }
+      },
+      "FilesystemOperation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Create one directory.",
+            "required": [
+              "path",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "create_dir"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Create or replace one file with an already-durable content ref.",
+            "required": [
+              "path",
+              "content_ref",
+              "behavior",
+              "op"
+            ],
+            "properties": {
+              "behavior": {
+                "$ref": "#/components/schemas/FilesystemPutBehavior"
+              },
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "put_file"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Delete one path.",
+            "required": [
+              "path",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "delete_path"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Move one path to another path.",
+            "required": [
+              "from_path",
+              "to_path",
+              "op"
+            ],
+            "properties": {
+              "from_path": {
+                "type": "string"
+              },
+              "mode": {
+                "$ref": "#/components/schemas/RenameMode"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "move_path"
+                ]
+              },
+              "to_path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Copy one file path to another path.",
+            "required": [
+              "from_path",
+              "to_path",
+              "op"
+            ],
+            "properties": {
+              "from_path": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "copy_path"
+                ]
+              },
+              "to_path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Restore an older revision as the current revision for a path.",
+            "required": [
+              "path",
+              "source_revision_no",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "restore_revision"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "source_revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
+              }
+            }
+          }
+        ],
+        "description": "One path-oriented filesystem operation."
+      },
+      "FilesystemOperationRequest": {
+        "type": "object",
+        "description": "Request wrapper for one path-oriented operation.",
+        "required": [
+          "commit_id",
+          "operation"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Caller-supplied idempotency key for this operation."
+          },
+          "content_tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidatedContentToken"
+            },
+            "description": "Proofs for any new external content refs introduced by this operation."
+          },
+          "operation": {
+            "$ref": "#/components/schemas/FilesystemOperation",
+            "description": "Operation to apply."
+          }
+        }
+      },
+      "FilesystemOperationResponse": {
+        "type": "object",
+        "description": "Response for one path-oriented operation.",
+        "required": [
+          "namespace_id",
+          "committed_seq"
+        ],
+        "properties": {
+          "committed_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence where the operation became visible."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that changed."
+          }
+        }
+      },
+      "FilesystemPutBehavior": {
+        "type": "string",
+        "description": "Put behavior for path-oriented file writes.",
+        "enum": [
+          "create_only",
+          "replace_existing"
+        ]
+      },
+      "ForkNamespaceRequest": {
+        "type": "object",
+        "description": "Request to fork a namespace.",
+        "required": [
+          "new_namespace_id"
+        ],
+        "properties": {
+          "new_namespace_id": {
+            "type": "string",
+            "description": "Durable namespace id for the fork target."
+          }
+        }
+      },
+      "InodeId": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Numeric identity of a file or directory within a namespace.\n\nInodes are stable across renames.",
+        "minimum": 0
+      },
+      "InodeKind": {
+        "type": "string",
+        "description": "Filesystem item kind.",
+        "enum": [
+          "file",
+          "dir"
+        ]
+      },
+      "ListFileRevisionsResponse": {
+        "type": "object",
+        "description": "Response for listing file revisions.",
+        "required": [
+          "namespace_id",
+          "inode_id",
+          "head_seq",
+          "revisions"
+        ],
+        "properties": {
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence used for the read."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "File inode whose revisions were returned."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileRevision"
+            },
+            "description": "Retained revisions in order."
+          }
+        }
+      },
+      "ListNamespacesResponse": {
+        "type": "object",
+        "description": "Response for namespace listing.",
+        "required": [
+          "namespaces"
+        ],
+        "properties": {
+          "namespaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceSummary"
+            },
+            "description": "Complete namespaces visible to the store for this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page, if more namespaces remain."
+          }
+        }
+      },
+      "ListPathEntriesResponse": {
+        "type": "object",
+        "description": "One directory listing and the namespace head it was answered at.\n\nThe envelope names the listing target and head so an empty directory\nstill tells the caller which state it observed, and so the response can\ngrow without reshaping `entries`.",
+        "required": [
+          "namespace_id",
+          "absolute_path",
+          "head_seq",
+          "entries"
+        ],
+        "properties": {
+          "absolute_path": {
+            "type": "string",
+            "description": "Absolute path of the listed directory."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuthoritativePathEntry"
+            },
+            "description": "Directory entries for this page.\n\nPaged APIs return entries in canonical name-key order. Higher-level\nfull-list convenience methods may sort drained results for display."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this listing was read from."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page, if more entries remain."
+          }
+        }
+      },
+      "ManifestId": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
+        "minimum": 0
+      },
+      "NameKey": {
+        "type": "string",
+        "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`."
+      },
+      "NamespaceId": {
+        "type": "string",
+        "description": "Durable id for one namespace.\n\nA namespace is one filesystem history. This id is not a display name and\nshould not be reused after destruction."
+      },
+      "NamespaceStatusResponse": {
+        "type": "object",
+        "description": "Status summary for one namespace.\n\nThis is the point-lookup answer to \"does this namespace exist, and where\nis its head?\" — cheaper than listing all namespaces when only one matters.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "wal_tail_segments",
+          "retention_floor_seq"
+        ],
+        "properties": {
+          "current_manifest_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ManifestId",
+                "description": "Current manifest pointer recorded by the head."
+              }
+            ]
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Current visible namespace sequence."
+          },
+          "latest_checkpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Latest checkpoint recorded by the head."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace being inspected."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Oldest sequence still promised for incremental replay."
+          },
+          "wal_tail_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of visible WAL segments after the manifest basis.",
+            "minimum": 0
+          }
+        }
+      },
+      "NamespaceSummary": {
+        "type": "object",
+        "description": "Short namespace listing entry.",
+        "required": [
+          "namespace_id"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Durable namespace id."
+          }
+        }
+      },
+      "ObjectTransferAccess": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Short-lived URL plus required headers for one object-store write.",
+            "required": [
+              "method",
+              "url",
+              "expires_at_ms",
+              "kind"
+            ],
+            "properties": {
+              "expires_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Expiration timestamp in Unix milliseconds.",
+                "minimum": 0
+              },
+              "headers": {
+                "type": "object",
+                "description": "Headers that are covered by the signature and must be sent.",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "presigned_url"
+                ]
+              },
+              "method": {
+                "type": "string",
+                "description": "HTTP method the client must use."
+              },
+              "url": {
+                "type": "string",
+                "description": "Full presigned URL."
+              }
+            }
+          }
+        ],
+        "description": "Client-facing direct transfer capability."
+      },
+      "RenameMode": {
+        "type": "string",
+        "description": "Rename behavior.",
+        "enum": [
+          "no_replace",
+          "replace_existing",
+          "exchange"
+        ]
+      },
+      "RestoreFileRevisionRequest": {
+        "type": "object",
+        "description": "Request to restore a file revision by inode.",
+        "required": [
+          "commit_id",
+          "base_revision_no"
+        ],
+        "properties": {
+          "base_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Current revision the caller expects to replace."
+          },
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Caller-supplied idempotency key."
+          }
+        }
+      },
+      "RevisionNo": {
+        "type": "integer",
+        "format": "int64",
+        "description": "Monotonically increasing file revision counter within one file inode.",
+        "minimum": 0
+      },
+      "UploadContentResponse": {
+        "type": "object",
+        "description": "Response after uploading bytes into a session.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "content_ref"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId"
+          },
+          "upload_id": {
+            "type": "string"
+          }
+        }
+      },
+      "UploadMode": {
+        "type": "string",
+        "description": "Upload transport mode.",
+        "enum": [
+          "service_proxied",
+          "direct_put"
+        ]
+      },
+      "ValidatedContentToken": {
+        "type": "object",
+        "description": "Stateless proof that a LoonFS server already validated a content ref.",
+        "required": [
+          "content_ref",
+          "token"
+        ],
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "token": {
+            "type": "string",
+            "description": "Opaque, server-signed token. Clients must not parse it."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "health",
+      "description": "Server health"
+    },
+    {
+      "name": "config",
+      "description": "Capability discovery"
+    },
+    {
+      "name": "namespaces",
+      "description": "Namespace lifecycle and status"
+    },
+    {
+      "name": "filesystem",
+      "description": "Path-oriented filesystem APIs"
+    },
+    {
+      "name": "inodes",
+      "description": "Inode revision APIs"
+    },
+    {
+      "name": "uploads",
+      "description": "Upload session APIs"
+    },
+    {
+      "name": "commits",
+      "description": "Commit and change-feed APIs"
+    },
+    {
+      "name": "admin",
+      "description": "Administrative maintenance APIs"
+    }
+  ]
+}
