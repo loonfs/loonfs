@@ -15,6 +15,7 @@
         "tags": [
           "health"
         ],
+        "summary": "Check health",
         "operationId": "healthz",
         "responses": {
           "200": {
@@ -38,6 +39,7 @@
         "tags": [
           "admin"
         ],
+        "summary": "Create checkpoint",
         "operationId": "create_checkpoint_handler",
         "parameters": [
           {
@@ -119,6 +121,7 @@
         "tags": [
           "admin"
         ],
+        "summary": "Advance retention",
         "operationId": "advance_retention_handler",
         "parameters": [
           {
@@ -190,6 +193,7 @@
         "tags": [
           "config"
         ],
+        "summary": "Get config",
         "operationId": "config_handler",
         "responses": {
           "200": {
@@ -220,6 +224,7 @@
         "tags": [
           "namespaces"
         ],
+        "summary": "List namespaces",
         "operationId": "list_namespaces_handler",
         "parameters": [
           {
@@ -278,6 +283,7 @@
         "tags": [
           "namespaces"
         ],
+        "summary": "Create namespace",
         "operationId": "create_namespace",
         "requestBody": {
           "content": {
@@ -348,6 +354,7 @@
         "tags": [
           "namespaces"
         ],
+        "summary": "Get namespace status",
         "operationId": "namespace_status_handler",
         "parameters": [
           {
@@ -417,6 +424,7 @@
         "tags": [
           "namespaces"
         ],
+        "summary": "Delete namespace",
         "operationId": "delete_namespace_handler",
         "parameters": [
           {
@@ -509,6 +517,7 @@
         "tags": [
           "commits"
         ],
+        "summary": "List changes",
         "operationId": "list_changes_handler",
         "parameters": [
           {
@@ -591,6 +600,7 @@
         "tags": [
           "commits"
         ],
+        "summary": "Commit operations",
         "operationId": "commit_operations_handler",
         "parameters": [
           {
@@ -692,6 +702,7 @@
         "tags": [
           "filesystem"
         ],
+        "summary": "Read file",
         "operationId": "get_content",
         "parameters": [
           {
@@ -786,6 +797,7 @@
         "tags": [
           "filesystem"
         ],
+        "summary": "List directory",
         "operationId": "list_entries",
         "parameters": [
           {
@@ -884,6 +896,7 @@
         "tags": [
           "filesystem"
         ],
+        "summary": "Run filesystem operation",
         "operationId": "filesystem_operation",
         "parameters": [
           {
@@ -985,6 +998,7 @@
         "tags": [
           "filesystem"
         ],
+        "summary": "List file revisions",
         "operationId": "list_path_revisions",
         "parameters": [
           {
@@ -1065,6 +1079,7 @@
         "tags": [
           "filesystem"
         ],
+        "summary": "Stat path",
         "operationId": "stat_entry",
         "parameters": [
           {
@@ -1145,6 +1160,7 @@
         "tags": [
           "namespaces"
         ],
+        "summary": "Fork namespace",
         "operationId": "fork_namespace_handler",
         "parameters": [
           {
@@ -1236,6 +1252,7 @@
         "tags": [
           "inodes"
         ],
+        "summary": "List inode revisions",
         "operationId": "list_inode_revisions",
         "parameters": [
           {
@@ -1316,6 +1333,7 @@
         "tags": [
           "inodes"
         ],
+        "summary": "Read inode revision",
         "operationId": "get_inode_revision_content",
         "parameters": [
           {
@@ -1410,6 +1428,7 @@
         "tags": [
           "inodes"
         ],
+        "summary": "Restore inode revision",
         "operationId": "restore_inode_revision",
         "parameters": [
           {
@@ -1519,6 +1538,7 @@
         "tags": [
           "uploads"
         ],
+        "summary": "Begin upload",
         "operationId": "begin_upload_handler",
         "parameters": [
           {
@@ -1610,6 +1630,7 @@
         "tags": [
           "uploads"
         ],
+        "summary": "Complete upload",
         "operationId": "complete_upload_handler",
         "parameters": [
           {
@@ -1710,6 +1731,7 @@
         "tags": [
           "uploads"
         ],
+        "summary": "Upload content",
         "operationId": "upload_content_handler",
         "parameters": [
           {

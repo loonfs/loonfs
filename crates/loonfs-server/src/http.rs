@@ -281,6 +281,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), String> {
         get,
         path = "/healthz",
         tag = "health",
+        summary = "Check health",
         security(()),
         responses((status = 200, description = "Server health check", body = String))
     )
@@ -295,6 +296,7 @@ async fn healthz() -> &'static str {
         get,
         path = "/v0/config",
         tag = "config",
+        summary = "Get config",
         responses(
             (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
             (status = 401, description = "Unauthorized", body = ApiError)
@@ -320,6 +322,7 @@ async fn config_handler(
         delete,
         path = "/v0/namespaces/{namespace}",
         tag = "namespaces",
+        summary = "Delete namespace",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("expected_head_seq" = Option<u64>, Query, description = "Delete only if the namespace head is still at this sequence")
@@ -359,6 +362,7 @@ async fn delete_namespace_handler(
         post,
         path = "/v0/namespaces",
         tag = "namespaces",
+        summary = "Create namespace",
         request_body = CreateNamespaceRequest,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_api::NamespaceSummary),
@@ -390,6 +394,7 @@ async fn create_namespace(
         get,
         path = "/v0/namespaces",
         tag = "namespaces",
+        summary = "List namespaces",
         params(
             ("limit" = Option<String>, Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque namespace-list page cursor")
@@ -433,6 +438,7 @@ async fn list_namespaces_handler(
         post,
         path = "/v0/namespaces/{namespace}/forks",
         tag = "namespaces",
+        summary = "Fork namespace",
         params(("namespace" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
@@ -468,6 +474,7 @@ async fn fork_namespace_handler(
         get,
         path = "/v0/namespaces/{namespace}/filesystem/list",
         tag = "filesystem",
+        summary = "List directory",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
@@ -513,6 +520,7 @@ async fn list_entries(
         get,
         path = "/v0/namespaces/{namespace}",
         tag = "namespaces",
+        summary = "Get namespace status",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace status", body = loonfs_api::NamespaceStatusResponse),
@@ -551,6 +559,7 @@ async fn namespace_status_handler(
         get,
         path = "/v0/namespaces/{namespace}/filesystem/stat",
         tag = "filesystem",
+        summary = "Stat path",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path")
@@ -587,6 +596,7 @@ async fn stat_entry(
         get,
         path = "/v0/namespaces/{namespace}/filesystem/content",
         tag = "filesystem",
+        summary = "Read file",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
@@ -634,6 +644,7 @@ async fn get_content(
         get,
         path = "/v0/namespaces/{namespace}/filesystem/revisions",
         tag = "filesystem",
+        summary = "List file revisions",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path")
@@ -670,6 +681,7 @@ async fn list_path_revisions(
         get,
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
         tag = "inodes",
+        summary = "List inode revisions",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode id")
@@ -705,6 +717,7 @@ async fn list_inode_revisions(
         get,
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
+        summary = "Read inode revision",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode id"),
@@ -742,6 +755,7 @@ async fn get_inode_revision_content(
         post,
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore",
         tag = "inodes",
+        summary = "Restore inode revision",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode id"),
@@ -796,6 +810,7 @@ async fn restore_inode_revision(
         post,
         path = "/v0/namespaces/{namespace}/filesystem/operations",
         tag = "filesystem",
+        summary = "Run filesystem operation",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = FilesystemOperationRequest,
         responses(
@@ -930,6 +945,7 @@ async fn filesystem_operation(
         post,
         path = "/v0/namespaces/{namespace}/uploads",
         tag = "uploads",
+        summary = "Begin upload",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = BeginUploadRequest,
         responses(
@@ -1087,6 +1103,7 @@ fn current_unix_ms() -> Result<u64, ApiResponseError> {
         put,
         path = "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
         tag = "uploads",
+        summary = "Upload content",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -1125,6 +1142,7 @@ async fn upload_content_handler(
         post,
         path = "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
         tag = "uploads",
+        summary = "Complete upload",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -1171,6 +1189,7 @@ async fn complete_upload_handler(
         post,
         path = "/v0/namespaces/{namespace}/commits",
         tag = "commits",
+        summary = "Commit operations",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = ApiCommitRequest,
         responses(
@@ -1206,6 +1225,7 @@ async fn commit_operations_handler(
         get,
         path = "/v0/namespaces/{namespace}/changes",
         tag = "commits",
+        summary = "List changes",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("after_seq" = u64, Query, description = "Return committed changes after this sequence")
@@ -1243,6 +1263,7 @@ async fn list_changes_handler(
         post,
         path = "/v0/admin/namespaces/{namespace}/checkpoint",
         tag = "admin",
+        summary = "Create checkpoint",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
@@ -1275,6 +1296,7 @@ async fn create_checkpoint_handler(
         post,
         path = "/v0/admin/namespaces/{namespace}/retention/advance",
         tag = "admin",
+        summary = "Advance retention",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Retention floor advanced", body = AdvanceRetentionResponse),
