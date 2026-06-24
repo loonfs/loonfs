@@ -33,7 +33,7 @@ pub struct AuthoritativePathEntry {
 ///
 /// The envelope names the listing target and head so an empty directory
 /// still tells the caller which state it observed, and so the response can
-/// grow (for example, pagination cursors) without reshaping `entries`.
+/// grow without reshaping `entries`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPathEntriesResponse {
     /// Namespace that was read.
@@ -42,8 +42,14 @@ pub struct ListPathEntriesResponse {
     pub absolute_path: String,
     /// Namespace head sequence this listing was read from.
     pub head_seq: ChangeSeq,
-    /// Directory entries in display-name order.
+    /// Directory entries for this page.
+    ///
+    /// Entries are returned in canonical name-key order. Higher-level display
+    /// surfaces may sort entries separately for presentation.
     pub entries: Vec<AuthoritativePathEntry>,
+    /// Cursor for the next page, if more entries remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// File bytes plus the metadata entry they came from.

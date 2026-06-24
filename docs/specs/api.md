@@ -77,7 +77,10 @@ therefore identical for both backends.
     "core.namespaces.delete": true,
     "core.uploads.direct_put": false
   },
-  "limits": {}
+  "limits": {
+    "pagination.default_limit": 1000,
+    "pagination.max_limit": 1000
+  }
 }
 ```
 
@@ -99,6 +102,13 @@ Rules:
 - Clients must ignore unknown feature keys and unknown document fields.
 - Limits are advisory; the authoritative outcome is the server's response to
   the actual request.
+
+Registered limit keys:
+
+| Limit key | Meaning |
+| --- | --- |
+| `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
+| `pagination.max_limit` | Largest accepted page size for paged requests. |
 
 ### 2.2 Feature registry
 
@@ -167,6 +177,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `invalid_upload_id` | 400 | The upload id violates the generated-id grammar. |
 | `invalid_inode_id` | 400 | The inode id path parameter is not a valid integer id. |
 | `invalid_revision_no` | 400 | The revision number parameter is not a valid integer. |
+| `invalid_cursor` | 400 | The pagination cursor is malformed, unsupported, expired, wrong-kind, or no longer matches the requested resource. |
 | `invalid_config` | 400 | The request or server configuration is invalid. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `permission_denied` | 403 | Authenticated, but not allowed to perform this operation. |
@@ -269,7 +280,9 @@ Annotations may be used to correlate multiple logical commits that belong to
 one higher-level workflow, for example with fields such as `operation_id`,
 `operation_kind`, or `operation_part`.
 
-The change feed returns ordered committed changes after an explicit cursor. If
+The change feed returns ordered committed changes after an explicit cursor.
+Callers may bound a response with `limit`; a truncated page returns
+`next_after_seq`, which should be used as the next request's `after_seq`. If
 the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
@@ -290,9 +303,10 @@ A representative v0 binding is shown below.
 | --- | --- |
 | Read deployment capabilities | `GET /v0/config` |
 | Create a namespace | `POST /v0/namespaces` |
+| List namespaces | `GET /v0/namespaces?limit=100&cursor=...` |
 | Read one namespace's status | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
-| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
+| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...` |
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
@@ -303,7 +317,7 @@ A representative v0 binding is shown below.
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
-| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
+| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
@@ -437,6 +451,21 @@ code `namespace_not_found`.
 }
 ```
 
+### 6.3 `GET /v0/namespaces`
+
+Namespace pagination advances in namespace id order. Responses include
+`next_cursor` only when another page is available.
+
+```json
+{
+  "namespaces": [
+    { "namespace_id": "demo" },
+    { "namespace_id": "logs" }
+  ],
+  "next_cursor": "7b2e2e2e7d"
+}
+```
+
 ### 6.4 `DELETE /v0/namespaces/{ns}`
 
 Deletion is a fenced, terminal head transition (`format.md`, "Tombstones and
@@ -490,9 +519,13 @@ the durable naming rules (`format.md`, "Durable naming conventions").
 
 The envelope names the listed path and the head the listing was read from, so
 an empty directory still reports which state it observed and the response can
-grow (for example, pagination cursors) without reshaping `entries`. Entries
-are full path entries with the same shape as `stat` (directory entries leave
-the file-only fields out).
+grow without reshaping `entries`. Entries are full path entries with the same
+shape as `stat` (directory entries leave the file-only fields out).
+
+Directory listing advances in canonical `name_key` order. The `path` query parameter is
+required on every page; the cursor pins the snapshot and resume position, but
+the request path remains the authority for what is being listed. Responses
+include `next_cursor` only when another page is available.
 
 ```json
 {
@@ -525,7 +558,8 @@ the file-only fields out).
       "parent_inode_id": 7,
       "display_name": "slides"
     }
-  ]
+  ],
+  "next_cursor": "7b2e2e2e7d"
 }
 ```
 
@@ -736,7 +770,7 @@ Representative response:
 {
   "namespace_id": "demo",
   "after_seq": 418,
-  "through_seq": 420,
+  "through_seq": 419,
   "changes": [
     {
       "seq": 419,
@@ -773,6 +807,10 @@ Representative response:
   ]
 }
 ```
+
+If `limit` truncates the page before the namespace head, the response includes
+`next_after_seq` set to the last returned change seq. The client resumes with
+`after_seq={next_after_seq}`.
 
 ### 6.11 `POST /forks`
 

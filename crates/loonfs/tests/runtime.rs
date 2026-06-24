@@ -9,11 +9,12 @@ use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode,
-    Fs, FsConfig, InodeId, MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult,
-    ManifestId, MoveOptions, MutationResult, NamespaceId, NamespaceStatus, PutFileBehavior,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    UploadContentResponse,
+    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
+    NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest, PaginationPolicy,
+    PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    TraceMode, TraceStoreKind, UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::cache::load_verified_namespace_basis;
@@ -52,6 +53,24 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .build()
         .expect("test runtime")
         .block_on(future)
+}
+
+fn page_limit(limit: u32) -> loonfs::EffectiveLimit {
+    PaginationPolicy::from_values(limit, limit)
+        .expect("valid pagination policy")
+        .resolve_limit(Some(limit))
+        .expect("valid page limit")
+}
+
+fn decode_directory_page_cursor(value: &str) -> DirectoryPageCursor {
+    loonfs_api::decode_directory_cursor(value).expect("decode directory cursor")
+}
+
+fn display_names(entries: &[AuthoritativePathEntry]) -> Vec<&str> {
+    entries
+        .iter()
+        .map(|entry| entry.display_name.as_str())
+        .collect()
 }
 
 trait FsTestExt {
@@ -1244,6 +1263,300 @@ fn delete_options_select_recursive_behavior() {
         error,
         RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
     ));
+}
+
+#[test]
+fn namespace_pages_resume_by_namespace_id_and_omit_deleted_namespaces() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "namespace-page-test");
+    for namespace in ["alpha", "beta", "charlie", "delta"] {
+        fs.create_namespace_blocking(
+            &NamespaceId::parse(namespace).expect("valid namespace id"),
+            CreateNamespaceOptions::default(),
+        )
+        .expect("create namespace");
+    }
+    block_on(fs.delete_namespace(
+        &NamespaceId::parse("beta").expect("valid namespace id"),
+        DeleteNamespaceOptions::default(),
+    ))
+    .expect("delete beta");
+
+    let limit = page_limit(2);
+    let first = block_on(fs.list_namespaces_page(PageRequest {
+        limit,
+        cursor: None,
+    }))
+    .expect("first namespace page");
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|summary| summary.namespace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "charlie"]
+    );
+    let second = block_on(fs.list_namespaces_page(PageRequest {
+        limit,
+        cursor: first.next_cursor,
+    }))
+    .expect("second namespace page");
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|summary| summary.namespace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["delta"]
+    );
+    assert!(second.next_cursor.is_none());
+
+    let full = fs.list_namespaces_blocking().expect("full namespace list");
+    assert_eq!(
+        full.iter()
+            .map(|summary| summary.namespace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "charlie", "delta"]
+    );
+}
+
+#[test]
+fn namespace_pages_do_not_read_skipped_namespace_heads() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(HeadCasFailureStore::new(temp_dir.path(), "ns-000"));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("namespace-page-read-count")
+        .build()
+        .expect("build runtime");
+
+    for index in 0..20 {
+        let namespace_id =
+            NamespaceId::parse(format!("ns-{index:03}")).expect("valid namespace id");
+        fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+            .expect("create namespace");
+    }
+
+    raw_store.reset_control_get_counts();
+    let page = block_on(fs.list_namespaces_page(PageRequest {
+        limit: page_limit(2),
+        cursor: Some(NamespacesPageCursor {
+            last_namespace_id: NamespaceId::parse("ns-009").expect("valid namespace id"),
+        }),
+    }))
+    .expect("list namespace page");
+
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|summary| summary.namespace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ns-010", "ns-011"]
+    );
+    assert_eq!(
+        raw_store.head_get_count(),
+        0,
+        "page should not read namespace heads before the cursor"
+    );
+}
+
+#[test]
+fn directory_pages_use_canonical_name_key_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "directory-page-order-test");
+    let namespace_id = namespace();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in [
+        "/docs/Zebra.txt",
+        "/docs/apple.txt",
+        "/docs/B.txt",
+        "/docs/a.txt",
+    ] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint");
+
+    let limit = page_limit(2);
+    let first = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit,
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    assert_eq!(display_names(&first.entries), vec!["a.txt", "apple.txt"]);
+
+    let cursor = decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+    let second = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit,
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("second directory page");
+    assert_eq!(display_names(&second.entries), vec!["B.txt", "Zebra.txt"]);
+    assert!(second.next_cursor.is_none());
+
+    let full = block_on(fs.list_path_entries(&namespace_id, "/docs")).expect("full listing");
+    assert_eq!(
+        display_names(&full.entries),
+        vec!["a.txt", "apple.txt", "B.txt", "Zebra.txt"]
+    );
+}
+
+#[test]
+fn directory_cursor_pages_read_original_snapshot_after_later_writes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
+    let namespace_id = namespace();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+
+    let limit = page_limit(2);
+    let first = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit,
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
+    let cursor = decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/z.txt",
+        b"newer",
+        PutFileOptions::default(),
+    )
+    .expect("put later file");
+
+    let second = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit,
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("second directory page");
+    assert_eq!(display_names(&second.entries), vec!["c.txt"]);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "directory-page-floor-test");
+    let namespace_id = namespace();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+
+    let first = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    let cursor = decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/z.txt",
+        b"newer",
+        PutFileOptions::default(),
+    )
+    .expect("put later file");
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint newer snapshot");
+
+    assert_core_error_kind(
+        block_on(fs.list_path_entries_page(
+            &namespace_id,
+            "/docs",
+            PageRequest {
+                limit: page_limit(2),
+                cursor: Some(cursor),
+            },
+        )),
+        ErrorCode::InvalidCursor,
+    );
+}
+
+#[test]
+fn directory_cursor_rejects_path_inode_mismatch() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "directory-page-mismatch-test");
+    let namespace_id = namespace();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+
+    let first = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit: page_limit(1),
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    let cursor = decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+
+    assert_core_error_kind(
+        block_on(fs.list_path_entries_page(
+            &namespace_id,
+            "/",
+            PageRequest {
+                limit: page_limit(1),
+                cursor: Some(cursor),
+            },
+        )),
+        ErrorCode::InvalidCursor,
+    );
 }
 
 #[test]

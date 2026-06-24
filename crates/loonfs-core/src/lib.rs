@@ -84,7 +84,7 @@ pub use context::MutationContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{Error, ErrorCode, ErrorKind, Result};
-pub use namespace::{list_namespaces, BootstrapNamespaceError};
+pub use namespace::{list_namespaces, list_namespaces_page, BootstrapNamespaceError};
 pub use options::{
     BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
     WriteOptions,

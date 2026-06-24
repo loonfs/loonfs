@@ -456,6 +456,7 @@ mod tests {
                 content_store_id: content_store_id.clone(),
             },
             content_store_id,
+            snapshot_floor_seq: ChangeSeq(0),
             head: head.clone(),
             head_etag: "etag-a".to_owned(),
             lease: original_lease.clone(),

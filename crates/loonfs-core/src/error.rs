@@ -87,6 +87,8 @@ pub enum CoreError {
     UploadContentConflict { upload_id: String },
     #[error("invalid upload content: {0}")]
     InvalidUploadContent(String),
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(String),
     #[error(
         "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
     )]
@@ -193,6 +195,7 @@ impl CoreError {
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
             CoreError::InvalidUploadContent(_) => ErrorCode::InvalidUploadContent,
+            CoreError::InvalidCursor(_) => ErrorCode::InvalidCursor,
             CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }

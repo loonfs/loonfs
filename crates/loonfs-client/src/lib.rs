@@ -184,10 +184,26 @@ impl Client {
     }
 
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, ClientError> {
-        let url = format!("{}/v0/namespaces", self.base_url);
-        Ok(self
-            .request_json::<(), ListNamespacesResponse>(self.agent.get(&url), None)?
-            .namespaces)
+        let mut namespaces = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = self.list_namespaces_page(None, cursor.as_deref())?;
+            namespaces.extend(page.namespaces);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(namespaces);
+            }
+        }
+    }
+
+    pub fn list_namespaces_page(
+        &self,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListNamespacesResponse, ClientError> {
+        let mut url = format!("{}/v0/namespaces", self.base_url);
+        append_optional_pagination_query(&mut url, false, limit, cursor);
+        self.request_json::<(), ListNamespacesResponse>(self.agent.get(&url), None)
     }
 
     pub fn namespace_status(
@@ -235,13 +251,46 @@ impl Client {
     }
 
     pub fn list_path(&self, spec: &NamespacePath) -> Result<ListPathEntriesResponse, ClientError> {
+        let mut entries = Vec::new();
+        let mut envelope = None;
+        let mut cursor = None;
+        loop {
+            let page = self.list_path_page(spec, None, cursor.as_deref())?;
+            let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
+                namespace_id: page.namespace_id.clone(),
+                absolute_path: page.absolute_path.clone(),
+                head_seq: page.head_seq,
+                entries: Vec::new(),
+                next_cursor: None,
+            });
+            entries.extend(page.entries);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                entries.sort_by(|left, right| {
+                    left.display_name
+                        .cmp(&right.display_name)
+                        .then(left.inode_id.0.cmp(&right.inode_id.0))
+                });
+                envelope_ref.entries = entries;
+                return Ok(envelope.expect("first page initializes response envelope"));
+            }
+        }
+    }
+
+    pub fn list_path_page(
+        &self,
+        spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListPathEntriesResponse, ClientError> {
         let namespace = namespace_url_segment(&spec.namespace)?;
-        let url = format!(
+        let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/list?path={}",
             self.base_url,
             namespace,
             urlencoding::encode(&spec.absolute_path)
         );
+        append_optional_pagination_query(&mut url, true, limit, cursor);
         self.request_json::<(), ListPathEntriesResponse>(self.agent.get(&url), None)
     }
 
@@ -439,11 +488,23 @@ impl Client {
         namespace: &str,
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse, ClientError> {
+        self.list_changes_page(namespace, after_seq, None)
+    }
+
+    pub fn list_changes_page(
+        &self,
+        namespace: &str,
+        after_seq: ChangeSeq,
+        limit: Option<u32>,
+    ) -> Result<ChangesResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
-        let url = format!(
+        let mut url = format!(
             "{}/v0/namespaces/{namespace}/changes?after_seq={}",
             self.base_url, after_seq.0
         );
+        if let Some(limit) = limit {
+            url.push_str(&format!("&limit={limit}"));
+        }
         self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
     }
 
@@ -896,6 +957,29 @@ fn namespace_url_segment(namespace: &str) -> Result<&str, ClientError> {
 
 fn invalid_namespace_id_error(error: loonfs_api::NamespaceIdValidationError) -> ClientError {
     ClientError::InvalidNamespacePath(error.to_string())
+}
+
+fn append_optional_pagination_query(
+    url: &mut String,
+    has_query: bool,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) {
+    let mut has_query = has_query;
+    if let Some(limit) = limit {
+        append_query_param(url, &mut has_query, "limit", &limit.to_string());
+    }
+    if let Some(cursor) = cursor {
+        append_query_param(url, &mut has_query, "cursor", cursor);
+    }
+}
+
+fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value: &str) {
+    url.push(if *has_query { '&' } else { '?' });
+    *has_query = true;
+    url.push_str(name);
+    url.push('=');
+    url.push_str(&urlencoding::encode(value));
 }
 
 fn parse_commit_id(commit_id: &str) -> Result<CommitId, ClientError> {

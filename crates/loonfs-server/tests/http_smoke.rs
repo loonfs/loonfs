@@ -13,7 +13,9 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, InodeId, InodeKind, ManifestId, RevisionNo,
+    FilesystemPutBehavior, InodeId, InodeKind, ListNamespacesResponse, ListPathEntriesResponse,
+    ManifestId, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
+    LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_objectstore::keys::{namespace_lease, namespace_manifest};
@@ -154,12 +156,210 @@ async fn config_endpoint_advertises_capabilities() {
         assert!(capabilities.supports("core.namespaces.fork"));
         assert!(capabilities.supports("core.namespaces.delete"));
         assert!(!capabilities.supports("core.uploads.direct_put"));
+        assert_eq!(
+            capabilities.limits.get(LIMIT_PAGINATION_DEFAULT),
+            Some(&u64::from(DEFAULT_PAGE_LIMIT))
+        );
+        assert_eq!(
+            capabilities.limits.get(LIMIT_PAGINATION_MAX),
+            Some(&u64::from(DEFAULT_MAX_PAGE_LIMIT))
+        );
 
         let cached = harness.client.capabilities().expect("cached capabilities");
         assert_eq!(cached, capabilities);
     })
     .await
     .expect("blocking task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_paginates_namespaces_and_rejects_bad_namespace_cursors() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-namespace-pagination",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        for namespace in ["alpha", "bravo", "charlie", "pages"] {
+            harness
+                .client
+                .create_namespace(namespace)
+                .expect("create namespace");
+        }
+
+        let first_page = harness
+            .client
+            .list_namespaces_page(Some(2), None)
+            .expect("first namespace page");
+        assert_eq!(
+            namespace_ids(&first_page),
+            vec!["alpha".to_owned(), "bravo".to_owned()]
+        );
+        let cursor = first_page.next_cursor.expect("namespace cursor");
+
+        let second_page = harness
+            .client
+            .list_namespaces_page(Some(2), Some(&cursor))
+            .expect("second namespace page");
+        assert_eq!(
+            namespace_ids(&second_page),
+            vec!["charlie".to_owned(), "pages".to_owned()]
+        );
+        assert_eq!(second_page.next_cursor, None);
+
+        let bad_limit = harness
+            .client
+            .list_namespaces_page(Some(0), None)
+            .expect_err("zero limit rejected");
+        match bad_limit {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(code, "invalid_config");
+            }
+            other => panic!("expected invalid_config, got {other:?}"),
+        }
+        let over_limit = harness
+            .client
+            .list_namespaces_page(Some(DEFAULT_MAX_PAGE_LIMIT + 1), None)
+            .expect_err("oversized limit rejected");
+        match over_limit {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(code, "invalid_config");
+            }
+            other => panic!("expected invalid_config, got {other:?}"),
+        }
+        let nonnumeric_limit: Result<ListNamespacesResponse, ApiError> = get_json(
+            &format!("{}/v0/namespaces?limit=not-a-number", harness.server_url),
+            "test-token",
+        );
+        let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
+        assert_eq!(error.code, "invalid_config");
+        assert!(error.message.contains("invalid limit"));
+
+        let dir = NamespacePath::parse("pages:/docs").expect("docs path");
+        harness.client.create_dir(&dir).expect("create docs dir");
+        for name in ["a.txt", "b.txt"] {
+            let path = NamespacePath::parse(&format!("pages:/docs/{name}")).expect("file path");
+            harness
+                .client
+                .write_file_bytes(&path, name.as_bytes())
+                .expect("write file");
+        }
+        let directory_page = harness
+            .client
+            .list_path_page(&dir, Some(1), None)
+            .expect("directory page");
+        let wrong_cursor = directory_page.next_cursor.expect("directory cursor");
+        let wrong_kind = harness
+            .client
+            .list_namespaces_page(Some(1), Some(&wrong_cursor))
+            .expect_err("directory cursor rejected by namespace endpoint");
+        match wrong_kind {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(code, "invalid_cursor");
+            }
+            other => panic!("expected invalid_cursor, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-directory-pagination",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let docs = NamespacePath::parse("demo:/docs").expect("docs path");
+        let other = NamespacePath::parse("demo:/other").expect("other path");
+        harness.client.create_dir(&docs).expect("create docs dir");
+        harness.client.create_dir(&other).expect("create other dir");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
+            harness
+                .client
+                .write_file_bytes(&path, name.as_bytes())
+                .expect("write file");
+        }
+
+        let first_page = harness
+            .client
+            .list_path_page(&docs, Some(2), None)
+            .expect("first directory page");
+        assert_eq!(entry_names(&first_page), vec!["a.txt", "b.txt"]);
+        let cursor = first_page.next_cursor.clone().expect("directory cursor");
+
+        let second_page = harness
+            .client
+            .list_path_page(&docs, Some(2), Some(&cursor))
+            .expect("second directory page");
+        assert_eq!(entry_names(&second_page), vec!["c.txt"]);
+        assert_eq!(second_page.next_cursor, None);
+
+        let full_listing = harness
+            .client
+            .list_path(&docs)
+            .expect("full directory list");
+        assert_eq!(entry_names(&full_listing), vec!["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(full_listing.next_cursor, None);
+
+        let mismatch = harness
+            .client
+            .list_path_page(&other, Some(2), Some(&cursor))
+            .expect_err("directory cursor must match listed path");
+        match mismatch {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(code, "invalid_cursor");
+            }
+            other => panic!("expected invalid_cursor, got {other:?}"),
+        }
+
+        let raw_first_page: ListPathEntriesResponse = get_json(
+            &format!(
+                "{}/v0/namespaces/demo/filesystem/list?path=/docs&limit=1",
+                harness.server_url
+            ),
+            "test-token",
+        )
+        .expect("raw first directory page");
+        assert_eq!(raw_first_page.entries.len(), 1);
+        assert!(raw_first_page.next_cursor.is_some());
+
+        let nonnumeric_limit: Result<ListPathEntriesResponse, ApiError> = get_json(
+            &format!(
+                "{}/v0/namespaces/demo/filesystem/list?path=/docs&limit=not-a-number",
+                harness.server_url
+            ),
+            "test-token",
+        );
+        let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
+        assert_eq!(error.code, "invalid_config");
+        assert!(error.message.contains("invalid limit"));
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -779,6 +979,35 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             CommitId::parse("req-restore-restore").expect("valid commit id")
         );
         assert_eq!(changes.changes[2].ops, restore.results);
+
+        let first_page = harness
+            .client
+            .list_changes_page(namespace, ChangeSeq(0), Some(2))
+            .expect("list first changes page");
+        assert_eq!(first_page.after_seq, ChangeSeq(0));
+        assert_eq!(first_page.through_seq, ChangeSeq(2));
+        assert_eq!(first_page.next_after_seq, Some(ChangeSeq(2)));
+        assert_eq!(first_page.changes.len(), 2);
+
+        let second_page = harness
+            .client
+            .list_changes_page(
+                namespace,
+                first_page.next_after_seq.expect("next page"),
+                Some(2),
+            )
+            .expect("list second changes page");
+        assert_eq!(second_page.after_seq, ChangeSeq(2));
+        assert_eq!(second_page.through_seq, ChangeSeq(3));
+        assert_eq!(second_page.next_after_seq, None);
+        assert_eq!(
+            second_page
+                .changes
+                .iter()
+                .map(|change| change.seq)
+                .collect::<Vec<_>>(),
+            vec![ChangeSeq(3)]
+        );
     })
     .await
     .expect("join blocking task");
@@ -1400,6 +1629,46 @@ fn test_config(
             root: store_root.display().to_string(),
             key_prefix: Some(key_prefix.to_owned()),
         },
+    }
+}
+
+fn namespace_ids(response: &ListNamespacesResponse) -> Vec<String> {
+    response
+        .namespaces
+        .iter()
+        .map(|namespace| namespace.namespace_id.as_str().to_owned())
+        .collect()
+}
+
+fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
+    response
+        .entries
+        .iter()
+        .map(|entry| entry.display_name.as_str())
+        .collect()
+}
+
+fn get_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> Result<T, ApiError> {
+    let request = ureq::get(url).set("authorization", &format!("Bearer {auth_token}"));
+    match request.call() {
+        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
+            code: "invalid_json".to_owned(),
+            feature: None,
+            message: err.to_string(),
+        }),
+        Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
+            response.into_reader(),
+        )
+        .unwrap_or_else(|err| ApiError {
+            code: "invalid_json".to_owned(),
+            feature: None,
+            message: err.to_string(),
+        })),
+        Err(ureq::Error::Transport(error)) => Err(ApiError {
+            code: "transport".to_owned(),
+            feature: None,
+            message: error.to_string(),
+        }),
     }
 }
 

@@ -11,17 +11,24 @@ use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
+use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult,
-    NamespaceId, NamespaceSummary, RevisionNo,
+    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, InodeId, ListFileRevisionsResponse,
+    MutationResult, NamespaceId, NamespaceSummary, NamespacesPageCursor, Page, PageRequest,
+    RevisionNo, DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
+
+fn default_page_limit() -> EffectiveLimit {
+    EffectiveLimit::new(NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap_or(NonZeroU32::MIN))
+}
 
 /// Internal target used by server integrations before they mint a presigned URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +173,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         catalog::list_namespaces(&self.store).await
     }
 
+    /// Lists one page of complete namespaces visible in the object store.
+    pub async fn list_namespaces_page(
+        &self,
+        request: PageRequest<NamespacesPageCursor>,
+    ) -> CoreResult<Page<NamespaceSummary, NamespacesPageCursor>> {
+        catalog::list_namespaces_page(&self.store, request).await
+    }
+
     /// Resolves one absolute path to the authoritative entry at the current head.
     pub async fn resolve_path(
         &self,
@@ -242,6 +257,48 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         }
         let basis = self.basis_for_read_options(options).await?;
         crate::path::query::list_path_from_basis(&basis, path)
+    }
+
+    /// Lists one page of children for a directory path.
+    pub async fn list_path_page(
+        &self,
+        path: impl AsRef<str>,
+        options: ReadOptions,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::PreferMaterialized => {
+                if let Some(entries) = crate::path::query::list_path_page_from_materialized_tables(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                    request.clone(),
+                )
+                .await?
+                {
+                    return Ok(entries);
+                }
+            }
+            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
+                if let Some(entries) =
+                    crate::path::query::list_path_page_from_materialized_tables_at_head_with_cache(
+                        &self.store,
+                        &self.namespace_id,
+                        head,
+                        path,
+                        table_cache.as_deref(),
+                        request.clone(),
+                    )
+                    .await?
+                {
+                    return Ok(entries);
+                }
+            }
+            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+        }
+        let basis = self.basis_for_read_options(options).await?;
+        crate::path::query::list_path_page_from_basis(&basis, path, request)
     }
 
     /// Reads the current bytes for a file path.
@@ -525,7 +582,17 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     /// Reads committed changes after `after_seq`.
     pub async fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
-        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq).await
+        self.list_changes_after_with_limit(after_seq, default_page_limit())
+            .await
+    }
+
+    /// Reads up to `limit` committed changes after `after_seq`.
+    pub async fn list_changes_after_with_limit(
+        &self,
+        after_seq: ChangeSeq,
+        limit: EffectiveLimit,
+    ) -> CoreResult<ChangesResponse> {
+        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
     }
 
     /// Starts a durable upload session for this namespace.

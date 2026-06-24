@@ -49,6 +49,7 @@ pub enum ErrorCode {
     InvalidUploadId,
     InvalidInodeId,
     InvalidRevisionNo,
+    InvalidCursor,
     InvalidConfig,
     Unauthorized,
     PermissionDenied,
@@ -83,13 +84,14 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 36] = [
+    pub const ALL: [ErrorCode; 37] = [
         ErrorCode::InvalidPath,
         ErrorCode::InvalidNamespaceId,
         ErrorCode::InvalidCommitId,
         ErrorCode::InvalidUploadId,
         ErrorCode::InvalidInodeId,
         ErrorCode::InvalidRevisionNo,
+        ErrorCode::InvalidCursor,
         ErrorCode::InvalidConfig,
         ErrorCode::Unauthorized,
         ErrorCode::PermissionDenied,
@@ -130,6 +132,7 @@ impl ErrorCode {
             | ErrorCode::InvalidUploadId
             | ErrorCode::InvalidInodeId
             | ErrorCode::InvalidRevisionNo
+            | ErrorCode::InvalidCursor
             | ErrorCode::InvalidConfig
             | ErrorCode::UnsupportedRenameMode
             | ErrorCode::InvalidUploadContent => ErrorKind::InvalidRequest,
@@ -169,6 +172,7 @@ impl ErrorCode {
             ErrorCode::InvalidUploadId => "invalid_upload_id",
             ErrorCode::InvalidInodeId => "invalid_inode_id",
             ErrorCode::InvalidRevisionNo => "invalid_revision_no",
+            ErrorCode::InvalidCursor => "invalid_cursor",
             ErrorCode::InvalidConfig => "invalid_config",
             ErrorCode::Unauthorized => "unauthorized",
             ErrorCode::PermissionDenied => "permission_denied",

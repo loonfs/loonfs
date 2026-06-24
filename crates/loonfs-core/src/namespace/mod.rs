@@ -14,7 +14,7 @@ pub(crate) mod lease;
 
 pub use bootstrap::BootstrapNamespaceError;
 pub use loonfs_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
-use loonfs_api::{FenceToken, NamespaceSummary};
+use loonfs_api::{FenceToken, NamespaceSummary, NamespacesPageCursor, Page, PageRequest};
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
@@ -23,6 +23,14 @@ pub async fn list_namespaces<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> crate::Result<Vec<NamespaceSummary>> {
     catalog::list_namespaces(store).await
+}
+
+/// Lists one page of complete namespaces in namespace id order.
+pub async fn list_namespaces_page<S: ObjectStore + ?Sized>(
+    store: &S,
+    request: PageRequest<NamespacesPageCursor>,
+) -> crate::Result<Page<NamespaceSummary, NamespacesPageCursor>> {
+    catalog::list_namespaces_page(store, request).await
 }
 
 /// Returns true when the head and lease agree on the active writer fence.
