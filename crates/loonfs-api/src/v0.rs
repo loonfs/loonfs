@@ -326,6 +326,8 @@ pub struct ChangesResponse {
     pub namespace_id: NamespaceId,
     pub after_seq: ChangeSeq,
     pub through_seq: ChangeSeq,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_seq: Option<ChangeSeq>,
     pub changes: Vec<CommittedChange>,
 }
 

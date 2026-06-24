@@ -11,18 +11,24 @@ use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
+use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, DirectoryPageCursor, InodeId, ListFileRevisionsResponse,
     MutationResult, NamespaceId, NamespaceSummary, NamespacesPageCursor, Page, PageRequest,
-    RevisionNo,
+    RevisionNo, DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
+
+fn default_page_limit() -> EffectiveLimit {
+    EffectiveLimit::new(NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap_or(NonZeroU32::MIN))
+}
 
 /// Internal target used by server integrations before they mint a presigned URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,7 +582,17 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     /// Reads committed changes after `after_seq`.
     pub async fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
-        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq).await
+        self.list_changes_after_with_limit(after_seq, default_page_limit())
+            .await
+    }
+
+    /// Reads up to `limit` committed changes after `after_seq`.
+    pub async fn list_changes_after_with_limit(
+        &self,
+        after_seq: ChangeSeq,
+        limit: EffectiveLimit,
+    ) -> CoreResult<ChangesResponse> {
+        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
     }
 
     /// Starts a durable upload session for this namespace.

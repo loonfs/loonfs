@@ -488,11 +488,23 @@ impl Client {
         namespace: &str,
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse, ClientError> {
+        self.list_changes_page(namespace, after_seq, None)
+    }
+
+    pub fn list_changes_page(
+        &self,
+        namespace: &str,
+        after_seq: ChangeSeq,
+        limit: Option<u32>,
+    ) -> Result<ChangesResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
-        let url = format!(
+        let mut url = format!(
             "{}/v0/namespaces/{namespace}/changes?after_seq={}",
             self.base_url, after_seq.0
         );
+        if let Some(limit) = limit {
+            url.push_str(&format!("&limit={limit}"));
+        }
         self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
     }
 

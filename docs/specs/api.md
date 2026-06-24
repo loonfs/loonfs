@@ -280,7 +280,9 @@ Annotations may be used to correlate multiple logical commits that belong to
 one higher-level workflow, for example with fields such as `operation_id`,
 `operation_kind`, or `operation_part`.
 
-The change feed returns ordered committed changes after an explicit cursor. If
+The change feed returns ordered committed changes after an explicit cursor.
+Callers may bound a response with `limit`; a truncated page returns
+`next_after_seq`, which should be used as the next request's `after_seq`. If
 the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
@@ -315,7 +317,7 @@ A representative v0 binding is shown below.
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
-| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
+| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
@@ -768,7 +770,7 @@ Representative response:
 {
   "namespace_id": "demo",
   "after_seq": 418,
-  "through_seq": 420,
+  "through_seq": 419,
   "changes": [
     {
       "seq": 419,
@@ -805,6 +807,10 @@ Representative response:
   ]
 }
 ```
+
+If `limit` truncates the page before the namespace head, the response includes
+`next_after_seq` set to the last returned change seq. The client resumes with
+`after_seq={next_after_seq}`.
 
 ### 6.11 `POST /forks`
 

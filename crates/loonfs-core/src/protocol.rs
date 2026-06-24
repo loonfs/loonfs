@@ -41,7 +41,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
 use loonfs_api::{
     generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    ContentStoreId, NameKey, NamespaceId,
+    ContentStoreId, EffectiveLimit, NameKey, NamespaceId,
 };
 use loonfs_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -964,6 +964,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
+    limit: EffectiveLimit,
 ) -> Result<ChangesResponse, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id).await?;
     if after_seq < basis.head.retention_floor_seq {
@@ -977,6 +978,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             after_seq,
             through_seq: basis.head.seq,
+            next_after_seq: None,
             changes: Vec::new(),
         });
     }
@@ -993,12 +995,15 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
-    let mut changes = Vec::new();
-    for segment in wal_chain.segments() {
+    let mut changes = Vec::with_capacity(limit.as_usize());
+    let mut through_seq = basis.head.seq;
+    let mut next_after_seq = None;
+    'segments: for segment in wal_chain.segments() {
         for record in segment.records() {
             if record.seq > after_seq {
+                let seq = record.seq;
                 changes.push(CommittedChange {
-                    seq: record.seq,
+                    seq,
                     commit_id: record.commit_id.clone(),
                     message: record.message.clone(),
                     annotations: record.annotations.clone(),
@@ -1009,6 +1014,13 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                         .map(commit_delta_from_wal)
                         .collect::<Result<Vec<_>, _>>()?,
                 });
+                if changes.len() == limit.as_usize() {
+                    through_seq = seq;
+                    if seq < basis.head.seq {
+                        next_after_seq = Some(seq);
+                    }
+                    break 'segments;
+                }
             }
         }
     }
@@ -1016,7 +1028,8 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     Ok(ChangesResponse {
         namespace_id: namespace_id.clone(),
         after_seq,
-        through_seq: basis.head.seq,
+        through_seq,
+        next_after_seq,
         changes,
     })
 }

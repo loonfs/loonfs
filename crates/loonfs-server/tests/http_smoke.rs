@@ -979,6 +979,35 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             CommitId::parse("req-restore-restore").expect("valid commit id")
         );
         assert_eq!(changes.changes[2].ops, restore.results);
+
+        let first_page = harness
+            .client
+            .list_changes_page(namespace, ChangeSeq(0), Some(2))
+            .expect("list first changes page");
+        assert_eq!(first_page.after_seq, ChangeSeq(0));
+        assert_eq!(first_page.through_seq, ChangeSeq(2));
+        assert_eq!(first_page.next_after_seq, Some(ChangeSeq(2)));
+        assert_eq!(first_page.changes.len(), 2);
+
+        let second_page = harness
+            .client
+            .list_changes_page(
+                namespace,
+                first_page.next_after_seq.expect("next page"),
+                Some(2),
+            )
+            .expect("list second changes page");
+        assert_eq!(second_page.after_seq, ChangeSeq(2));
+        assert_eq!(second_page.through_seq, ChangeSeq(3));
+        assert_eq!(second_page.next_after_seq, None);
+        assert_eq!(
+            second_page
+                .changes
+                .iter()
+                .map(|change| change.seq)
+                .collect::<Vec<_>>(),
+            vec![ChangeSeq(3)]
+        );
     })
     .await
     .expect("join blocking task");

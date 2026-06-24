@@ -80,6 +80,7 @@ struct ContentQuery {
 #[derive(Debug, serde::Deserialize)]
 struct ChangesQuery {
     after_seq: u64,
+    limit: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -861,9 +862,10 @@ async fn list_changes_handler(
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let after_seq = loonfs_api::ChangeSeq(query.after_seq);
+    let limit = resolve_page_limit(query.limit)?;
     let response = state
         .fs
-        .list_changes_after(&namespace_id, after_seq)
+        .list_changes_after_with_limit(&namespace_id, after_seq, limit)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

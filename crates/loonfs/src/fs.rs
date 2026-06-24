@@ -1097,9 +1097,23 @@ impl Fs {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse> {
+        let limit = PaginationPolicy::default()
+            .resolve_limit(None)
+            .map_err(|error| RuntimeError::Config(error.to_string()))?;
+        self.list_changes_after_with_limit(namespace_id, after_seq, limit)
+            .await
+    }
+
+    /// Reads up to `limit` committed changes after the `after_seq` cursor.
+    pub async fn list_changes_after_with_limit(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        limit: EffectiveLimit,
+    ) -> Result<ChangesResponse> {
         Ok(self
             .namespace_engine(namespace_id)
-            .list_changes_after(after_seq)
+            .list_changes_after_with_limit(after_seq, limit)
             .await?)
     }
 
