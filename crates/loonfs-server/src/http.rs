@@ -125,7 +125,7 @@ fn app_with_fs(
         transfer_issuer,
     };
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
         .route("/v0/config", get(config_handler))
         .route(
             "/v0/namespaces",
@@ -275,10 +275,34 @@ pub async fn serve(config: ServerConfig) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-async fn healthz() -> &'static str {
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/health",
+        tag = "health",
+        summary = "Check health",
+        security(()),
+        responses((status = 200, description = "Server health check", body = String))
+    )
+)]
+async fn health() -> &'static str {
     "ok"
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/config",
+        tag = "config",
+        summary = "Get config",
+        responses(
+            (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
+            (status = 401, description = "Unauthorized", body = ApiError)
+        )
+    )
+)]
 async fn config_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -292,6 +316,27 @@ async fn config_handler(
     Ok(Json(capabilities))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        delete,
+        path = "/v0/namespaces/{namespace}",
+        tag = "namespaces",
+        summary = "Delete namespace",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("expected_head_seq" = Option<u64>, Query, description = "Delete only if the namespace head is still at this sequence")
+        ),
+        responses(
+            (status = 200, description = "Namespace deleted", body = loonfs_api::DeleteNamespaceResponse),
+            (status = 400, description = "Invalid request", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "Delete conflict", body = ApiError),
+            (status = 410, description = "Namespace already deleted", body = ApiError)
+        )
+    )
+)]
 async fn delete_namespace_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -311,6 +356,23 @@ async fn delete_namespace_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces",
+        tag = "namespaces",
+        summary = "Create namespace",
+        request_body = CreateNamespaceRequest,
+        responses(
+            (status = 200, description = "Namespace created", body = loonfs_api::NamespaceSummary),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 409, description = "Namespace already exists or is partial", body = ApiError),
+            (status = 410, description = "Namespace id was deleted and retired", body = ApiError)
+        )
+    )
+)]
 async fn create_namespace(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -326,6 +388,24 @@ async fn create_namespace(
     Ok(Json(summary))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces",
+        tag = "namespaces",
+        summary = "List namespaces",
+        params(
+            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque namespace-list page cursor")
+        ),
+        responses(
+            (status = 200, description = "Namespace page", body = ListNamespacesResponse),
+            (status = 400, description = "Invalid limit or cursor", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError)
+        )
+    )
+)]
 async fn list_namespaces_handler(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
@@ -352,6 +432,25 @@ async fn list_namespaces_handler(
     }))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/forks",
+        tag = "namespaces",
+        summary = "Fork namespace",
+        params(("namespace" = String, Path, description = "Source namespace id")),
+        request_body = ForkNamespaceRequest,
+        responses(
+            (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceSummary),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Source namespace not found", body = ApiError),
+            (status = 409, description = "Fork conflict", body = ApiError),
+            (status = 410, description = "Source namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn fork_namespace_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -369,6 +468,28 @@ async fn fork_namespace_handler(
     Ok(Json(summary))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/filesystem/list",
+        tag = "filesystem",
+        summary = "List directory",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("path" = String, Query, description = "Absolute filesystem path"),
+            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor")
+        ),
+        responses(
+            (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
+            (status = 400, description = "Invalid path, limit, or cursor", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or path not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn list_entries(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -393,6 +514,23 @@ async fn list_entries(
     Ok(Json(listing))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}",
+        tag = "namespaces",
+        summary = "Get namespace status",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Namespace status", body = loonfs_api::NamespaceStatusResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn namespace_status_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -415,6 +553,26 @@ async fn namespace_status_handler(
     }))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/filesystem/stat",
+        tag = "filesystem",
+        summary = "Stat path",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("path" = String, Query, description = "Absolute filesystem path")
+        ),
+        responses(
+            (status = 200, description = "Authoritative path entry", body = loonfs_api::AuthoritativePathEntry),
+            (status = 400, description = "Invalid path", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or path not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn stat_entry(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -432,6 +590,27 @@ async fn stat_entry(
     Ok(Json(entry))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/filesystem/content",
+        tag = "filesystem",
+        summary = "Read file",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("path" = String, Query, description = "Absolute file path"),
+            ("revision_no" = Option<String>, Query, description = "Optional prior revision number")
+        ),
+        responses(
+            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
+            (status = 400, description = "Invalid path or revision", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn get_content(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -459,6 +638,26 @@ async fn get_content(
     Ok((StatusCode::OK, file.bytes).into_response())
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/filesystem/revisions",
+        tag = "filesystem",
+        summary = "List file revisions",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("path" = String, Query, description = "Absolute file path")
+        ),
+        responses(
+            (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
+            (status = 400, description = "Invalid path", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or path not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn list_path_revisions(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -476,6 +675,26 @@ async fn list_path_revisions(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
+        tag = "inodes",
+        summary = "List inode revisions",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("inode_id" = String, Path, description = "File inode id")
+        ),
+        responses(
+            (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
+            (status = 400, description = "Invalid inode id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or inode not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn list_inode_revisions(
     State(state): State<AppState>,
     AxumPath((namespace, inode_id)): AxumPath<(String, String)>,
@@ -492,6 +711,27 @@ async fn list_inode_revisions(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content",
+        tag = "inodes",
+        summary = "Read inode revision",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("inode_id" = String, Path, description = "File inode id"),
+            ("revision_no" = String, Path, description = "File revision number")
+        ),
+        responses(
+            (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
+            (status = 400, description = "Invalid inode id or revision", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn get_inode_revision_content(
     State(state): State<AppState>,
     AxumPath((namespace, inode_id, revision_no)): AxumPath<(String, String, String)>,
@@ -509,6 +749,29 @@ async fn get_inode_revision_content(
     Ok((StatusCode::OK, bytes).into_response())
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore",
+        tag = "inodes",
+        summary = "Restore inode revision",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("inode_id" = String, Path, description = "File inode id"),
+            ("source_revision_no" = String, Path, description = "Revision number to restore")
+        ),
+        request_body = RestoreFileRevisionRequest,
+        responses(
+            (status = 200, description = "Restore commit response", body = ApiCommitResponse),
+            (status = 400, description = "Invalid inode id, revision, or request", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
+            (status = 409, description = "Commit conflict", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn restore_inode_revision(
     State(state): State<AppState>,
     AxumPath((namespace, inode_id, source_revision_no)): AxumPath<(String, String, String)>,
@@ -541,6 +804,26 @@ async fn restore_inode_revision(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/filesystem/operations",
+        tag = "filesystem",
+        summary = "Run filesystem operation",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        request_body = FilesystemOperationRequest,
+        responses(
+            (status = 200, description = "Filesystem operation committed", body = FilesystemOperationResponse),
+            (status = 400, description = "Invalid operation", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or path not found", body = ApiError),
+            (status = 409, description = "Operation conflict", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 503, description = "Commit unavailable", body = ApiError)
+        )
+    )
+)]
 async fn filesystem_operation(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -656,6 +939,25 @@ async fn filesystem_operation(
     Ok(Json(result))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/uploads",
+        tag = "uploads",
+        summary = "Begin upload",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        request_body = BeginUploadRequest,
+        responses(
+            (status = 200, description = "Upload session started", body = BeginUploadResponse),
+            (status = 400, description = "Invalid upload request", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 501, description = "Requested upload mode is unsupported", body = ApiError)
+        )
+    )
+)]
 async fn begin_upload_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -795,6 +1097,28 @@ fn current_unix_ms() -> Result<u64, ApiResponseError> {
     })
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        put,
+        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
+        tag = "uploads",
+        summary = "Upload content",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+        responses(
+            (status = 200, description = "Upload content accepted", body = UploadContentResponse),
+            (status = 400, description = "Invalid upload content", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 409, description = "Upload content conflict", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn upload_content_handler(
     State(state): State<AppState>,
     AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
@@ -812,6 +1136,28 @@ async fn upload_content_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
+        tag = "uploads",
+        summary = "Complete upload",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        request_body = CompleteUploadRequest,
+        responses(
+            (status = 200, description = "Upload completed", body = CompleteUploadResponse),
+            (status = 400, description = "Invalid completion request", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 409, description = "Upload completion conflict", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn complete_upload_handler(
     State(state): State<AppState>,
     AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
@@ -837,6 +1183,26 @@ async fn complete_upload_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/commits",
+        tag = "commits",
+        summary = "Commit operations",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        request_body = ApiCommitRequest,
+        responses(
+            (status = 200, description = "Commit accepted", body = ApiCommitResponse),
+            (status = 400, description = "Invalid commit request", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "Commit conflict", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 503, description = "Commit unavailable", body = ApiError)
+        )
+    )
+)]
 async fn commit_operations_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -853,6 +1219,27 @@ async fn commit_operations_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/changes",
+        tag = "commits",
+        summary = "List changes",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("after_seq" = u64, Query, description = "Return committed changes after this sequence"),
+            ("limit" = Option<String>, Query, description = "Maximum page size")
+        ),
+        responses(
+            (status = 200, description = "Committed changes", body = ChangesResponse),
+            (status = 400, description = "Invalid change cursor or limit", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn list_changes_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -871,6 +1258,24 @@ async fn list_changes_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/checkpoint",
+        tag = "admin",
+        summary = "Create checkpoint",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 503, description = "Checkpoint unavailable", body = ApiError)
+        )
+    )
+)]
 async fn create_checkpoint_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -886,6 +1291,23 @@ async fn create_checkpoint_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/retention/advance",
+        tag = "admin",
+        summary = "Advance retention",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Retention floor advanced", body = AdvanceRetentionResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
 async fn advance_retention_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -900,6 +1322,110 @@ async fn advance_retention_handler(
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
+
+#[cfg(feature = "openapi")]
+pub fn openapi_document() -> utoipa::openapi::OpenApi {
+    <LoonfsOpenApi as utoipa::OpenApi>::openapi()
+}
+
+#[cfg(feature = "openapi")]
+pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&openapi_document())
+}
+
+#[cfg(feature = "openapi")]
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    info(
+        title = "LoonFS HTTP API",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "Static OpenAPI document for the LoonFS v0 HTTP API."
+    ),
+    paths(
+        health,
+        config_handler,
+        create_namespace,
+        list_namespaces_handler,
+        namespace_status_handler,
+        delete_namespace_handler,
+        fork_namespace_handler,
+        list_entries,
+        stat_entry,
+        get_content,
+        list_path_revisions,
+        filesystem_operation,
+        list_inode_revisions,
+        get_inode_revision_content,
+        restore_inode_revision,
+        begin_upload_handler,
+        upload_content_handler,
+        complete_upload_handler,
+        commit_operations_handler,
+        list_changes_handler,
+        create_checkpoint_handler,
+        advance_retention_handler
+    ),
+    components(schemas(
+        loonfs_api::CapabilityDocument,
+        ApiError,
+        CreateNamespaceRequest,
+        ForkNamespaceRequest,
+        loonfs_api::NamespaceSummary,
+        ListNamespacesResponse,
+        loonfs_api::NamespaceStatusResponse,
+        loonfs_api::DeleteNamespaceResponse,
+        FilesystemPutBehavior,
+        FilesystemOperation,
+        FilesystemOperationRequest,
+        FilesystemOperationResponse,
+        loonfs_api::FileRevision,
+        ListFileRevisionsResponse,
+        RestoreFileRevisionRequest,
+        CreateCheckpointResponse,
+        AdvanceRetentionResponse,
+        ContentRef,
+        loonfs_api::NamespaceId,
+        loonfs_api::ContentStoreId,
+        loonfs_api::CommitId,
+        InodeId,
+        RevisionNo,
+        ChangeSeq,
+        loonfs_api::ManifestId,
+        loonfs_api::NameKey,
+        loonfs_api::InodeKind,
+        loonfs_api::AuthoritativePathEntry,
+        loonfs_api::ListPathEntriesResponse,
+        BeginUploadRequest,
+        BeginUploadResponse,
+        UploadContentResponse,
+        CompleteUploadRequest,
+        CompleteUploadResponse,
+        DirectPutUpload,
+        ObjectTransferAccess,
+        UploadMode,
+        ValidatedContentToken,
+        ApiCommitRequest,
+        ApiCommitResponse,
+        loonfs_api::v0::RenameMode,
+        loonfs_api::v0::CommitOp,
+        loonfs_api::v0::CommitPrecondition,
+        loonfs_api::v0::CommitOpResult,
+        loonfs_api::v0::CommitDelta,
+        loonfs_api::v0::CommittedChange,
+        ChangesResponse
+    )),
+    tags(
+        (name = "health", description = "Server health"),
+        (name = "config", description = "Capability discovery"),
+        (name = "namespaces", description = "Namespace lifecycle and status"),
+        (name = "filesystem", description = "Path-oriented filesystem APIs"),
+        (name = "inodes", description = "Inode revision APIs"),
+        (name = "uploads", description = "Upload session APIs"),
+        (name = "commits", description = "Commit and change-feed APIs"),
+        (name = "admin", description = "Administrative maintenance APIs")
+    )
+)]
+struct LoonfsOpenApi;
 
 fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiResponseError> {
     let Some(expected) = &config.auth_token else {

@@ -32,6 +32,7 @@ pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// [`supports`]: CapabilityDocument::supports
 /// [`has_profile`]: CapabilityDocument::has_profile
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CapabilityDocument {
     /// The protocol generation, currently `v0`.
     pub protocol_version: String,

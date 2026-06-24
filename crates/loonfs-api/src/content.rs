@@ -62,8 +62,10 @@ impl<'de> Deserialize<'de> for ContentRefKind {
 /// A `ContentRef` is safe to publish only after the referenced bytes are
 /// durable in the namespace's content store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ContentRef {
     /// Content strategy used by the referenced object.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub kind: ContentRefKind,
     /// Digest string, currently `sha256:<64 lowercase hex>`.
     pub digest: String,

@@ -11,18 +11,24 @@ const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 /// A namespace is one filesystem history. This id is not a display name and
 /// should not be reused after destruction.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String))]
 pub struct NamespaceId(String);
 
 /// Durable id for an immutable content store.
 ///
 /// Content stores own file bytes. Namespaces point at content stores.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String))]
 pub struct ContentStoreId(String);
 
 /// Client-supplied idempotency key for one logical commit.
 ///
 /// Reuse the same `CommitId` when retrying the same request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String))]
 pub struct CommitId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -584,16 +590,22 @@ impl<'de> Deserialize<'de> for NameKey {
 ///
 /// Inodes are stable across renames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = u64))]
 pub struct InodeId(pub u64);
 
 /// Monotonically increasing file revision counter within one file inode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = u64))]
 pub struct RevisionNo(pub u64);
 
 /// Monotonically increasing namespace commit sequence number.
 ///
 /// This is the global visibility order for a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = u64))]
 pub struct ChangeSeq(pub u64);
 
 /// Monotonically increasing namespace manifest identity.
@@ -603,10 +615,14 @@ pub struct ChangeSeq(pub u64);
 /// later manifest ids can advance for checkpoint metadata, compaction, or
 /// fork/index metadata without a new namespace commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = u64))]
 pub struct ManifestId(pub u64);
 
 /// Fencing token for write-lease concurrency control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = u64))]
 pub struct FenceToken(pub u64);
 
 /// Name-policy-derived directory entry key.
@@ -614,10 +630,13 @@ pub struct FenceToken(pub u64);
 /// Use this for exact name preconditions. Keep user-facing spelling in
 /// `DisplayName`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String))]
 pub struct NameKey(String);
 
 /// Filesystem item kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InodeKind {
     /// File with revision history.

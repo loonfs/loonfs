@@ -48,6 +48,7 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
       - run: cargo test --all
+      - run: cargo test -p loonfs-server --features openapi openapi
 
   dist:
     name: dist

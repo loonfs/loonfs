@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// This is the result shape for stat/list style reads. File entries include
 /// revision and content summary fields; directory entries leave those empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuthoritativePathEntry {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
@@ -35,6 +36,7 @@ pub struct AuthoritativePathEntry {
 /// still tells the caller which state it observed, and so the response can
 /// grow without reshaping `entries`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListPathEntriesResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
@@ -54,6 +56,7 @@ pub struct ListPathEntriesResponse {
 
 /// File bytes plus the metadata entry they came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AuthoritativeFileBytes {
     /// Authoritative metadata for the file that was read.
     pub entry: AuthoritativePathEntry,

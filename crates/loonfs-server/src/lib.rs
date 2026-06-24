@@ -14,4 +14,6 @@ pub use config::{
     load_server_config, RuntimeCacheConfigOverrides, ServerConfig, ServerConfigError, StoreConfig,
 };
 pub use http::{app, serve};
+#[cfg(feature = "openapi")]
+pub use http::{openapi_document, openapi_json_pretty};
 pub use trace::{init_tracing_from_env, TraceInitError};

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// HTTP error body used by LoonFS APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiError {
     /// Stable machine-readable reason from the [`ErrorCode`] registry.
     ///
@@ -31,6 +32,7 @@ impl ApiError {
 
 /// Request to create a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateNamespaceRequest {
     /// Durable namespace id to create.
     pub namespace_id: String,
@@ -38,6 +40,7 @@ pub struct CreateNamespaceRequest {
 
 /// Request to fork a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
     pub new_namespace_id: String,
@@ -45,6 +48,7 @@ pub struct ForkNamespaceRequest {
 
 /// Short namespace listing entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceSummary {
     /// Durable namespace id.
     pub namespace_id: NamespaceId,
@@ -52,6 +56,7 @@ pub struct NamespaceSummary {
 
 /// Response for namespace listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListNamespacesResponse {
     /// Complete namespaces visible to the store for this page.
     pub namespaces: Vec<NamespaceSummary>,
@@ -65,6 +70,7 @@ pub struct ListNamespacesResponse {
 /// This is the point-lookup answer to "does this namespace exist, and where
 /// is its head?" — cheaper than listing all namespaces when only one matters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceStatusResponse {
     /// Namespace being inspected.
     pub namespace_id: NamespaceId,
@@ -84,6 +90,7 @@ pub struct NamespaceStatusResponse {
 
 /// Result of deleting a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeleteNamespaceResponse {
     /// Namespace whose history ended.
     pub namespace_id: NamespaceId,
@@ -94,6 +101,7 @@ pub struct DeleteNamespaceResponse {
 
 /// Result of a namespace-visible mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MutationResult {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
@@ -103,6 +111,7 @@ pub struct MutationResult {
 
 /// Put behavior for path-oriented file writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum FilesystemPutBehavior {
     /// Fail if the path already exists.
@@ -113,6 +122,7 @@ pub enum FilesystemPutBehavior {
 
 /// One path-oriented filesystem operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum FilesystemOperation {
     /// Create one directory.
@@ -143,6 +153,7 @@ pub enum FilesystemOperation {
 
 /// Request wrapper for one path-oriented operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FilesystemOperationRequest {
     /// Caller-supplied idempotency key for this operation.
     pub commit_id: CommitId,
@@ -155,6 +166,7 @@ pub struct FilesystemOperationRequest {
 
 /// Response for one path-oriented operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FilesystemOperationResponse {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
@@ -164,6 +176,7 @@ pub struct FilesystemOperationResponse {
 
 /// One immutable file revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct FileRevision {
     /// File inode that owns this revision.
     pub inode_id: InodeId,
@@ -177,6 +190,7 @@ pub struct FileRevision {
 
 /// Response for listing file revisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListFileRevisionsResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
@@ -190,6 +204,7 @@ pub struct ListFileRevisionsResponse {
 
 /// Request to restore a file revision by inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreFileRevisionRequest {
     /// Caller-supplied idempotency key.
     pub commit_id: CommitId,
@@ -199,6 +214,7 @@ pub struct RestoreFileRevisionRequest {
 
 /// Result of creating or reusing a checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateCheckpointResponse {
     /// Namespace that was checkpointed.
     pub namespace_id: NamespaceId,
@@ -216,6 +232,7 @@ pub struct CreateCheckpointResponse {
 
 /// Result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AdvanceRetentionResponse {
     /// Namespace whose retention floor changed.
     pub namespace_id: NamespaceId,
