@@ -1228,11 +1228,12 @@ async fn commit_operations_handler(
         summary = "List changes",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
-            ("after_seq" = u64, Query, description = "Return committed changes after this sequence")
+            ("after_seq" = u64, Query, description = "Return committed changes after this sequence"),
+            ("limit" = Option<String>, Query, description = "Maximum page size")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ChangesResponse),
-            (status = 400, description = "Invalid change cursor", body = ApiError),
+            (status = 400, description = "Invalid change cursor or limit", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError)

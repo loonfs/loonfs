@@ -80,6 +80,12 @@ fn openapi_documents_current_server_paths() {
         "get",
         &["path", "limit", "cursor"],
     );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace}/changes",
+        "get",
+        &["after_seq", "limit"],
+    );
 }
 
 fn assert_path_method(paths: &serde_json::Map<String, Value>, path: &str, method: &str) {

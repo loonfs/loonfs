@@ -539,6 +539,15 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -553,7 +562,7 @@
             }
           },
           "400": {
-            "description": "Invalid change cursor",
+            "description": "Invalid change cursor or limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -2087,6 +2096,16 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId"
           },
+          "next_after_seq": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChangeSeq"
+              }
+            ]
+          },
           "through_seq": {
             "$ref": "#/components/schemas/ChangeSeq"
           }
@@ -3387,7 +3406,7 @@
             "items": {
               "$ref": "#/components/schemas/AuthoritativePathEntry"
             },
-            "description": "Directory entries for this page.\n\nPaged APIs return entries in canonical name-key order. Higher-level\nfull-list convenience methods may sort drained results for display."
+            "description": "Directory entries for this page.\n\nEntries are returned in canonical name-key order. Higher-level display\nsurfaces may sort entries separately for presentation."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
