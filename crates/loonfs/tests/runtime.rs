@@ -10,11 +10,11 @@ use loonfs::{
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
-    NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest, PaginationPolicy,
-    PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    TraceMode, TraceStoreKind, UploadContentResponse,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
+    MutationResult, NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest,
+    PaginationPolicy, PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, TraceMode, TraceStoreKind, UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::cache::load_verified_namespace_basis;
@@ -598,22 +598,32 @@ fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
-        .expect("create docs");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
 
     raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first stat should reuse write-promoted basis");
     assert_eq!(raw_store.wal_get_count(), 0);
 
-    fs.stat_path_blocking(&namespace_id, "/docs")
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second stat should reuse cached basis");
     assert_eq!(raw_store.wal_get_count(), 0);
 
-    fs.create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
-        .expect("create other");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/other.txt",
+        b"other",
+        PutFileOptions::default(),
+    )
+    .expect("put other");
     raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("stat after local mutation should reuse advanced basis");
     assert_eq!(raw_store.wal_get_count(), 0);
 }
@@ -677,13 +687,18 @@ fn runtime_cache_can_be_disabled() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
-        .expect("create docs");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
 
     raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first stat should load basis");
-    fs.stat_path_blocking(&namespace_id, "/docs")
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second stat should load basis again");
     assert_eq!(raw_store.wal_get_count(), 2);
 }
@@ -691,7 +706,33 @@ fn runtime_cache_can_be_disabled() {
 #[test]
 fn runtime_basis_cache_evicts_by_namespace_count() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = Fs::builder(store(temp_dir.path()))
+    let shared_store = store(temp_dir.path());
+    let setup = Fs::builder(shared_store.clone())
+        .writer_id("basis-count-setup")
+        .build()
+        .expect("build setup runtime");
+    let first = NamespaceId::parse("first").expect("valid namespace id");
+    let second = NamespaceId::parse("second").expect("valid namespace id");
+    setup
+        .create_namespace_blocking(&first, CreateNamespaceOptions::default())
+        .expect("create first namespace");
+    setup
+        .put_file_bytes_blocking(&first, "/file.txt", b"first", PutFileOptions::default())
+        .expect("put first file");
+    setup
+        .create_namespace_blocking(&second, CreateNamespaceOptions::default())
+        .expect("create second namespace");
+    setup
+        .put_file_bytes_blocking(&second, "/file.txt", b"second", PutFileOptions::default())
+        .expect("put second file");
+
+    let second_weight = block_on(load_verified_namespace_basis(
+        shared_store.as_ref(),
+        &second,
+    ))
+    .expect("load second basis")
+    .weight();
+    let fs = Fs::builder(shared_store)
         .writer_id("basis-count-budget")
         .runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces: 1,
@@ -699,22 +740,16 @@ fn runtime_basis_cache_evicts_by_namespace_count() {
         })
         .build()
         .expect("build runtime");
-    let first = NamespaceId::parse("first").expect("valid namespace id");
-    let second = NamespaceId::parse("second").expect("valid namespace id");
-    fs.create_namespace_blocking(&first, CreateNamespaceOptions::default())
-        .expect("create first namespace");
-    fs.create_namespace_blocking(&second, CreateNamespaceOptions::default())
-        .expect("create second namespace");
 
-    fs.stat_path_blocking(&first, "/")
+    fs.read_file_bytes_blocking(&first, "/file.txt")
         .expect("cache first basis");
-    fs.stat_path_blocking(&second, "/")
+    fs.read_file_bytes_blocking(&second, "/file.txt")
         .expect("cache second basis and evict first");
     let after_second = fs.runtime_cache_stats();
     assert_eq!(after_second.warm_basis_evictions, 1);
-    assert_eq!(after_second.warm_basis_cached_rows, 1);
+    assert_eq!(after_second.warm_basis_cached_rows, second_weight.rows);
 
-    fs.stat_path_blocking(&first, "/")
+    fs.read_file_bytes_blocking(&first, "/file.txt")
         .expect("first basis rehydrates after eviction");
     let after_reload = fs.runtime_cache_stats();
     assert_eq!(after_reload.warm_basis_cache_misses, 3);
@@ -724,49 +759,90 @@ fn runtime_basis_cache_evicts_by_namespace_count() {
 #[test]
 fn runtime_basis_cache_evicts_by_row_budget() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = Fs::builder(store(temp_dir.path()))
+    let shared_store = store(temp_dir.path());
+    let setup = Fs::builder(shared_store.clone())
+        .writer_id("basis-row-setup")
+        .build()
+        .expect("build setup runtime");
+    let first = NamespaceId::parse("row-one").expect("valid namespace id");
+    let second = NamespaceId::parse("row-two").expect("valid namespace id");
+    setup
+        .create_namespace_blocking(&first, CreateNamespaceOptions::default())
+        .expect("create first namespace");
+    setup
+        .put_file_bytes_blocking(&first, "/file.txt", b"first", PutFileOptions::default())
+        .expect("put first file");
+    setup
+        .create_namespace_blocking(&second, CreateNamespaceOptions::default())
+        .expect("create second namespace");
+    setup
+        .put_file_bytes_blocking(&second, "/file.txt", b"second", PutFileOptions::default())
+        .expect("put second file");
+
+    let second_weight = block_on(load_verified_namespace_basis(
+        shared_store.as_ref(),
+        &second,
+    ))
+    .expect("load second basis")
+    .weight();
+    let fs = Fs::builder(shared_store)
         .writer_id("basis-row-budget")
         .runtime_cache(RuntimeCacheConfig {
-            max_cached_basis_rows: 1,
+            max_cached_basis_rows: second_weight.rows,
             max_cached_basis_decoded_bytes: None,
             ..RuntimeCacheConfig::default()
         })
         .build()
         .expect("build runtime");
-    let first = NamespaceId::parse("row-one").expect("valid namespace id");
-    let second = NamespaceId::parse("row-two").expect("valid namespace id");
-    fs.create_namespace_blocking(&first, CreateNamespaceOptions::default())
-        .expect("create first namespace");
-    fs.create_namespace_blocking(&second, CreateNamespaceOptions::default())
-        .expect("create second namespace");
 
-    fs.stat_path_blocking(&first, "/")
+    fs.read_file_bytes_blocking(&first, "/file.txt")
         .expect("cache first basis");
-    fs.stat_path_blocking(&second, "/")
+    fs.read_file_bytes_blocking(&second, "/file.txt")
         .expect("cache second basis and evict first by rows");
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_evictions, 1);
-    assert_eq!(stats.warm_basis_evicted_rows, 1);
-    assert_eq!(stats.warm_basis_cached_rows, 1);
+    assert_eq!(stats.warm_basis_evicted_rows, second_weight.rows);
+    assert_eq!(stats.warm_basis_cached_rows, second_weight.rows);
 }
 
 #[test]
 fn runtime_basis_budget_includes_commit_engine_bases() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("combined-budget").expect("valid namespace id");
-    let fs = Fs::builder(store(temp_dir.path()))
+    let shared_store = store(temp_dir.path());
+    let setup = Fs::builder(shared_store.clone())
+        .writer_id("combined-basis-budget")
+        .build()
+        .expect("build setup runtime");
+    setup
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    setup
+        .put_file_bytes_blocking(
+            &namespace_id,
+            "/file.txt",
+            b"file",
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    let basis_weight = block_on(load_verified_namespace_basis(
+        shared_store.as_ref(),
+        &namespace_id,
+    ))
+    .expect("load basis")
+    .weight();
+
+    let fs = Fs::builder(shared_store)
         .writer_id("combined-basis-budget")
         .runtime_cache(RuntimeCacheConfig {
-            max_cached_basis_rows: 2,
+            max_cached_basis_rows: basis_weight.rows,
             max_cached_basis_decoded_bytes: None,
             ..RuntimeCacheConfig::default()
         })
         .build()
         .expect("build runtime");
 
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    fs.stat_path_blocking(&namespace_id, "/")
+    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("cache read basis");
     assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
         &namespace_id,
@@ -778,7 +854,7 @@ fn runtime_basis_budget_includes_commit_engine_bases() {
     assert!(stats.warm_basis_cached_rows <= 2);
 
     let misses_before = stats.warm_basis_cache_misses;
-    fs.stat_path_blocking(&namespace_id, "/docs")
+    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("read still works after aggregate budget pruning");
     let stats = fs.runtime_cache_stats();
     assert!(stats.warm_basis_cache_misses > misses_before);
@@ -795,8 +871,14 @@ fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
         .create_namespace_blocking(&first, CreateNamespaceOptions::default())
         .expect("create first namespace");
     setup
+        .put_file_bytes_blocking(&first, "/file.txt", b"first", PutFileOptions::default())
+        .expect("put first file");
+    setup
         .create_namespace_blocking(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
+    setup
+        .put_file_bytes_blocking(&second, "/file.txt", b"second", PutFileOptions::default())
+        .expect("put second file");
     let raw_store = store(temp_dir.path());
     let basis_weight = block_on(load_verified_namespace_basis(raw_store.as_ref(), &first))
         .expect("load basis")
@@ -812,9 +894,9 @@ fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
         .build()
         .expect("build runtime");
 
-    fs.stat_path_blocking(&first, "/")
+    fs.read_file_bytes_blocking(&first, "/file.txt")
         .expect("cache first basis");
-    fs.stat_path_blocking(&second, "/")
+    fs.read_file_bytes_blocking(&second, "/file.txt")
         .expect("cache second basis and evict first by bytes");
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_evictions, 1);
@@ -830,6 +912,14 @@ fn runtime_basis_cache_skips_oversized_basis() {
     setup
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
+    setup
+        .put_file_bytes_blocking(
+            &namespace_id,
+            "/file.txt",
+            b"file",
+            PutFileOptions::default(),
+        )
+        .expect("put file");
     let raw_store = store(temp_dir.path());
     let basis_weight = block_on(load_verified_namespace_basis(
         raw_store.as_ref(),
@@ -848,9 +938,9 @@ fn runtime_basis_cache_skips_oversized_basis() {
         .build()
         .expect("build runtime");
 
-    fs.stat_path_blocking(&namespace_id, "/")
+    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("first stat reconstructs oversized basis");
-    fs.stat_path_blocking(&namespace_id, "/")
+    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("second stat reconstructs oversized basis again");
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_cache_misses, 2);
@@ -1688,7 +1778,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 }
 
 #[test]
-fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
+fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let fs = runtime(temp_dir.path(), "read-fallback-test");
@@ -1704,8 +1794,8 @@ fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
         .expect("list root");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_full_basis_fallbacks, 2);
-    assert_eq!(stats.read_materialized_table_hits, 0);
+    assert_eq!(stats.read_full_basis_fallbacks, 0);
+    assert_eq!(stats.read_materialized_table_hits, 2);
 }
 
 #[test]
@@ -2159,7 +2249,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -2175,9 +2265,32 @@ fn namespace_status_reports_wal_tail_segments() {
         .namespace_status_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+}
+
+#[test]
+fn root_stat_and_list_work_immediately_after_namespace_create() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "initial-manifest-read-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    let root = fs
+        .stat_path_blocking(&namespace_id, "/")
+        .expect("stat root after create");
+    assert_eq!(root.absolute_path, "/");
+    assert_eq!(root.inode_id, InodeId(1));
+    assert_eq!(root.inode_kind, InodeKind::Dir);
+    assert_eq!(root.head_seq, ChangeSeq(0));
+
+    let entries = fs
+        .list_path_blocking(&namespace_id, "/")
+        .expect("list root after create");
+    assert!(entries.is_empty());
 }
 
 #[test]
@@ -2509,7 +2622,7 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
     let status = fs
         .namespace_status_blocking(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 1);
 }
 

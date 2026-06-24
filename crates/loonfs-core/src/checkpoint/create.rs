@@ -21,11 +21,14 @@ use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::namespace::bootstrap::bootstrap_basis_metadata_state;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{generate_checkpoint_id, CreateCheckpointResponse, ManifestId, NamespaceId};
+use loonfs_api::{
+    generate_checkpoint_id, ChangeSeq, CreateCheckpointResponse, ManifestId, NamespaceId,
+};
 use loonfs_objectstore::keys::namespace_manifest;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeMap;
@@ -237,6 +240,49 @@ pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId, 
         .ok_or_else(|| CoreError::Store("manifest id overflow".to_owned()))
 }
 
+pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    initial_head: &HeadState,
+    writer_version: &str,
+) -> Result<NamespaceManifestEnvelope, CoreError> {
+    let manifest_id = ManifestId(initial_head.seq.0);
+    let metadata_state = bootstrap_basis_metadata_state();
+    let run_tables = build_manifest_tables(
+        store,
+        namespace_id,
+        initial_head.seq,
+        CHECKPOINT_BASE_RUN_LEVEL,
+        &metadata_state,
+        writer_version,
+        MetadataLsmPolicy::default().max_rows_per_segment,
+    )
+    .await?;
+    debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
+
+    NamespaceManifestEnvelope::from_payload(
+        writer_version,
+        NamespaceManifestPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            head_seq: initial_head.seq,
+            head_commit_id: initial_head.head_commit_id.clone(),
+            base_seq: initial_head.seq,
+            active_fence_token: initial_head.active_fence_token,
+            next_inode_id: initial_head.next_inode_id,
+            name_policy: initial_head.name_policy,
+            retention_floor_seq: initial_head.retention_floor_seq,
+            initialized: true,
+            verified: true,
+            fork: None,
+            checkpoints: Vec::new(),
+            features: BTreeMap::new(),
+            metadata_files: flatten_manifest_tables(run_tables),
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))
+}
+
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -272,6 +318,20 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
     }
 
     let (base_seq, metadata_files) = match previous_manifest {
+        Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
+            let run_tables = build_manifest_tables(
+                store,
+                namespace_id,
+                head_seq,
+                CHECKPOINT_BASE_RUN_LEVEL,
+                &basis.metadata_state,
+                writer_version,
+                policy.max_rows_per_segment,
+            )
+            .await?;
+            debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
+            (head_seq, flatten_manifest_tables(run_tables))
+        }
         Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
             let mut metadata_files = previous.manifest.payload.metadata_files.clone();
             if previous.manifest.payload.head_seq < head_seq {
@@ -339,6 +399,13 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))
+}
+
+fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
+    payload.head_seq == ChangeSeq(0)
+        && payload.base_seq == ChangeSeq(0)
+        && payload.checkpoints.is_empty()
+        && payload.fork.is_none()
 }
 
 pub(super) fn checkpoint_record_for_manifest(

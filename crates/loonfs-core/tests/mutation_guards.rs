@@ -1675,7 +1675,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_driven_reads_fallback_without_manifest() {
+async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1694,12 +1694,12 @@ async fn query_driven_reads_fallback_without_manifest() {
     .expect("put file");
 
     let stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/file.txt")
-        .expect("stat with fallback");
-    let list =
-        list_path_with_read_source(&store, &namespace_id, "/docs").expect("list with fallback");
+        .expect("stat with initial manifest");
+    let list = list_path_with_read_source(&store, &namespace_id, "/docs")
+        .expect("list with initial manifest");
 
-    assert_eq!(stat.source, MetadataReadSource::FullBasisFallback);
-    assert_eq!(list.source, MetadataReadSource::FullBasisFallback);
+    assert_eq!(stat.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(list.source, MetadataReadSource::MaterializedTables);
     assert_eq!(stat.value.size_bytes, Some(4));
     assert_eq!(list.value.len(), 1);
 }

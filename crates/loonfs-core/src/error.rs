@@ -228,6 +228,7 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
 fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
     match error {
         BasisLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+        BasisLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
         BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
         BasisLoadError::LoadContentStoreDescriptor(error) => match error {
             ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,

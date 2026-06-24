@@ -180,9 +180,12 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        let Some(manifest_id) = head.current_manifest_id else {
-            return Ok(None);
-        };
+        let manifest_id = head.current_manifest_id.ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "namespace `{}` head has no current manifest",
+                namespace_id.as_str()
+            ))
+        })?;
         let _catalog_entry = load_namespace_catalog_entry(store, namespace_id)
             .await
             .map_err(BasisLoadError::from)?;

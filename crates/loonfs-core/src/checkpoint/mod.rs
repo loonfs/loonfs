@@ -35,7 +35,7 @@ pub use self::cache::{MetadataTableCache, MetadataTableCacheConfig, MetadataTabl
 pub use self::error::{ManifestLoadError, ManifestLoadErrorKind};
 pub use self::runs::MetadataLsmPolicy;
 
-pub(crate) use self::create::create_checkpoint;
+pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::load::{
     load_namespace_manifest_envelope, load_verified_manifest_materialization,
     load_verified_manifest_tables_with_cache, manifest_basis_head,

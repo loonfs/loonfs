@@ -1,3 +1,4 @@
+use crate::checkpoint::{build_initial_namespace_manifest, write_namespace_manifest};
 use crate::context::MutationContext;
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::catalog::{
@@ -13,8 +14,8 @@ use loonfs_api::wire::control::{
     NamespaceDescriptorEnvelope, NamespaceDescriptorState,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError,
-    NamespaceSummary,
+    ChangeSeq, ContentStoreId, InodeId, InodeKind, ManifestId, NamespaceId,
+    NamespaceIdValidationError, NamespaceSummary,
 };
 use loonfs_objectstore::keys::{
     content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
@@ -49,6 +50,8 @@ pub enum BootstrapNamespaceError {
     HeadWrite(String),
     #[error("failed to write lease object: {0}")]
     LeaseWrite(String),
+    #[error("failed to write initial namespace manifest: {0}")]
+    ManifestWrite(String),
 }
 
 impl From<NamespaceInitializationError> for BootstrapNamespaceError {
@@ -114,7 +117,20 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         NamespaceInitializationState::Absent => {}
     }
 
-    let initial_head = HeadState::initial(namespace_id.clone());
+    let mut initial_head = HeadState::initial(namespace_id.clone());
+    initial_head.current_manifest_id = Some(ManifestId(initial_head.seq.0));
+    let initial_manifest = build_initial_namespace_manifest(
+        store,
+        namespace_id,
+        &initial_head,
+        &context.writer_version,
+    )
+    .await
+    .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+    write_namespace_manifest(store, &initial_manifest)
+        .await
+        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+
     let initial_lease = LeaseState {
         namespace_id: namespace_id.clone(),
         holder_id: context.writer_id.clone(),
@@ -167,8 +183,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .put_if_absent(&descriptor_key, Bytes::from(namespace_descriptor_bytes))
         .await
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
-
-    let _ = bootstrap_basis_metadata_state();
 
     Ok(NamespaceSummary {
         namespace_id: namespace_id.clone(),

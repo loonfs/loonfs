@@ -96,17 +96,14 @@ async fn manifest_round_trip_uses_manifest_basis_for_mixed_namespace() {
     let before = load_verified_namespace_basis(&store, &namespace_id)
         .await
         .expect("basis before");
-    create_checkpoint(&store, &namespace_id, &context)
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
     let after = load_verified_namespace_basis(&store, &namespace_id)
         .await
         .expect("basis after");
 
-    assert_eq!(
-        after.head.current_manifest_id,
-        Some(ManifestId(before.head.seq.0))
-    );
+    assert_eq!(after.head.current_manifest_id, Some(checkpoint.manifest_id));
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -181,15 +178,21 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let basis = load_verified_namespace_basis(&store, &namespace_id)
         .await
         .expect("basis");
-    assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
-    let materialized = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
+    assert_eq!(basis.head.current_manifest_id, Some(ManifestId(1)));
+    assert!(basis.head.latest_checkpoint_id.is_some());
+    let bootstrap_manifest =
+        load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
+            .await
+            .expect("load bootstrap manifest");
+    assert!(bootstrap_manifest.manifest.payload.checkpoints.is_empty());
+    let materialized = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
         .await
         .expect("load namespace manifest");
     assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
     let checkpoint = &materialized.manifest.payload.checkpoints[0];
     assert!(validate_checkpoint_id(&checkpoint.checkpoint_id).is_ok());
     assert_eq!(checkpoint.head_seq, ChangeSeq(0));
-    assert_eq!(checkpoint.manifest_id, ManifestId(0));
+    assert_eq!(checkpoint.manifest_id, ManifestId(1));
 }
 
 #[tokio::test]
@@ -262,11 +265,11 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let basis = load_verified_namespace_basis(&store, &namespace_id)
         .await
         .expect("basis");
-    assert_eq!(basis.head.current_manifest_id, None);
+    assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
 }
 
 #[tokio::test]
-async fn retention_advancement_requires_published_checkpoint_and_updates_floor_only() {
+async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -275,10 +278,10 @@ async fn retention_advancement_requires_published_checkpoint_and_updates_floor_o
         .await
         .expect("bootstrap");
 
-    match advance_retention_floor(&store, &namespace_id, &context).await {
-        Err(CoreError::CheckpointUnavailable(_)) => {}
-        other => panic!("expected manifest unavailable, got {other:?}"),
-    }
+    let unchanged = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("initial manifest already covers floor zero");
+    assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
 
     write_file_bytes(
         &store,
@@ -1939,7 +1942,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
     let outcome = publish_current_manifest_id(
         &store,
         &namespace_id,
-        ManifestId(0),
+        ManifestId(1),
         "chk_00000000000000000000000000000000",
         &context.writer_version,
     )

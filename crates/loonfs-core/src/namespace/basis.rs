@@ -4,7 +4,6 @@ use crate::checkpoint::{
 };
 use crate::error::CoreError;
 use crate::metadata::MetadataState;
-use crate::namespace::bootstrap::bootstrap_basis_metadata_state;
 use crate::namespace::catalog::{
     load_namespace_catalog_entry, namespace_initialization_state, NamespaceCatalogLoadError,
     NamespaceInitializationError, NamespaceInitializationState, VerifiedNamespaceCatalogEntry,
@@ -130,6 +129,8 @@ pub enum BasisLoadError {
     MissingHeadEtag { object_key: String },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` head has no current manifest")]
+    MissingCurrentManifest { namespace_id: NamespaceId },
     #[error(
         "namespace head changed during basis load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
     )]
@@ -244,20 +245,17 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
         .await
         .map_err(BasisLoadError::LoadLease)?;
 
-    let (initial_head, initial_metadata_state) = if let Some(manifest_id) = head.current_manifest_id
-    {
-        let materialized =
-            load_verified_manifest_materialization(store, expected_namespace, manifest_id).await?;
-        (
-            manifest_basis_head(&head, &materialized.manifest),
-            materialized.metadata_state,
-        )
-    } else {
-        (
-            HeadState::initial(expected_namespace.clone()),
-            bootstrap_basis_metadata_state(),
-        )
-    };
+    let manifest_id =
+        head.current_manifest_id
+            .ok_or_else(|| BasisLoadError::MissingCurrentManifest {
+                namespace_id: expected_namespace.clone(),
+            })?;
+    let materialized =
+        load_verified_manifest_materialization(store, expected_namespace, manifest_id).await?;
+    let (initial_head, initial_metadata_state) = (
+        manifest_basis_head(&head, &materialized.manifest),
+        materialized.metadata_state,
+    );
     let wal_chain = load_validated_wal_chain(
         store,
         WalChainLoadRequest {
@@ -354,15 +352,17 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         });
     }
     let head = loaded_head.envelope.state;
-    let manifest_basis_seq = if let Some(manifest_id) = head.current_manifest_id {
+    let manifest_id = head.current_manifest_id.ok_or_else(|| {
+        CoreError::Basis(BasisLoadError::MissingCurrentManifest {
+            namespace_id: expected_namespace.clone(),
+        })
+    })?;
+    let manifest_basis_seq =
         load_namespace_manifest_envelope(store, expected_namespace, manifest_id)
             .await
             .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?
             .payload
-            .head_seq
-    } else {
-        ChangeSeq(0)
-    };
+            .head_seq;
     let wal_tail_segments = if head.visible_wal_tip.is_some() {
         count_wal_tail_segments_by_position(store, expected_namespace, manifest_basis_seq).await?
     } else {
@@ -488,10 +488,13 @@ fn ensure_reconstructed_head_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BootstrapOptions, NamespaceEngine, WriteOptions};
+    use crate::checkpoint::load_verified_manifest_materialization;
+    use crate::{BootstrapOptions, NamespaceEngine, ReadOptions, WriteOptions};
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::BoxStream;
+    use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
+    use loonfs_api::{ErrorCode, InodeId, InodeKind, ManifestId};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
     use std::sync::Arc;
@@ -554,6 +557,91 @@ mod tests {
         ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
             self.inner.list_prefix_stream(prefix)
         }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_publishes_initial_manifest_for_root_metadata() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("primary").expect("valid namespace id");
+        let engine = NamespaceEngine::builder(Arc::clone(&store))
+            .namespace(namespace_id.clone())
+            .writer("writer-a")
+            .build()
+            .expect("engine");
+        engine
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap");
+
+        let basis = load_verified_namespace_basis(store.as_ref(), &namespace_id)
+            .await
+            .expect("basis");
+        assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
+        assert_eq!(basis.head.latest_checkpoint_id, None);
+
+        let materialized =
+            load_verified_manifest_materialization(store.as_ref(), &namespace_id, ManifestId(0))
+                .await
+                .expect("initial manifest materializes");
+        assert_eq!(materialized.manifest.payload.head_seq, ChangeSeq(0));
+        assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(0));
+        assert!(materialized.manifest.payload.checkpoints.is_empty());
+        assert_eq!(materialized.metadata_state.inodes().len(), 1);
+        assert_eq!(materialized.metadata_state.inodes()[0].inode_id, InodeId(1));
+        assert_eq!(
+            materialized.metadata_state.inodes()[0].inode_kind,
+            InodeKind::Dir
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_namespace_without_current_manifest_is_corrupt() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("primary").expect("valid namespace id");
+        let engine = NamespaceEngine::builder(Arc::clone(&store))
+            .namespace(namespace_id.clone())
+            .writer("writer-a")
+            .build()
+            .expect("engine");
+        engine
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap");
+
+        let loaded_head = read_head_object(store.as_ref(), &namespace_id)
+            .await
+            .expect("head");
+        let mut head = loaded_head.envelope.state;
+        head.current_manifest_id = None;
+        let envelope =
+            HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, "test-writer", head)
+                .expect("head envelope");
+        let encoded = encode_control_object(&envelope).expect("encode head");
+        store
+            .put_overwrite(&loaded_head.object_key, Bytes::from(encoded))
+            .await
+            .expect("overwrite head");
+
+        let basis_error = load_verified_namespace_basis(store.as_ref(), &namespace_id)
+            .await
+            .expect_err("basis rejects missing manifest");
+        assert!(matches!(
+            basis_error,
+            BasisLoadError::MissingCurrentManifest { namespace_id: found } if found == namespace_id
+        ));
+
+        let summary_error = load_namespace_head_summary(store.as_ref(), &namespace_id)
+            .await
+            .expect_err("status rejects missing manifest");
+        assert_eq!(summary_error.code(), ErrorCode::NamespaceCorrupt);
+
+        let read_error = engine
+            .resolve_path("/", ReadOptions::default())
+            .await
+            .expect_err("current read rejects missing manifest");
+        assert_eq!(read_error.code(), ErrorCode::NamespaceCorrupt);
     }
 
     #[tokio::test]
