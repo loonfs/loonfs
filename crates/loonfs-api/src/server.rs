@@ -44,8 +44,8 @@ pub struct ListPathEntriesResponse {
     pub head_seq: ChangeSeq,
     /// Directory entries for this page.
     ///
-    /// Paged APIs return entries in canonical name-key order. Higher-level
-    /// full-list convenience methods may sort drained results for display.
+    /// Entries are returned in canonical name-key order. Higher-level display
+    /// surfaces may sort entries separately for presentation.
     pub entries: Vec<AuthoritativePathEntry>,
     /// Cursor for the next page, if more entries remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]

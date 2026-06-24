@@ -475,7 +475,8 @@ impl Fs {
     /// Lists a directory together with the head the listing was read from.
     ///
     /// The envelope and every entry come from one consistent head, so an
-    /// empty directory still reports which state answered the question.
+    /// empty directory still reports which state answered the question. Entries
+    /// are returned in canonical name-key order, matching paged listings.
     pub async fn list_path_entries(
         &self,
         namespace_id: &NamespaceId,
@@ -503,11 +504,6 @@ impl Fs {
             entries.extend(page.entries);
             cursor = next_cursor;
             if cursor.is_none() {
-                entries.sort_by(|left, right| {
-                    left.display_name
-                        .cmp(&right.display_name)
-                        .then(left.inode_id.0.cmp(&right.inode_id.0))
-                });
                 envelope_ref.entries = entries;
                 return Ok(envelope.expect("first page initializes response envelope"));
             }

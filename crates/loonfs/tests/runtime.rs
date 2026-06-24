@@ -1408,6 +1408,12 @@ fn directory_pages_use_canonical_name_key_order() {
     .expect("second directory page");
     assert_eq!(display_names(&second.entries), vec!["B.txt", "Zebra.txt"]);
     assert!(second.next_cursor.is_none());
+
+    let full = block_on(fs.list_path_entries(&namespace_id, "/docs")).expect("full listing");
+    assert_eq!(
+        display_names(&full.entries),
+        vec!["a.txt", "apple.txt", "B.txt", "Zebra.txt"]
+    );
 }
 
 #[test]
