@@ -1,3 +1,4 @@
+use crate::checkpoint::{load_verified_manifest_materialization, manifest_basis_head};
 use crate::commit::{
     build_commit_plan, commit_request_from_v0, core_commit_fingerprint, materialize_commit,
     prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
@@ -14,20 +15,24 @@ use crate::namespace::basis::{
     load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis,
 };
 use crate::namespace::catalog::{
-    load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
-    NamespaceInitializationState,
+    load_namespace_catalog_entry, load_namespace_content_store_id, namespace_initialization_state,
+    NamespaceInitializationError, NamespaceInitializationState,
 };
 use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
     load_namespace_head_control, load_namespace_lease_control,
 };
+use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
     validate_durable_content_reference, write_immutable_object, ContentValidationTracker,
 };
-use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
+use crate::wal::{
+    load_validated_wal_chain, prepare_wal_segment, replay_validated_wal_tail_with_metadata,
+    WalChainLoadRequest,
+};
 use bytes::Bytes;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta,
@@ -35,15 +40,17 @@ use loonfs_api::v0::{
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind,
-    UploadSessionEnvelope, UploadSessionState,
+    decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind, HeadState,
+    NamespaceState, UploadSessionEnvelope, UploadSessionState,
 };
-use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{
     generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    ContentStoreId, EffectiveLimit, NameKey, NamespaceId,
+    ContentStoreId, EffectiveLimit, ManifestId, NameKey, NamespaceId,
 };
-use loonfs_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
+use loonfs_objectstore::keys::{
+    content_blob, namespace_descriptor, namespace_head, upload_session,
+};
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
 use tracing::Instrument;
@@ -53,11 +60,46 @@ const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstBasisResult {
     pub(crate) results: Vec<Result<ApiCommitResponse, CoreError>>,
+    pub(crate) published_records: Vec<WalCommitPayload>,
+    pub(crate) resulting_head: Option<HeadState>,
+    pub(crate) resulting_head_etag: Option<String>,
+    pub(crate) can_reuse_loaded_projection: bool,
 }
 
 impl PublishBatchAgainstBasisResult {
     fn new(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
-        Self { results }
+        Self {
+            results,
+            published_records: Vec::new(),
+            resulting_head: None,
+            resulting_head_etag: None,
+            can_reuse_loaded_projection: true,
+        }
+    }
+
+    fn invalidate_projection(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
+        Self {
+            results,
+            published_records: Vec::new(),
+            resulting_head: None,
+            resulting_head_etag: None,
+            can_reuse_loaded_projection: false,
+        }
+    }
+
+    fn published(
+        results: Vec<Result<ApiCommitResponse, CoreError>>,
+        published_records: Vec<WalCommitPayload>,
+        resulting_head: HeadState,
+        resulting_head_etag: Option<String>,
+    ) -> Self {
+        Self {
+            results,
+            published_records,
+            resulting_head: Some(resulting_head),
+            resulting_head_etag,
+            can_reuse_loaded_projection: false,
+        }
     }
 }
 
@@ -72,6 +114,63 @@ struct LoadedUploadSessionObject {
 struct InBatchRequest {
     primary_index: usize,
     semantic_identity: SemanticMutationIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishTailOptions {
+    pub(crate) max_wal_tail_segments: u64,
+    pub(crate) max_tail_rows: usize,
+    pub(crate) max_tail_decoded_bytes: Option<usize>,
+}
+
+impl Default for PublishTailOptions {
+    fn default() -> Self {
+        Self {
+            max_wal_tail_segments: 32,
+            max_tail_rows: 1_000_000,
+            max_tail_decoded_bytes: Some(256 * 1024 * 1024),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishTailProjection {
+    pub(crate) namespace_id: NamespaceId,
+    pub(crate) head_etag: String,
+    pub(crate) head_seq: ChangeSeq,
+    pub(crate) manifest_id: ManifestId,
+    pub(crate) manifest_head_seq: ChangeSeq,
+    pub(crate) manifest_payload_checksum: String,
+    pub(crate) wal_tail_segments: u64,
+    pub(crate) tail_state: MetadataState,
+}
+
+impl PublishTailProjection {
+    fn matches(
+        &self,
+        namespace_id: &NamespaceId,
+        head: &HeadState,
+        head_etag: &str,
+        manifest_id: ManifestId,
+        manifest_head_seq: ChangeSeq,
+        manifest_payload_checksum: &str,
+    ) -> bool {
+        self.namespace_id == *namespace_id
+            && self.head_etag == head_etag
+            && self.head_seq == head.seq
+            && self.manifest_id == manifest_id
+            && self.manifest_head_seq == manifest_head_seq
+            && self.manifest_payload_checksum == manifest_payload_checksum
+    }
+
+    pub(crate) fn within_limits(&self, options: &PublishTailOptions) -> bool {
+        self.wal_tail_segments <= options.max_wal_tail_segments
+            && self.tail_state.row_count() <= options.max_tail_rows
+            && options
+                .max_tail_decoded_bytes
+                .map(|max| self.tail_state.decoded_bytes() <= max)
+                .unwrap_or(true)
+    }
 }
 
 struct CandidateCoreRequest {
@@ -482,20 +581,18 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
     }
-    let basis = match load_verified_namespace_basis(store, namespace_id)
-        .instrument(tracing::info_span!(
-            "loon.phase",
-            phase = "load_basis_for_publish"
-        ))
-        .await
-    {
-        Ok(basis) => basis,
-        Err(error) => {
-            return (0..candidates.len())
-                .map(|_| Err(CoreError::Basis(error.clone())))
-                .collect()
-        }
-    };
+    let publish_tail_options = PublishTailOptions::default();
+    let basis =
+        match load_publish_validation_basis(store, namespace_id, None, &publish_tail_options)
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "load_publish_view"
+            ))
+            .await
+        {
+            Ok((basis, _projection)) => basis,
+            Err(error) => return (0..candidates.len()).map(|_| Err(error.clone())).collect(),
+        };
     publish_namespace_mutations_batch_against_basis(
         store,
         namespace_id,
@@ -505,6 +602,234 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     )
     .await
     .results
+}
+
+pub(crate) async fn load_publish_validation_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    cached_projection: Option<&PublishTailProjection>,
+    options: &PublishTailOptions,
+) -> Result<(VerifiedNamespaceBasis, PublishTailProjection), CoreError> {
+    let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
+        .await
+        .map_err(|error| CoreError::Basis(BasisLoadError::from(error)))?;
+    let loaded_head = read_head_object(store, namespace_id)
+        .await
+        .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+    let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
+        CoreError::Basis(BasisLoadError::MissingHeadEtag {
+            object_key: loaded_head.object_key.clone(),
+        })
+    })?;
+    let head = loaded_head.envelope.state;
+    if head.state == NamespaceState::Deleted {
+        return Err(CoreError::Basis(BasisLoadError::NamespaceDeleted {
+            namespace_id: namespace_id.clone(),
+        }));
+    }
+    let lease = read_lease_object(store, namespace_id)
+        .await
+        .map_err(|error| CoreError::Basis(BasisLoadError::LoadLease(error)))?
+        .envelope
+        .state;
+    let manifest_id = head.current_manifest_id.ok_or_else(|| {
+        CoreError::Basis(BasisLoadError::MissingCurrentManifest {
+            namespace_id: namespace_id.clone(),
+        })
+    })?;
+    let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
+        .await
+        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+    let manifest_head = manifest_basis_head(&head, &materialized.manifest);
+    let manifest_payload_checksum = materialized.manifest.payload_checksum.clone();
+
+    let projection = if let Some(cached) = cached_projection.filter(|cached| {
+        cached.matches(
+            namespace_id,
+            &head,
+            &head_etag,
+            manifest_id,
+            manifest_head.seq,
+            &manifest_payload_checksum,
+        ) && cached.within_limits(options)
+    }) {
+        cached.clone()
+    } else {
+        load_publish_tail_projection(
+            store,
+            namespace_id,
+            &head,
+            &head_etag,
+            manifest_id,
+            &manifest_head,
+            manifest_payload_checksum,
+            options,
+        )
+        .await?
+    };
+
+    let mut metadata_state = materialized.metadata_state;
+    append_metadata_rows(&mut metadata_state, &projection.tail_state);
+    ensure_publish_head_etag_still_current(store, namespace_id, &head_etag).await?;
+
+    Ok((
+        VerifiedNamespaceBasis {
+            namespace_descriptor: catalog_entry.namespace_descriptor,
+            content_store_id: catalog_entry.content_store_id,
+            snapshot_floor_seq: manifest_head.seq,
+            head,
+            head_etag,
+            lease,
+            metadata_state,
+        },
+        projection,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    head_etag: &str,
+    manifest_id: ManifestId,
+    manifest_head: &HeadState,
+    manifest_payload_checksum: String,
+    options: &PublishTailOptions,
+) -> Result<PublishTailProjection, CoreError> {
+    let wal_chain = load_validated_wal_chain(
+        store,
+        WalChainLoadRequest {
+            namespace_id,
+            chain_base_seq: manifest_head.seq,
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
+            stop_after_seq: None,
+        },
+    )
+    .await
+    .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
+    let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
+    if wal_tail_segments > options.max_wal_tail_segments {
+        return Err(CoreError::MetadataTailTooLong {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            manifest_head_seq: manifest_head.seq,
+            head_seq: head.seq,
+            wal_tail_segments,
+            max_wal_tail_segments: options.max_wal_tail_segments,
+        });
+    }
+    let replayed = replay_validated_wal_tail_with_metadata(
+        manifest_head,
+        &MetadataState::default(),
+        wal_chain.segments(),
+    )
+    .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))?;
+    ensure_publish_reconstructed_head_matches(head, &replayed.resulting_head)?;
+    let projection = PublishTailProjection {
+        namespace_id: namespace_id.clone(),
+        head_etag: head_etag.to_owned(),
+        head_seq: head.seq,
+        manifest_id,
+        manifest_head_seq: manifest_head.seq,
+        manifest_payload_checksum,
+        wal_tail_segments,
+        tail_state: replayed.resulting_metadata_state,
+    };
+    if !projection.within_limits(options) {
+        return Err(CoreError::MetadataTailTooLong {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            manifest_head_seq: manifest_head.seq,
+            head_seq: head.seq,
+            wal_tail_segments,
+            max_wal_tail_segments: options.max_wal_tail_segments,
+        });
+    }
+    Ok(projection)
+}
+
+fn ensure_publish_reconstructed_head_matches(
+    current_head: &HeadState,
+    reconstructed: &HeadState,
+) -> Result<(), CoreError> {
+    if current_head.namespace_id != reconstructed.namespace_id
+        || current_head.seq != reconstructed.seq
+        || current_head.head_commit_id != reconstructed.head_commit_id
+        || current_head.next_inode_id != reconstructed.next_inode_id
+        || current_head.name_policy != reconstructed.name_policy
+        || current_head.current_manifest_id != reconstructed.current_manifest_id
+        || current_head.latest_checkpoint_id != reconstructed.latest_checkpoint_id
+        || current_head.retention_floor_seq != reconstructed.retention_floor_seq
+        || (reconstructed.visible_wal_tip.is_some()
+            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
+    {
+        return Err(CoreError::Basis(
+            BasisLoadError::ReconstructedHeadMismatch {
+                expected: Box::new(current_head.clone()),
+                actual: Box::new(reconstructed.clone()),
+            },
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    loaded_head_etag: &str,
+) -> Result<(), CoreError> {
+    let object_key = namespace_head(namespace_id.as_str());
+    let metadata = store
+        .head(&object_key)
+        .await
+        .map_err(|error| {
+            CoreError::Basis(BasisLoadError::LoadHead(ControlObjectLoadError::Store(
+                error.to_string(),
+            )))
+        })?
+        .ok_or_else(|| {
+            CoreError::Basis(BasisLoadError::LoadHead(
+                ControlObjectLoadError::MissingObject {
+                    object_key: object_key.clone(),
+                },
+            ))
+        })?;
+    let current_head_etag = metadata.etag.ok_or_else(|| {
+        CoreError::Basis(BasisLoadError::MissingHeadEtag {
+            object_key: object_key.clone(),
+        })
+    })?;
+    if current_head_etag != loaded_head_etag {
+        return Err(CoreError::Basis(BasisLoadError::HeadChangedDuringLoad {
+            object_key,
+            loaded_head_etag: loaded_head_etag.to_owned(),
+            current_head_etag,
+        }));
+    }
+    Ok(())
+}
+
+fn append_metadata_rows(target: &mut MetadataState, rows: &MetadataState) {
+    for record in rows.inodes() {
+        target.push_inode_record(record.clone());
+    }
+    for record in rows.direntry_binds() {
+        target.push_direntry_bind_record(record.clone());
+    }
+    for record in rows.direntry_unbinds() {
+        target.push_direntry_unbind_record(record.clone());
+    }
+    for record in rows.revisions() {
+        target.push_revision_record(record.clone());
+    }
+    for record in rows.subtree_tombstones() {
+        target.push_subtree_tombstone_record(record.clone());
+    }
+    for record in rows.commit_receipts() {
+        target.push_commit_receipt_record(record.clone());
+    }
 }
 
 pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?Sized>(
@@ -697,9 +1022,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         Ok(wal) => wal,
         Err(error) => {
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
-            return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
-                outcomes, &aliases,
-            ));
+            return PublishBatchAgainstBasisResult::invalidate_projection(
+                finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            );
         }
     };
 
@@ -715,9 +1040,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         Err(error) => {
             let error = CoreError::Store(format!("head publish preparation failed: {error:?}"));
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
-            return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
-                outcomes, &aliases,
-            ));
+            return PublishBatchAgainstBasisResult::invalidate_projection(
+                finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            );
         }
     };
     let head_cas_span = tracing::info_span!(
@@ -741,26 +1066,32 @@ pub(crate) async fn publish_namespace_mutations_batch_against_basis<S: ObjectSto
         },
     );
     drop(head_cas_span);
-    match head_metadata_result {
-        Ok(_) => {}
+    let resulting_head_etag = match head_metadata_result {
+        Ok(metadata) => metadata.etag,
         Err(error) => {
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error.into());
-            return PublishBatchAgainstBasisResult::new(finish_batch_outcomes_with_aliases(
-                outcomes, &aliases,
-            ));
+            return PublishBatchAgainstBasisResult::invalidate_projection(
+                finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            );
         }
-    }
+    };
 
+    let published_records = wal.envelope.payload.records.clone();
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
             namespace_id: namespace_id.clone(),
             commit_id: record.prepared.request.commit_id,
-            committed_seq: wal.envelope.payload.records[accepted_index].seq,
+            committed_seq: published_records[accepted_index].seq,
             results: record.results,
         }));
     }
     let results = finish_batch_outcomes_with_aliases(outcomes, &aliases);
-    PublishBatchAgainstBasisResult::new(results)
+    PublishBatchAgainstBasisResult::published(
+        results,
+        published_records,
+        head_publish.resulting_head,
+        resulting_head_etag,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

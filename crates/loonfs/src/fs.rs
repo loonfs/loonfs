@@ -988,8 +988,18 @@ impl Fs {
             let engine = self.commit_engine(namespace_id);
             let publish = {
                 let context = self.mutation_context();
+                let cache_config = &self.inner.config.runtime_cache;
                 let mut engine = engine.lock().await;
-                engine.publish_batch(&store, candidates, &context).await
+                engine
+                    .publish_batch_with_tail_limits(
+                        &store,
+                        candidates,
+                        &context,
+                        cache_config.max_read_wal_tail_segments,
+                        cache_config.max_cached_wal_tail_projection_rows,
+                        cache_config.max_cached_wal_tail_projection_decoded_bytes,
+                    )
+                    .await
             };
             {
                 let _span = tracing::info_span!(

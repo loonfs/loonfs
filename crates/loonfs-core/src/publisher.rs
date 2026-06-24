@@ -2,11 +2,11 @@ use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIden
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
-use crate::namespace::basis::load_verified_namespace_basis;
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{
     path_intent_fingerprint_for_path_intent, PathMutationIntent, PathPlanner, PlannedPathMutation,
 };
+use crate::protocol::{load_publish_validation_basis, PublishTailOptions, PublishTailProjection};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, MutationResult, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -78,20 +78,42 @@ pub struct NamespaceCommitEnginePublishResult {
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
+    publish_tail_projection: Option<PublishTailProjection>,
 }
 
 impl NamespaceCommitEngine {
     pub fn new(namespace_id: NamespaceId) -> Self {
-        Self { namespace_id }
+        Self {
+            namespace_id,
+            publish_tail_projection: None,
+        }
     }
 
-    pub fn invalidate(&mut self) {}
+    pub fn invalidate(&mut self) {
+        self.publish_tail_projection = None;
+    }
 
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: Vec<NamespaceMutationCandidate>,
         context: &MutationContext,
+    ) -> NamespaceCommitEnginePublishResult {
+        self.publish_batch_with_tail_options(
+            store,
+            candidates,
+            context,
+            &PublishTailOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_batch_with_tail_options<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+        tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
@@ -108,11 +130,19 @@ impl NamespaceCommitEngine {
             };
         }
 
-        let basis = match load_verified_namespace_basis(store, &self.namespace_id).await {
+        let (basis, projection) = match load_publish_validation_basis(
+            store,
+            &self.namespace_id,
+            self.publish_tail_projection.as_ref(),
+            tail_options,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
+                self.invalidate();
                 return NamespaceCommitEnginePublishResult {
-                    results: repeated_error(candidate_count, CoreError::Basis(error)),
+                    results: repeated_error(candidate_count, error),
                 };
             }
         };
@@ -125,8 +155,69 @@ impl NamespaceCommitEngine {
             &basis,
         )
         .await;
+        self.update_publish_tail_projection(projection, &published, tail_options);
         NamespaceCommitEnginePublishResult {
             results: published.results,
+        }
+    }
+
+    pub async fn publish_batch_with_tail_limits<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+        max_wal_tail_segments: u64,
+        max_tail_rows: usize,
+        max_tail_decoded_bytes: Option<usize>,
+    ) -> NamespaceCommitEnginePublishResult {
+        let options = PublishTailOptions {
+            max_wal_tail_segments,
+            max_tail_rows,
+            max_tail_decoded_bytes,
+        };
+        self.publish_batch_with_tail_options(store, candidates, context, &options)
+            .await
+    }
+
+    fn update_publish_tail_projection(
+        &mut self,
+        mut projection: PublishTailProjection,
+        published: &crate::protocol::PublishBatchAgainstBasisResult,
+        tail_options: &PublishTailOptions,
+    ) {
+        let Some(resulting_head) = published.resulting_head.clone() else {
+            if published.can_reuse_loaded_projection {
+                self.publish_tail_projection = Some(projection);
+            } else {
+                self.invalidate();
+            }
+            return;
+        };
+        let Some(resulting_head_etag) = published.resulting_head_etag.clone() else {
+            self.invalidate();
+            return;
+        };
+        if resulting_head.current_manifest_id != Some(projection.manifest_id) {
+            self.invalidate();
+            return;
+        }
+        for record in &published.published_records {
+            if projection
+                .tail_state
+                .apply_committed_wal_record_mut(record)
+                .is_err()
+            {
+                self.invalidate();
+                return;
+            }
+        }
+        projection.head_seq = resulting_head.seq;
+        projection.head_etag = resulting_head_etag;
+        projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
+        if projection.within_limits(tail_options) {
+            self.publish_tail_projection = Some(projection);
+        } else {
+            self.invalidate();
         }
     }
 }

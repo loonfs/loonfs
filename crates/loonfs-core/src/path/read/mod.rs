@@ -1,3 +1,4 @@
+mod current_view;
 mod listing;
 #[path = "checkpoint_index.rs"]
 mod manifest_index;
@@ -6,6 +7,7 @@ mod resolver;
 mod revision_reader;
 mod row_decode;
 
+pub(crate) use current_view::CurrentManifestTailView;
 pub(crate) use listing::{list_path_from_basis, list_path_page_from_basis};
 pub(crate) use materialized_view::{
     list_file_revisions_for_inode_from_manifest_plus_tail,
