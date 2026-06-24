@@ -233,6 +233,13 @@ async fn http_paginates_namespaces_and_rejects_bad_namespace_cursors() {
             }
             other => panic!("expected invalid_config, got {other:?}"),
         }
+        let nonnumeric_limit: Result<ListNamespacesResponse, ApiError> = get_json(
+            &format!("{}/v0/namespaces?limit=not-a-number", harness.server_url),
+            "test-token",
+        );
+        let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
+        assert_eq!(error.code, "invalid_config");
+        assert!(error.message.contains("invalid limit"));
 
         let dir = NamespacePath::parse("pages:/docs").expect("docs path");
         harness.client.create_dir(&dir).expect("create docs dir");
@@ -337,6 +344,17 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         .expect("raw first directory page");
         assert_eq!(raw_first_page.entries.len(), 1);
         assert!(raw_first_page.next_cursor.is_some());
+
+        let nonnumeric_limit: Result<ListPathEntriesResponse, ApiError> = get_json(
+            &format!(
+                "{}/v0/namespaces/demo/filesystem/list?path=/docs&limit=not-a-number",
+                harness.server_url
+            ),
+            "test-token",
+        );
+        let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
+        assert_eq!(error.code, "invalid_config");
+        assert!(error.message.contains("invalid limit"));
     })
     .await
     .expect("join blocking task");

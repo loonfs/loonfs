@@ -60,14 +60,14 @@ struct PathQuery {
 
 #[derive(Debug, serde::Deserialize)]
 struct PageQuery {
-    limit: Option<u32>,
+    limit: Option<String>,
     cursor: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct PathPageQuery {
     path: String,
-    limit: Option<u32>,
+    limit: Option<String>,
     cursor: Option<String>,
 }
 
@@ -949,10 +949,23 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
     })
 }
 
-fn resolve_page_limit(limit: Option<u32>) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {
+fn resolve_page_limit(
+    limit: Option<String>,
+) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {
+    let requested = limit.as_deref().map(parse_page_limit).transpose()?;
     PaginationPolicy::default()
-        .resolve_limit(limit)
+        .resolve_limit(requested)
         .map_err(limit_response_error)
+}
+
+fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
+    value.parse::<u32>().map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidConfig,
+            &format!("invalid limit `{value}`: {error}"),
+        )
+    })
 }
 
 fn decode_namespaces_page_cursor(
