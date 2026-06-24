@@ -373,8 +373,8 @@ impl Client {
         self.request_bytes(&url)
     }
 
-    pub fn healthz(&self) -> Result<(), ClientError> {
-        let url = format!("{}/healthz", self.base_url);
+    pub fn health(&self) -> Result<(), ClientError> {
+        let url = format!("{}/health", self.base_url);
         let request = self.authenticated(self.agent.get(&url));
         request.call().map_err(|err| self.map_error(err))?;
         Ok(())

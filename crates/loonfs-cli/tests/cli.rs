@@ -945,7 +945,7 @@ key_prefix = "{key_prefix}"
                 .spawn()
                 .expect("spawn loonfs-server");
             let server_url = server_url_from_config(&server_config_path);
-            if wait_for_healthz_ready(&server_url) {
+            if wait_for_health_ready(&server_url) {
                 return ExternalServer { child, server_url };
             }
 
@@ -1027,10 +1027,10 @@ fn server_url_from_config(path: &Path) -> String {
     format!("http://{bind}")
 }
 
-fn wait_for_healthz_ready(server_url: &str) -> bool {
+fn wait_for_health_ready(server_url: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if ureq::get(&format!("{server_url}/healthz")).call().is_ok() {
+        if ureq::get(&format!("{server_url}/health")).call().is_ok() {
             return true;
         }
         thread::sleep(Duration::from_millis(100));

@@ -125,7 +125,7 @@ fn app_with_fs(
         transfer_issuer,
     };
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
         .route("/v0/config", get(config_handler))
         .route(
             "/v0/namespaces",
@@ -279,14 +279,14 @@ pub async fn serve(config: ServerConfig) -> Result<(), String> {
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/healthz",
+        path = "/health",
         tag = "health",
         summary = "Check health",
         security(()),
         responses((status = 200, description = "Server health check", body = String))
     )
 )]
-async fn healthz() -> &'static str {
+async fn health() -> &'static str {
     "ok"
 }
 
@@ -1341,7 +1341,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         description = "Static OpenAPI document for the LoonFS v0 HTTP API."
     ),
     paths(
-        healthz,
+        health,
         config_handler,
         create_namespace,
         list_namespaces_handler,

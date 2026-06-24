@@ -10,13 +10,13 @@
     "version": "0.1.1"
   },
   "paths": {
-    "/healthz": {
+    "/health": {
       "get": {
         "tags": [
           "health"
         ],
         "summary": "Check health",
-        "operationId": "healthz",
+        "operationId": "health",
         "responses": {
           "200": {
             "description": "Server health check",

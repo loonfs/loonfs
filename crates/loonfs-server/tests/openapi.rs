@@ -31,7 +31,7 @@ fn openapi_documents_current_server_paths() {
         .expect("openapi paths object");
 
     for (path, method) in [
-        ("/healthz", "get"),
+        ("/health", "get"),
         ("/v0/config", "get"),
         ("/v0/namespaces", "post"),
         ("/v0/namespaces", "get"),
