@@ -5,8 +5,8 @@ use super::create::checkpoint_record_by_id;
 use super::error::ManifestLoadError;
 use super::load::{load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present};
 use crate::error::CoreError;
+use crate::error::MetadataProjectionLoadError;
 use crate::namespace::control::read_head_object;
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
@@ -37,13 +37,13 @@ pub(super) enum ManifestPublicationOutcome {
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestEnvelope,
-) -> Result<(), FullMaterializationLoadError> {
+) -> Result<(), MetadataProjectionLoadError> {
     let manifest_key = namespace_manifest(
         manifest.payload.namespace_id.as_str(),
         manifest.payload.manifest_id,
     );
     let manifest_bytes = encode_namespace_manifest_json(manifest).map_err(|err| {
-        FullMaterializationLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
+        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
             object_key: manifest_key.clone(),
             message: err.to_string(),
         })
@@ -61,9 +61,9 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                 &manifest_key,
             )
             .await
-            .map_err(FullMaterializationLoadError::ManifestLoad)?
+            .map_err(MetadataProjectionLoadError::ManifestLoad)?
             else {
-                return Err(FullMaterializationLoadError::ManifestLoad(
+                return Err(MetadataProjectionLoadError::ManifestLoad(
                     ManifestLoadError::MissingManifest {
                         object_key: manifest_key,
                     },
@@ -72,7 +72,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
             if existing.payload_checksum == manifest.payload_checksum {
                 Ok(())
             } else {
-                Err(FullMaterializationLoadError::ManifestLoad(
+                Err(MetadataProjectionLoadError::ManifestLoad(
                     ManifestLoadError::ManifestConflict {
                         object_key: manifest_key,
                         manifest_id: manifest.payload.manifest_id,
@@ -82,7 +82,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                 ))
             }
         }
-        Err(error) => Err(FullMaterializationLoadError::ManifestLoad(
+        Err(error) => Err(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
                 message: error.to_string(),
@@ -109,7 +109,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
         let loaded_head = read_head_object(store, namespace_id)
             .await
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             })?;
         let current_head = loaded_head.envelope.state;
         if current_head.current_manifest_id >= Some(manifest_id) {
@@ -123,7 +123,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                 load_namespace_manifest_envelope(store, namespace_id, current_manifest_id)
                     .await
                     .map_err(|error| {
-                        CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+                        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
                             error,
                         ))
                     })?;

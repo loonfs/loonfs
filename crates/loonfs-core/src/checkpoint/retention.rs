@@ -3,9 +3,9 @@
 use super::load::load_verified_manifest_materialization;
 use super::publish::{compare_and_swap_head, HEAD_CAS_RETRY_LIMIT};
 use crate::context::MutationContext;
+use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::namespace::control::read_head_object;
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use loonfs_api::wire::control::{
     decode_control_object, ControlObjectKind, HeadState, ProgressStateEnvelope,
 };
@@ -27,7 +27,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let loaded_head = read_head_object(store, namespace_id)
             .await
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             })?;
         let head = loaded_head.envelope.state;
         let current_manifest_id =
@@ -39,9 +39,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
                 .await
                 .map_err(|error| {
-                    CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
-                        error,
-                    ))
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
                 })?;
         let target_floor = manifest.manifest.payload.head_seq;
         ensure_required_retention_progress(store, namespace_id, target_floor).await?;

@@ -66,11 +66,10 @@ mod tests {
     use super::super::intent::PutFileBehavior;
     use super::*;
     use crate::context::MutationContext;
+    use crate::engine::NamespaceEngine;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::full_materialization::{
-        load_full_namespace_materialization, FullMaterializationPurpose,
-    };
+    use crate::options::ReadOptions;
     use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::CommitId;
@@ -115,6 +114,20 @@ mod tests {
         })
     }
 
+    fn test_engine<'a>(
+        store: &'a LocalFsStore,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+    ) -> NamespaceEngine<&'a LocalFsStore> {
+        NamespaceEngine::builder(store)
+            .namespace(namespace_id.clone())
+            .writer(context.writer_id.clone())
+            .writer_version(context.writer_version.clone())
+            .lease_duration_ms(context.lease_duration_ms)
+            .build()
+            .expect("test engine")
+    }
+
     /// The first candidate implicitly creates `/wide`; the second must plan
     /// against the session state that already contains it, or its own
     /// duplicate `CreateDir` would fail child-name-absent validation.
@@ -140,22 +153,11 @@ mod tests {
         let second = results[1].as_ref().expect("second create succeeds");
         assert!(second.committed_seq > first.committed_seq);
 
-        let materialization = load_full_namespace_materialization(
-            &store,
-            &namespace_id,
-            FullMaterializationPurpose::TestOracle,
-        )
-        .await
-        .expect("materialization");
+        let engine = test_engine(&store, &namespace_id, &context);
         for path in ["/wide/a.txt", "/wide/b.txt"] {
-            let absolute_path = loonfs_api::AbsolutePath::parse(path).expect("path");
-            materialization
-                .metadata_state
-                .resolve_visible_path(
-                    &absolute_path,
-                    materialization.head.name_policy,
-                    materialization.head.seq,
-                )
+            engine
+                .resolve_path(path, ReadOptions::default())
+                .await
                 .expect("published file is visible");
         }
     }
@@ -215,21 +217,9 @@ mod tests {
             .as_ref()
             .expect("delete sees the create from the same batch");
 
-        let materialization = load_full_namespace_materialization(
-            &store,
-            &namespace_id,
-            FullMaterializationPurpose::TestOracle,
-        )
-        .await
-        .expect("materialization");
-        let absolute_path = loonfs_api::AbsolutePath::parse("/docs/doomed.txt").expect("path");
-        materialization
-            .metadata_state
-            .resolve_visible_path(
-                &absolute_path,
-                materialization.head.name_policy,
-                materialization.head.seq,
-            )
+        test_engine(&store, &namespace_id, &context)
+            .resolve_path("/docs/doomed.txt", ReadOptions::default())
+            .await
             .expect_err("deleted file is no longer visible");
     }
 }

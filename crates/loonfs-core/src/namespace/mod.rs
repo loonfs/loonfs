@@ -9,8 +9,8 @@ pub(crate) mod catalog;
 pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
-pub(crate) mod full_materialization;
 pub(crate) mod lease;
+pub(crate) mod status;
 
 pub use bootstrap::BootstrapNamespaceError;
 pub use loonfs_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};

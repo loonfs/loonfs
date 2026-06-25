@@ -5,17 +5,17 @@ use super::row_decode::{
 };
 use crate::checkpoint::{string_prefix_upper_bound, ManifestLoadError, VerifiedMetadataTables};
 use crate::error::CoreError;
+use crate::error::MetadataProjectionLoadError;
 use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use loonfs_api::wire::manifest::{hex_encode_row_key_component, MetadataRow, MetadataTableFamily};
 use loonfs_api::{CommitId, InodeId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
-    CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
 }
 
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(

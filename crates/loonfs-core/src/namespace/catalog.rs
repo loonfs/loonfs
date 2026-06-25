@@ -110,7 +110,7 @@ pub(crate) async fn list_namespaces<S: ObjectStore + ?Sized>(
         // tombstone; the head's lifecycle state is what excludes them here.
         let head = read_head_object(store, &namespace_id)
             .await
-            .map_err(|error| CoreError::FullMaterialization(error.into()))?;
+            .map_err(|error| CoreError::MetadataProjection(error.into()))?;
         if head.envelope.state.state == NamespaceState::Deleted {
             continue;
         }
@@ -146,7 +146,7 @@ pub(crate) async fn list_namespaces_page<S: ObjectStore + ?Sized>(
         load_namespace_descriptor(store, &namespace_id).await?;
         let head = read_head_object(store, &namespace_id)
             .await
-            .map_err(|error| CoreError::FullMaterialization(error.into()))?;
+            .map_err(|error| CoreError::MetadataProjection(error.into()))?;
         if head.envelope.state.state == NamespaceState::Deleted {
             continue;
         }

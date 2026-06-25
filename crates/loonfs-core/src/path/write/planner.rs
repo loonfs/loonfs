@@ -7,11 +7,7 @@ use crate::error::CoreError;
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use crate::metadata::{ResolvedVisiblePath, VisiblePathError};
-#[cfg(test)]
-use crate::path::helpers::lookup_path;
 use crate::path::helpers::{final_component, parse_absolute_path_for_core, parse_mutation_path};
-#[cfg(test)]
-use crate::path::tombstone::reject_tombstoned_path_ancestor;
 use loonfs_api::wire::control::HeadState;
 #[cfg(test)]
 use loonfs_api::ChangeSeq;
@@ -31,26 +27,6 @@ pub struct PlannedPathMutation {
     pub commit_id: CommitId,
     pub path_intent_fingerprint: PathIntentFingerprint,
     pub commit_request: ApiCommitRequest,
-}
-
-#[cfg(test)]
-pub(crate) struct PathPlanner;
-
-#[cfg(test)]
-impl PathPlanner {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-
-    pub(crate) fn plan_against_state(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-        head: &HeadState,
-        metadata_state: &MetadataState,
-    ) -> Result<PlannedPathMutation, CoreError> {
-        plan_path_mutation_against_state(namespace_id, intent, head, metadata_state)
-    }
 }
 
 /// Canonical preimage for path-intent fingerprints.
@@ -183,62 +159,6 @@ fn is_missing_visible_path(error: &CoreError) -> bool {
         error,
         CoreError::MissingPath(_) | CoreError::VisiblePath(VisiblePathError::PathNotFound { .. })
     )
-}
-
-#[cfg(test)]
-pub(crate) fn plan_path_mutation_against_state(
-    namespace_id: &NamespaceId,
-    intent: &PathMutationIntent,
-    head: &HeadState,
-    metadata_state: &MetadataState,
-) -> Result<PlannedPathMutation, CoreError> {
-    let commit_id = intent.commit_id().clone();
-    let path_intent_fingerprint = path_intent_fingerprint_for_path_intent(namespace_id, intent)?;
-    let view = PathPlanningView {
-        head,
-        metadata_state,
-    };
-    let commit_request = match intent {
-        PathMutationIntent::CreateDir { absolute_path, .. } => {
-            plan_create_dir(absolute_path, &commit_id, &view)?
-        }
-        PathMutationIntent::PutFile {
-            absolute_path,
-            content_ref,
-            behavior,
-            ..
-        } => plan_put_file_content_ref(
-            absolute_path,
-            content_ref.clone(),
-            *behavior,
-            &commit_id,
-            &view,
-        )?,
-        PathMutationIntent::DeletePath {
-            absolute_path,
-            recursive,
-            ..
-        } => plan_delete_path(absolute_path, *recursive, &commit_id, &view)?,
-        PathMutationIntent::MovePath {
-            from_path,
-            to_path,
-            mode,
-            ..
-        } => plan_move_path(from_path, to_path, *mode, &commit_id, &view)?,
-        PathMutationIntent::CopyFilePath {
-            from_path, to_path, ..
-        } => plan_copy_file_path(from_path, to_path, &commit_id, &view)?,
-        PathMutationIntent::RestoreRevision {
-            absolute_path,
-            source_revision_no,
-            ..
-        } => plan_restore_revision(absolute_path, *source_revision_no, &commit_id, &view)?,
-    };
-    Ok(PlannedPathMutation {
-        commit_id,
-        path_intent_fingerprint,
-        commit_request,
-    })
 }
 
 pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Sized>(
@@ -844,498 +764,6 @@ fn binding_is_precondition(
 }
 
 #[cfg(test)]
-fn child_name_absent_precondition(
-    view: &PathPlanningView<'_>,
-    parent_inode: InodeId,
-    display_name: &str,
-) -> ApiCommitPrecondition {
-    let display_name =
-        DisplayName::parse(display_name).expect("path planner should provide valid display name");
-    let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
-    ApiCommitPrecondition::ChildNameAbsent {
-        parent_inode,
-        name_key,
-    }
-}
-
-#[cfg(test)]
-fn plan_create_dir(
-    absolute_path: &str,
-    commit_id: &CommitId,
-    view: &PathPlanningView<'_>,
-) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    if lookup_path(
-        view.metadata_state,
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )
-    .is_ok()
-    {
-        return Err(CoreError::DestinationExists(
-            absolute_path.as_str().to_owned(),
-        ));
-    }
-    let parent_inode = resolve_parent_directory(
-        view.metadata_state,
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let display_name = final_component(&absolute_path)?;
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::CreateDir {
-            parent_inode,
-            display_name: display_name.clone(),
-        }],
-        preconditions: vec![
-            child_name_absent_precondition(view, parent_inode, &display_name),
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: parent_inode,
-            },
-        ],
-        message: None,
-        annotations: None,
-    })
-}
-
-#[cfg(test)]
-fn plan_put_file_content_ref(
-    absolute_path: &str,
-    content_ref: ContentRef,
-    behavior: PutFileBehavior,
-    commit_id: &CommitId,
-    view: &PathPlanningView<'_>,
-) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let target = lookup_path(
-        view.metadata_state,
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    );
-
-    let mut ops = Vec::new();
-    let mut next_inode_id = view.head.next_inode_id;
-    let final_parent_inode =
-        ensure_parent_directories(&absolute_path, view, &mut ops, &mut next_inode_id)?;
-    let final_name = final_component(&absolute_path)?;
-    let mut preconditions = Vec::new();
-
-    match target {
-        Ok(existing) => {
-            if behavior == PutFileBehavior::CreateOnly {
-                return Err(CoreError::DestinationExists(
-                    absolute_path.as_str().to_owned(),
-                ));
-            }
-            if existing.inode_kind != InodeKind::File {
-                return Err(CoreError::ExpectedFile {
-                    path: absolute_path.as_str().to_owned(),
-                    kind: existing.inode_kind,
-                });
-            }
-            let revision = view
-                .metadata_state
-                .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
-                .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
-            preconditions.push(binding_is_precondition(view, &existing)?);
-            ops.push(ApiCommitOp::ReplaceFile {
-                inode_id: existing.inode_id,
-                base_revision_no: revision.revision_no,
-                content_ref: content_ref.clone(),
-            });
-            preconditions.push(ApiCommitPrecondition::InodeRevisionIs {
-                inode_id: existing.inode_id,
-                revision_no: revision.revision_no,
-            });
-            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: existing.inode_id,
-            });
-        }
-        Err(VisiblePathError::PathNotFound { .. }) => {
-            ops.push(ApiCommitOp::CreateFile {
-                parent_inode: final_parent_inode,
-                display_name: final_name.clone(),
-                content_ref,
-            });
-            if view
-                .metadata_state
-                .visible_inode(final_parent_inode, view.head.seq)
-                .is_some()
-            {
-                preconditions.push(child_name_absent_precondition(
-                    view,
-                    final_parent_inode,
-                    &final_name,
-                ));
-                preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                    inode_id: final_parent_inode,
-                });
-            }
-        }
-        Err(other) => return Err(other.into()),
-    }
-
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops,
-        preconditions,
-        message: None,
-        annotations: None,
-    })
-}
-
-#[cfg(test)]
-fn plan_delete_path(
-    absolute_path: &str,
-    recursive: bool,
-    commit_id: &CommitId,
-    view: &PathPlanningView<'_>,
-) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    let resolved = view.metadata_state.resolve_visible_path(
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let op = match resolved.inode_kind {
-        InodeKind::File => ApiCommitOp::DeleteFile {
-            inode_id: resolved.inode_id,
-        },
-        InodeKind::Dir if recursive => ApiCommitOp::DeleteSubtree {
-            root_inode: resolved.inode_id,
-        },
-        InodeKind::Dir => {
-            let children = view
-                .metadata_state
-                .visible_children(resolved.inode_id, view.head.seq);
-            if !children.is_empty() {
-                return Err(CoreError::DirectoryNotEmpty(
-                    absolute_path.as_str().to_owned(),
-                ));
-            }
-            ApiCommitOp::DeleteSubtree {
-                root_inode: resolved.inode_id,
-            }
-        }
-    };
-    let mut preconditions = vec![binding_is_precondition(view, &resolved)?];
-    if !recursive && resolved.inode_kind == InodeKind::Dir {
-        preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
-            inode_id: resolved.inode_id,
-        });
-    }
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![op],
-        preconditions,
-        message: None,
-        annotations: None,
-    })
-}
-
-#[cfg(test)]
-fn plan_move_path(
-    from_path: &str,
-    to_path: &str,
-    mode: RenameMode,
-    commit_id: &CommitId,
-    view: &PathPlanningView<'_>,
-) -> Result<ApiCommitRequest, CoreError> {
-    if mode != RenameMode::NoReplace {
-        return Err(CoreError::CommitValidation(
-            crate::commit::CommitValidationError::UnsupportedRenameMode { mode },
-        ));
-    }
-    let from_path = parse_mutation_path(from_path)?;
-    let to_path = parse_mutation_path(to_path)?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &from_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &to_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let source = view.metadata_state.resolve_visible_path(
-        &from_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let target_parent = resolve_parent_directory(
-        view.metadata_state,
-        &to_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let target_name = final_component(&to_path)?;
-    if lookup_path(
-        view.metadata_state,
-        &to_path,
-        view.head.name_policy,
-        view.head.seq,
-    )
-    .is_ok()
-    {
-        return Err(CoreError::DestinationExists(to_path.as_str().to_owned()));
-    }
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::Rename {
-            inode_id: source.inode_id,
-            new_parent_inode: target_parent,
-            new_display_name: target_name.clone(),
-            mode,
-        }],
-        preconditions: vec![
-            binding_is_precondition(view, &source)?,
-            child_name_absent_precondition(view, target_parent, &target_name),
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: source.inode_id,
-            },
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: target_parent,
-            },
-        ],
-        message: None,
-        annotations: None,
-    })
-}
-
-#[cfg(test)]
-fn plan_copy_file_path(
-    from_path: &str,
-    to_path: &str,
-    commit_id: &CommitId,
-    view: &PathPlanningView<'_>,
-) -> Result<ApiCommitRequest, CoreError> {
-    let from_path = parse_mutation_path(from_path)?;
-    let to_path = parse_mutation_path(to_path)?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &from_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &to_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-
-    let source = view.metadata_state.resolve_visible_path(
-        &from_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    if source.inode_kind != InodeKind::File {
-        return Err(CoreError::ExpectedFile {
-            path: from_path.as_str().to_owned(),
-            kind: source.inode_kind,
-        });
-    }
-
-    if lookup_path(
-        view.metadata_state,
-        &to_path,
-        view.head.name_policy,
-        view.head.seq,
-    )
-    .is_ok()
-    {
-        return Err(CoreError::DestinationExists(to_path.as_str().to_owned()));
-    }
-
-    let revision = view
-        .metadata_state
-        .latest_revision_head_at_seq(source.inode_id, view.head.seq)
-        .ok_or_else(|| CoreError::MissingPath(from_path.as_str().to_owned()))?;
-
-    let target_parent = resolve_parent_directory(
-        view.metadata_state,
-        &to_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let target_name = final_component(&to_path)?;
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::CreateFile {
-            parent_inode: target_parent,
-            display_name: target_name.clone(),
-            content_ref: revision.content_ref,
-        }],
-        preconditions: vec![
-            binding_is_precondition(view, &source)?,
-            ApiCommitPrecondition::InodeRevisionIs {
-                inode_id: source.inode_id,
-                revision_no: revision.revision_no,
-            },
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: source.inode_id,
-            },
-            child_name_absent_precondition(view, target_parent, &target_name),
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: target_parent,
-            },
-        ],
-        message: None,
-        annotations: None,
-    })
-}
-
-#[cfg(test)]
-fn plan_restore_revision(
-    absolute_path: &str,
-    source_revision_no: RevisionNo,
-    commit_id: &CommitId,
-    view: &PathPlanningView<'_>,
-) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    reject_tombstoned_path_ancestor(
-        view.metadata_state,
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    let target = view.metadata_state.resolve_visible_path(
-        &absolute_path,
-        view.head.name_policy,
-        view.head.seq,
-    )?;
-    if target.inode_kind != InodeKind::File {
-        return Err(CoreError::ExpectedFile {
-            path: absolute_path.as_str().to_owned(),
-            kind: target.inode_kind,
-        });
-    }
-    let revision = view
-        .metadata_state
-        .latest_revision_head_at_seq(target.inode_id, view.head.seq)
-        .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
-
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::RestoreRevision {
-            inode_id: target.inode_id,
-            source_revision_no,
-            base_revision_no: revision.revision_no,
-        }],
-        preconditions: vec![
-            binding_is_precondition(view, &target)?,
-            ApiCommitPrecondition::InodeRevisionIs {
-                inode_id: target.inode_id,
-                revision_no: revision.revision_no,
-            },
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: target.inode_id,
-            },
-        ],
-        message: None,
-        annotations: None,
-    })
-}
-
-/// Resolves the parent chain of `absolute_path`, planning `CreateDir` ops for
-/// missing ancestors.
-///
-/// Planned directories receive speculative inode ids allocated in op order
-/// from `next_inode_id`; commit validation re-derives the same ids because it
-/// allocates from the same head counter in the same order. Once one ancestor
-/// is missing, every deeper component is missing too (a planned directory has
-/// no children), so the walk never needs to materialize planned state.
-#[cfg(test)]
-fn ensure_parent_directories(
-    absolute_path: &AbsolutePath,
-    view: &PathPlanningView<'_>,
-    ops: &mut Vec<ApiCommitOp>,
-    next_inode_id: &mut InodeId,
-) -> Result<InodeId, CoreError> {
-    let components = absolute_path.components();
-    if components.len() <= 1 {
-        return Ok(InodeId(1));
-    }
-
-    let mut current_inode = InodeId(1);
-    let mut creating_missing_ancestors = false;
-    for component in &components[..components.len() - 1] {
-        let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
-        if !creating_missing_ancestors {
-            if let Some(child) =
-                view.metadata_state
-                    .visible_child(current_inode, name_key.as_str(), view.head.seq)
-            {
-                let inode = view
-                    .metadata_state
-                    .visible_inode(child.child_inode_id, view.head.seq)
-                    .ok_or_else(|| CoreError::MissingPath(component.as_str().to_owned()))?;
-                if inode.inode_kind != InodeKind::Dir {
-                    return Err(CoreError::NonDirectoryPathComponent(
-                        component.as_str().to_owned(),
-                    ));
-                }
-                current_inode = child.child_inode_id;
-                continue;
-            }
-            creating_missing_ancestors = true;
-        }
-
-        ops.push(ApiCommitOp::CreateDir {
-            parent_inode: current_inode,
-            display_name: display_name.as_str().to_owned(),
-        });
-        let allocated = *next_inode_id;
-        *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
-        current_inode = allocated;
-    }
-    Ok(current_inode)
-}
-
-#[cfg(test)]
-fn resolve_parent_directory(
-    metadata_state: &MetadataState,
-    absolute_path: &AbsolutePath,
-    name_policy: loonfs_api::NamePolicy,
-    seq: ChangeSeq,
-) -> Result<InodeId, CoreError> {
-    let Some(parent_path) = absolute_path.parent() else {
-        return Ok(InodeId(1));
-    };
-    if parent_path.is_root() {
-        return Ok(InodeId(1));
-    }
-    let resolved = metadata_state.resolve_visible_path(&parent_path, name_policy, seq)?;
-    if resolved.inode_kind != InodeKind::Dir {
-        return Err(CoreError::ExpectedDirectory {
-            path: parent_path.as_str().to_owned(),
-            kind: resolved.inode_kind,
-        });
-    }
-    Ok(resolved.inode_id)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::commit::core_commit_fingerprint_for_v0_request;
@@ -1343,10 +771,8 @@ mod tests {
     use crate::error::ErrorCode;
     use crate::metadata::{DirentryBindRecord, InodeRecord};
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::namespace::full_materialization::{
-        load_full_namespace_materialization, FullMaterializationPurpose,
-    };
     use crate::path::write::ops::{delete_path, put_file_bytes};
+    use crate::protocol::{load_publish_manifest_plus_tail_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loonfs_api::RevisionNo;
@@ -1402,25 +828,30 @@ mod tests {
         (temp_dir, store, namespace_id, context)
     }
 
+    async fn try_plan_against_current_state(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        intent: &PathMutationIntent,
+    ) -> Result<PlannedPathMutation, CoreError> {
+        let (view, _projection) = load_publish_manifest_plus_tail_view(
+            store,
+            namespace_id,
+            None,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .expect("publish view");
+        let preview = PublishMetadataPreview::new(view.metadata_view(), &MetadataState::default());
+        plan_path_mutation_against_publish_view(namespace_id, intent, view.head(), &preview).await
+    }
+
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> PlannedPathMutation {
-        let materialization = load_full_namespace_materialization(
-            store,
-            namespace_id,
-            FullMaterializationPurpose::TestOracle,
-        )
-        .await
-        .expect("materialization");
-        PathPlanner::new()
-            .plan_against_state(
-                namespace_id,
-                intent,
-                &materialization.head,
-                &materialization.metadata_state,
-            )
+        try_plan_against_current_state(store, namespace_id, intent)
+            .await
             .expect("plan")
     }
 
@@ -1748,26 +1179,18 @@ mod tests {
         let staged = store_bytes_as_content(&store, &namespace_id, b"new")
             .await
             .expect("stage");
-        let materialization = load_full_namespace_materialization(
+        let error = try_plan_against_current_state(
             &store,
             &namespace_id,
-            FullMaterializationPurpose::TestOracle,
+            &PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
+                absolute_path: "/dead/new.txt".to_owned(),
+                content_ref: staged.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
         )
         .await
-        .expect("materialization");
-        let error = PathPlanner::new()
-            .plan_against_state(
-                &namespace_id,
-                &PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
-                    absolute_path: "/dead/new.txt".to_owned(),
-                    content_ref: staged.content_ref,
-                    behavior: PutFileBehavior::CreateOnly,
-                },
-                &materialization.head,
-                &materialization.metadata_state,
-            )
-            .expect_err("tombstoned ancestor");
+        .expect_err("tombstoned ancestor");
 
         assert_eq!(error.code(), ErrorCode::TombstoneConflict);
     }

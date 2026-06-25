@@ -1,19 +1,5 @@
 use crate::error::CoreError;
-#[cfg(test)]
-use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-#[cfg(test)]
-use loonfs_api::ChangeSeq;
 use loonfs_api::{AbsolutePath, PathError};
-
-#[cfg(test)]
-pub(crate) fn lookup_path(
-    metadata_state: &MetadataState,
-    absolute_path: &AbsolutePath,
-    name_policy: loonfs_api::NamePolicy,
-    seq: ChangeSeq,
-) -> Result<ResolvedVisiblePath, VisiblePathError> {
-    metadata_state.resolve_visible_path(absolute_path, name_policy, seq)
-}
 
 pub(crate) fn validate_path_for_mutation(absolute_path: &str) -> Result<(), CoreError> {
     parse_mutation_path(absolute_path).map(|_| ())

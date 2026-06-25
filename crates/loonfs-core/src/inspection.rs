@@ -1,26 +1,27 @@
 use crate::error::CoreError;
-use crate::namespace::full_materialization::FullNamespaceMaterialization;
-use loonfs_api::{AuthoritativePathEntry, InodeKind};
+use crate::path::read::ManifestPlusTailView;
+use loonfs_api::{AuthoritativePathEntry, InodeKind, NamespaceId};
+use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
 
-/// Lists every visible path in a full namespace materialization.
-pub fn list_visible_paths_from_full_materialization(
-    materialization: &FullNamespaceMaterialization,
+/// Lists every visible path in the current manifest-plus-tail namespace view.
+pub async fn list_visible_paths<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-    let mut entries = vec![crate::path::query::resolve_path_from_full_materialization(
-        materialization,
-        "/",
-    )?];
-    visit_visible_tree(materialization, "/", &mut entries)?;
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    let mut entries = vec![view.resolve_path("/").await?];
+    visit_visible_tree(&view, "/", &mut entries).await?;
     entries.sort_by(|left, right| left.absolute_path.cmp(&right.absolute_path));
     Ok(entries)
 }
 
-/// Computes a deterministic hash of the visible path tree in a full materialization.
-pub fn visible_tree_hash_from_full_materialization(
-    materialization: &FullNamespaceMaterialization,
+/// Computes a deterministic hash of the current manifest-plus-tail visible tree.
+pub async fn visible_tree_hash<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
 ) -> Result<String, CoreError> {
-    let entries = list_visible_paths_from_full_materialization(materialization)?;
+    let entries = list_visible_paths(store, namespace_id).await?;
     let bytes = serde_json::to_vec(&entries).map_err(|error| {
         CoreError::Store(format!("failed to encode visible tree hash: {error}"))
     })?;
@@ -28,19 +29,20 @@ pub fn visible_tree_hash_from_full_materialization(
     Ok(format!("sha256:{digest:x}"))
 }
 
-fn visit_visible_tree(
-    materialization: &FullNamespaceMaterialization,
+async fn visit_visible_tree<S: ObjectStore + ?Sized>(
+    view: &ManifestPlusTailView<'_, S>,
     absolute_path: &str,
     entries: &mut Vec<AuthoritativePathEntry>,
 ) -> Result<(), CoreError> {
-    for entry in
-        crate::path::query::list_path_from_full_materialization(materialization, absolute_path)?
-    {
-        let is_dir = entry.inode_kind == InodeKind::Dir;
-        let child_path = entry.absolute_path.clone();
-        entries.push(entry);
-        if is_dir {
-            visit_visible_tree(materialization, &child_path, entries)?;
+    let mut pending = vec![absolute_path.to_owned()];
+    while let Some(path) = pending.pop() {
+        for entry in view.list_path(&path).await? {
+            let is_dir = entry.inode_kind == InodeKind::Dir;
+            let child_path = entry.absolute_path.clone();
+            entries.push(entry);
+            if is_dir {
+                pending.push(child_path);
+            }
         }
     }
     Ok(())
@@ -49,51 +51,33 @@ fn visit_visible_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{load_full_namespace_materialization, FullMaterializationPurpose};
     use crate::{BootstrapOptions, NamespaceEngine, WriteOptions};
-    use loonfs_api::NamespaceId;
     use loonfs_objectstore::fs::LocalFsStore;
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn visible_paths_from_full_materialization_are_sorted() {
+    async fn visible_paths_are_sorted() {
         let (_temp_dir, store, namespace) = populated_namespace().await;
-        let materialization = load_full_namespace_materialization(
-            &store,
-            &namespace,
-            FullMaterializationPurpose::InspectionDebug,
-        )
-        .await
-        .expect("load materialization");
 
-        let paths =
-            list_visible_paths_from_full_materialization(&materialization).expect("visible paths");
+        let paths = list_visible_paths(store.as_ref(), &namespace)
+            .await
+            .expect("visible paths");
         let actual: Vec<_> = paths.into_iter().map(|entry| entry.absolute_path).collect();
 
         assert_eq!(actual, vec!["/", "/a", "/a/file.txt", "/z"]);
     }
 
     #[tokio::test]
-    async fn visible_tree_hash_from_full_materialization_is_deterministic() {
+    async fn visible_tree_hash_is_deterministic() {
         let (_temp_dir, store, namespace) = populated_namespace().await;
-        let left = load_full_namespace_materialization(
-            &store,
-            &namespace,
-            FullMaterializationPurpose::InspectionDebug,
-        )
-        .await
-        .expect("load left materialization");
-        let right = load_full_namespace_materialization(
-            &store,
-            &namespace,
-            FullMaterializationPurpose::InspectionDebug,
-        )
-        .await
-        .expect("load right materialization");
 
         assert_eq!(
-            visible_tree_hash_from_full_materialization(&left).expect("left hash"),
-            visible_tree_hash_from_full_materialization(&right).expect("right hash")
+            visible_tree_hash(store.as_ref(), &namespace)
+                .await
+                .expect("left hash"),
+            visible_tree_hash(store.as_ref(), &namespace)
+                .await
+                .expect("right hash")
         );
     }
 

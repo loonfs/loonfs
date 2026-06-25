@@ -51,11 +51,9 @@ pub mod cache {
         MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
         WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
     };
-    pub use crate::namespace::full_materialization::{
-        load_full_namespace_materialization, load_full_namespace_materialization_at_head,
-        load_namespace_head_summary, probe_namespace_head_etag, FullMaterializationLimits,
-        FullMaterializationLoadError, FullMaterializationPurpose, FullNamespaceMaterialization,
-        FullNamespaceMaterializationWeight, NamespaceHeadEtagProbe, NamespaceHeadSummary,
+    pub use crate::namespace::status::{
+        load_namespace_head_summary, probe_namespace_head_etag, NamespaceHeadEtagProbe,
+        NamespaceHeadSummary,
     };
 }
 
@@ -83,7 +81,9 @@ pub mod inspection;
 pub use context::MutationContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
-pub use error::{Error, ErrorCode, ErrorKind, Result};
+pub use error::{
+    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
+};
 pub use namespace::{list_namespaces, list_namespaces_page, BootstrapNamespaceError};
 pub use options::{
     BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
