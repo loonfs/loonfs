@@ -53,9 +53,12 @@ pub mod cache {
     };
     pub use crate::namespace::full_materialization::{
         load_full_namespace_materialization, load_full_namespace_materialization_at_head,
-        load_namespace_head_summary, probe_namespace_head_etag, FullMaterializationLimits,
-        FullMaterializationLoadError, FullMaterializationPurpose, FullNamespaceMaterialization,
-        FullNamespaceMaterializationWeight, NamespaceHeadEtagProbe, NamespaceHeadSummary,
+        FullMaterializationLimits, FullMaterializationLoadError, FullMaterializationPurpose,
+        FullNamespaceMaterialization, FullNamespaceMaterializationWeight,
+    };
+    pub use crate::namespace::status::{
+        load_namespace_head_summary, probe_namespace_head_etag, NamespaceHeadEtagProbe,
+        NamespaceHeadSummary,
     };
 }
 
