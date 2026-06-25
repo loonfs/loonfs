@@ -5,12 +5,11 @@ use crate::checkpoint::{
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::catalog::{
-    namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
+    load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
+    NamespaceInitializationState,
 };
 use crate::namespace::control::read_head_object;
-use crate::namespace::full_materialization::{
-    load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
-};
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
@@ -76,12 +75,9 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_head_commit_id = source_checkpoint.head_commit_id.clone();
     let source_manifest_id = source_checkpoint.manifest_id;
     let source_checkpoint_id = source_checkpoint.checkpoint_id.clone();
-    let source_materialization = load_full_namespace_materialization(
-        store,
-        source_namespace_id,
-        FullMaterializationPurpose::ForkInitializationTemporary,
-    )
-    .await?;
+    let source_content_store_id = load_namespace_content_store_id(store, source_namespace_id)
+        .await
+        .map_err(FullMaterializationLoadError::from)?;
     let target_manifest_id = ManifestId(fork_seq.0);
     let target_checkpoint_id = generate_checkpoint_id();
 
@@ -109,7 +105,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         &context.writer_version,
         NamespaceDescriptorState {
             namespace_id: new_namespace_id.clone(),
-            content_store_id: source_materialization.content_store_id,
+            content_store_id: source_content_store_id,
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;

@@ -30,21 +30,15 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FullMaterializationPurpose {
-    ForkInitializationTemporary,
     InspectionDebug,
     TestOracle,
 }
 
 impl FullMaterializationPurpose {
-    pub const ALL: [Self; 3] = [
-        Self::ForkInitializationTemporary,
-        Self::InspectionDebug,
-        Self::TestOracle,
-    ];
+    pub const ALL: [Self; 2] = [Self::InspectionDebug, Self::TestOracle];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ForkInitializationTemporary => "fork_initialization_temporary",
             Self::InspectionDebug => "inspection_debug",
             Self::TestOracle => "test_oracle",
         }
@@ -817,6 +811,7 @@ mod tests {
         assert_eq!(names.len(), FullMaterializationPurpose::ALL.len());
         for forbidden in [
             "change_feed_temporary",
+            "fork_initialization_temporary",
             "current_head_read",
             "publish_validation",
             "normal_write",
@@ -835,12 +830,17 @@ mod tests {
             ("options", include_str!("../options.rs")),
             ("protocol", include_str!("../protocol.rs")),
             ("publisher", include_str!("../publisher.rs")),
+            ("fork", include_str!("../namespace/fork.rs")),
         ] {
             for forbidden in [
                 concat!("ReadOptions::", "full_materialization"),
                 concat!("ReadSource::", "FullMaterialization"),
                 "load_full_namespace_materialization(",
                 concat!("FullMaterializationPurpose::", "ChangeFeedTemporary"),
+                concat!(
+                    "FullMaterializationPurpose::",
+                    "ForkInitializationTemporary"
+                ),
                 concat!(
                     "FullMaterializationPurpose::",
                     "DirectPathPlanning",
