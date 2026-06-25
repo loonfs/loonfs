@@ -933,10 +933,14 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         .iter()
         .find(|table| table.family == ApiMetadataTableFamily::DirentryBinds)
         .expect("direntry table");
+    assert!(
+        direntries.segments.len() >= 3,
+        "hot directory direntry rows should be range-split"
+    );
     assert!(direntries.segments.iter().all(|descriptor| {
         matches!(
             descriptor.segment_key,
-            MetadataSegmentKey::DirentryParent { .. }
+            MetadataSegmentKey::RowKeyRange { .. }
         )
     }));
 
