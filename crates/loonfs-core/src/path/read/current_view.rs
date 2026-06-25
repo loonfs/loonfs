@@ -6,8 +6,12 @@ use crate::metadata::{
     ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, VisiblePathError,
 };
 use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::{AbsolutePath, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
+use std::collections::{BTreeSet, VecDeque};
+
+const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
 pub(crate) struct CurrentManifestTailView<'a, S: ObjectStore + ?Sized> {
     head: &'a HeadState,
@@ -171,30 +175,61 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
             return Ok(Vec::new());
         }
 
-        let mut candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
-        candidates.extend(
-            self.wal_tail_rows
-                .direntry_binds()
-                .iter()
-                .filter(|direntry| direntry.parent_inode_id == parent_inode_id)
-                .cloned(),
-        );
-        candidates.sort_by(|left, right| left.name_key.cmp(&right.name_key));
-
-        let mut seen_name_keys = std::collections::BTreeSet::new();
+        let raw_scan_limit = limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT);
+        let mut manifest_after_row_key = None;
+        let mut manifest_exhausted = false;
+        let mut manifest_candidates = VecDeque::<DirentryBindPageCandidate>::new();
+        let tail_candidates =
+            self.tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key);
+        let mut tail_index = 0;
+        let mut seen_name_keys = BTreeSet::new();
         let mut children = Vec::with_capacity(limit);
-        for candidate in candidates {
-            if start_after_name_key
-                .map(|last_name_key| candidate.name_key.as_str() <= last_name_key)
-                .unwrap_or(false)
-            {
-                continue;
+        while children.len() < limit {
+            if manifest_candidates.is_empty() && !manifest_exhausted {
+                let page = manifest_index::direntry_binds_for_parent_name_key_page(
+                    self.tables,
+                    parent_inode_id,
+                    start_after_name_key,
+                    manifest_after_row_key.as_deref(),
+                    raw_scan_limit,
+                )
+                .await?;
+                if page.is_empty() {
+                    manifest_exhausted = true;
+                } else {
+                    manifest_after_row_key = page.last().map(|candidate| candidate.row_key.clone());
+                    manifest_candidates.extend(page.into_iter().map(|candidate| {
+                        DirentryBindPageCandidate {
+                            row_key: candidate.row_key,
+                            record: candidate.record,
+                        }
+                    }));
+                }
             }
-            if !seen_name_keys.insert(candidate.name_key.clone()) {
+
+            let next_manifest = manifest_candidates.front();
+            let next_tail = tail_candidates.get(tail_index);
+            let take_tail = match (next_manifest, next_tail) {
+                (Some(manifest), Some(tail)) => tail.row_key < manifest.row_key,
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (None, None) => break,
+            };
+            let candidate = if take_tail {
+                let candidate = tail_candidates[tail_index].clone();
+                tail_index += 1;
+                candidate
+            } else {
+                manifest_candidates
+                    .pop_front()
+                    .expect("manifest candidate should exist")
+            };
+
+            if !seen_name_keys.insert(candidate.record.name_key.clone()) {
                 continue;
             }
             let Some(active) = self
-                .visible_child(parent_inode_id, &candidate.name_key)
+                .visible_child(parent_inode_id, &candidate.record.name_key)
                 .await?
             else {
                 continue;
@@ -203,9 +238,6 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
                 continue;
             }
             children.push(active);
-            if children.len() == limit {
-                break;
-            }
         }
         Ok(children)
     }
@@ -510,6 +542,48 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
     ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
         manifest_index::tombstones_for_root(self.tables, root_inode_id).await
     }
+
+    fn tail_direntry_bind_page_candidates(
+        &self,
+        parent_inode_id: InodeId,
+        start_after_name_key: Option<&str>,
+    ) -> Vec<DirentryBindPageCandidate> {
+        let mut candidates = self
+            .wal_tail_rows
+            .direntry_binds()
+            .iter()
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id
+                    && start_after_name_key
+                        .map(|last_name_key| direntry.name_key.as_str() > last_name_key)
+                        .unwrap_or(true)
+            })
+            .map(|record| DirentryBindPageCandidate {
+                row_key: direntry_bind_row_key(record),
+                record: record.clone(),
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.row_key.cmp(&right.row_key));
+        candidates
+    }
+}
+
+#[derive(Clone)]
+struct DirentryBindPageCandidate {
+    row_key: String,
+    record: DirentryBindRecord,
+}
+
+fn direntry_bind_row_key(record: &DirentryBindRecord) -> String {
+    MetadataRow::DirentryBind {
+        parent_inode_id: record.parent_inode_id,
+        name_key: record.name_key.clone(),
+        display_name: record.display_name.clone(),
+        child_inode_id: record.child_inode_id,
+        bind_seq: record.bind_seq,
+        bind_delta_index: record.bind_delta_index,
+    }
+    .row_key_for_family(MetadataTableFamily::DirentryBinds)
 }
 
 fn absolute_path_prefix(current: &str, component: &str) -> String {

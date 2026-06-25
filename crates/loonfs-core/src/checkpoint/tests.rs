@@ -1001,6 +1001,67 @@ async fn large_table_scan_does_not_insert_metadata_cache_blocks() {
 }
 
 #[tokio::test]
+async fn table_range_page_merges_base_and_l0_in_row_key_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/docs/a.txt", b"a\n", &context, None)
+        .await
+        .expect("write a");
+    write_file_bytes(&store, &namespace_id, "/docs/c.txt", b"c\n", &context, None)
+        .await
+        .expect("write c");
+
+    let policy = MetadataLsmPolicy {
+        max_rows_per_segment: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("first checkpoint");
+    write_file_bytes(&store, &namespace_id, "/docs/b.txt", b"b\n", &context, None)
+        .await
+        .expect("write b");
+    let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("second checkpoint");
+    let tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        None,
+        &namespace_id,
+        manifest.manifest_id,
+    )
+    .await
+    .expect("load tables");
+
+    let docs_inode_id = InodeId(2);
+    let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
+    let upper_bound = super::string_prefix_upper_bound(&lower_bound);
+    let page = tables
+        .scan_range_page(
+            ApiMetadataTableFamily::DirentryBinds,
+            &lower_bound,
+            upper_bound.as_deref(),
+            2,
+        )
+        .await
+        .expect("scan range page");
+    let display_names = page
+        .into_iter()
+        .filter_map(|row| match row {
+            MetadataRow::DirentryBind { display_name, .. } => Some(display_name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(display_names, vec!["a.txt", "b.txt"]);
+}
+
+#[tokio::test]
 async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

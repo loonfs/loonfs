@@ -45,4 +45,4 @@ pub(crate) use self::load::{
 };
 pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::retention::advance_retention_floor;
-pub(crate) use self::scan::VerifiedMetadataTables;
+pub(crate) use self::scan::{string_prefix_upper_bound, VerifiedMetadataTables};
