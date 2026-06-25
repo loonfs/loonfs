@@ -1,5 +1,5 @@
 use crate::checkpoint::{
-    load_namespace_manifest_envelope, load_verified_manifest_materialization, manifest_basis_head,
+    head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_materialization,
     ManifestLoadError,
 };
 use crate::error::CoreError;
@@ -23,15 +23,70 @@ use serde::{Deserialize, Serialize};
 use std::mem::size_of;
 use thiserror::Error;
 
-/// Fully verified namespace view at one head.
+/// Why a caller is allowed to reconstruct a full namespace materialization.
 ///
-/// A basis contains enough metadata to answer normal path reads and validate
-/// mutations for the head it was reconstructed from.
+/// Normal current-head reads and writes deliberately have no purpose here:
+/// they should use manifest-plus-tail views instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FullMaterializationPurpose {
+    ForkInitializationTemporary,
+    ChangeFeedTemporary,
+    InspectionDebug,
+    TestOracle,
+}
+
+impl FullMaterializationPurpose {
+    pub const ALL: [Self; 4] = [
+        Self::ForkInitializationTemporary,
+        Self::ChangeFeedTemporary,
+        Self::InspectionDebug,
+        Self::TestOracle,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ForkInitializationTemporary => "fork_initialization_temporary",
+            Self::ChangeFeedTemporary => "change_feed_temporary",
+            Self::InspectionDebug => "inspection_debug",
+            Self::TestOracle => "test_oracle",
+        }
+    }
+}
+
+impl std::fmt::Display for FullMaterializationPurpose {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Permissive transition guardrails for full namespace materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FullMaterializationLimits {
+    pub max_rows: usize,
+    pub max_decoded_bytes: usize,
+    pub max_wal_tail_segments: u64,
+}
+
+impl Default for FullMaterializationLimits {
+    fn default() -> Self {
+        Self {
+            max_rows: 10_000_000,
+            max_decoded_bytes: 4 * 1024 * 1024 * 1024,
+            max_wal_tail_segments: 10_000,
+        }
+    }
+}
+
+/// Fully materialized namespace view at one head.
+///
+/// This is intentionally expensive. Production read/write paths should prefer
+/// manifest-plus-tail views and use this only through an explicit purpose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifiedNamespaceBasis {
+pub struct FullNamespaceMaterialization {
     pub namespace_descriptor: NamespaceDescriptorState,
     pub content_store_id: ContentStoreId,
-    /// Oldest namespace sequence this basis can answer snapshot reads for.
+    /// Oldest namespace sequence this materialization can answer snapshot reads for.
     pub snapshot_floor_seq: ChangeSeq,
     pub head: HeadState,
     pub head_etag: String,
@@ -39,30 +94,30 @@ pub struct VerifiedNamespaceBasis {
     pub metadata_state: MetadataState,
 }
 
-/// Approximate size of a verified basis.
+/// Approximate size of a full materialization.
 ///
 /// Runtime caches use this as an eviction weight, not exact heap accounting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifiedNamespaceBasisWeight {
+pub struct FullNamespaceMaterializationWeight {
     pub rows: usize,
     pub decoded_bytes: usize,
 }
 
-impl VerifiedNamespaceBasis {
-    /// Returns the approximate cache weight for this basis.
-    pub fn weight(&self) -> VerifiedNamespaceBasisWeight {
-        VerifiedNamespaceBasisWeight {
+impl FullNamespaceMaterialization {
+    /// Returns the approximate cache weight for this materialization.
+    pub fn weight(&self) -> FullNamespaceMaterializationWeight {
+        FullNamespaceMaterializationWeight {
             rows: self.row_count(),
             decoded_bytes: self.decoded_bytes(),
         }
     }
 
-    /// Returns the number of metadata rows in this basis.
+    /// Returns the number of metadata rows in this materialization.
     pub fn row_count(&self) -> usize {
         self.metadata_state.row_count()
     }
 
-    /// Returns an approximate decoded byte size for this basis.
+    /// Returns an approximate decoded byte size for this materialization.
     pub fn decoded_bytes(&self) -> usize {
         size_of::<Self>()
             + self.namespace_descriptor.namespace_id.as_str().len()
@@ -96,7 +151,7 @@ pub struct NamespaceHeadSummary {
     pub head_seq: ChangeSeq,
     pub current_manifest_id: Option<ManifestId>,
     pub latest_checkpoint_id: Option<String>,
-    /// WAL segment objects positioned past the materialized manifest basis.
+    /// WAL segment objects positioned past the loaded manifest.
     ///
     /// Derived from position-ordered object names, not from walking the
     /// chain: an inspection count for maintenance gating and operators, not
@@ -108,15 +163,15 @@ pub struct NamespaceHeadSummary {
 /// Opaque ETag probe for the namespace head object.
 ///
 /// This only proves that the durable head object identity still matches a
-/// previously reconstructed basis.
+/// previously reconstructed materialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceHeadEtagProbe {
     pub head_etag: String,
 }
 
-/// Error while reconstructing a verified namespace basis.
+/// Error while reconstructing a full namespace materialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum BasisLoadError {
+pub enum FullMaterializationLoadError {
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
@@ -132,7 +187,7 @@ pub enum BasisLoadError {
     #[error("namespace `{namespace_id}` head has no current manifest")]
     MissingCurrentManifest { namespace_id: NamespaceId },
     #[error(
-        "namespace head changed during basis load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
+        "namespace head changed during materialization load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
     )]
     HeadChangedDuringLoad {
         object_key: String,
@@ -146,15 +201,27 @@ pub enum BasisLoadError {
     #[error("wal replay failed: {0:?}")]
     WalReplay(WalReplayError),
     #[error(
-        "verified basis mismatch: expected current head `{expected:?}`, reconstructed `{actual:?}`"
+        "full materialization mismatch: expected current head `{expected:?}`, reconstructed `{actual:?}`"
     )]
     ReconstructedHeadMismatch {
         expected: Box<HeadState>,
         actual: Box<HeadState>,
     },
+    #[error(
+        "full namespace materialization for `{purpose}` exceeded guardrails: rows {rows}/{max_rows}, decoded bytes {decoded_bytes}/{max_decoded_bytes}, wal tail segments {wal_tail_segments}/{max_wal_tail_segments}"
+    )]
+    LimitExceeded {
+        purpose: FullMaterializationPurpose,
+        rows: usize,
+        max_rows: usize,
+        decoded_bytes: usize,
+        max_decoded_bytes: usize,
+        wal_tail_segments: u64,
+        max_wal_tail_segments: u64,
+    },
 }
 
-impl From<NamespaceCatalogLoadError> for BasisLoadError {
+impl From<NamespaceCatalogLoadError> for FullMaterializationLoadError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
         match value {
             NamespaceCatalogLoadError::LoadNamespaceDescriptor(error) => {
@@ -167,40 +234,77 @@ impl From<NamespaceCatalogLoadError> for BasisLoadError {
     }
 }
 
-/// Reconstructs and verifies the current namespace basis.
-pub async fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
+/// Reconstructs and verifies the current namespace materialization.
+pub async fn load_full_namespace_materialization<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
-) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    purpose: FullMaterializationPurpose,
+) -> Result<FullNamespaceMaterialization, FullMaterializationLoadError> {
+    load_full_namespace_materialization_with_limits(
+        store,
+        expected_namespace,
+        purpose,
+        FullMaterializationLimits::default(),
+    )
+    .await
+}
+
+pub(crate) async fn load_full_namespace_materialization_with_limits<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    purpose: FullMaterializationPurpose,
+    limits: FullMaterializationLimits,
+) -> Result<FullNamespaceMaterialization, FullMaterializationLoadError> {
     let catalog_entry = load_namespace_catalog_entry(store, expected_namespace).await?;
     let loaded_head = read_head_object(store, expected_namespace).await?;
-    let head_etag =
-        loaded_head
-            .metadata
-            .etag
-            .clone()
-            .ok_or_else(|| BasisLoadError::MissingHeadEtag {
-                object_key: loaded_head.object_key.clone(),
-            })?;
-    load_verified_namespace_basis_at_head_with_catalog(
+    let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
+        FullMaterializationLoadError::MissingHeadEtag {
+            object_key: loaded_head.object_key.clone(),
+        }
+    })?;
+    load_full_namespace_materialization_at_head_with_catalog(
         store,
         expected_namespace,
         catalog_entry,
         loaded_head.envelope.state,
         head_etag,
+        purpose,
+        limits,
     )
     .await
 }
 
-/// Reconstructs and verifies a namespace basis for an already-loaded head.
-pub async fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
+/// Reconstructs and verifies a namespace materialization for an already-loaded head.
+pub async fn load_full_namespace_materialization_at_head<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
     head: HeadState,
     head_etag: String,
-) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    purpose: FullMaterializationPurpose,
+) -> Result<FullNamespaceMaterialization, FullMaterializationLoadError> {
+    load_full_namespace_materialization_at_head_with_limits(
+        store,
+        expected_namespace,
+        head,
+        head_etag,
+        purpose,
+        FullMaterializationLimits::default(),
+    )
+    .await
+}
+
+pub(crate) async fn load_full_namespace_materialization_at_head_with_limits<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    head: HeadState,
+    head_etag: String,
+    purpose: FullMaterializationPurpose,
+    limits: FullMaterializationLimits,
+) -> Result<FullNamespaceMaterialization, FullMaterializationLoadError> {
     if &head.namespace_id != expected_namespace {
-        return Err(BasisLoadError::LoadHead(
+        return Err(FullMaterializationLoadError::LoadHead(
             ControlObjectLoadError::NamespaceMismatch {
                 object_key: namespace_head(expected_namespace.as_str()),
                 expected: expected_namespace.clone(),
@@ -209,12 +313,14 @@ pub async fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
         ));
     }
     let catalog_entry = load_namespace_catalog_entry(store, expected_namespace).await?;
-    load_verified_namespace_basis_at_head_with_catalog(
+    load_full_namespace_materialization_at_head_with_catalog(
         store,
         expected_namespace,
         catalog_entry,
         head,
         head_etag,
+        purpose,
+        limits,
     )
     .await
 }
@@ -224,36 +330,38 @@ pub async fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "reconstruct_basis")
+    fields(phase = "full_namespace_materialization")
 )]
-async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
+async fn load_full_namespace_materialization_at_head_with_catalog<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
     catalog_entry: VerifiedNamespaceCatalogEntry,
     head: HeadState,
     head_etag: String,
-) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    purpose: FullMaterializationPurpose,
+    limits: FullMaterializationLimits,
+) -> Result<FullNamespaceMaterialization, FullMaterializationLoadError> {
     // The single lifecycle gate: every read, publish, status, fork, and
     // checkpoint reconstructs through here, so a deleted head refuses them
     // all in one place.
     if head.state == NamespaceState::Deleted {
-        return Err(BasisLoadError::NamespaceDeleted {
+        return Err(FullMaterializationLoadError::NamespaceDeleted {
             namespace_id: expected_namespace.clone(),
         });
     }
     let loaded_lease = read_lease_object(store, expected_namespace)
         .await
-        .map_err(BasisLoadError::LoadLease)?;
+        .map_err(FullMaterializationLoadError::LoadLease)?;
 
-    let manifest_id =
-        head.current_manifest_id
-            .ok_or_else(|| BasisLoadError::MissingCurrentManifest {
-                namespace_id: expected_namespace.clone(),
-            })?;
+    let manifest_id = head.current_manifest_id.ok_or_else(|| {
+        FullMaterializationLoadError::MissingCurrentManifest {
+            namespace_id: expected_namespace.clone(),
+        }
+    })?;
     let materialized =
         load_verified_manifest_materialization(store, expected_namespace, manifest_id).await?;
     let (initial_head, initial_metadata_state) = (
-        manifest_basis_head(&head, &materialized.manifest),
+        head_from_manifest(&head, &materialized.manifest),
         materialized.metadata_state,
     );
     let wal_chain = load_validated_wal_chain(
@@ -267,6 +375,7 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
         },
     )
     .await?;
+    let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     let replayed = {
         let _span = tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
         replay_validated_wal_tail_with_metadata(
@@ -274,12 +383,12 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
             &initial_metadata_state,
             wal_chain.segments(),
         )
-        .map_err(BasisLoadError::WalReplay)
+        .map_err(FullMaterializationLoadError::WalReplay)
     }?;
     ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
     ensure_head_etag_still_current(store, expected_namespace, &head_etag).await?;
 
-    Ok(VerifiedNamespaceBasis {
+    let materialization = FullNamespaceMaterialization {
         namespace_descriptor: catalog_entry.namespace_descriptor,
         content_store_id: catalog_entry.content_store_id,
         snapshot_floor_seq: initial_head.seq,
@@ -287,33 +396,71 @@ async fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Si
         head_etag,
         lease: loaded_lease.envelope.state,
         metadata_state: replayed.resulting_metadata_state,
-    })
+    };
+    enforce_full_materialization_limits(purpose, limits, &materialization, wal_tail_segments)?;
+    let rows = materialization.row_count();
+    let decoded_bytes = materialization.decoded_bytes();
+    tracing::info!(
+        phase = "full_namespace_materialization",
+        purpose = purpose.as_str(),
+        rows,
+        decoded_bytes,
+        wal_tail_segments,
+        "full namespace materialized"
+    );
+    Ok(materialization)
+}
+
+fn enforce_full_materialization_limits(
+    purpose: FullMaterializationPurpose,
+    limits: FullMaterializationLimits,
+    materialization: &FullNamespaceMaterialization,
+    wal_tail_segments: u64,
+) -> Result<(), FullMaterializationLoadError> {
+    let rows = materialization.row_count();
+    let decoded_bytes = materialization.decoded_bytes();
+    if rows > limits.max_rows
+        || decoded_bytes > limits.max_decoded_bytes
+        || wal_tail_segments > limits.max_wal_tail_segments
+    {
+        return Err(FullMaterializationLoadError::LimitExceeded {
+            purpose,
+            rows,
+            max_rows: limits.max_rows,
+            decoded_bytes,
+            max_decoded_bytes: limits.max_decoded_bytes,
+            wal_tail_segments,
+            max_wal_tail_segments: limits.max_wal_tail_segments,
+        });
+    }
+    Ok(())
 }
 
 async fn ensure_head_etag_still_current<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
     loaded_head_etag: &str,
-) -> Result<(), BasisLoadError> {
+) -> Result<(), FullMaterializationLoadError> {
     let object_key = namespace_head(expected_namespace.as_str());
     let metadata = store
         .head(&object_key)
         .await
         .map_err(|error| {
-            BasisLoadError::LoadHead(ControlObjectLoadError::Store(error.to_string()))
+            FullMaterializationLoadError::LoadHead(ControlObjectLoadError::Store(error.to_string()))
         })?
         .ok_or_else(|| {
-            BasisLoadError::LoadHead(ControlObjectLoadError::MissingObject {
+            FullMaterializationLoadError::LoadHead(ControlObjectLoadError::MissingObject {
                 object_key: object_key.clone(),
             })
         })?;
-    let current_head_etag = metadata
-        .etag
-        .ok_or_else(|| BasisLoadError::MissingHeadEtag {
-            object_key: object_key.clone(),
-        })?;
+    let current_head_etag =
+        metadata
+            .etag
+            .ok_or_else(|| FullMaterializationLoadError::MissingHeadEtag {
+                object_key: object_key.clone(),
+            })?;
     if current_head_etag != loaded_head_etag {
-        return Err(BasisLoadError::HeadChangedDuringLoad {
+        return Err(FullMaterializationLoadError::HeadChangedDuringLoad {
             object_key,
             loaded_head_etag: loaded_head_etag.to_owned(),
             current_head_etag,
@@ -329,11 +476,13 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     match namespace_initialization_state(store, expected_namespace).await {
         Ok(NamespaceInitializationState::Complete) => {}
         Ok(NamespaceInitializationState::Absent) => {
-            return Err(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
-                ControlObjectLoadError::MissingObject {
-                    object_key: namespace_descriptor(expected_namespace.as_str()),
-                },
-            )));
+            return Err(CoreError::FullMaterialization(
+                FullMaterializationLoadError::LoadNamespaceDescriptor(
+                    ControlObjectLoadError::MissingObject {
+                        object_key: namespace_descriptor(expected_namespace.as_str()),
+                    },
+                ),
+            ));
         }
         Ok(NamespaceInitializationState::Partial) => {
             return Err(CoreError::NamespacePartiallyInitialized {
@@ -345,7 +494,9 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
 
     let loaded_head = read_head_object(store, expected_namespace)
         .await
-        .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+        .map_err(|error| {
+            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+        })?;
     if loaded_head.envelope.state.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace.clone(),
@@ -353,18 +504,21 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     }
     let head = loaded_head.envelope.state;
     let manifest_id = head.current_manifest_id.ok_or_else(|| {
-        CoreError::Basis(BasisLoadError::MissingCurrentManifest {
+        CoreError::FullMaterialization(FullMaterializationLoadError::MissingCurrentManifest {
             namespace_id: expected_namespace.clone(),
         })
     })?;
-    let manifest_basis_seq =
+    let manifest_materialization_seq =
         load_namespace_manifest_envelope(store, expected_namespace, manifest_id)
             .await
-            .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?
+            .map_err(|error| {
+                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+            })?
             .payload
             .head_seq;
     let wal_tail_segments = if head.visible_wal_tip.is_some() {
-        count_wal_tail_segments_by_position(store, expected_namespace, manifest_basis_seq).await?
+        count_wal_tail_segments_by_position(store, expected_namespace, manifest_materialization_seq)
+            .await?
     } else {
         0
     };
@@ -382,14 +536,14 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
 ///
 /// Status is an inspection surface, so the count comes from one listing
 /// instead of loading and validating segment bodies: segment file names
-/// carry their `start_seq`, and every chain segment past the materialized
-/// manifest basis starts above it. Objects that lost a head race are counted
-/// until reclamation removes them, which can only over-trigger maintenance,
-/// never starve it. Recovery authority stays with the head and chain.
+/// carry their `start_seq`, and every chain segment past the manifest starts
+/// above it. Objects that lost a head race are counted until reclamation
+/// removes them, which can only over-trigger maintenance, never starve it.
+/// Recovery authority stays with the head and chain.
 async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_basis_seq: ChangeSeq,
+    manifest_materialization_seq: ChangeSeq,
 ) -> Result<u64, CoreError> {
     let keys = store
         .list_prefix(&wal_segment_prefix(namespace_id.as_str()))
@@ -399,7 +553,7 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
         .iter()
         .filter_map(|key| wal_segment_id_from_key(key))
         .filter_map(wal_segment_id_start_seq)
-        .filter(|start_seq| *start_seq > manifest_basis_seq)
+        .filter(|start_seq| *start_seq > manifest_materialization_seq)
         .count();
     u64::try_from(tail_segments)
         .map_err(|_| CoreError::Store("WAL tail segment count overflow".to_owned()))
@@ -422,22 +576,20 @@ pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
         .head(&object_key)
         .await
         .map_err(|err| {
-            CoreError::Basis(BasisLoadError::LoadHead(ControlObjectLoadError::Store(
-                err.to_string(),
-            )))
+            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(
+                ControlObjectLoadError::Store(err.to_string()),
+            ))
         })?
         .ok_or_else(|| {
-            CoreError::Basis(BasisLoadError::LoadHead(
+            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(
                 ControlObjectLoadError::MissingObject {
                     object_key: object_key.clone(),
                 },
             ))
         })?;
-    let head_etag = metadata
-        .etag
-        .ok_or(CoreError::Basis(BasisLoadError::MissingHeadEtag {
-            object_key,
-        }))?;
+    let head_etag = metadata.etag.ok_or(CoreError::FullMaterialization(
+        FullMaterializationLoadError::MissingHeadEtag { object_key },
+    ))?;
     Ok(NamespaceHeadEtagProbe { head_etag })
 }
 
@@ -447,10 +599,14 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
             CoreError::InvalidNamespaceId(error)
         }
         NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
-            CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(error))
+            CoreError::FullMaterialization(FullMaterializationLoadError::LoadNamespaceDescriptor(
+                error,
+            ))
         }
         NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
-            CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(error))
+            CoreError::FullMaterialization(
+                FullMaterializationLoadError::LoadContentStoreDescriptor(error),
+            )
         }
         NamespaceInitializationError::InspectNamespaceDescriptor(_)
         | NamespaceInitializationError::InspectNamespaceHead(_)
@@ -463,7 +619,7 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
 fn ensure_reconstructed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,
-) -> Result<(), BasisLoadError> {
+) -> Result<(), FullMaterializationLoadError> {
     // `active_fence_token` is intentionally excluded. Lease takeover can bump
     // the fence token in the control plane without any WAL replay.
     if current_head.namespace_id != reconstructed.namespace_id
@@ -477,7 +633,7 @@ fn ensure_reconstructed_head_matches(
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
     {
-        return Err(BasisLoadError::ReconstructedHeadMismatch {
+        return Err(FullMaterializationLoadError::ReconstructedHeadMismatch {
             expected: Box::new(current_head.clone()),
             actual: Box::new(reconstructed.clone()),
         });
@@ -574,11 +730,18 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let basis = load_verified_namespace_basis(store.as_ref(), &namespace_id)
-            .await
-            .expect("basis");
-        assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
-        assert_eq!(basis.head.latest_checkpoint_id, None);
+        let materialization = load_full_namespace_materialization(
+            store.as_ref(),
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
+        assert_eq!(
+            materialization.head.current_manifest_id,
+            Some(ManifestId(0))
+        );
+        assert_eq!(materialization.head.latest_checkpoint_id, None);
 
         let materialized =
             load_verified_manifest_materialization(store.as_ref(), &namespace_id, ManifestId(0))
@@ -624,12 +787,16 @@ mod tests {
             .await
             .expect("overwrite head");
 
-        let basis_error = load_verified_namespace_basis(store.as_ref(), &namespace_id)
-            .await
-            .expect_err("basis rejects missing manifest");
+        let materialization_error = load_full_namespace_materialization(
+            store.as_ref(),
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect_err("materialization rejects missing manifest");
         assert!(matches!(
-            basis_error,
-            BasisLoadError::MissingCurrentManifest { namespace_id: found } if found == namespace_id
+            materialization_error,
+            FullMaterializationLoadError::MissingCurrentManifest { namespace_id: found } if found == namespace_id
         ));
 
         let summary_error = load_namespace_head_summary(store.as_ref(), &namespace_id)
@@ -644,8 +811,87 @@ mod tests {
         assert_eq!(read_error.code(), ErrorCode::NamespaceCorrupt);
     }
 
+    #[test]
+    fn full_materialization_purposes_exclude_normal_runtime_paths() {
+        let names = FullMaterializationPurpose::ALL
+            .iter()
+            .map(|purpose| purpose.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), FullMaterializationPurpose::ALL.len());
+        for forbidden in ["current_head_read", "publish_validation", "normal_write"] {
+            assert!(!names.contains(forbidden));
+        }
+        for name in names {
+            assert!(name.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'));
+        }
+    }
+
+    #[test]
+    fn production_read_write_entrypoints_do_not_load_full_materializations() {
+        for (label, source) in [
+            ("engine", include_str!("../engine.rs")),
+            ("options", include_str!("../options.rs")),
+            ("publisher", include_str!("../publisher.rs")),
+        ] {
+            for forbidden in [
+                concat!("ReadOptions::", "full_materialization"),
+                concat!("ReadSource::", "FullMaterialization"),
+                "load_full_namespace_materialization(",
+                concat!(
+                    "FullMaterializationPurpose::",
+                    "DirectPathPlanning",
+                    "Temporary"
+                ),
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{label} must not reference `{forbidden}`"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn basis_load_rejects_stale_head_body_when_current_etag_changed() {
+    async fn full_materialization_limit_exceeded_is_structured() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("primary").expect("valid namespace id");
+        let engine = NamespaceEngine::builder(Arc::clone(&store))
+            .namespace(namespace_id.clone())
+            .writer("writer-a")
+            .build()
+            .expect("engine");
+        engine
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap");
+
+        let error = load_full_namespace_materialization_with_limits(
+            store.as_ref(),
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+            FullMaterializationLimits {
+                max_rows: 0,
+                max_decoded_bytes: usize::MAX,
+                max_wal_tail_segments: u64::MAX,
+            },
+        )
+        .await
+        .expect_err("row limit rejects bootstrap materialization");
+
+        assert!(matches!(
+            error,
+            FullMaterializationLoadError::LimitExceeded {
+                purpose: FullMaterializationPurpose::TestOracle,
+                rows: 1,
+                max_rows: 0,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_materialization_rejects_stale_head_body_when_current_etag_changed() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse("primary").expect("valid namespace id");
@@ -675,13 +921,17 @@ mod tests {
             head_key: head_key.clone(),
             stale_head,
         };
-        let error = load_verified_namespace_basis(&stale_store, &namespace_id)
-            .await
-            .expect_err("stale head is rejected");
+        let error = load_full_namespace_materialization(
+            &stale_store,
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect_err("stale head is rejected");
 
         assert!(matches!(
             error,
-            BasisLoadError::HeadChangedDuringLoad { object_key, .. } if object_key == head_key
+            FullMaterializationLoadError::HeadChangedDuringLoad { object_key, .. } if object_key == head_key
         ));
     }
 

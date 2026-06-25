@@ -1920,7 +1920,7 @@ mod tests {
     }
 
     /// Queries above `indexed_seq()` are at-head queries: commit validation
-    /// probes the basis at the next assigned seq and must hit the indexes.
+    /// probes the materialization at the next assigned seq and must hit the indexes.
     #[test]
     fn queries_above_indexed_seq_match_at_head_results() {
         let state = churned_binding_state();

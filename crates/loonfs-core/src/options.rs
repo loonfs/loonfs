@@ -1,6 +1,5 @@
 use crate::{
     checkpoint::{MetadataTableCache, WalTailProjectionCache},
-    namespace::basis::VerifiedNamespaceBasis,
     path::write::PutFileBehavior,
 };
 use loonfs_api::wire::control::HeadState;
@@ -43,15 +42,6 @@ impl ReadOptions {
         }
     }
 
-    /// Reuses a caller-supplied verified basis for maintenance/debug callers.
-    ///
-    /// This is useful when several reads should share the same namespace view.
-    pub fn verified_basis(basis: Arc<VerifiedNamespaceBasis>) -> Self {
-        Self {
-            source: ReadSource::VerifiedBasis(basis),
-        }
-    }
-
     /// Reads from a manifest-plus-tail view pinned to an already-loaded head.
     ///
     /// Runtime code uses this when it has already validated the head and wants
@@ -78,10 +68,6 @@ impl ReadOptions {
     pub fn source(&self) -> &ReadSource {
         &self.source
     }
-
-    pub(crate) fn into_source(self) -> ReadSource {
-        self.source
-    }
 }
 
 impl Default for ReadOptions {
@@ -95,8 +81,6 @@ impl Default for ReadOptions {
 pub enum ReadSource {
     /// Use the current manifest and bounded WAL tail.
     ManifestPlusTail,
-    /// Use this already-verified namespace basis.
-    VerifiedBasis(Arc<VerifiedNamespaceBasis>),
     /// Use manifest-plus-tail for a specific already-loaded head.
     ManifestPlusTailAtHead {
         /// The namespace head to read against.

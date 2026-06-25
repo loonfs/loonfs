@@ -14,7 +14,7 @@ pub struct NamespaceStatus {
     pub current_manifest_id: Option<ManifestId>,
     /// Latest checkpoint recorded by the head.
     pub latest_checkpoint_id: Option<String>,
-    /// Number of visible WAL segments after the manifest basis.
+    /// Number of visible WAL segments after the manifest materialization.
     pub wal_tail_segments: u64,
     /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,

@@ -1,8 +1,11 @@
-use super::runs::CHECKPOINT_TABLE_FAMILIES;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::ChangeSeq;
 
+#[cfg(test)]
+use super::runs::CHECKPOINT_TABLE_FAMILIES;
+
+#[cfg(test)]
 pub(super) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
     CHECKPOINT_TABLE_FAMILIES.into_iter().all(|family| {
         manifest_rows_for_family(left, family) == manifest_rows_for_family(right, family)

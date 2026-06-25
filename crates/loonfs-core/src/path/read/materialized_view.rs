@@ -1,18 +1,18 @@
 use super::{
     listing::{invalid_cursor, page_head_seq, validate_directory_cursor},
-    CurrentManifestTailView,
+    CurrentManifestTailView, MetadataReadSession, VisibleChildEntry,
 };
 use crate::checkpoint::{
-    load_verified_manifest_tables_with_cache, manifest_basis_head, MetadataTableCache,
+    head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
     VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
 };
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord,
 };
-use crate::namespace::basis::BasisLoadError;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{
@@ -26,6 +26,7 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
+use tracing::Instrument;
 
 const DEFAULT_MAX_READ_WAL_TAIL_SEGMENTS: u64 = 32;
 
@@ -125,9 +126,15 @@ pub(crate) async fn list_path_page_from_manifest_plus_tail_at_head_with_cache<
         .map(|cursor| cursor.head_seq != head.seq)
         .unwrap_or(false)
     {
-        return Err(invalid_cursor(
-            "cursor snapshot does not match the requested materialized head",
-        ));
+        let cursor = request
+            .cursor
+            .as_ref()
+            .expect("cursor presence checked above");
+        return Err(MetadataViewError::UnsupportedHistoricalRead {
+            requested_seq: cursor.head_seq,
+            head_seq: head.seq,
+        }
+        .into());
     }
     let view = ManifestPlusTailView::load_at_head_with_cache(
         store,
@@ -332,7 +339,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
     pub(crate) async fn load(store: &'a S, namespace_id: &NamespaceId) -> Result<Self, CoreError> {
         let loaded_head = read_head_object(store, namespace_id)
             .await
-            .map_err(BasisLoadError::LoadHead)?;
+            .map_err(FullMaterializationLoadError::LoadHead)?;
         Self::load_at_head_with_cache(
             store,
             namespace_id,
@@ -359,15 +366,14 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 namespace_id: namespace_id.clone(),
             });
         }
-        let manifest_id = head.current_manifest_id.ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "namespace `{}` head has no current manifest",
-                namespace_id.as_str()
-            ))
-        })?;
+        let manifest_id =
+            head.current_manifest_id
+                .ok_or_else(|| MetadataViewError::MissingManifest {
+                    namespace_id: namespace_id.clone(),
+                })?;
         let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
             .await
-            .map_err(BasisLoadError::from)?;
+            .map_err(FullMaterializationLoadError::from)?;
         let tables = load_verified_manifest_tables_with_cache(
             store,
             cache_context.table_cache,
@@ -375,8 +381,10 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             manifest_id,
         )
         .await
-        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-        let manifest_head = manifest_basis_head(&head, tables.manifest());
+        .map_err(|error| {
+            CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+        })?;
+        let manifest_head = head_from_manifest(&head, tables.manifest());
         let cache_key = cache_context
             .head_etag
             .map(|etag| WalTailProjectionCacheKey {
@@ -408,17 +416,20 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             },
         )
         .await
-        .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
+        .map_err(|error| {
+            CoreError::FullMaterialization(FullMaterializationLoadError::WalChainLoad(error))
+        })?;
         let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
         if wal_tail_segments > cache_context.max_wal_tail_segments {
-            return Err(CoreError::MetadataTailTooLong {
+            return Err(MetadataViewError::TailTooLong {
                 namespace_id: namespace_id.clone(),
                 manifest_id,
                 manifest_head_seq: manifest_head.seq,
                 head_seq: head.seq,
                 wal_tail_segments,
                 max_wal_tail_segments: cache_context.max_wal_tail_segments,
-            });
+            }
+            .into());
         }
         let replayed = {
             let _span =
@@ -428,7 +439,9 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 &MetadataState::default(),
                 wal_chain.segments(),
             )
-            .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))
+            .map_err(|error| {
+                CoreError::FullMaterialization(FullMaterializationLoadError::WalReplay(error))
+            })
         }?;
         let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);
         if let (Some(cache), Some(key)) = (cache_context.tail_cache, cache_key) {
@@ -632,12 +645,15 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             request.cursor.as_ref(),
         )?;
         if page_head_seq != self.head.seq {
-            return Err(invalid_cursor(
-                "materialized listing can only page at its loaded head",
-            ));
+            return Err(MetadataViewError::UnsupportedHistoricalRead {
+                requested_seq: page_head_seq,
+                head_seq: self.head.seq,
+            }
+            .into());
         }
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+        let mut session = self.metadata_view().session();
         let resolved = self.resolve_visible_path(&absolute_path).await?;
         if let Some(cursor) = request.cursor.as_ref() {
             validate_directory_cursor(cursor, &resolved)?;
@@ -650,7 +666,10 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 ));
             }
             return Ok(Page {
-                items: vec![self.build_authoritative_path_entry(&resolved).await?],
+                items: vec![
+                    self.build_authoritative_path_entry_with_session(&mut session, &resolved)
+                        .await?,
+                ],
                 next_cursor: None,
             });
         }
@@ -665,13 +684,21 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             .cursor
             .as_ref()
             .map(|cursor| cursor.last_name_key.as_str());
-        let mut children = self
+        let select_span = tracing::info_span!(
+            "loon.phase",
+            phase = "list_page_select_children",
+            list_page_requested_limit = request.limit.as_usize() as u64,
+            list_page_children_returned = tracing::field::Empty,
+        );
+        let mut children = session
             .visible_children_page_by_name_key(
                 resolved.inode_id,
                 start_after,
                 request.limit.limit_plus_one(),
             )
+            .instrument(select_span.clone())
             .await?;
+        select_span.record("list_page_children_returned", children.len() as u64);
         let has_more = children.len() > request.limit.as_usize();
         if has_more {
             children.truncate(request.limit.as_usize());
@@ -684,34 +711,80 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             Some(DirectoryPageCursor {
                 head_seq: page_head_seq,
                 dir_inode_id: resolved.inode_id,
-                last_name_key: NameKey::try_new(last.name_key.clone()).map_err(|error| {
-                    CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))
-                })?,
+                last_name_key: NameKey::try_new(last.binding.name_key.clone()).map_err(
+                    |error| {
+                        CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))
+                    },
+                )?,
             })
         } else {
             None
         };
 
-        let mut entries = Vec::with_capacity(children.len());
-        for direntry in children {
-            let child = self
-                .visible_inode(direntry.child_inode_id)
-                .await?
-                .expect("visible child listing should resolve inode");
-            let child_path = AbsolutePath::parse(&resolved.absolute_path)
-                .map_err(map_path_error_to_core)?
-                .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
-            entries.push(
-                self.build_authoritative_path_entry(&ResolvedVisiblePath {
-                    absolute_path: child_path.as_str().to_owned(),
-                    inode_id: direntry.child_inode_id,
-                    inode_kind: child.inode_kind,
-                    parent_inode_id: Some(direntry.parent_inode_id),
-                    display_name: direntry.display_name,
-                })
-                .await?,
-            );
+        let build_span = tracing::info_span!(
+            "loon.phase",
+            phase = "list_page_build_entries",
+            list_page_children_returned = children.len() as u64,
+            list_page_visible_child_calls = tracing::field::Empty,
+            list_page_visible_inode_calls = tracing::field::Empty,
+            list_page_current_parent_binding_calls = tracing::field::Empty,
+            list_page_covering_tombstone_calls = tracing::field::Empty,
+            list_page_latest_revision_calls = tracing::field::Empty,
+            list_page_revision_scan_calls = tracing::field::Empty,
+            list_page_direntry_child_scan_calls = tracing::field::Empty,
+            list_page_scan_prefix_calls = tracing::field::Empty,
+            list_page_scan_range_page_calls = tracing::field::Empty,
+        );
+        let entries = async {
+            let mut entries = Vec::with_capacity(children.len());
+            for child in children {
+                entries.push(
+                    self.build_authoritative_path_entry_from_visible_child(
+                        &mut session,
+                        &resolved,
+                        child,
+                    )
+                    .await?,
+                );
+            }
+            Ok::<_, CoreError>(entries)
         }
+        .instrument(build_span.clone())
+        .await?;
+        let counters = session.counters();
+        build_span.record(
+            "list_page_visible_child_calls",
+            counters.visible_child_calls,
+        );
+        build_span.record(
+            "list_page_visible_inode_calls",
+            counters.visible_inode_calls,
+        );
+        build_span.record(
+            "list_page_current_parent_binding_calls",
+            counters.current_parent_binding_calls,
+        );
+        build_span.record(
+            "list_page_covering_tombstone_calls",
+            counters.covering_tombstone_calls,
+        );
+        build_span.record(
+            "list_page_latest_revision_calls",
+            counters.latest_revision_calls,
+        );
+        build_span.record(
+            "list_page_revision_scan_calls",
+            counters.revision_scan_calls,
+        );
+        build_span.record(
+            "list_page_direntry_child_scan_calls",
+            counters.direntry_child_scan_calls,
+        );
+        build_span.record("list_page_scan_prefix_calls", counters.scan_prefix_calls);
+        build_span.record(
+            "list_page_scan_range_page_calls",
+            counters.scan_range_page_calls,
+        );
 
         Ok(Page {
             items: entries,
@@ -732,7 +805,21 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         &self,
         resolved: &ResolvedVisiblePath,
     ) -> Result<AuthoritativePathEntry, CoreError> {
-        let revision = self.latest_revision_head(resolved.inode_id).await?;
+        let mut session = self.metadata_view().session();
+        self.build_authoritative_path_entry_with_session(&mut session, resolved)
+            .await
+    }
+
+    async fn build_authoritative_path_entry_with_session(
+        &self,
+        session: &mut MetadataReadSession<'_, S>,
+        resolved: &ResolvedVisiblePath,
+    ) -> Result<AuthoritativePathEntry, CoreError> {
+        let revision = if resolved.inode_kind == InodeKind::File {
+            session.latest_revision_head(resolved.inode_id).await?
+        } else {
+            None
+        };
         let content_ref = revision
             .as_ref()
             .map(|revision| revision.content_ref.clone());
@@ -754,6 +841,30 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         })
     }
 
+    async fn build_authoritative_path_entry_from_visible_child(
+        &self,
+        session: &mut MetadataReadSession<'_, S>,
+        resolved_dir: &ResolvedVisiblePath,
+        child: VisibleChildEntry,
+    ) -> Result<AuthoritativePathEntry, CoreError> {
+        let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
+            .map_err(map_path_error_to_core)?
+            .join(
+                &DisplayName::parse(&child.binding.display_name).map_err(map_path_error_to_core)?,
+            );
+        self.build_authoritative_path_entry_with_session(
+            session,
+            &ResolvedVisiblePath {
+                absolute_path: child_path.as_str().to_owned(),
+                inode_id: child.binding.child_inode_id,
+                inode_kind: child.inode.inode_kind,
+                parent_inode_id: Some(child.binding.parent_inode_id),
+                display_name: child.binding.display_name,
+            },
+        )
+        .await
+    }
+
     async fn visible_children(
         &self,
         parent_inode_id: InodeId,
@@ -761,26 +872,8 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         self.metadata_view().visible_children(parent_inode_id).await
     }
 
-    async fn visible_children_page_by_name_key(
-        &self,
-        parent_inode_id: InodeId,
-        start_after_name_key: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        self.metadata_view()
-            .visible_children_page_by_name_key(parent_inode_id, start_after_name_key, limit)
-            .await
-    }
-
     async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, CoreError> {
         self.metadata_view().visible_inode(inode_id).await
-    }
-
-    async fn latest_revision_head(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, CoreError> {
-        self.metadata_view().latest_revision_head(inode_id).await
     }
 
     async fn revision_for_inode(

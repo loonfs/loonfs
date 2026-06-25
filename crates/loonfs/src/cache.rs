@@ -8,7 +8,9 @@ use crate::fs::{should_invalidate_after_result, Fs};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
-use loonfs_core::cache::{BasisLoadError, MetadataTableCacheStats, WalTailProjectionCacheStats};
+use loonfs_core::cache::{
+    FullMaterializationLoadError, MetadataTableCacheStats, WalTailProjectionCacheStats,
+};
 use loonfs_core::control::{
     load_namespace_head_control, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
 };
@@ -288,8 +290,8 @@ impl Fs {
             Err(ControlObjectLoadError::MissingObject { object_key }) => {
                 Err(self.missing_head_read_error(namespace_id, object_key).await)
             }
-            Err(error) => Err(RuntimeError::Core(CoreError::Basis(
-                BasisLoadError::LoadHead(error),
+            Err(error) => Err(RuntimeError::Core(CoreError::FullMaterialization(
+                FullMaterializationLoadError::LoadHead(error),
             ))),
         }
     }
@@ -310,16 +312,18 @@ impl Fs {
             Err(error) => return RuntimeError::Core(CoreError::Store(error.to_string())),
         };
         match (descriptor_exists, lease_exists) {
-            (false, false) => RuntimeError::Core(CoreError::Basis(
-                BasisLoadError::LoadNamespaceDescriptor(ControlObjectLoadError::MissingObject {
-                    object_key: descriptor_key,
+            (false, false) => RuntimeError::Core(CoreError::FullMaterialization(
+                FullMaterializationLoadError::LoadNamespaceDescriptor(
+                    ControlObjectLoadError::MissingObject {
+                        object_key: descriptor_key,
+                    },
+                ),
+            )),
+            (true, true) => RuntimeError::Core(CoreError::FullMaterialization(
+                FullMaterializationLoadError::LoadHead(ControlObjectLoadError::MissingObject {
+                    object_key: head_key,
                 }),
             )),
-            (true, true) => RuntimeError::Core(CoreError::Basis(BasisLoadError::LoadHead(
-                ControlObjectLoadError::MissingObject {
-                    object_key: head_key,
-                },
-            ))),
             _ => RuntimeError::Core(CoreError::NamespacePartiallyInitialized {
                 namespace_id: namespace_id.clone(),
             }),
