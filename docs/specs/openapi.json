@@ -16,6 +16,7 @@
           "health"
         ],
         "summary": "Check health",
+        "description": "Returns `ok` when the server process is running and can accept requests. This does not prove the backing object store is healthy.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -40,6 +41,7 @@
           "admin"
         ],
         "summary": "Create checkpoint",
+        "description": "Pins the current namespace view with a checkpoint and publishes checkpoint metadata through the namespace manifest. This is a maintenance/admin operation, not a file mutation.",
         "operationId": "create_checkpoint_handler",
         "parameters": [
           {
@@ -122,6 +124,7 @@
           "admin"
         ],
         "summary": "Advance retention",
+        "description": "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
         "operationId": "advance_retention_handler",
         "parameters": [
           {
@@ -194,6 +197,7 @@
           "config"
         ],
         "summary": "Get config",
+        "description": "Returns the capability document clients use to discover supported profiles, features, and limits before sending other requests.",
         "operationId": "config_handler",
         "responses": {
           "200": {
@@ -225,6 +229,7 @@
           "namespaces"
         ],
         "summary": "List namespaces",
+        "description": "Returns complete, non-deleted namespaces visible to this server. Use pagination when the deployment may contain many namespaces.",
         "operationId": "list_namespaces_handler",
         "parameters": [
           {
@@ -284,6 +289,7 @@
           "namespaces"
         ],
         "summary": "Create namespace",
+        "description": "Creates a new empty namespace and its initial manifest. Namespace ids are durable and cannot be reused after deletion.",
         "operationId": "create_namespace",
         "requestBody": {
           "content": {
@@ -355,6 +361,7 @@
           "namespaces"
         ],
         "summary": "Get namespace status",
+        "description": "Returns the current head, manifest, checkpoint, WAL tail, and retention state for one namespace without listing namespace contents.",
         "operationId": "namespace_status_handler",
         "parameters": [
           {
@@ -425,6 +432,7 @@
           "namespaces"
         ],
         "summary": "Delete namespace",
+        "description": "Marks a namespace as deleted and retires its id. Existing durable history remains, but future reads, writes, forks, and re-creation attempts fail.",
         "operationId": "delete_namespace_handler",
         "parameters": [
           {
@@ -518,6 +526,7 @@
           "commits"
         ],
         "summary": "List changes",
+        "description": "Returns committed changes after a namespace sequence cursor. Callers can use this feed to keep another projection synchronized with retained WAL history.",
         "operationId": "list_changes_handler",
         "parameters": [
           {
@@ -610,6 +619,7 @@
           "commits"
         ],
         "summary": "Commit operations",
+        "description": "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this when path-oriented operations are not precise enough.",
         "operationId": "commit_operations_handler",
         "parameters": [
           {
@@ -712,6 +722,7 @@
           "filesystem"
         ],
         "summary": "Read file",
+        "description": "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
         "operationId": "get_content",
         "parameters": [
           {
@@ -807,6 +818,7 @@
           "filesystem"
         ],
         "summary": "List directory",
+        "description": "Lists one directory at the current namespace head. Results are returned in stable pages and include the head sequence the page was read from.",
         "operationId": "list_entries",
         "parameters": [
           {
@@ -906,6 +918,7 @@
           "filesystem"
         ],
         "summary": "Run filesystem operation",
+        "description": "Runs one path-oriented filesystem mutation, such as create directory, put file, move, copy, delete, or restore revision. The commit id makes retries idempotent.",
         "operationId": "filesystem_operation",
         "parameters": [
           {
@@ -1008,6 +1021,7 @@
           "filesystem"
         ],
         "summary": "List file revisions",
+        "description": "Resolves the current path to a file inode and returns retained revisions for that file. If the file is renamed, use the inode revision API for stable identity.",
         "operationId": "list_path_revisions",
         "parameters": [
           {
@@ -1089,6 +1103,7 @@
           "filesystem"
         ],
         "summary": "Stat path",
+        "description": "Returns the current metadata for one path, including inode identity, kind, display name, and file content metadata when the path is a file.",
         "operationId": "stat_entry",
         "parameters": [
           {
@@ -1170,6 +1185,7 @@
           "namespaces"
         ],
         "summary": "Fork namespace",
+        "description": "Creates a new namespace from the source namespace's current durable view. The fork starts with the same file contents and can diverge after later writes.",
         "operationId": "fork_namespace_handler",
         "parameters": [
           {
@@ -1262,6 +1278,7 @@
           "inodes"
         ],
         "summary": "List inode revisions",
+        "description": "Returns retained revisions for a file inode, independent of the file's current path or later renames.",
         "operationId": "list_inode_revisions",
         "parameters": [
           {
@@ -1343,6 +1360,7 @@
           "inodes"
         ],
         "summary": "Read inode revision",
+        "description": "Returns bytes for one retained file revision by inode id and revision number.",
         "operationId": "get_inode_revision_content",
         "parameters": [
           {
@@ -1438,6 +1456,7 @@
           "inodes"
         ],
         "summary": "Restore inode revision",
+        "description": "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
         "operationId": "restore_inode_revision",
         "parameters": [
           {
@@ -1548,6 +1567,7 @@
           "uploads"
         ],
         "summary": "Begin upload",
+        "description": "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store access details when enabled.",
         "operationId": "begin_upload_handler",
         "parameters": [
           {
@@ -1640,6 +1660,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
+        "description": "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
         "operationId": "complete_upload_handler",
         "parameters": [
           {
@@ -1741,6 +1762,7 @@
           "uploads"
         ],
         "summary": "Upload content",
+        "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
         "operationId": "upload_content_handler",
         "parameters": [
           {
