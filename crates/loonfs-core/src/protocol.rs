@@ -116,7 +116,11 @@ pub(crate) struct PublishManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> PublishManifestPlusTailView<'_, S> {
-    fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
+    pub(crate) fn head(&self) -> &HeadState {
+        &self.head
+    }
+
+    pub(crate) fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
         CurrentManifestTailView::new(&self.head, &self.manifest_tables, &self.tail_state)
     }
 

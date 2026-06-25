@@ -4,22 +4,24 @@ use crate::commit::{
     PATH_INTENT_FINGERPRINT_DOMAIN,
 };
 use crate::error::CoreError;
-use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-use crate::namespace::full_materialization::{
-    load_full_namespace_materialization, FullMaterializationPurpose, FullNamespaceMaterialization,
-};
-use crate::path::helpers::{
-    final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
-};
+#[cfg(test)]
+use crate::metadata::MetadataState;
+use crate::metadata::{ResolvedVisiblePath, VisiblePathError};
+#[cfg(test)]
+use crate::path::helpers::lookup_path;
+use crate::path::helpers::{final_component, parse_absolute_path_for_core, parse_mutation_path};
+#[cfg(test)]
 use crate::path::tombstone::reject_tombstoned_path_ancestor;
 use loonfs_api::wire::control::HeadState;
+#[cfg(test)]
+use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
         CommitRequest as ApiCommitRequest, RenameMode,
     },
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey,
-    NamespaceId, RevisionNo,
+    AbsolutePath, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
@@ -31,41 +33,13 @@ pub struct PlannedPathMutation {
     pub commit_request: ApiCommitRequest,
 }
 
-pub(crate) struct PathPlanner<'a, S: ObjectStore + ?Sized> {
-    store: &'a S,
-}
+#[cfg(test)]
+pub(crate) struct PathPlanner;
 
-impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
-    pub(crate) fn new(store: &'a S) -> Self {
-        Self { store }
-    }
-
-    pub(crate) async fn plan_against_current_full_materialization(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-    ) -> Result<PlannedPathMutation, CoreError> {
-        let materialization = load_full_namespace_materialization(
-            self.store,
-            namespace_id,
-            FullMaterializationPurpose::DirectPathPlanningTemporary,
-        )
-        .await?;
-        self.plan_against_full_materialization(namespace_id, intent, &materialization)
-    }
-
-    pub(crate) fn plan_against_full_materialization(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-        materialization: &FullNamespaceMaterialization,
-    ) -> Result<PlannedPathMutation, CoreError> {
-        self.plan_against_state(
-            namespace_id,
-            intent,
-            &materialization.head,
-            &materialization.metadata_state,
-        )
+#[cfg(test)]
+impl PathPlanner {
+    pub(crate) fn new() -> Self {
+        Self
     }
 
     pub(crate) fn plan_against_state(
@@ -211,6 +185,7 @@ fn is_missing_visible_path(error: &CoreError) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn plan_path_mutation_against_state(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
@@ -327,6 +302,7 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
     })
 }
 
+#[cfg(test)]
 struct PathPlanningView<'a> {
     head: &'a HeadState,
     metadata_state: &'a MetadataState,
@@ -841,6 +817,7 @@ async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
     Ok(resolved.inode_id)
 }
 
+#[cfg(test)]
 fn binding_is_precondition(
     view: &PathPlanningView<'_>,
     resolved: &ResolvedVisiblePath,
@@ -866,6 +843,7 @@ fn binding_is_precondition(
     })
 }
 
+#[cfg(test)]
 fn child_name_absent_precondition(
     view: &PathPlanningView<'_>,
     parent_inode: InodeId,
@@ -880,6 +858,7 @@ fn child_name_absent_precondition(
     }
 }
 
+#[cfg(test)]
 fn plan_create_dir(
     absolute_path: &str,
     commit_id: &CommitId,
@@ -928,6 +907,7 @@ fn plan_create_dir(
     })
 }
 
+#[cfg(test)]
 fn plan_put_file_content_ref(
     absolute_path: &str,
     content_ref: ContentRef,
@@ -1020,6 +1000,7 @@ fn plan_put_file_content_ref(
     })
 }
 
+#[cfg(test)]
 fn plan_delete_path(
     absolute_path: &str,
     recursive: bool,
@@ -1068,6 +1049,7 @@ fn plan_delete_path(
     })
 }
 
+#[cfg(test)]
 fn plan_move_path(
     from_path: &str,
     to_path: &str,
@@ -1139,6 +1121,7 @@ fn plan_move_path(
     })
 }
 
+#[cfg(test)]
 fn plan_copy_file_path(
     from_path: &str,
     to_path: &str,
@@ -1221,6 +1204,7 @@ fn plan_copy_file_path(
     })
 }
 
+#[cfg(test)]
 fn plan_restore_revision(
     absolute_path: &str,
     source_revision_no: RevisionNo,
@@ -1280,6 +1264,7 @@ fn plan_restore_revision(
 /// allocates from the same head counter in the same order. Once one ancestor
 /// is missing, every deeper component is missing too (a planned directory has
 /// no children), so the walk never needs to materialize planned state.
+#[cfg(test)]
 fn ensure_parent_directories(
     absolute_path: &AbsolutePath,
     view: &PathPlanningView<'_>,
@@ -1327,6 +1312,7 @@ fn ensure_parent_directories(
     Ok(current_inode)
 }
 
+#[cfg(test)]
 fn resolve_parent_directory(
     metadata_state: &MetadataState,
     absolute_path: &AbsolutePath,
@@ -1357,6 +1343,9 @@ mod tests {
     use crate::error::ErrorCode;
     use crate::metadata::{DirentryBindRecord, InodeRecord};
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::full_materialization::{
+        load_full_namespace_materialization, FullMaterializationPurpose,
+    };
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
@@ -1425,7 +1414,7 @@ mod tests {
         )
         .await
         .expect("materialization");
-        PathPlanner::new(store)
+        PathPlanner::new()
             .plan_against_state(
                 namespace_id,
                 intent,
@@ -1766,7 +1755,7 @@ mod tests {
         )
         .await
         .expect("materialization");
-        let error = PathPlanner::new(&store)
+        let error = PathPlanner::new()
             .plan_against_state(
                 &namespace_id,
                 &PathMutationIntent::PutFile {

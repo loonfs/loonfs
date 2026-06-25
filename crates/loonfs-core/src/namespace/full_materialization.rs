@@ -30,33 +30,24 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FullMaterializationPurpose {
-    CheckpointBuildTemporary,
     ForkInitializationTemporary,
     ChangeFeedTemporary,
-    DirectPathPlanningTemporary,
-    ExplicitReadOption,
     InspectionDebug,
     TestOracle,
 }
 
 impl FullMaterializationPurpose {
-    pub const ALL: [Self; 7] = [
-        Self::CheckpointBuildTemporary,
+    pub const ALL: [Self; 4] = [
         Self::ForkInitializationTemporary,
         Self::ChangeFeedTemporary,
-        Self::DirectPathPlanningTemporary,
-        Self::ExplicitReadOption,
         Self::InspectionDebug,
         Self::TestOracle,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::CheckpointBuildTemporary => "checkpoint_build_temporary",
             Self::ForkInitializationTemporary => "fork_initialization_temporary",
             Self::ChangeFeedTemporary => "change_feed_temporary",
-            Self::DirectPathPlanningTemporary => "direct_path_planning_temporary",
-            Self::ExplicitReadOption => "explicit_read_option",
             Self::InspectionDebug => "inspection_debug",
             Self::TestOracle => "test_oracle",
         }
@@ -832,6 +823,31 @@ mod tests {
         }
         for name in names {
             assert!(name.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'));
+        }
+    }
+
+    #[test]
+    fn production_read_write_entrypoints_do_not_load_full_materializations() {
+        for (label, source) in [
+            ("engine", include_str!("../engine.rs")),
+            ("options", include_str!("../options.rs")),
+            ("publisher", include_str!("../publisher.rs")),
+        ] {
+            for forbidden in [
+                concat!("ReadOptions::", "full_materialization"),
+                concat!("ReadSource::", "FullMaterialization"),
+                "load_full_namespace_materialization(",
+                concat!(
+                    "FullMaterializationPurpose::",
+                    "DirectPathPlanning",
+                    "Temporary"
+                ),
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{label} must not reference `{forbidden}`"
+                );
+            }
         }
     }
 

@@ -1,6 +1,5 @@
 use crate::{
     checkpoint::{MetadataTableCache, WalTailProjectionCache},
-    namespace::full_materialization::FullNamespaceMaterialization,
     path::write::PutFileBehavior,
 };
 use loonfs_api::wire::control::HeadState;
@@ -43,15 +42,6 @@ impl ReadOptions {
         }
     }
 
-    /// Reuses a caller-supplied full materialization for maintenance/debug callers.
-    ///
-    /// This is useful when several reads should share the same namespace view.
-    pub fn full_materialization(materialization: Arc<FullNamespaceMaterialization>) -> Self {
-        Self {
-            source: ReadSource::FullMaterialization(materialization),
-        }
-    }
-
     /// Reads from a manifest-plus-tail view pinned to an already-loaded head.
     ///
     /// Runtime code uses this when it has already validated the head and wants
@@ -78,10 +68,6 @@ impl ReadOptions {
     pub fn source(&self) -> &ReadSource {
         &self.source
     }
-
-    pub(crate) fn into_source(self) -> ReadSource {
-        self.source
-    }
 }
 
 impl Default for ReadOptions {
@@ -95,8 +81,6 @@ impl Default for ReadOptions {
 pub enum ReadSource {
     /// Use the current manifest and bounded WAL tail.
     ManifestPlusTail,
-    /// Use this already-loaded full namespace materialization.
-    FullMaterialization(Arc<FullNamespaceMaterialization>),
     /// Use manifest-plus-tail for a specific already-loaded head.
     ManifestPlusTailAtHead {
         /// The namespace head to read against.

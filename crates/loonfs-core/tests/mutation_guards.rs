@@ -52,7 +52,7 @@ use loonfs_objectstore::{
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,42 +450,113 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     )
 }
 
-fn resolve_path_using_full_materialization_option(
+fn resolve_path_using_full_materialization_oracle(
     materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    block_on(
-        NamespaceEngine::builder(&store)
-            .namespace(materialization.head.namespace_id.clone())
-            .writer("test")
-            .build()
-            .expect("test engine")
-            .resolve_path(
-                absolute_path,
-                ReadOptions::full_materialization(Arc::new(materialization.clone())),
-            ),
-    )
+    let absolute_path = AbsolutePath::parse(absolute_path)
+        .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
+    let resolved = materialization
+        .metadata_state
+        .resolve_visible_path(
+            &absolute_path,
+            materialization.head.name_policy,
+            materialization.head.seq,
+        )
+        .map_err(CoreError::from)?;
+    Ok(path_entry_from_full_materialization(
+        materialization,
+        resolved,
+    ))
 }
 
-fn list_path_using_full_materialization_option(
+fn list_path_using_full_materialization_oracle(
     materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
 ) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    block_on(
-        NamespaceEngine::builder(&store)
-            .namespace(materialization.head.namespace_id.clone())
-            .writer("test")
-            .build()
-            .expect("test engine")
-            .list_path(
-                absolute_path,
-                ReadOptions::full_materialization(Arc::new(materialization.clone())),
-            ),
+    let entry = resolve_path_using_full_materialization_oracle(materialization, absolute_path)?;
+    if entry.inode_kind == InodeKind::File {
+        return Ok(vec![entry]);
+    }
+    if entry.inode_kind != InodeKind::Dir {
+        return Err(CoreError::ExpectedDirectory {
+            path: entry.absolute_path,
+            kind: entry.inode_kind,
+        });
+    }
+    Ok(materialization
+        .metadata_state
+        .visible_children(entry.inode_id, materialization.head.seq)
+        .into_iter()
+        .map(|direntry| {
+            let child = materialization
+                .metadata_state
+                .visible_inode(direntry.child_inode_id, materialization.head.seq)
+                .expect("visible child inode exists");
+            let child_path = join_display_path(&entry.absolute_path, &direntry.display_name);
+            path_entry_from_full_materialization_resolved(
+                materialization,
+                child_path,
+                direntry.child_inode_id,
+                child.inode_kind,
+                Some(direntry.parent_inode_id),
+                direntry.display_name,
+            )
+        })
+        .collect())
+}
+
+fn path_entry_from_full_materialization(
+    materialization: &FullNamespaceMaterialization,
+    resolved: loonfs_core::metadata::ResolvedVisiblePath,
+) -> loonfs_api::AuthoritativePathEntry {
+    path_entry_from_full_materialization_resolved(
+        materialization,
+        resolved.absolute_path,
+        resolved.inode_id,
+        resolved.inode_kind,
+        resolved.parent_inode_id,
+        resolved.display_name,
     )
+}
+
+fn path_entry_from_full_materialization_resolved(
+    materialization: &FullNamespaceMaterialization,
+    absolute_path: String,
+    inode_id: InodeId,
+    inode_kind: InodeKind,
+    parent_inode_id: Option<InodeId>,
+    display_name: String,
+) -> loonfs_api::AuthoritativePathEntry {
+    let revision = materialization
+        .metadata_state
+        .latest_revision_at_head(inode_id);
+    let content_ref = revision
+        .as_ref()
+        .map(|revision| revision.content_ref.clone());
+    let size_bytes = content_ref
+        .as_ref()
+        .map(|content_ref| content_ref.size_bytes);
+    loonfs_api::AuthoritativePathEntry {
+        namespace_id: materialization.head.namespace_id.clone(),
+        absolute_path,
+        inode_id,
+        inode_kind,
+        head_seq: materialization.head.seq,
+        parent_inode_id,
+        display_name,
+        revision_no: revision.as_ref().map(|revision| revision.revision_no),
+        size_bytes,
+        content_ref,
+    }
+}
+
+fn join_display_path(parent: &str, display_name: &str) -> String {
+    if parent == "/" {
+        format!("/{display_name}")
+    } else {
+        format!("{parent}/{display_name}")
+    }
 }
 
 fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
@@ -1693,7 +1764,8 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_driven_stat_and_list_match_full_materialization_with_l0_run_and_wal_overlay() {
+async fn query_driven_stat_and_list_match_full_materialization_oracle_with_l0_run_and_wal_overlay()
+{
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
@@ -1780,12 +1852,12 @@ async fn query_driven_stat_and_list_match_full_materialization_with_l0_run_and_w
     .await
     .expect("materialization");
     let expected_stat =
-        resolve_path_using_full_materialization_option(&materialization, "/docs/moved.txt")
+        resolve_path_using_full_materialization_oracle(&materialization, "/docs/moved.txt")
             .expect("materialization stat");
-    let expected_list = list_path_using_full_materialization_option(&materialization, "/docs")
+    let expected_list = list_path_using_full_materialization_oracle(&materialization, "/docs")
         .expect("materialization list");
     let expected_file_list =
-        list_path_using_full_materialization_option(&materialization, "/docs/moved.txt")
+        list_path_using_full_materialization_oracle(&materialization, "/docs/moved.txt")
             .expect("materialization file list");
 
     store.reset_content_blob_get_count();
@@ -1856,7 +1928,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     )
     .await
     .expect("materialization");
-    let expected = resolve_path_using_full_materialization_option(&materialization, "/docs/report")
+    let expected = resolve_path_using_full_materialization_oracle(&materialization, "/docs/report")
         .expect("materialization stat");
     let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
         .expect("materialized stat");
@@ -2730,7 +2802,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_publisher_retries_after_stale_head_get_during_full_materialization_load() {
+async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();

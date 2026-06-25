@@ -1,21 +1,22 @@
+#[cfg(any(test, feature = "inspection"))]
 pub(crate) use super::read::{
-    list_file_revisions_for_inode_from_full_materialization,
+    list_path_from_full_materialization, resolve_path_from_full_materialization,
+};
+
+pub(crate) use super::read::{
     list_file_revisions_for_inode_from_manifest_plus_tail,
     list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache,
-    list_file_revisions_from_full_materialization, list_file_revisions_from_manifest_plus_tail,
+    list_file_revisions_from_manifest_plus_tail,
     list_file_revisions_from_manifest_plus_tail_at_head_with_cache,
-    list_path_from_full_materialization, list_path_from_manifest_plus_tail,
-    list_path_from_manifest_plus_tail_at_head_with_cache, list_path_page_from_full_materialization,
+    list_path_from_manifest_plus_tail, list_path_from_manifest_plus_tail_at_head_with_cache,
     list_path_page_from_manifest_plus_tail,
     list_path_page_from_manifest_plus_tail_at_head_with_cache,
-    read_file_bytes_from_full_materialization, read_file_bytes_from_manifest_plus_tail,
+    read_file_bytes_from_manifest_plus_tail,
     read_file_bytes_from_manifest_plus_tail_at_head_with_cache,
-    read_file_revision_bytes_for_inode_from_full_materialization,
     read_file_revision_bytes_for_inode_from_manifest_plus_tail,
     read_file_revision_bytes_for_inode_from_manifest_plus_tail_at_head_with_cache,
-    read_file_revision_bytes_from_full_materialization,
     read_file_revision_bytes_from_manifest_plus_tail,
     read_file_revision_bytes_from_manifest_plus_tail_at_head_with_cache,
-    resolve_path_from_full_materialization, resolve_path_from_manifest_plus_tail,
-    resolve_path_from_manifest_plus_tail_at_head_with_cache, ManifestPlusTailCacheContext,
+    resolve_path_from_manifest_plus_tail, resolve_path_from_manifest_plus_tail_at_head_with_cache,
+    ManifestPlusTailCacheContext,
 };
