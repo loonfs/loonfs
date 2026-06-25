@@ -1,4 +1,6 @@
-use crate::checkpoint::{head_from_manifest, load_verified_manifest_materialization};
+use crate::checkpoint::{
+    head_from_manifest, load_verified_manifest_tables_with_cache, VerifiedMetadataTables,
+};
 use crate::commit::{
     build_commit_plan, commit_request_from_v0, core_commit_fingerprint, materialize_commit,
     prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
@@ -24,6 +26,7 @@ use crate::namespace::full_materialization::{
     load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
 };
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
+use crate::path::read::CurrentManifestTailView;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
@@ -103,16 +106,30 @@ impl PublishBatchAgainstViewResult {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct PublishManifestPlusTailView {
+pub(crate) struct PublishManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
     head: HeadState,
     head_etag: String,
     lease: loonfs_api::wire::control::LeaseState,
+    manifest_tables: VerifiedMetadataTables<'a, S>,
+    tail_state: MetadataState,
     // Transitional: publish validation is still synchronous and expects a
     // MetadataState. Keep this scoped to one publish attempt; do not cache it
     // as a full namespace materialization.
     metadata_state: MetadataState,
+}
+
+impl<S: ObjectStore + ?Sized> PublishManifestPlusTailView<'_, S> {
+    fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
+        CurrentManifestTailView::new(&self.head, &self.manifest_tables, &self.tail_state)
+    }
+
+    async fn find_commit_receipt(
+        &self,
+        commit_id: &CommitId,
+    ) -> Result<Option<CommitReceiptRecord>, CoreError> {
+        self.metadata_view().find_commit_receipt(commit_id).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -632,12 +649,12 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     .results
 }
 
-pub(crate) async fn load_publish_manifest_plus_tail_view<S: ObjectStore + ?Sized>(
-    store: &S,
+pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
     namespace_id: &NamespaceId,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
-) -> Result<(PublishManifestPlusTailView, PublishTailProjection), CoreError> {
+) -> Result<(PublishManifestPlusTailView<'a, S>, PublishTailProjection), CoreError> {
     let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| {
@@ -673,13 +690,17 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<S: ObjectStore + ?Sized
             namespace_id: namespace_id.clone(),
         })
     })?;
-    let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
-        .await
-        .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
-        })?;
-    let manifest_head = head_from_manifest(&head, &materialized.manifest);
-    let manifest_payload_checksum = materialized.manifest.payload_checksum.clone();
+    let manifest_tables =
+        load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
+            .await
+            .map_err(|error| {
+                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+            })?;
+    let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
+    let manifest_payload_checksum = manifest_tables.manifest().payload_checksum.clone();
+    let manifest_metadata_state = manifest_tables.materialize().await.map_err(|error| {
+        CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+    })?;
 
     let projection = if let Some(cached) = cached_projection.filter(|cached| {
         cached.matches(
@@ -706,8 +727,9 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<S: ObjectStore + ?Sized
         .await?
     };
 
-    let mut metadata_state = materialized.metadata_state;
+    let mut metadata_state = manifest_metadata_state;
     append_metadata_rows(&mut metadata_state, &projection.tail_state);
+    let tail_state = projection.tail_state.clone();
     ensure_publish_head_etag_still_current(store, namespace_id, &head_etag).await?;
 
     Ok((
@@ -716,6 +738,8 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<S: ObjectStore + ?Sized
             head,
             head_etag,
             lease,
+            manifest_tables,
+            tail_state,
             metadata_state,
         },
         projection,
@@ -881,7 +905,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     namespace_id: &NamespaceId,
     candidates: &[NamespaceMutationCandidate],
     context: &MutationContext,
-    view: &PublishManifestPlusTailView,
+    view: &PublishManifestPlusTailView<'_, S>,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::new(Vec::new());
@@ -914,20 +938,19 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     );
     async {
         for (index, candidate) in candidates.iter().enumerate() {
-            let candidate_request = {
-                let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
-                prepare_candidate_request(
-                    namespace_id,
-                    view,
-                    &session,
-                    candidate,
-                    context,
-                    index,
-                    &mut outcomes,
-                    &mut in_batch_requests,
-                    &mut aliases,
-                )
-            };
+            let candidate_request = prepare_candidate_request(
+                namespace_id,
+                view,
+                &session,
+                candidate,
+                context,
+                index,
+                &mut outcomes,
+                &mut in_batch_requests,
+                &mut aliases,
+            )
+            .instrument(tracing::info_span!("loon.phase", phase = "prepare_commit"))
+            .await;
             let Some(candidate_request) = candidate_request else {
                 continue;
             };
@@ -1139,9 +1162,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_candidate_request(
+async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
-    view: &PublishManifestPlusTailView,
+    view: &PublishManifestPlusTailView<'_, S>,
     session: &PublishPlanningSession,
     candidate: &NamespaceMutationCandidate,
     context: &MutationContext,
@@ -1176,16 +1199,25 @@ fn prepare_candidate_request(
                 }
             };
             let semantic_identity = SemanticMutationIdentity::CoreCommit(semantic_identity);
-            if !record_primary_request_or_complete_idempotent(
+            let should_prepare = match record_primary_request_or_complete_idempotent(
                 namespace_id,
-                &view.metadata_state,
+                view,
                 outcomes,
                 in_batch_requests,
                 aliases,
                 index,
                 &request.commit_id,
                 &semantic_identity,
-            ) {
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error));
+                    return None;
+                }
+            };
+            if !should_prepare {
                 return None;
             }
             Some(CandidateCoreRequest {
@@ -1210,16 +1242,25 @@ fn prepare_candidate_request(
             let semantic_identity =
                 SemanticMutationIdentity::PathIntent(path_intent_fingerprint.clone());
             let commit_id = intent.commit_id().clone();
-            if !record_primary_request_or_complete_idempotent(
+            let should_prepare = match record_primary_request_or_complete_idempotent(
                 namespace_id,
-                &view.metadata_state,
+                view,
                 outcomes,
                 in_batch_requests,
                 aliases,
                 index,
                 &commit_id,
                 &semantic_identity,
-            ) {
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error));
+                    return None;
+                }
+            };
+            if !should_prepare {
                 return None;
             }
             let planned = match session.plan_path_mutation(namespace_id, intent) {
@@ -1251,25 +1292,25 @@ fn validate_commit_id(commit_id: &CommitId) -> Result<(), CoreError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_primary_request_or_complete_idempotent(
+async fn record_primary_request_or_complete_idempotent<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
-    visible_metadata_state: &MetadataState,
+    view: &PublishManifestPlusTailView<'_, S>,
     outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
     aliases: &mut Vec<(usize, usize)>,
     index: usize,
     commit_id: &CommitId,
     semantic_identity: &SemanticMutationIdentity,
-) -> bool {
-    if let Some(existing) = find_commit_receipt(visible_metadata_state, commit_id) {
+) -> Result<bool, CoreError> {
+    if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         outcomes[index] = Some(
             if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
                 Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
             } else {
-                Ok(commit_response_from_commit_receipt(namespace_id, existing))
+                Ok(commit_response_from_commit_receipt(namespace_id, &existing))
             },
         );
-        return false;
+        return Ok(false);
     }
     if let Some(existing) = in_batch_requests.get(commit_id) {
         if existing.semantic_identity != *semantic_identity {
@@ -1277,7 +1318,7 @@ fn record_primary_request_or_complete_idempotent(
         } else {
             aliases.push((index, existing.primary_index));
         }
-        return false;
+        return Ok(false);
     }
     in_batch_requests.insert(
         commit_id.clone(),
@@ -1286,7 +1327,7 @@ fn record_primary_request_or_complete_idempotent(
             semantic_identity: semantic_identity.clone(),
         },
     );
-    true
+    Ok(true)
 }
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -1546,13 +1587,6 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
         metadata,
         envelope,
     })
-}
-
-fn find_commit_receipt<'a>(
-    metadata_state: &'a crate::metadata::MetadataState,
-    commit_id: &CommitId,
-) -> Option<&'a CommitReceiptRecord> {
-    metadata_state.find_commit_receipt(commit_id)
 }
 
 fn commit_response_from_commit_receipt(

@@ -1,15 +1,17 @@
 use super::row_decode::{
-    direntry_bind_from_manifest_row, direntry_unbind_from_manifest_row, inode_from_manifest_row,
-    revision_from_manifest_row, tombstone_from_manifest_row, unbind_matches_binding,
+    commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
+    direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
+    tombstone_from_manifest_row, unbind_matches_binding,
 };
 use crate::checkpoint::{ManifestLoadError, VerifiedMetadataTables};
 use crate::error::CoreError;
 use crate::metadata::{
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use crate::namespace::full_materialization::FullMaterializationLoadError;
 use loonfs_api::wire::manifest::{hex_encode_row_key_component, MetadataTableFamily};
-use loonfs_api::InodeId;
+use loonfs_api::{CommitId, InodeId};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
@@ -120,4 +122,19 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
         .into_iter()
         .filter_map(tombstone_from_manifest_row)
         .collect())
+}
+
+pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    commit_id: &CommitId,
+) -> Result<Option<CommitReceiptRecord>, CoreError> {
+    let encoded_commit_id = hex_encode_row_key_component(commit_id.as_str());
+    let prefix = format!("commit-receipt-{encoded_commit_id}-");
+    Ok(tables
+        .scan_prefix(MetadataTableFamily::CommitReceipts, &prefix)
+        .await
+        .map_err(manifest_error_to_core)?
+        .into_iter()
+        .filter_map(commit_receipt_from_manifest_row)
+        .max_by_key(|receipt| receipt.committed_seq))
 }

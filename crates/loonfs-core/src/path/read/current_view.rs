@@ -2,11 +2,11 @@ use super::{manifest_index, row_decode::unbind_matches_binding};
 use crate::checkpoint::VerifiedMetadataTables;
 use crate::error::CoreError;
 use crate::metadata::{
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, ResolvedVisiblePath,
-    RevisionRecord, SubtreeTombstoneRecord, VisiblePathError,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
+    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, VisiblePathError,
 };
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{AbsolutePath, InodeId, InodeKind, NameKey, RevisionNo};
+use loonfs_api::{AbsolutePath, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) struct CurrentManifestTailView<'a, S: ObjectStore + ?Sized> {
@@ -323,6 +323,24 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
                 inode_id,
                 revision_no,
             })
+    }
+
+    pub(crate) async fn find_commit_receipt(
+        &self,
+        commit_id: &CommitId,
+    ) -> Result<Option<CommitReceiptRecord>, CoreError> {
+        let tail_receipt = self
+            .wal_tail_rows
+            .commit_receipts()
+            .iter()
+            .filter(|receipt| receipt.commit_id == *commit_id)
+            .max_by_key(|receipt| receipt.committed_seq)
+            .cloned();
+        let manifest_receipt = manifest_index::commit_receipt(self.tables, commit_id).await?;
+        Ok(tail_receipt
+            .into_iter()
+            .chain(manifest_receipt)
+            .max_by_key(|receipt| receipt.committed_seq))
     }
 
     pub(crate) async fn current_parent_binding_for_child(

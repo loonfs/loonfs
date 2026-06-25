@@ -4,11 +4,15 @@
 use super::cache::MetadataTableCache;
 use super::error::ManifestLoadError;
 use super::load::{
-    load_manifest_segment_rows_with_cache, metadata_file_object_key, MetadataSstSeqExpectation,
-    MetadataTableCacheMode, MetadataTableLoadContext,
+    append_rows_to_metadata, load_manifest_segment_rows_with_cache, metadata_file_object_key,
+    validate_direntry_child_bind_index, MetadataSstSeqExpectation, MetadataTableCacheMode,
+    MetadataTableLoadContext,
 };
-use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
-use crate::metadata::MetadataState;
+use super::runs::{
+    runs_in_materialization_order, runs_in_scan_order, MetadataTableManifest,
+    CHECKPOINT_TABLE_FAMILIES,
+};
+use crate::metadata::{MetadataState, MetadataStateBuilder};
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
@@ -65,6 +69,57 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         };
         self.scan_prefix_with_cache_mode(family, prefix, cache_mode)
             .await
+    }
+
+    pub(crate) async fn materialize(&self) -> Result<MetadataState, ManifestLoadError> {
+        let mut metadata_state = MetadataStateBuilder::default();
+        let mut direntry_bind_rows = Vec::new();
+        let mut direntry_child_bind_rows = Vec::new();
+
+        for run in runs_in_materialization_order(&self.manifest.payload) {
+            for table in ordered_manifest_tables(&self.manifest_object_key, &run.tables)? {
+                let mut rows = Vec::new();
+                self.scan_manifest_tables(
+                    table.family,
+                    "",
+                    MetadataTableLoadContext {
+                        manifest_object_key: &self.manifest_object_key,
+                        segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
+                        row_seq_min: None,
+                        row_seq_max: run.run_seq,
+                    },
+                    &run.tables,
+                    MetadataTableScanOutput {
+                        rows: &mut rows,
+                        cache_mode: MetadataTableCacheMode::ReadOnly,
+                    },
+                )
+                .await?;
+
+                match table.family {
+                    MetadataTableFamily::DirentryBinds => {
+                        direntry_bind_rows.extend(rows.iter().cloned());
+                    }
+                    MetadataTableFamily::DirentryChildBinds => {
+                        direntry_child_bind_rows.extend(rows.iter().cloned());
+                    }
+                    _ => {}
+                }
+                append_rows_to_metadata(
+                    &mut metadata_state,
+                    table.family,
+                    &self.manifest_object_key,
+                    &rows,
+                )?;
+            }
+        }
+
+        validate_direntry_child_bind_index(
+            &self.manifest_object_key,
+            direntry_bind_rows,
+            direntry_child_bind_rows,
+        )?;
+        Ok(metadata_state.finish())
     }
 
     async fn scan_prefix_with_cache_mode(
