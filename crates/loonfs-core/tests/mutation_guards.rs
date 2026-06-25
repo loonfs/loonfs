@@ -19,8 +19,9 @@ use loonfs_api::{
     },
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, FenceToken, InodeId, InodeKind,
-    ManifestId, NameKey, NamespaceId, RevisionNo,
+    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+    DirectoryPageCursor, EffectiveLimit, FenceToken, InodeId, InodeKind, ManifestId, NameKey,
+    NamespaceId, Page, PageRequest, RevisionNo,
 };
 use loonfs_core::cache::{
     load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
@@ -50,6 +51,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -384,6 +386,29 @@ fn list_path<S: ObjectStore + ?Sized>(
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
             .list_path(absolute_path, ReadOptions::default()),
+    )
+}
+
+fn page_limit(value: u32) -> EffectiveLimit {
+    EffectiveLimit::new(NonZeroU32::new(value).expect("page limit should be non-zero"))
+}
+
+fn list_path_page<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    limit: u32,
+    cursor: Option<DirectoryPageCursor>,
+) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context()).list_path_page(
+            absolute_path,
+            ReadOptions::default(),
+            PageRequest {
+                limit: page_limit(limit),
+                cursor,
+            },
+        ),
     )
 }
 
@@ -1937,6 +1962,198 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     assert_eq!(actual.value, expected);
     assert_eq!(actual.value.absolute_path, "/docs/report");
     assert_eq!(actual.value.size_bytes, Some(5));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_driven_directory_page_merges_manifest_and_tail_visible_children() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    create_dir_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
+        .expect("create docs");
+    create_dir_path(
+        &store,
+        &namespace_id,
+        "/docs/a-dir",
+        &context,
+        Some("mkdir-a-dir"),
+    )
+    .expect("create a-dir");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/c-file.txt",
+        b"charlie",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-c-file"),
+    )
+    .expect("put c-file");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/stale.txt",
+        b"stale",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-stale"),
+    )
+    .expect("put stale");
+    move_path(
+        &store,
+        &namespace_id,
+        "/docs/stale.txt",
+        "/docs/b-renamed.txt",
+        &context,
+        Some("move-stale"),
+    )
+    .expect("move stale");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/dead/leaf.txt",
+        b"dead",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-dead"),
+    )
+    .expect("put dead");
+    delete_path(
+        &store,
+        &namespace_id,
+        "/docs/dead",
+        &context,
+        Some("delete-dead"),
+    )
+    .expect("delete dead");
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint manifest children");
+
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/d-tail.txt",
+        b"delta",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-d-tail"),
+    )
+    .expect("put d-tail");
+    create_dir_path(
+        &store,
+        &namespace_id,
+        "/docs/e-tail-dir",
+        &context,
+        Some("mkdir-e-tail-dir"),
+    )
+    .expect("create tail dir");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/tail-dead/leaf.txt",
+        b"tail-dead",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-tail-dead"),
+    )
+    .expect("put tail dead");
+    delete_path(
+        &store,
+        &namespace_id,
+        "/docs/tail-dead",
+        &context,
+        Some("delete-tail-dead"),
+    )
+    .expect("delete tail dead");
+
+    let first = list_path_page(&store, &namespace_id, "/docs", 2, None).expect("first page");
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|entry| entry.display_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-dir", "b-renamed.txt"]
+    );
+    let second = list_path_page(&store, &namespace_id, "/docs", 2, first.next_cursor.clone())
+        .expect("second page");
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|entry| entry.display_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c-file.txt", "d-tail.txt"]
+    );
+    let third = list_path_page(
+        &store,
+        &namespace_id,
+        "/docs",
+        2,
+        second.next_cursor.clone(),
+    )
+    .expect("third page");
+    assert!(third.next_cursor.is_none());
+    assert_eq!(
+        third
+            .items
+            .iter()
+            .map(|entry| entry.display_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["e-tail-dir"]
+    );
+
+    let entries = first
+        .items
+        .into_iter()
+        .chain(second.items)
+        .chain(third.items)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.display_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "a-dir",
+            "b-renamed.txt",
+            "c-file.txt",
+            "d-tail.txt",
+            "e-tail-dir"
+        ]
+    );
+    assert!(entries.iter().all(|entry| !matches!(
+        entry.display_name.as_str(),
+        "stale.txt" | "dead" | "tail-dead"
+    )));
+
+    for directory_name in ["a-dir", "e-tail-dir"] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.display_name == directory_name)
+            .expect("directory entry");
+        assert_eq!(entry.inode_kind, InodeKind::Dir);
+        assert_eq!(entry.revision_no, None);
+        assert_eq!(entry.size_bytes, None);
+        assert!(entry.content_ref.is_none());
+    }
+
+    for (file_name, size) in [
+        ("b-renamed.txt", b"stale".len() as u64),
+        ("c-file.txt", b"charlie".len() as u64),
+        ("d-tail.txt", b"delta".len() as u64),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.display_name == file_name)
+            .expect("file entry");
+        assert_eq!(entry.inode_kind, InodeKind::File);
+        assert_eq!(entry.revision_no, Some(RevisionNo(1)));
+        assert_eq!(entry.size_bytes, Some(size));
+        assert!(entry.content_ref.is_some());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

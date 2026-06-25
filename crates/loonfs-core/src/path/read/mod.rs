@@ -7,7 +7,7 @@ mod materialized_view;
 mod resolver;
 mod row_decode;
 
-pub(crate) use current_view::CurrentManifestTailView;
+pub(crate) use current_view::{CurrentManifestTailView, MetadataReadSession, VisibleChildEntry};
 #[cfg(any(test, feature = "inspection"))]
 pub(crate) use listing::list_path_from_full_materialization;
 pub(crate) use materialized_view::{
