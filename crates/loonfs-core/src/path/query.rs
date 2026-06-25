@@ -1,8 +1,3 @@
-#[cfg(any(test, feature = "inspection"))]
-pub(crate) use super::read::{
-    list_path_from_full_materialization, resolve_path_from_full_materialization,
-};
-
 pub(crate) use super::read::{
     list_file_revisions_for_inode_from_manifest_plus_tail,
     list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache,

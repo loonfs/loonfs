@@ -463,7 +463,10 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         skip_all,
         fields(phase = "walk_path")
     )]
-    async fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry, CoreError> {
+    pub(crate) async fn resolve_path(
+        &self,
+        absolute_path: &str,
+    ) -> Result<AuthoritativePathEntry, CoreError> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let resolved = self.resolve_visible_path(&absolute_path).await?;
         self.build_authoritative_path_entry(&resolved).await
@@ -476,7 +479,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         skip_all,
         fields(phase = "walk_path")
     )]
-    async fn list_path(
+    pub(crate) async fn list_path(
         &self,
         absolute_path: &str,
     ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
