@@ -21,7 +21,7 @@ use super::runs::{
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
@@ -268,11 +268,11 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let manifest_id = head.current_manifest_id.ok_or_else(|| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::MissingCurrentManifest {
-            namespace_id: namespace_id.clone(),
-        })
-    })?;
+    let manifest_id =
+        head.current_manifest_id
+            .ok_or_else(|| MetadataViewError::MissingManifest {
+                namespace_id: namespace_id.clone(),
+            })?;
     let manifest_tables =
         load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
             .await

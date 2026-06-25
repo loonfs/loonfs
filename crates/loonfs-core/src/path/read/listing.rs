@@ -1,6 +1,6 @@
 #[cfg(any(test, feature = "inspection"))]
 use super::resolver::build_authoritative_path_entry;
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::ResolvedVisiblePath;
 #[cfg(any(test, feature = "inspection"))]
 use crate::namespace::full_materialization::FullNamespaceMaterialization;
@@ -80,16 +80,20 @@ pub(super) fn page_head_seq(
         return Ok(current_head_seq);
     };
     if cursor.head_seq > current_head_seq {
-        return Err(invalid_cursor(format!(
-            "cursor snapshot `{}` is ahead of current head `{}`",
-            cursor.head_seq.0, current_head_seq.0
-        )));
+        return Err(MetadataViewError::SnapshotUnavailable {
+            requested_seq: cursor.head_seq,
+            snapshot_floor_seq,
+            head_seq: current_head_seq,
+        }
+        .into());
     }
     if cursor.head_seq < snapshot_floor_seq {
-        return Err(invalid_cursor(format!(
-            "cursor snapshot `{}` is older than available snapshot floor `{}`",
-            cursor.head_seq.0, snapshot_floor_seq.0
-        )));
+        return Err(MetadataViewError::SnapshotUnavailable {
+            requested_seq: cursor.head_seq,
+            snapshot_floor_seq,
+            head_seq: current_head_seq,
+        }
+        .into());
     }
     Ok(cursor.head_seq)
 }

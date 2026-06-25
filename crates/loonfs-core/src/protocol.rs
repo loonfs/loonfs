@@ -11,7 +11,7 @@ use crate::commit::{
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::catalog::{
     load_namespace_catalog_entry, load_namespace_content_store_id, namespace_initialization_state,
@@ -685,11 +685,11 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
         })?
         .envelope
         .state;
-    let manifest_id = head.current_manifest_id.ok_or_else(|| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::MissingCurrentManifest {
-            namespace_id: namespace_id.clone(),
-        })
-    })?;
+    let manifest_id =
+        head.current_manifest_id
+            .ok_or_else(|| MetadataViewError::MissingManifest {
+                namespace_id: namespace_id.clone(),
+            })?;
     let manifest_tables =
         load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
             .await
@@ -766,14 +766,15 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     })?;
     let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     if wal_tail_segments > options.max_wal_tail_segments {
-        return Err(CoreError::MetadataTailTooLong {
+        return Err(MetadataViewError::TailTooLong {
             namespace_id: namespace_id.clone(),
             manifest_id,
             manifest_head_seq: manifest_head.seq,
             head_seq: head.seq,
             wal_tail_segments,
             max_wal_tail_segments: options.max_wal_tail_segments,
-        });
+        }
+        .into());
     }
     let replayed = replay_validated_wal_tail_with_metadata(
         manifest_head,
@@ -795,14 +796,15 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         tail_state: replayed.resulting_metadata_state,
     };
     if !projection.within_limits(options) {
-        return Err(CoreError::MetadataTailTooLong {
+        return Err(MetadataViewError::TailTooLong {
             namespace_id: namespace_id.clone(),
             manifest_id,
             manifest_head_seq: manifest_head.seq,
             head_seq: head.seq,
             wal_tail_segments,
             max_wal_tail_segments: options.max_wal_tail_segments,
-        });
+        }
+        .into());
     }
     Ok(projection)
 }

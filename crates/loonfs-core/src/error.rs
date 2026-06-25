@@ -33,6 +33,8 @@ pub enum CoreError {
     #[error(transparent)]
     FullMaterialization(#[from] FullMaterializationLoadError),
     #[error(transparent)]
+    MetadataView(#[from] MetadataViewError),
+    #[error(transparent)]
     VisiblePath(#[from] VisiblePathError),
     #[error(transparent)]
     DurableContent(#[from] DurableContentValidationError),
@@ -97,17 +99,6 @@ pub enum CoreError {
         retention_floor_seq: ChangeSeq,
     },
     #[error(
-        "metadata WAL tail after manifest `{manifest_id:?}` is too long: {wal_tail_segments} segments exceeds max {max_wal_tail_segments}"
-    )]
-    MetadataTailTooLong {
-        namespace_id: NamespaceId,
-        manifest_id: ManifestId,
-        manifest_head_seq: ChangeSeq,
-        head_seq: ChangeSeq,
-        wal_tail_segments: u64,
-        max_wal_tail_segments: u64,
-    },
-    #[error(
         "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
     )]
     TombstoneConflict {
@@ -127,6 +118,56 @@ pub enum CoreError {
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is partially initialized")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
+}
+
+/// Failures specific to manifest-plus-tail metadata views.
+///
+/// These are not generic store failures: each variant names the recovery or
+/// caller action we expect. Normal reads and publishes must return these
+/// errors instead of falling back to full namespace materialization.
+#[derive(Debug, Clone, Error)]
+pub enum MetadataViewError {
+    #[error("namespace `{namespace_id}` head has no current manifest")]
+    MissingManifest { namespace_id: NamespaceId },
+    #[error(
+        "metadata WAL tail after manifest `{manifest_id:?}` is too long: {wal_tail_segments} segments exceeds max {max_wal_tail_segments}"
+    )]
+    TailTooLong {
+        namespace_id: NamespaceId,
+        manifest_id: ManifestId,
+        manifest_head_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+        wal_tail_segments: u64,
+        max_wal_tail_segments: u64,
+    },
+    #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
+    MaintenanceRequired {
+        namespace_id: NamespaceId,
+        reason: String,
+    },
+    #[error(
+        "metadata snapshot `{requested_seq:?}` is outside available range `{snapshot_floor_seq:?}`..=`{head_seq:?}`"
+    )]
+    SnapshotUnavailable {
+        requested_seq: ChangeSeq,
+        snapshot_floor_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    #[error(
+        "metadata view only supports the loaded head `{head_seq:?}`, not historical snapshot `{requested_seq:?}`"
+    )]
+    UnsupportedHistoricalRead {
+        requested_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    #[error(
+        "namespace `{namespace_id}` current manifest changed during metadata view load: expected `{expected_manifest_id:?}`, found `{actual_manifest_id:?}`"
+    )]
+    ManifestChangedDuringViewLoad {
+        namespace_id: NamespaceId,
+        expected_manifest_id: ManifestId,
+        actual_manifest_id: Option<ManifestId>,
+    },
 }
 
 impl From<CommitValidationError> for CoreError {
@@ -183,6 +224,7 @@ impl CoreError {
             CoreError::FullMaterialization(error) => {
                 classify_full_materialization_load_error(error)
             }
+            CoreError::MetadataView(error) => classify_metadata_view_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
             CoreError::Lease(error) => classify_lease_acquire_error(error),
@@ -210,7 +252,6 @@ impl CoreError {
             CoreError::InvalidUploadContent(_) => ErrorCode::InvalidUploadContent,
             CoreError::InvalidCursor(_) => ErrorCode::InvalidCursor,
             CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
-            CoreError::MetadataTailTooLong { .. } => ErrorCode::MetadataTailTooLong,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists(_) => ErrorCode::PathConflict,
@@ -223,6 +264,17 @@ impl CoreError {
 
     pub fn message(&self) -> String {
         self.to_string()
+    }
+}
+
+fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
+    match error {
+        MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
+        MetadataViewError::TailTooLong { .. } => ErrorCode::MetadataTailTooLong,
+        MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
+        MetadataViewError::SnapshotUnavailable { .. }
+        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidCursor,
+        MetadataViewError::ManifestChangedDuringViewLoad { .. } => ErrorCode::StaleHead,
     }
 }
 
@@ -413,8 +465,8 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreError, ErrorCode, ErrorKind};
-    use loonfs_api::NamespaceId;
+    use super::{CoreError, ErrorCode, ErrorKind, MetadataViewError};
+    use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
@@ -426,6 +478,10 @@ mod tests {
             ErrorKind::PreconditionFailed
         );
         assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
+        assert_eq!(
+            ErrorCode::MaintenanceRequired.kind(),
+            ErrorKind::Unavailable
+        );
         assert_eq!(
             ErrorCode::CommitOutcomeUnknown.kind(),
             ErrorKind::OutcomeUnknown
@@ -446,5 +502,67 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::NamespaceExists);
         assert_eq!(error.code().as_str(), "namespace_exists");
         assert!(error.message().contains("already exists"));
+    }
+
+    #[test]
+    fn metadata_view_errors_map_to_actionable_public_codes() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let manifest_id = ManifestId(1);
+        let head_seq = ChangeSeq(3);
+
+        let cases = [
+            (
+                MetadataViewError::MissingManifest {
+                    namespace_id: namespace_id.clone(),
+                },
+                ErrorCode::NamespaceCorrupt,
+            ),
+            (
+                MetadataViewError::TailTooLong {
+                    namespace_id: namespace_id.clone(),
+                    manifest_id,
+                    manifest_head_seq: ChangeSeq(1),
+                    head_seq,
+                    wal_tail_segments: 33,
+                    max_wal_tail_segments: 32,
+                },
+                ErrorCode::MetadataTailTooLong,
+            ),
+            (
+                MetadataViewError::MaintenanceRequired {
+                    namespace_id: namespace_id.clone(),
+                    reason: "retention progress is missing".to_owned(),
+                },
+                ErrorCode::MaintenanceRequired,
+            ),
+            (
+                MetadataViewError::SnapshotUnavailable {
+                    requested_seq: ChangeSeq(1),
+                    snapshot_floor_seq: ChangeSeq(2),
+                    head_seq,
+                },
+                ErrorCode::InvalidCursor,
+            ),
+            (
+                MetadataViewError::UnsupportedHistoricalRead {
+                    requested_seq: ChangeSeq(2),
+                    head_seq,
+                },
+                ErrorCode::InvalidCursor,
+            ),
+            (
+                MetadataViewError::ManifestChangedDuringViewLoad {
+                    namespace_id,
+                    expected_manifest_id: manifest_id,
+                    actual_manifest_id: Some(ManifestId(2)),
+                },
+                ErrorCode::StaleHead,
+            ),
+        ];
+
+        for (metadata_error, code) in cases {
+            let error = CoreError::from(metadata_error);
+            assert_eq!(error.code(), code);
+        }
     }
 }

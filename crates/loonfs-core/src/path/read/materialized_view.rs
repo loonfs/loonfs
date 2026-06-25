@@ -6,7 +6,7 @@ use crate::checkpoint::{
     head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
     VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
 };
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord,
 };
@@ -125,9 +125,15 @@ pub(crate) async fn list_path_page_from_manifest_plus_tail_at_head_with_cache<
         .map(|cursor| cursor.head_seq != head.seq)
         .unwrap_or(false)
     {
-        return Err(invalid_cursor(
-            "cursor snapshot does not match the requested materialized head",
-        ));
+        let cursor = request
+            .cursor
+            .as_ref()
+            .expect("cursor presence checked above");
+        return Err(MetadataViewError::UnsupportedHistoricalRead {
+            requested_seq: cursor.head_seq,
+            head_seq: head.seq,
+        }
+        .into());
     }
     let view = ManifestPlusTailView::load_at_head_with_cache(
         store,
@@ -359,12 +365,11 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 namespace_id: namespace_id.clone(),
             });
         }
-        let manifest_id = head.current_manifest_id.ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "namespace `{}` head has no current manifest",
-                namespace_id.as_str()
-            ))
-        })?;
+        let manifest_id =
+            head.current_manifest_id
+                .ok_or_else(|| MetadataViewError::MissingManifest {
+                    namespace_id: namespace_id.clone(),
+                })?;
         let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
             .await
             .map_err(FullMaterializationLoadError::from)?;
@@ -415,14 +420,15 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         })?;
         let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
         if wal_tail_segments > cache_context.max_wal_tail_segments {
-            return Err(CoreError::MetadataTailTooLong {
+            return Err(MetadataViewError::TailTooLong {
                 namespace_id: namespace_id.clone(),
                 manifest_id,
                 manifest_head_seq: manifest_head.seq,
                 head_seq: head.seq,
                 wal_tail_segments,
                 max_wal_tail_segments: cache_context.max_wal_tail_segments,
-            });
+            }
+            .into());
         }
         let replayed = {
             let _span =
@@ -638,9 +644,11 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             request.cursor.as_ref(),
         )?;
         if page_head_seq != self.head.seq {
-            return Err(invalid_cursor(
-                "materialized listing can only page at its loaded head",
-            ));
+            return Err(MetadataViewError::UnsupportedHistoricalRead {
+                requested_seq: page_head_seq,
+                head_seq: self.head.seq,
+            }
+            .into());
         }
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;

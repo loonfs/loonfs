@@ -72,6 +72,7 @@ pub enum ErrorCode {
     CommitOutcomeUnknown,
     CommitQueueFull,
     CheckpointUnavailable,
+    MaintenanceRequired,
     UploadNotFound,
     UploadAlreadyCompleted,
     UploadContentConflict,
@@ -85,7 +86,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 38] = [
+    pub const ALL: [ErrorCode; 39] = [
         ErrorCode::InvalidPath,
         ErrorCode::InvalidNamespaceId,
         ErrorCode::InvalidCommitId,
@@ -115,6 +116,7 @@ impl ErrorCode {
         ErrorCode::CommitOutcomeUnknown,
         ErrorCode::CommitQueueFull,
         ErrorCode::CheckpointUnavailable,
+        ErrorCode::MaintenanceRequired,
         ErrorCode::UploadNotFound,
         ErrorCode::UploadAlreadyCompleted,
         ErrorCode::UploadContentConflict,
@@ -150,6 +152,7 @@ impl ErrorCode {
             ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
             ErrorCode::CommitQueueFull
             | ErrorCode::CheckpointUnavailable
+            | ErrorCode::MaintenanceRequired
             | ErrorCode::MetadataTailTooLong => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
@@ -199,6 +202,7 @@ impl ErrorCode {
             ErrorCode::CommitOutcomeUnknown => "commit_outcome_unknown",
             ErrorCode::CommitQueueFull => "commit_queue_full",
             ErrorCode::CheckpointUnavailable => "checkpoint_unavailable",
+            ErrorCode::MaintenanceRequired => "maintenance_required",
             ErrorCode::UploadNotFound => "upload_not_found",
             ErrorCode::UploadAlreadyCompleted => "upload_already_completed",
             ErrorCode::UploadContentConflict => "upload_content_conflict",

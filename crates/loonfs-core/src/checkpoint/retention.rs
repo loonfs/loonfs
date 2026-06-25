@@ -3,7 +3,7 @@
 use super::load::load_verified_manifest_materialization;
 use super::publish::{compare_and_swap_head, HEAD_CAS_RETRY_LIMIT};
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataViewError};
 use crate::namespace::control::read_head_object;
 use crate::namespace::full_materialization::FullMaterializationLoadError;
 use loonfs_api::wire::control::{
@@ -30,12 +30,11 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                 CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
             })?;
         let head = loaded_head.envelope.state;
-        let Some(current_manifest_id) = head.current_manifest_id else {
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "namespace `{}` has no published manifest",
-                namespace_id.as_str()
-            )));
-        };
+        let current_manifest_id =
+            head.current_manifest_id
+                .ok_or_else(|| MetadataViewError::MissingManifest {
+                    namespace_id: namespace_id.clone(),
+                })?;
         let manifest =
             load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
                 .await
@@ -105,21 +104,25 @@ pub(super) async fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
             .await
             .map_err(|err| CoreError::Store(err.to_string()))?
         else {
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "required derived progress `{work_class_name}` is missing for namespace `{}`",
-                namespace_id.as_str()
-            )));
+            return Err(MetadataViewError::MaintenanceRequired {
+                namespace_id: namespace_id.clone(),
+                reason: format!("required derived progress `{work_class_name}` is missing"),
+            }
+            .into());
         };
         let progress: ProgressStateEnvelope =
             decode_control_object(&bytes, ControlObjectKind::NamespaceProgress).map_err(|err| {
                 CoreError::Store(format!("invalid derived progress `{object_key}`: {err}"))
             })?;
         if progress.state.through_seq < target_floor {
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "required derived progress `{work_class_name}` only covers {:?} for namespace `{}`",
-                progress.state.through_seq,
-                namespace_id.as_str()
-            )));
+            return Err(MetadataViewError::MaintenanceRequired {
+                namespace_id: namespace_id.clone(),
+                reason: format!(
+                    "required derived progress `{work_class_name}` only covers {:?}",
+                    progress.state.through_seq
+                ),
+            }
+            .into());
         }
     }
     Ok(())
