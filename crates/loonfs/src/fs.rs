@@ -23,7 +23,8 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    encode_directory_cursor, AbsolutePath, CapabilityDocument, DirectoryPageCursor, EffectiveLimit,
+    encode_directory_cursor, encode_file_revisions_cursor, AbsolutePath, CapabilityDocument,
+    DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
     NamespacesPageCursor, Page, PageRequest, PaginationPolicy, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
@@ -578,6 +579,32 @@ impl Fs {
         Ok(revisions)
     }
 
+    /// Lists one page of a file path's revision history.
+    pub async fn list_file_revisions_page(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
+        let page = self
+            .namespace_engine(namespace_id)
+            .list_file_revisions_page(
+                absolute_path,
+                self.manifest_plus_tail_read_options(&head),
+                request,
+            )
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(file_revisions_page_response(
+            namespace_id.clone(),
+            head.state.seq,
+            page,
+            fallback_inode_id,
+        )?)
+    }
+
     /// Lists a file's revision history by inode id, independent of its
     /// current path.
     pub async fn list_file_revisions_for_inode(
@@ -592,6 +619,31 @@ impl Fs {
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(revisions)
+    }
+
+    /// Lists one page of a file inode's revision history.
+    pub async fn list_file_revisions_for_inode_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let page = self
+            .namespace_engine(namespace_id)
+            .list_file_revisions_for_inode_page(
+                inode_id,
+                self.manifest_plus_tail_read_options(&head),
+                request,
+            )
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(file_revisions_page_response(
+            namespace_id.clone(),
+            head.state.seq,
+            page,
+            Some(inode_id),
+        )?)
     }
 
     /// Reads the content of one historical file revision by path.
@@ -1183,6 +1235,36 @@ fn default_page_limit() -> EffectiveLimit {
     PaginationPolicy::default()
         .resolve_limit(None)
         .expect("default pagination policy must resolve its default limit")
+}
+
+fn file_revisions_page_response(
+    namespace_id: NamespaceId,
+    head_seq: ChangeSeq,
+    page: Page<FileRevision, FileRevisionsPageCursor>,
+    fallback_inode_id: Option<InodeId>,
+) -> std::result::Result<ListFileRevisionsResponse, CoreError> {
+    let inode_id = page
+        .items
+        .first()
+        .map(|revision| revision.inode_id)
+        .or_else(|| page.next_cursor.as_ref().map(|cursor| cursor.inode_id))
+        .or(fallback_inode_id)
+        .ok_or_else(|| {
+            CoreError::InvalidCursor("empty revision page lacks inode identity".into())
+        })?;
+    let next_cursor = page
+        .next_cursor
+        .as_ref()
+        .map(encode_file_revisions_cursor)
+        .transpose()
+        .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+    Ok(ListFileRevisionsResponse {
+        namespace_id,
+        inode_id,
+        head_seq,
+        revisions: page.items,
+        next_cursor,
+    })
 }
 
 #[cfg(test)]

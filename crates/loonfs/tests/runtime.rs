@@ -64,6 +64,10 @@ fn decode_directory_page_cursor(value: &str) -> DirectoryPageCursor {
     loonfs_api::decode_directory_cursor(value).expect("decode directory cursor")
 }
 
+fn decode_file_revisions_page_cursor(value: &str) -> loonfs::FileRevisionsPageCursor {
+    loonfs_api::decode_file_revisions_cursor(value).expect("decode file revisions cursor")
+}
+
 fn display_names(entries: &[AuthoritativePathEntry]) -> Vec<&str> {
     entries
         .iter()
@@ -1110,6 +1114,88 @@ fn directory_pages_use_canonical_name_key_order() {
     assert_eq!(
         display_names(&full.entries),
         vec!["a.txt", "apple.txt", "B.txt", "Zebra.txt"]
+    );
+}
+
+#[test]
+fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "file-revision-page-test");
+    let namespace_id = namespace();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    let replace = PutFileOptions {
+        behavior: PutFileBehavior::ReplaceExisting,
+        commit_id: None,
+    };
+    fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v1", PutFileOptions::default())
+        .expect("put v1");
+    fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v2", replace.clone())
+        .expect("put v2");
+    fs.create_checkpoint_blocking(&namespace_id)
+        .expect("checkpoint after v2");
+    fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v3", replace.clone())
+        .expect("put v3");
+    fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v4", replace)
+        .expect("put v4");
+
+    let limit = page_limit(2);
+    let first = block_on(fs.list_file_revisions_page(
+        &namespace_id,
+        "/doc.txt",
+        PageRequest {
+            limit,
+            cursor: None,
+        },
+    ))
+    .expect("first revision page");
+    assert_eq!(
+        first
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no.0)
+            .collect::<Vec<_>>(),
+        vec![4, 3]
+    );
+
+    let cursor =
+        decode_file_revisions_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+    let second = block_on(fs.list_file_revisions_page(
+        &namespace_id,
+        "/doc.txt",
+        PageRequest {
+            limit,
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("second revision page");
+    assert_eq!(
+        second
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no.0)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert!(second.next_cursor.is_none());
+
+    let inode_page = block_on(fs.list_file_revisions_for_inode_page(
+        &namespace_id,
+        first.inode_id,
+        PageRequest {
+            limit,
+            cursor: None,
+        },
+    ))
+    .expect("inode revision page");
+    assert_eq!(
+        inode_page
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no.0)
+            .collect::<Vec<_>>(),
+        vec![4, 3]
     );
 }
 

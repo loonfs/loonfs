@@ -14,7 +14,8 @@ use loonfs::{
     TraceStoreKind,
 };
 use loonfs_api::{
-    decode_directory_cursor, decode_namespaces_cursor, encode_namespaces_cursor,
+    decode_directory_cursor, decode_file_revisions_cursor, decode_namespaces_cursor,
+    encode_namespaces_cursor,
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
@@ -22,11 +23,11 @@ use loonfs_api::{
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
-    CreateNamespaceRequest, DirectoryPageCursor, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest, InodeId, LimitError,
-    ListFileRevisionsResponse, ListNamespacesResponse, NamespaceId, NamespaceIdValidationError,
-    NamespacesPageCursor, PageCursorError, PageRequest, PaginationPolicy,
-    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+    CreateNamespaceRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
+    ForkNamespaceRequest, InodeId, LimitError, ListFileRevisionsResponse, ListNamespacesResponse,
+    NamespaceId, NamespaceIdValidationError, NamespacesPageCursor, PageCursorError, PageRequest,
+    PaginationPolicy, RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_core::content::{
     mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
@@ -647,7 +648,9 @@ async fn get_content(
         summary = "List file revisions",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
-            ("path" = String, Query, description = "Absolute file path")
+            ("path" = String, Query, description = "Absolute file path"),
+            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
@@ -662,14 +665,21 @@ async fn list_path_revisions(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let response = state
         .fs
-        .list_file_revisions(&namespace_id, &path)
+        .list_file_revisions_page(
+            &namespace_id,
+            &path,
+            PageRequest {
+                limit: resolve_page_limit(query.limit)?,
+                cursor: decode_file_revisions_page_cursor(query.cursor)?,
+            },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -684,7 +694,9 @@ async fn list_path_revisions(
         summary = "List inode revisions",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode id")
+            ("inode_id" = String, Path, description = "File inode id"),
+            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
@@ -699,13 +711,21 @@ async fn list_inode_revisions(
     State(state): State<AppState>,
     AxumPath((namespace, inode_id)): AxumPath<(String, String)>,
     headers: HeaderMap,
+    Query(query): Query<PageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let inode_id = parse_inode_id(&inode_id)?;
     let response = state
         .fs
-        .list_file_revisions_for_inode(&namespace_id, inode_id)
+        .list_file_revisions_for_inode_page(
+            &namespace_id,
+            inode_id,
+            PageRequest {
+                limit: resolve_page_limit(query.limit)?,
+                cursor: decode_file_revisions_page_cursor(query.cursor)?,
+            },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -1512,6 +1532,16 @@ fn decode_directory_page_cursor(
     cursor
         .as_deref()
         .map(decode_directory_cursor)
+        .transpose()
+        .map_err(page_cursor_response_error)
+}
+
+fn decode_file_revisions_page_cursor(
+    cursor: Option<String>,
+) -> Result<Option<FileRevisionsPageCursor>, ApiResponseError> {
+    cursor
+        .as_deref()
+        .map(decode_file_revisions_cursor)
         .transpose()
         .map_err(page_cursor_response_error)
 }

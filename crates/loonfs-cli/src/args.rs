@@ -30,7 +30,7 @@ pub(crate) enum Command {
     Cat(FilesystemCatArgs),
     Get(FilesystemGetArgs),
     Put(FilesystemPutArgs),
-    Revisions(FilesystemPathArgs),
+    Revisions(FilesystemRevisionsArgs),
     Restore(FilesystemRestoreArgs),
     Mkdir(FilesystemPathArgs),
     Rm(FilesystemPathArgs),
@@ -251,6 +251,17 @@ pub(crate) struct FilesystemPathArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FilesystemRevisionsArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+    #[arg(long)]
+    pub limit: Option<u32>,
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]

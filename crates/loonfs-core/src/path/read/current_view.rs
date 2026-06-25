@@ -235,29 +235,13 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         if self.visible_inode(inode_id).await?.is_none() {
             return Ok(None);
         }
-        Ok(self
-            .revisions_for_inode_at_head(inode_id)
-            .await?
+        let tail_revision = self.tail_latest_revision_for_inode(inode_id);
+        let manifest_revision =
+            manifest_index::latest_revision_for_inode(self.tables, inode_id).await?;
+        Ok(tail_revision
             .into_iter()
-            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index)))
-    }
-
-    pub(crate) async fn revisions_for_inode_at_head(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<Vec<RevisionRecord>, CoreError> {
-        let mut revisions = self.revisions_for_inode(inode_id).await?;
-        revisions.extend(
-            self.wal_tail_rows
-                .revisions()
-                .iter()
-                .filter(|revision| revision.inode_id == inode_id)
-                .cloned(),
-        );
-        Ok(revisions
-            .into_iter()
-            .filter(|revision| revision.committed_seq <= self.head.seq)
-            .collect())
+            .chain(manifest_revision)
+            .max_by_key(revision_order_key))
     }
 
     pub(crate) async fn revision_for_inode(
@@ -275,11 +259,8 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
                 kind: inode.inode_kind,
             });
         }
-        self.revisions_for_inode_at_head(inode_id)
+        self.revision_at_head(inode_id, revision_no)
             .await?
-            .into_iter()
-            .filter(|revision| revision.revision_no == revision_no)
-            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
             .ok_or(CoreError::MissingRevision {
                 inode_id,
                 revision_no,
@@ -291,12 +272,36 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Option<RevisionRecord>, CoreError> {
-        Ok(self
-            .revisions_for_inode_at_head(inode_id)
-            .await?
+        let tail_revision = self.tail_revision_for_inode_no(inode_id, revision_no);
+        let manifest_revision =
+            manifest_index::revision_for_inode_no(self.tables, inode_id, revision_no).await?;
+        Ok(tail_revision
             .into_iter()
-            .filter(|revision| revision.revision_no == revision_no)
-            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index)))
+            .chain(manifest_revision)
+            .max_by_key(revision_order_key))
+    }
+
+    pub(crate) async fn revisions_for_inode_page_desc(
+        &self,
+        inode_id: InodeId,
+        start_after: Option<manifest_index::RevisionPagePosition>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, CoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut revisions = manifest_index::revisions_for_inode_page_desc(
+            self.tables,
+            inode_id,
+            start_after,
+            limit,
+        )
+        .await?;
+        revisions.extend(self.tail_revisions_for_inode_page_desc(inode_id, start_after));
+        revisions.retain(|revision| revision.committed_seq <= self.head.seq);
+        revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
+        revisions.truncate(limit);
+        Ok(revisions)
     }
 
     pub(crate) async fn find_commit_receipt(
@@ -450,11 +455,54 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         manifest_index::direntry_unbinds_for_binding(self.tables, direntry).await
     }
 
-    async fn revisions_for_inode(
+    fn tail_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+        self.wal_tail_rows
+            .revisions()
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id && revision.committed_seq <= self.head.seq
+            })
+            .max_by_key(|revision| revision_order_key(revision))
+            .cloned()
+    }
+
+    fn tail_revision_for_inode_no(
         &self,
         inode_id: InodeId,
-    ) -> Result<Vec<RevisionRecord>, CoreError> {
-        manifest_index::revisions_for_inode(self.tables, inode_id).await
+        revision_no: RevisionNo,
+    ) -> Option<RevisionRecord> {
+        self.wal_tail_rows
+            .revisions()
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.revision_no == revision_no
+                    && revision.committed_seq <= self.head.seq
+            })
+            .max_by_key(|revision| revision_order_key(revision))
+            .cloned()
+    }
+
+    fn tail_revisions_for_inode_page_desc(
+        &self,
+        inode_id: InodeId,
+        start_after: Option<manifest_index::RevisionPagePosition>,
+    ) -> Vec<RevisionRecord> {
+        let mut revisions = self
+            .wal_tail_rows
+            .revisions()
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.committed_seq <= self.head.seq
+                    && start_after
+                        .map(|position| revision_is_after_position_desc(revision, position))
+                        .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
+        revisions
     }
 
     async fn tombstones_for_root(
@@ -502,7 +550,6 @@ pub(crate) struct MetadataReadSessionCounters {
     pub(crate) current_parent_binding_calls: u64,
     pub(crate) covering_tombstone_calls: u64,
     pub(crate) latest_revision_calls: u64,
-    pub(crate) revision_scan_calls: u64,
     pub(crate) direntry_child_scan_calls: u64,
     pub(crate) scan_prefix_calls: u64,
     pub(crate) scan_range_page_calls: u64,
@@ -710,17 +757,22 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
         if let Some(cached) = self.latest_revision_head_cache.get(&inode_id).cloned() {
             return Ok(cached);
         }
-        let revision = if self.visible_inode(inode_id).await?.is_some() {
-            self.revisions_for_inode_at_head(inode_id)
-                .await?
-                .into_iter()
-                .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
-        } else {
-            None
-        };
+        let revision = self.base.latest_revision_head(inode_id).await?;
         self.latest_revision_head_cache
             .insert(inode_id, revision.clone());
         Ok(revision)
+    }
+
+    pub(crate) async fn revisions_for_inode_page_desc(
+        &mut self,
+        inode_id: InodeId,
+        start_after: Option<manifest_index::RevisionPagePosition>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, CoreError> {
+        self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
+        self.base
+            .revisions_for_inode_page_desc(inode_id, start_after, limit)
+            .await
     }
 
     pub(crate) async fn current_parent_binding_for_child(
@@ -883,27 +935,6 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
         self.unbind_cache.insert(cache_key, unbound);
         Ok(unbound)
     }
-
-    async fn revisions_for_inode_at_head(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Vec<RevisionRecord>, CoreError> {
-        self.counters.revision_scan_calls = self.counters.revision_scan_calls.saturating_add(1);
-        self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let mut revisions = self.base.revisions_for_inode(inode_id).await?;
-        revisions.extend(
-            self.base
-                .wal_tail_rows
-                .revisions()
-                .iter()
-                .filter(|revision| revision.inode_id == inode_id)
-                .cloned(),
-        );
-        Ok(revisions
-            .into_iter()
-            .filter(|revision| revision.committed_seq <= self.base.head.seq)
-            .collect())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -949,6 +980,26 @@ fn direntry_bind_row_key(record: &DirentryBindRecord) -> String {
         bind_delta_index: record.bind_delta_index,
     }
     .row_key_for_family(MetadataTableFamily::DirentryBinds)
+}
+
+fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_api::ChangeSeq, u32) {
+    (
+        record.revision_no,
+        record.committed_seq,
+        record.revision_delta_index,
+    )
+}
+
+fn revision_is_after_position_desc(
+    record: &RevisionRecord,
+    position: manifest_index::RevisionPagePosition,
+) -> bool {
+    revision_order_key(record)
+        < (
+            position.revision_no,
+            position.committed_seq,
+            position.revision_delta_index,
+        )
 }
 
 fn absolute_path_prefix(current: &str, component: &str) -> String {

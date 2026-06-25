@@ -569,6 +569,7 @@ pub(super) fn append_rows_to_metadata(
                 revision_delta_index: *revision_delta_index,
                 content_ref: content_ref.clone(),
             }),
+            (MetadataTableFamily::RevisionsByInodeDesc, MetadataRow::Revision { .. }) => {}
             (
                 MetadataTableFamily::Tombstones,
                 MetadataRow::Tombstone {

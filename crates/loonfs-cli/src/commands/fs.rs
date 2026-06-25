@@ -5,7 +5,8 @@ use super::context::{
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemLsArgs, FilesystemMoveArgs,
-    FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs, RuntimeBehavior,
+    FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs,
+    RuntimeBehavior,
 };
 use crate::error::CliError;
 use loonfs_api::{InodeKind, RevisionNo};
@@ -193,7 +194,7 @@ pub(crate) fn run_filesystem_get(
 
 pub(crate) fn run_filesystem_revisions(
     kind: CommandKind,
-    args: FilesystemPathArgs,
+    args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target)?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
@@ -207,7 +208,7 @@ pub(crate) fn run_filesystem_revisions(
     let response = context
         .target
         .backend()
-        .list_file_revisions(&spec)
+        .list_file_revisions(&spec, args.limit, args.cursor.as_deref())
         .map_err(|error| {
             fail(
                 kind,
@@ -224,6 +225,7 @@ pub(crate) fn run_filesystem_revisions(
         data: CommandData::FileRevisions {
             target: render_target(&context.namespace, &spec.absolute_path),
             revisions: response.revisions,
+            next_cursor: response.next_cursor,
         },
     })
 }

@@ -200,6 +200,9 @@ pub struct ListFileRevisionsResponse {
     pub head_seq: ChangeSeq,
     /// Retained revisions in order.
     pub revisions: Vec<FileRevision>,
+    /// Opaque cursor for the next page, if more revisions are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Request to restore a file revision by inode.

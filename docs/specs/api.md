@@ -309,10 +309,10 @@ A representative v0 binding is shown below.
 | Read one namespace's status | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...` |
-| List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt` |
+| List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
-| List file revisions by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions` |
+| List file revisions by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read prior file content by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
@@ -569,6 +569,33 @@ include `next_cursor` only when another page is available.
 
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
+
+Revision listing endpoints return newest revisions first and use the same
+`limit` / `cursor` pattern as directory and namespace listing. Path-based
+revision listing resolves the current path to its current inode, while inode
+revision listing is stable across later renames. Responses include
+`next_cursor` only when another page is available.
+
+```json
+{
+  "namespace_id": "demo",
+  "inode_id": 42,
+  "head_seq": 418,
+  "revisions": [
+    {
+      "inode_id": 42,
+      "revision_no": 7,
+      "committed_seq": 418,
+      "content_ref": {
+        "kind": "whole_file_v0",
+        "digest": "sha256:42d...",
+        "size_bytes": 19482
+      }
+    }
+  ],
+  "next_cursor": "7b2e2e2e7d"
+}
+```
 
 ### 6.7 `POST /filesystem/operations`
 

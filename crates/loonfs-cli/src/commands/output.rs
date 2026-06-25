@@ -51,6 +51,7 @@ pub(crate) enum CommandData {
     FileRevisions {
         target: String,
         revisions: Vec<FileRevision>,
+        next_cursor: Option<String>,
     },
     FileTransfer {
         target: String,

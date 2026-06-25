@@ -336,13 +336,23 @@ impl Client {
         &self,
         spec: &NamespacePath,
     ) -> Result<ListFileRevisionsResponse, ClientError> {
+        self.list_file_revisions_page(spec, None, None)
+    }
+
+    pub fn list_file_revisions_page(
+        &self,
+        spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListFileRevisionsResponse, ClientError> {
         let namespace = namespace_url_segment(&spec.namespace)?;
-        let url = format!(
+        let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/revisions?path={}",
             self.base_url,
             namespace,
             urlencoding::encode(&spec.absolute_path)
         );
+        append_optional_pagination_query(&mut url, true, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
     }
 
@@ -351,11 +361,22 @@ impl Client {
         namespace: &str,
         inode_id: InodeId,
     ) -> Result<ListFileRevisionsResponse, ClientError> {
+        self.list_file_revisions_for_inode_page(namespace, inode_id, None, None)
+    }
+
+    pub fn list_file_revisions_for_inode_page(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListFileRevisionsResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
-        let url = format!(
+        let mut url = format!(
             "{}/v0/namespaces/{namespace}/inodes/{}/revisions",
             self.base_url, inode_id.0
         );
+        append_optional_pagination_query(&mut url, false, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
     }
 

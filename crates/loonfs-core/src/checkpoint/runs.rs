@@ -14,12 +14,13 @@ pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 pub(super) const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
 pub(super) const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
-pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 7] = [
+pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 8] = [
     MetadataTableFamily::Inodes,
     MetadataTableFamily::DirentryBinds,
     MetadataTableFamily::DirentryChildBinds,
     MetadataTableFamily::DirentryUnbinds,
     MetadataTableFamily::Revisions,
+    MetadataTableFamily::RevisionsByInodeDesc,
     MetadataTableFamily::Tombstones,
     MetadataTableFamily::CommitReceipts,
 ];

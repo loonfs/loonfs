@@ -11,7 +11,7 @@ use crate::metadata::{
     SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::{hex_encode_row_key_component, MetadataRow, MetadataTableFamily};
-use loonfs_api::{CommitId, InodeId};
+use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
@@ -133,13 +133,63 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
         .collect())
 }
 
-pub(super) async fn revisions_for_inode<S: ObjectStore + ?Sized>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RevisionPagePosition {
+    pub(super) revision_no: RevisionNo,
+    pub(super) committed_seq: ChangeSeq,
+    pub(super) revision_delta_index: u32,
+}
+
+pub(super) async fn latest_revision_for_inode<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     inode_id: InodeId,
-) -> Result<Vec<RevisionRecord>, CoreError> {
-    let prefix = format!("revision-{:020}-", inode_id.0);
+) -> Result<Option<RevisionRecord>, CoreError> {
+    Ok(revisions_for_inode_page_desc(tables, inode_id, None, 1)
+        .await?
+        .into_iter()
+        .next())
+}
+
+pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+) -> Result<Option<RevisionRecord>, CoreError> {
+    let exact_prefix = revision_by_inode_desc_exact_revision_prefix(inode_id, revision_no);
     Ok(tables
-        .scan_prefix(MetadataTableFamily::Revisions, &prefix)
+        .scan_range_page(
+            MetadataTableFamily::RevisionsByInodeDesc,
+            &exact_prefix,
+            string_prefix_upper_bound(&exact_prefix).as_deref(),
+            1,
+        )
+        .await
+        .map_err(manifest_error_to_core)?
+        .into_iter()
+        .filter_map(revision_from_manifest_row)
+        .next())
+}
+
+pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    inode_id: InodeId,
+    start_after: Option<RevisionPagePosition>,
+    limit: usize,
+) -> Result<Vec<RevisionRecord>, CoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let inode_prefix = revision_by_inode_desc_inode_prefix(inode_id);
+    let lower_bound = start_after
+        .map(|position| resume_after_row_key(&revision_by_inode_desc_row_key(inode_id, position)))
+        .unwrap_or_else(|| inode_prefix.clone());
+    Ok(tables
+        .scan_range_page(
+            MetadataTableFamily::RevisionsByInodeDesc,
+            &lower_bound,
+            string_prefix_upper_bound(&inode_prefix).as_deref(),
+            limit,
+        )
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
@@ -189,4 +239,29 @@ fn resume_after_row_key(row_key: &str) -> String {
     lower_bound.push_str(row_key);
     lower_bound.push('\0');
     lower_bound
+}
+
+fn revision_by_inode_desc_inode_prefix(inode_id: InodeId) -> String {
+    format!("revision-by-inode-desc-{:020}-", inode_id.0)
+}
+
+fn revision_by_inode_desc_exact_revision_prefix(
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+) -> String {
+    format!(
+        "{}{:020}-",
+        revision_by_inode_desc_inode_prefix(inode_id),
+        u64::MAX - revision_no.0
+    )
+}
+
+fn revision_by_inode_desc_row_key(inode_id: InodeId, position: RevisionPagePosition) -> String {
+    format!(
+        "{}{:020}-{:020}-{:010}",
+        revision_by_inode_desc_inode_prefix(inode_id),
+        u64::MAX - position.revision_no.0,
+        u64::MAX - position.committed_seq.0,
+        u32::MAX - position.revision_delta_index
+    )
 }

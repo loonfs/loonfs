@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, InodeId, NameKey, NamespaceId};
+use crate::{ChangeSeq, InodeId, NameKey, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -202,6 +202,25 @@ pub struct DirectoryPageCursor {
     pub last_name_key: NameKey,
 }
 
+/// Cursor for one file revision listing snapshot.
+///
+/// Revision pagination advances in newest-first revision order for one file
+/// inode. The cursor includes the snapshot head plus the last returned row's
+/// complete ordering identity so ties stay unambiguous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRevisionsPageCursor {
+    /// Snapshot sequence captured by the first page.
+    pub head_seq: ChangeSeq,
+    /// File inode whose revisions are being listed.
+    pub inode_id: InodeId,
+    /// Last revision number returned to the client.
+    pub last_revision_no: RevisionNo,
+    /// Namespace sequence that created the last returned revision.
+    pub last_committed_seq: ChangeSeq,
+    /// WAL delta index that created the last returned revision.
+    pub last_revision_delta_index: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum EncodedPageCursor {
@@ -215,12 +234,22 @@ enum EncodedPageCursor {
         dir_inode_id: InodeId,
         last_name_key: NameKey,
     },
+    FileRevisions {
+        v: u8,
+        head_seq: ChangeSeq,
+        inode_id: InodeId,
+        last_revision_no: RevisionNo,
+        last_committed_seq: ChangeSeq,
+        last_revision_delta_index: u32,
+    },
 }
 
 impl EncodedPageCursor {
     fn version(&self) -> u8 {
         match self {
-            Self::Namespaces { v, .. } | Self::Directory { v, .. } => *v,
+            Self::Namespaces { v, .. }
+            | Self::Directory { v, .. }
+            | Self::FileRevisions { v, .. } => *v,
         }
     }
 
@@ -228,6 +257,7 @@ impl EncodedPageCursor {
         match self {
             Self::Namespaces { .. } => "namespaces",
             Self::Directory { .. } => "directory",
+            Self::FileRevisions { .. } => "file_revisions",
         }
     }
 
@@ -290,6 +320,46 @@ pub fn decode_directory_cursor(value: &str) -> Result<DirectoryPageCursor, PageC
         }),
         other => Err(PageCursorError::WrongKind {
             expected: "directory",
+            actual: other.kind(),
+        }),
+    }
+}
+
+/// Encodes a file-revisions cursor as an opaque string for clients.
+pub fn encode_file_revisions_cursor(
+    cursor: &FileRevisionsPageCursor,
+) -> Result<String, PageCursorError> {
+    encode_cursor(&EncodedPageCursor::FileRevisions {
+        v: PAGE_CURSOR_VERSION,
+        head_seq: cursor.head_seq,
+        inode_id: cursor.inode_id,
+        last_revision_no: cursor.last_revision_no,
+        last_committed_seq: cursor.last_committed_seq,
+        last_revision_delta_index: cursor.last_revision_delta_index,
+    })
+}
+
+/// Decodes a file-revisions cursor returned by [`encode_file_revisions_cursor`].
+pub fn decode_file_revisions_cursor(
+    value: &str,
+) -> Result<FileRevisionsPageCursor, PageCursorError> {
+    match decode_cursor(value)? {
+        EncodedPageCursor::FileRevisions {
+            head_seq,
+            inode_id,
+            last_revision_no,
+            last_committed_seq,
+            last_revision_delta_index,
+            ..
+        } => Ok(FileRevisionsPageCursor {
+            head_seq,
+            inode_id,
+            last_revision_no,
+            last_committed_seq,
+            last_revision_delta_index,
+        }),
+        other => Err(PageCursorError::WrongKind {
+            expected: "file_revisions",
             actual: other.kind(),
         }),
     }
@@ -441,6 +511,22 @@ mod tests {
 
         let encoded = encode_directory_cursor(&cursor).expect("encode cursor");
         let decoded = decode_directory_cursor(&encoded).expect("decode cursor");
+
+        assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn file_revisions_cursor_round_trips() {
+        let cursor = FileRevisionsPageCursor {
+            head_seq: ChangeSeq(11),
+            inode_id: InodeId(7),
+            last_revision_no: RevisionNo(5),
+            last_committed_seq: ChangeSeq(10),
+            last_revision_delta_index: 3,
+        };
+
+        let encoded = encode_file_revisions_cursor(&cursor).expect("encode cursor");
+        let decoded = decode_file_revisions_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }

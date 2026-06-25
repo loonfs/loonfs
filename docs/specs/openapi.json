@@ -1027,6 +1027,24 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque file-revisions page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1278,6 +1296,24 @@
             "in": "path",
             "description": "File inode id",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque file-revisions page cursor",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3354,6 +3390,13 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, if more revisions are available."
           },
           "revisions": {
             "type": "array",
