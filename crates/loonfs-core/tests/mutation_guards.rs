@@ -19,13 +19,9 @@ use loonfs_api::{
     },
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    DirectoryPageCursor, EffectiveLimit, FenceToken, InodeId, InodeKind, ManifestId, NameKey,
-    NamespaceId, Page, PageRequest, RevisionNo,
-};
-use loonfs_core::cache::{
-    load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
-    FullNamespaceMaterialization,
+    AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind, DirectoryPageCursor,
+    EffectiveLimit, FenceToken, InodeId, InodeKind, ManifestId, NameKey, NamespaceId, Page,
+    PageRequest, RevisionNo,
 };
 use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
@@ -40,7 +36,8 @@ use loonfs_core::publish::{
 };
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    ForkOptions, MutationContext, NamespaceEngine, PutFileBehavior, ReadOptions, WriteOptions,
+    ForkOptions, MetadataProjectionLoadError, MutationContext, NamespaceEngine, PutFileBehavior,
+    ReadOptions, WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
@@ -66,6 +63,15 @@ enum MetadataReadSource {
 struct MetadataRead<T> {
     value: T,
     source: MetadataReadSource,
+}
+
+#[derive(Debug, Clone)]
+struct BindingIdentity {
+    parent_inode_id: InodeId,
+    name_key: NameKey,
+    child_inode_id: InodeId,
+    bind_seq: ChangeSeq,
+    bind_delta_index: u32,
 }
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
@@ -114,6 +120,19 @@ fn list_namespaces<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<Vec<loonfs_api::NamespaceSummary>, CoreError> {
     block_on(loonfs_core::namespace::list_namespaces(store))
+}
+
+fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> NamespaceDescriptorState {
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let descriptor_bytes = block_on(store.get(&descriptor_key, None))
+        .expect("read namespace descriptor")
+        .expect("namespace descriptor exists");
+    decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
+        .expect("decode namespace descriptor")
+        .state
 }
 
 fn commit_operations<S: ObjectStore + ?Sized>(
@@ -475,113 +494,38 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     )
 }
 
-fn resolve_path_using_full_materialization_oracle(
-    materialization: &FullNamespaceMaterialization,
-    absolute_path: &str,
-) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    let absolute_path = AbsolutePath::parse(absolute_path)
-        .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-    let resolved = materialization
-        .metadata_state
-        .resolve_visible_path(
-            &absolute_path,
-            materialization.head.name_policy,
-            materialization.head.seq,
-        )
-        .map_err(CoreError::from)?;
-    Ok(path_entry_from_full_materialization(
-        materialization,
-        resolved,
-    ))
-}
-
-fn list_path_using_full_materialization_oracle(
-    materialization: &FullNamespaceMaterialization,
-    absolute_path: &str,
-) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    let entry = resolve_path_using_full_materialization_oracle(materialization, absolute_path)?;
-    if entry.inode_kind == InodeKind::File {
-        return Ok(vec![entry]);
-    }
-    if entry.inode_kind != InodeKind::Dir {
-        return Err(CoreError::ExpectedDirectory {
-            path: entry.absolute_path,
-            kind: entry.inode_kind,
-        });
-    }
-    Ok(materialization
-        .metadata_state
-        .visible_children(entry.inode_id, materialization.head.seq)
+fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    child_inode_id: InodeId,
+) -> BindingIdentity {
+    list_changes_after(store, namespace_id, ChangeSeq(0))
+        .expect("change feed")
+        .changes
         .into_iter()
-        .map(|direntry| {
-            let child = materialization
-                .metadata_state
-                .visible_inode(direntry.child_inode_id, materialization.head.seq)
-                .expect("visible child inode exists");
-            let child_path = join_display_path(&entry.absolute_path, &direntry.display_name);
-            path_entry_from_full_materialization_resolved(
-                materialization,
-                child_path,
-                direntry.child_inode_id,
-                child.inode_kind,
-                Some(direntry.parent_inode_id),
-                direntry.display_name,
-            )
+        .flat_map(|change| {
+            change
+                .deltas
+                .into_iter()
+                .filter_map(move |delta| match delta {
+                    CommitDelta::BindDirentry {
+                        delta_index,
+                        parent_inode,
+                        name_key,
+                        child_inode,
+                        ..
+                    } if child_inode == child_inode_id => Some(BindingIdentity {
+                        parent_inode_id: parent_inode,
+                        name_key,
+                        child_inode_id: child_inode,
+                        bind_seq: change.seq,
+                        bind_delta_index: delta_index,
+                    }),
+                    _ => None,
+                })
         })
-        .collect())
-}
-
-fn path_entry_from_full_materialization(
-    materialization: &FullNamespaceMaterialization,
-    resolved: loonfs_core::metadata::ResolvedVisiblePath,
-) -> loonfs_api::AuthoritativePathEntry {
-    path_entry_from_full_materialization_resolved(
-        materialization,
-        resolved.absolute_path,
-        resolved.inode_id,
-        resolved.inode_kind,
-        resolved.parent_inode_id,
-        resolved.display_name,
-    )
-}
-
-fn path_entry_from_full_materialization_resolved(
-    materialization: &FullNamespaceMaterialization,
-    absolute_path: String,
-    inode_id: InodeId,
-    inode_kind: InodeKind,
-    parent_inode_id: Option<InodeId>,
-    display_name: String,
-) -> loonfs_api::AuthoritativePathEntry {
-    let revision = materialization
-        .metadata_state
-        .latest_revision_at_head(inode_id);
-    let content_ref = revision
-        .as_ref()
-        .map(|revision| revision.content_ref.clone());
-    let size_bytes = content_ref
-        .as_ref()
-        .map(|content_ref| content_ref.size_bytes);
-    loonfs_api::AuthoritativePathEntry {
-        namespace_id: materialization.head.namespace_id.clone(),
-        absolute_path,
-        inode_id,
-        inode_kind,
-        head_seq: materialization.head.seq,
-        parent_inode_id,
-        display_name,
-        revision_no: revision.as_ref().map(|revision| revision.revision_no),
-        size_bytes,
-        content_ref,
-    }
-}
-
-fn join_display_path(parent: &str, display_name: &str) -> String {
-    if parent == "/" {
-        format!("/{display_name}")
-    } else {
-        format!("{parent}/{display_name}")
-    }
+        .max_by_key(|binding| (binding.bind_seq, binding.bind_delta_index))
+        .expect("binding exists in change feed")
 }
 
 fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
@@ -591,7 +535,8 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataRead<loonfs_api::AuthoritativePathEntry>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let head = block_on(load_namespace_head_control(store, namespace_id))
-        .map_err(FullMaterializationLoadError::LoadHead)?;
+        .map_err(MetadataProjectionLoadError::LoadHead)
+        .map_err(CoreError::MetadataProjection)?;
     Ok(MetadataRead {
         value: block_on(engine.resolve_path(
             absolute_path,
@@ -608,7 +553,8 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataRead<Vec<loonfs_api::AuthoritativePathEntry>>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let head = block_on(load_namespace_head_control(store, namespace_id))
-        .map_err(FullMaterializationLoadError::LoadHead)?;
+        .map_err(MetadataProjectionLoadError::LoadHead)
+        .map_err(CoreError::MetadataProjection)?;
     Ok(MetadataRead {
         value: block_on(engine.list_path(
             absolute_path,
@@ -1195,13 +1141,6 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
         bootstrap_namespace(&store, &namespace_id, &context, true).expect("allow existing");
     assert_eq!(existing.namespace_id, namespace_id);
 
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load namespace materialization");
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     let descriptor_bytes = store
         .get(&descriptor_key, None)
@@ -1212,10 +1151,13 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
         decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
             .expect("decode namespace descriptor");
     assert_eq!(descriptor.state.namespace_id, namespace_id);
-    assert_eq!(
-        descriptor.state.content_store_id,
-        materialization.content_store_id
-    );
+    assert!(store
+        .head(&content_store_descriptor(
+            descriptor.state.content_store_id.as_str()
+        ))
+        .await
+        .expect("content store descriptor head")
+        .is_some());
     assert!(
         store
             .head(&namespace_fork_state(namespace_id.as_str()))
@@ -1226,7 +1168,7 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
     );
 
     let content_descriptor_key =
-        content_store_descriptor(materialization.content_store_id.as_str());
+        content_store_descriptor(descriptor.state.content_store_id.as_str());
     let content_descriptor_bytes = store
         .get(&content_descriptor_key, None)
         .await
@@ -1239,7 +1181,7 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
     .expect("decode content-store descriptor");
     assert_eq!(
         content_descriptor.state.content_store_id,
-        materialization.content_store_id
+        descriptor.state.content_store_id
     );
 
     let content_store_descriptors = store
@@ -1789,8 +1731,7 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_driven_stat_and_list_match_full_materialization_oracle_with_l0_run_and_wal_overlay()
-{
+async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
@@ -1869,21 +1810,10 @@ async fn query_driven_stat_and_list_match_full_materialization_oracle_with_l0_ru
     )
     .expect("put wal tail");
 
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("materialization");
-    let expected_stat =
-        resolve_path_using_full_materialization_oracle(&materialization, "/docs/moved.txt")
-            .expect("materialization stat");
-    let expected_list = list_path_using_full_materialization_oracle(&materialization, "/docs")
-        .expect("materialization list");
+    let expected_stat = resolve_path(&store, &namespace_id, "/docs/moved.txt").expect("stat");
+    let expected_list = list_path(&store, &namespace_id, "/docs").expect("list");
     let expected_file_list =
-        list_path_using_full_materialization_oracle(&materialization, "/docs/moved.txt")
-            .expect("materialization file list");
+        list_path(&store, &namespace_id, "/docs/moved.txt").expect("file list");
 
     store.reset_content_blob_get_count();
     let actual_stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/moved.txt")
@@ -1946,15 +1876,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     .expect("put report-2024");
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("materialization");
-    let expected = resolve_path_using_full_materialization_oracle(&materialization, "/docs/report")
-        .expect("materialization stat");
+    let expected = resolve_path(&store, &namespace_id, "/docs/report").expect("stat");
     let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
         .expect("materialized stat");
 
@@ -2407,13 +2329,8 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
         .await
         .expect("corrupt wal");
 
-    load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("checkpoint-backed materialization should not read pre-checkpoint wal");
+    resolve_path(&store, &namespace_id, "/docs")
+        .expect("checkpoint-backed read should not read pre-checkpoint wal");
     let error =
         list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect_err("corrupt wal chain");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -2441,17 +2358,8 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
     let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
         .expect("resolve file")
         .inode_id;
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    let original_binding = materialization
-        .metadata_state
-        .current_parent_binding_for_child(file_inode, materialization.head.seq)
-        .expect("source binding");
+    let original_binding =
+        latest_binding_for_child_from_change_feed(&store, &namespace_id, file_inode);
 
     let responses = commit_operations_batch(
         &store,
@@ -2474,7 +2382,7 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                 commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
                 preconditions: vec![CommitPrecondition::BindingIs {
                     parent_inode: docs_inode,
-                    name_key: NameKey::try_new(original_binding.name_key).expect("valid name key"),
+                    name_key: original_binding.name_key.clone(),
                     child_inode: file_inode,
                     bind_seq: original_binding.bind_seq,
                     bind_delta_index: original_binding.bind_delta_index,
@@ -2614,18 +2522,10 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .expect("delete namespace");
     assert_eq!(response.head_seq, ChangeSeq(1));
 
-    // Terminal: materialization loads, commits, status, repeat deletes, re-creation,
-    // and forks all observe the deleted head.
-    let read = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await;
-    assert!(matches!(
-        read,
-        Err(FullMaterializationLoadError::NamespaceDeleted { .. })
-    ));
+    // Terminal: reads, commits, status, repeat deletes, re-creation, and forks
+    // all observe the deleted head.
+    let read = resolve_path(&store, &namespace_id, "/").expect_err("read after delete");
+    assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
     let commit = publisher
         .submit_path_intent(
             &namespace_id,
@@ -2698,11 +2598,10 @@ async fn fork_clone_survives_source_delete() {
 
     // The spec promise: the clone keeps reading through the source-owned
     // immutable metadata its manifest pins.
-    let materialization =
-        load_full_namespace_materialization(&store, &clone, FullMaterializationPurpose::TestOracle)
-            .await
-            .expect("clone materialization survives source delete");
-    assert_eq!(materialization.head.seq, ChangeSeq(1));
+    let clone_head = block_on(load_namespace_head_control(&store, &clone))
+        .expect("clone head survives source delete");
+    assert_eq!(clone_head.state.seq, ChangeSeq(1));
+    resolve_path(&store, &clone, "/shared.txt").expect("clone reads forked file");
     let listed = list_namespaces(&store).expect("list namespaces");
     assert!(listed.iter().any(|summary| summary.namespace_id == clone));
     assert!(listed.iter().all(|summary| summary.namespace_id != source));
@@ -2743,14 +2642,8 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         .expect("same-commit-id retry replays the committed mutation");
     assert_eq!(result.committed_seq, ChangeSeq(1));
 
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    assert_eq!(materialization.head.seq, ChangeSeq(1));
+    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    assert_eq!(head.state.seq, ChangeSeq(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2788,16 +2681,10 @@ async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
         .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
 
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    assert_eq!(materialization.head.seq, ChangeSeq(1));
-    let visible_tip = materialization
-        .head
+    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    assert_eq!(head.state.seq, ChangeSeq(1));
+    let visible_tip = head
+        .state
         .visible_wal_tip
         .as_ref()
         .expect("visible wal tip");
@@ -2906,14 +2793,8 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
 
     // Nothing became durable, so the retry the batch error asks for derives
     // every verdict from durable state.
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    assert_eq!(materialization.head.seq, ChangeSeq(0));
+    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    assert_eq!(head.state.seq, ChangeSeq(0));
 
     let retried = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
     assert_eq!(
@@ -3081,14 +2962,8 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
     );
     resolve_path(&store, &namespace_id, "/parent/child").expect("child directory remains visible");
 
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    assert_eq!(materialization.head.seq, ChangeSeq(4));
+    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    assert_eq!(head.state.seq, ChangeSeq(4));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3283,21 +3158,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
         Some("seed-for-invalid-rename"),
     )
     .expect("seed file");
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    let file = materialization
-        .metadata_state
-        .resolve_visible_path(
-            &AbsolutePath::parse("/file.txt").expect("path"),
-            materialization.head.name_policy,
-            materialization.head.seq,
-        )
-        .expect("resolve file");
+    let file = resolve_path(&store, &namespace_id, "/file.txt").expect("resolve file");
 
     let rename_error = commit_operations(
         &store,
@@ -3561,13 +3422,7 @@ async fn namespace_descriptor_checksum_is_validated() {
         .await
         .expect("overwrite descriptor");
 
-    let error = load_full_namespace_materialization(
-        &store,
-        &namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect_err("descriptor checksum");
+    let error = resolve_path(&store, &namespace_id, "/").expect_err("descriptor checksum");
     assert!(
         error.to_string().contains("checksum mismatch"),
         "unexpected error: {error}"
@@ -3594,15 +3449,11 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     )
     .expect("seed shared file");
 
-    let source_materialization = load_full_namespace_materialization(
-        &store,
-        &source_namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("source materialization");
-    assert_eq!(source_materialization.head.seq, ChangeSeq(1));
-    let content_store_id = source_materialization.content_store_id.clone();
+    let source_head =
+        block_on(load_namespace_head_control(&store, &source_namespace_id)).expect("source head");
+    assert_eq!(source_head.state.seq, ChangeSeq(1));
+    let content_store_id =
+        load_namespace_descriptor_state(&store, &source_namespace_id).content_store_id;
     let blobs_before = store
         .list_prefix(&format!(
             "content-stores/{}/blobs/",
@@ -3640,20 +3491,13 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("list blobs after fork");
     assert_eq!(blobs_after, blobs_before, "fork must not copy content");
 
-    let clone_materialization = load_full_namespace_materialization(
-        &store,
-        &clone_namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("clone materialization");
-    assert_eq!(clone_materialization.content_store_id, content_store_id);
-    assert_eq!(clone_materialization.head.seq, ChangeSeq(1));
-    assert_eq!(
-        clone_materialization.head.current_manifest_id,
-        Some(ManifestId(1))
-    );
-    assert_eq!(clone_materialization.head.retention_floor_seq, ChangeSeq(1));
+    let clone_descriptor = load_namespace_descriptor_state(&store, &clone_namespace_id);
+    assert_eq!(clone_descriptor.content_store_id, content_store_id);
+    let clone_head =
+        block_on(load_namespace_head_control(&store, &clone_namespace_id)).expect("clone head");
+    assert_eq!(clone_head.state.seq, ChangeSeq(1));
+    assert_eq!(clone_head.state.current_manifest_id, Some(ManifestId(1)));
+    assert_eq!(clone_head.state.retention_floor_seq, ChangeSeq(1));
 
     let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), ManifestId(1));
     let target_manifest_bytes = store
@@ -4123,14 +3967,8 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     seed_source_namespace_for_fork(&inner, &source_namespace_id, &context);
-    let content_store_id = load_full_namespace_materialization(
-        &inner,
-        &source_namespace_id,
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("source materialization")
-    .content_store_id;
+    let content_store_id =
+        load_namespace_descriptor_state(&inner, &source_namespace_id).content_store_id;
     let descriptor = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
         &context.writer_version,
@@ -4713,25 +4551,9 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         Some("seed-a"),
     )
     .expect("seed file");
-    let materialization_before_move = load_full_namespace_materialization(
-        &store,
-        &namespace_id(),
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    let file = materialization_before_move
-        .metadata_state
-        .resolve_visible_path(
-            &AbsolutePath::parse("/docs/a.txt").expect("path"),
-            materialization_before_move.head.name_policy,
-            materialization_before_move.head.seq,
-        )
-        .expect("resolve file");
-    let old_binding = materialization_before_move
-        .metadata_state
-        .current_parent_binding_for_child(file.inode_id, materialization_before_move.head.seq)
-        .expect("old binding");
+    let file = resolve_path(&store, &namespace_id(), "/docs/a.txt").expect("resolve file");
+    let old_binding =
+        latest_binding_for_child_from_change_feed(&store, &namespace_id(), file.inode_id);
 
     move_path(
         &store,
@@ -4742,20 +4564,14 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         Some("move-a-to-b"),
     )
     .expect("move file");
-    let moved_materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id(),
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    assert_eq!(
-        moved_materialization
-            .metadata_state
-            .direntry_unbinds()
-            .len(),
-        1
-    );
+    let unbind_count = list_changes_after(&store, &namespace_id(), ChangeSeq(0))
+        .expect("change feed")
+        .changes
+        .iter()
+        .flat_map(|change| &change.deltas)
+        .filter(|delta| matches!(delta, CommitDelta::UnbindDirentry { .. }))
+        .count();
+    assert_eq!(unbind_count, 1);
     assert!(resolve_path(&store, &namespace_id(), "/docs/a.txt").is_err());
     resolve_path(&store, &namespace_id(), "/docs/b.txt").expect("new path visible");
 
@@ -4766,7 +4582,7 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
             commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
             preconditions: vec![CommitPrecondition::BindingIs {
                 parent_inode: old_binding.parent_inode_id,
-                name_key: NameKey::try_new(old_binding.name_key).expect("valid name key"),
+                name_key: old_binding.name_key.clone(),
                 child_inode: old_binding.child_inode_id,
                 bind_seq: old_binding.bind_seq,
                 bind_delta_index: old_binding.bind_delta_index,
@@ -4798,21 +4614,7 @@ async fn unsupported_rename_mode_is_named_bad_request_failure() {
         Some("seed-rename-mode"),
     )
     .expect("seed file");
-    let materialization = load_full_namespace_materialization(
-        &store,
-        &namespace_id(),
-        FullMaterializationPurpose::TestOracle,
-    )
-    .await
-    .expect("load materialization");
-    let file = materialization
-        .metadata_state
-        .resolve_visible_path(
-            &AbsolutePath::parse("/docs/a.txt").expect("path"),
-            materialization.head.name_policy,
-            materialization.head.seq,
-        )
-        .expect("resolve file");
+    let file = resolve_path(&store, &namespace_id(), "/docs/a.txt").expect("resolve file");
 
     let error = commit_operations(
         &store,

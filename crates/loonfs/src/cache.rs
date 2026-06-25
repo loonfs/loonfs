@@ -8,14 +8,12 @@ use crate::fs::{should_invalidate_after_result, Fs};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
-use loonfs_core::cache::{
-    FullMaterializationLoadError, MetadataTableCacheStats, WalTailProjectionCacheStats,
-};
+use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
     load_namespace_head_control, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
 };
 use loonfs_core::publish::NamespaceCommitEngine;
-use loonfs_core::ReadOptions;
+use loonfs_core::{MetadataProjectionLoadError, ReadOptions};
 use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -290,8 +288,8 @@ impl Fs {
             Err(ControlObjectLoadError::MissingObject { object_key }) => {
                 Err(self.missing_head_read_error(namespace_id, object_key).await)
             }
-            Err(error) => Err(RuntimeError::Core(CoreError::FullMaterialization(
-                FullMaterializationLoadError::LoadHead(error),
+            Err(error) => Err(RuntimeError::Core(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::LoadHead(error),
             ))),
         }
     }
@@ -312,15 +310,15 @@ impl Fs {
             Err(error) => return RuntimeError::Core(CoreError::Store(error.to_string())),
         };
         match (descriptor_exists, lease_exists) {
-            (false, false) => RuntimeError::Core(CoreError::FullMaterialization(
-                FullMaterializationLoadError::LoadNamespaceDescriptor(
+            (false, false) => RuntimeError::Core(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::LoadNamespaceDescriptor(
                     ControlObjectLoadError::MissingObject {
                         object_key: descriptor_key,
                     },
                 ),
             )),
-            (true, true) => RuntimeError::Core(CoreError::FullMaterialization(
-                FullMaterializationLoadError::LoadHead(ControlObjectLoadError::MissingObject {
+            (true, true) => RuntimeError::Core(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::LoadHead(ControlObjectLoadError::MissingObject {
                     object_key: head_key,
                 }),
             )),

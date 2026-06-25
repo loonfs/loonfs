@@ -45,7 +45,9 @@ use std::collections::BTreeMap;
 use tracing::Instrument;
 
 #[cfg(test)]
-use super::load::load_verified_manifest_materialization;
+use super::load::{append_rows_to_metadata, load_verified_manifest_materialization};
+#[cfg(test)]
+use crate::metadata::MetadataStateBuilder;
 
 // Manifest id allocation can race with other manifest publishers. Exhausting
 // this loop means the candidate id range was already occupied.
@@ -73,10 +75,10 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     // manifest state, using the current manifest tables plus the visible WAL
     // tail as the row source.
     //
-    // This is distinct from full namespace materialization: creating a
-    // checkpoint should not rebuild a `MetadataState` for the whole namespace.
-    // It only writes new SSTs when the bootstrap seed, WAL tail, or L0 policy
-    // requires new metadata files.
+    // This is distinct from rebuilding a whole namespace state from scratch:
+    // checkpoint creation projects from the current manifest tables plus the
+    // visible WAL tail. It only writes new SSTs when the bootstrap seed, WAL
+    // tail, or L0 policy requires new metadata files.
     let checkpoint_id = generate_checkpoint_id();
     let mut saw_head_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
@@ -312,6 +314,31 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     })
 }
 
+#[cfg(test)]
+pub(super) async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<(HeadState, MetadataState), CoreError> {
+    let projection = load_checkpoint_projection(store, namespace_id).await?;
+    let mut metadata_state = MetadataStateBuilder::default();
+    for family in CHECKPOINT_TABLE_FAMILIES {
+        let mut rows = projection
+            .manifest_tables
+            .scan_prefix(family, "")
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
+        rows.extend(manifest_rows_for_family(&projection.tail_state, family));
+        rows.sort_by_key(|row| row.row_key_for_family(family));
+        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
+    }
+    Ok((projection.head, metadata_state.finish()))
+}
+
 fn ensure_checkpoint_reconstructed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,
@@ -520,6 +547,12 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
 }
 
 #[cfg(test)]
+pub(super) struct ManifestMetadataSource<'a> {
+    pub(super) head: &'a HeadState,
+    pub(super) metadata_state: &'a MetadataState,
+}
+
+#[cfg(test)]
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -527,17 +560,19 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "project_manifest")
 )]
-pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectStore + ?Sized>(
+pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    materialization: &crate::namespace::full_materialization::FullNamespaceMaterialization,
+    source: ManifestMetadataSource<'_>,
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
     checkpoint_to_add: Option<NamespaceCheckpointRecord>,
 ) -> Result<NamespaceManifestEnvelope, CoreError> {
-    let head_seq = materialization.head.seq;
-    let previous_manifest = match materialization.head.current_manifest_id {
+    let head = source.head;
+    let metadata_state = source.metadata_state;
+    let head_seq = head.seq;
+    let previous_manifest = match head.current_manifest_id {
         Some(previous_id) => Some(
             load_verified_manifest_materialization(store, namespace_id, previous_id)
                 .await
@@ -563,7 +598,7 @@ pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectS
                 namespace_id,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
-                &materialization.metadata_state,
+                metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )
@@ -580,7 +615,7 @@ pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectS
                         namespace_id,
                         head_seq,
                         previous.manifest.payload.head_seq,
-                        &materialization.metadata_state,
+                        metadata_state,
                         writer_version,
                     )
                     .await?,
@@ -594,7 +629,7 @@ pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectS
                 namespace_id,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
-                &materialization.metadata_state,
+                metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )
@@ -608,7 +643,7 @@ pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectS
                 namespace_id,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
-                &materialization.metadata_state,
+                metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )
@@ -623,12 +658,12 @@ pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectS
             namespace_id: namespace_id.clone(),
             manifest_id,
             head_seq,
-            head_commit_id: materialization.head.head_commit_id.clone(),
+            head_commit_id: head.head_commit_id.clone(),
             base_seq,
-            active_fence_token: materialization.head.active_fence_token,
-            next_inode_id: materialization.head.next_inode_id,
-            name_policy: materialization.head.name_policy,
-            retention_floor_seq: materialization.head.retention_floor_seq,
+            active_fence_token: head.active_fence_token,
+            next_inode_id: head.next_inode_id,
+            name_policy: head.name_policy,
+            retention_floor_seq: head.retention_floor_seq,
             initialized: true,
             verified: true,
             fork: None,

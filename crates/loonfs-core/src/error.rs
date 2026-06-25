@@ -3,7 +3,6 @@ use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidat
 use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::namespace::lease::LeaseAcquireError;
 use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
@@ -32,8 +31,6 @@ pub use loonfs_api::{ErrorCode, ErrorKind};
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum CoreError {
-    #[error(transparent)]
-    FullMaterialization(#[from] FullMaterializationLoadError),
     #[error(transparent)]
     MetadataProjection(#[from] MetadataProjectionLoadError),
     #[error(transparent)]
@@ -128,7 +125,7 @@ pub enum CoreError {
 ///
 /// These are not generic store failures: each variant names the recovery or
 /// caller action we expect. Normal reads and publishes must return these
-/// errors instead of falling back to full namespace materialization.
+/// errors instead of falling back to a whole-namespace rebuild.
 #[derive(Debug, Clone, Error)]
 pub enum MetadataViewError {
     #[error("namespace `{namespace_id}` head has no current manifest")]
@@ -281,9 +278,6 @@ impl CoreError {
 
     pub fn code(&self) -> ErrorCode {
         match self {
-            CoreError::FullMaterialization(error) => {
-                classify_full_materialization_load_error(error)
-            }
             CoreError::MetadataProjection(error) => classify_metadata_projection_load_error(error),
             CoreError::MetadataView(error) => classify_metadata_view_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
@@ -379,39 +373,6 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
         ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
-    }
-}
-
-fn classify_full_materialization_load_error(error: &FullMaterializationLoadError) -> ErrorCode {
-    match error {
-        FullMaterializationLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        FullMaterializationLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
-        FullMaterializationLoadError::LoadNamespaceDescriptor(error) => {
-            classify_control_object_load_error(error)
-        }
-        FullMaterializationLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
-            ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
-            _ => ErrorCode::NamespaceCorrupt,
-        },
-        FullMaterializationLoadError::LoadHead(error)
-        | FullMaterializationLoadError::LoadLease(error) => match error {
-            ControlObjectLoadError::MissingObject { .. }
-            | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
-            _ => classify_control_object_load_error(error),
-        },
-        FullMaterializationLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
-        FullMaterializationLoadError::WalReplay(_)
-        | FullMaterializationLoadError::ReconstructedHeadMismatch { .. } => {
-            ErrorCode::NamespaceCorrupt
-        }
-        FullMaterializationLoadError::ManifestLoad(error) => match error.kind() {
-            crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
-            crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
-        },
-        FullMaterializationLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
-        FullMaterializationLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
-        FullMaterializationLoadError::LimitExceeded { .. } => ErrorCode::ServerError,
     }
 }
 
