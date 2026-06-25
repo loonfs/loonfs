@@ -26,7 +26,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::Instrument;
 
 const DEFAULT_MAX_READ_WAL_TAIL_SEGMENTS: u64 = 32;
@@ -735,9 +734,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             list_page_direntry_child_scan_calls = tracing::field::Empty,
             list_page_scan_prefix_calls = tracing::field::Empty,
             list_page_scan_range_page_calls = tracing::field::Empty,
-            list_page_authoritative_entry_ms = tracing::field::Empty,
         );
-        let build_started = Instant::now();
         let entries = async {
             let mut entries = Vec::with_capacity(children.len());
             for child in children {
@@ -787,10 +784,6 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         build_span.record(
             "list_page_scan_range_page_calls",
             counters.scan_range_page_calls,
-        );
-        build_span.record(
-            "list_page_authoritative_entry_ms",
-            elapsed_ms_u64(build_started),
         );
 
         Ok(Page {
@@ -896,8 +889,4 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
     fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
         CurrentManifestTailView::new(&self.head, &self.tables, self.wal_tail_rows.as_ref())
     }
-}
-
-fn elapsed_ms_u64(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
