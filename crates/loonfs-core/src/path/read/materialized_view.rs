@@ -6,13 +6,13 @@ use crate::checkpoint::{
     head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
     VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
 };
+use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord,
 };
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{
@@ -339,7 +339,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
     pub(crate) async fn load(store: &'a S, namespace_id: &NamespaceId) -> Result<Self, CoreError> {
         let loaded_head = read_head_object(store, namespace_id)
             .await
-            .map_err(FullMaterializationLoadError::LoadHead)?;
+            .map_err(MetadataProjectionLoadError::LoadHead)?;
         Self::load_at_head_with_cache(
             store,
             namespace_id,
@@ -373,7 +373,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 })?;
         let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
             .await
-            .map_err(FullMaterializationLoadError::from)?;
+            .map_err(MetadataProjectionLoadError::from)?;
         let tables = load_verified_manifest_tables_with_cache(
             store,
             cache_context.table_cache,
@@ -382,7 +382,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         )
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
         let manifest_head = head_from_manifest(&head, tables.manifest());
         let cache_key = cache_context
@@ -417,7 +417,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         )
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::WalChainLoad(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
         })?;
         let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
         if wal_tail_segments > cache_context.max_wal_tail_segments {
@@ -440,7 +440,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 wal_chain.segments(),
             )
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::WalReplay(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
             })
         }?;
         let wal_tail_rows = Arc::new(replayed.resulting_metadata_state);

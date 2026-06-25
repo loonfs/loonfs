@@ -1,10 +1,10 @@
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::CoreError;
+use crate::error::MetadataProjectionLoadError;
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::{
@@ -45,8 +45,8 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     match namespace_initialization_state(store, expected_namespace).await {
         Ok(NamespaceInitializationState::Complete) => {}
         Ok(NamespaceInitializationState::Absent) => {
-            return Err(CoreError::FullMaterialization(
-                FullMaterializationLoadError::LoadNamespaceDescriptor(
+            return Err(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::LoadNamespaceDescriptor(
                     ControlObjectLoadError::MissingObject {
                         object_key: namespace_descriptor(expected_namespace.as_str()),
                     },
@@ -64,7 +64,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     let loaded_head = read_head_object(store, expected_namespace)
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     if loaded_head.envelope.state.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
@@ -73,7 +73,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     }
     let head = loaded_head.envelope.state;
     let manifest_id = head.current_manifest_id.ok_or_else(|| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::MissingCurrentManifest {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::MissingCurrentManifest {
             namespace_id: expected_namespace.clone(),
         })
     })?;
@@ -81,7 +81,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         load_namespace_manifest_envelope(store, expected_namespace, manifest_id)
             .await
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?
             .payload
             .head_seq;
@@ -144,19 +144,19 @@ pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
         .head(&object_key)
         .await
         .map_err(|err| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
                 ControlObjectLoadError::Store(err.to_string()),
             ))
         })?
         .ok_or_else(|| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
                 ControlObjectLoadError::MissingObject {
                     object_key: object_key.clone(),
                 },
             ))
         })?;
-    let head_etag = metadata.etag.ok_or(CoreError::FullMaterialization(
-        FullMaterializationLoadError::MissingHeadEtag { object_key },
+    let head_etag = metadata.etag.ok_or(CoreError::MetadataProjection(
+        MetadataProjectionLoadError::MissingHeadEtag { object_key },
     ))?;
     Ok(NamespaceHeadEtagProbe { head_etag })
 }
@@ -167,14 +167,14 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
             CoreError::InvalidNamespaceId(error)
         }
         NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadNamespaceDescriptor(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
                 error,
             ))
         }
         NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
-            CoreError::FullMaterialization(
-                FullMaterializationLoadError::LoadContentStoreDescriptor(error),
-            )
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadContentStoreDescriptor(
+                error,
+            ))
         }
         NamespaceInitializationError::InspectNamespaceDescriptor(_)
         | NamespaceInitializationError::InspectNamespaceHead(_)

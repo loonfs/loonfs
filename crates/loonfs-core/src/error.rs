@@ -1,3 +1,4 @@
+use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
 use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
@@ -5,7 +6,8 @@ use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::namespace::lease::LeaseAcquireError;
 use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
-use crate::wal::{WalBuildError, WalChainLoadError};
+use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
     ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind, ManifestId,
     NamespaceId, NamespaceIdValidationError,
@@ -32,6 +34,8 @@ pub use loonfs_api::{ErrorCode, ErrorKind};
 pub enum CoreError {
     #[error(transparent)]
     FullMaterialization(#[from] FullMaterializationLoadError),
+    #[error(transparent)]
+    MetadataProjection(#[from] MetadataProjectionLoadError),
     #[error(transparent)]
     MetadataView(#[from] MetadataViewError),
     #[error(transparent)]
@@ -170,6 +174,63 @@ pub enum MetadataViewError {
     },
 }
 
+/// Failures while loading a bounded manifest-plus-tail metadata projection.
+///
+/// This intentionally mirrors the durable/control failure cases that used to
+/// be reported through `FullMaterializationLoadError`, without implying that a
+/// full namespace state was reconstructed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MetadataProjectionLoadError {
+    #[error("failed to load namespace descriptor: {0}")]
+    LoadNamespaceDescriptor(ControlObjectLoadError),
+    #[error("failed to load content store descriptor: {0}")]
+    LoadContentStoreDescriptor(ControlObjectLoadError),
+    #[error(transparent)]
+    LoadHead(#[from] ControlObjectLoadError),
+    #[error("failed to load lease object: {0}")]
+    LoadLease(ControlObjectLoadError),
+    #[error("missing head etag for `{object_key}`")]
+    MissingHeadEtag { object_key: String },
+    #[error("namespace `{namespace_id}` is deleted")]
+    NamespaceDeleted { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` head has no current manifest")]
+    MissingCurrentManifest { namespace_id: NamespaceId },
+    #[error(
+        "namespace head changed during metadata projection load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
+    )]
+    HeadChangedDuringLoad {
+        object_key: String,
+        loaded_head_etag: String,
+        current_head_etag: String,
+    },
+    #[error(transparent)]
+    WalChainLoad(#[from] WalChainLoadError),
+    #[error(transparent)]
+    ManifestLoad(#[from] ManifestLoadError),
+    #[error("wal replay failed: {0:?}")]
+    WalReplay(WalReplayError),
+    #[error(
+        "metadata projection head mismatch: expected current head `{expected:?}`, replayed `{actual:?}`"
+    )]
+    ReplayedHeadMismatch {
+        expected: Box<HeadState>,
+        actual: Box<HeadState>,
+    },
+}
+
+impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
+    fn from(value: NamespaceCatalogLoadError) -> Self {
+        match value {
+            NamespaceCatalogLoadError::LoadNamespaceDescriptor(error) => {
+                Self::LoadNamespaceDescriptor(error)
+            }
+            NamespaceCatalogLoadError::LoadContentStoreDescriptor(error) => {
+                Self::LoadContentStoreDescriptor(error)
+            }
+        }
+    }
+}
+
 impl From<CommitValidationError> for CoreError {
     fn from(value: CommitValidationError) -> Self {
         Self::CommitValidation(value)
@@ -204,7 +265,7 @@ impl From<CommitConversionError> for CoreError {
 
 impl From<NamespaceCatalogLoadError> for CoreError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
-        Self::FullMaterialization(value.into())
+        Self::MetadataProjection(value.into())
     }
 }
 
@@ -224,6 +285,7 @@ impl CoreError {
             CoreError::FullMaterialization(error) => {
                 classify_full_materialization_load_error(error)
             }
+            CoreError::MetadataProjection(error) => classify_metadata_projection_load_error(error),
             CoreError::MetadataView(error) => classify_metadata_view_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
@@ -275,6 +337,36 @@ fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
         MetadataViewError::SnapshotUnavailable { .. }
         | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidCursor,
         MetadataViewError::ManifestChangedDuringViewLoad { .. } => ErrorCode::StaleHead,
+    }
+}
+
+fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) -> ErrorCode {
+    match error {
+        MetadataProjectionLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+        MetadataProjectionLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
+        MetadataProjectionLoadError::LoadNamespaceDescriptor(error) => {
+            classify_control_object_load_error(error)
+        }
+        MetadataProjectionLoadError::LoadContentStoreDescriptor(error) => match error {
+            ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
+            ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
+            _ => ErrorCode::NamespaceCorrupt,
+        },
+        MetadataProjectionLoadError::LoadHead(error)
+        | MetadataProjectionLoadError::LoadLease(error) => match error {
+            ControlObjectLoadError::MissingObject { .. }
+            | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
+            _ => classify_control_object_load_error(error),
+        },
+        MetadataProjectionLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
+        MetadataProjectionLoadError::WalReplay(_)
+        | MetadataProjectionLoadError::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
+        MetadataProjectionLoadError::ManifestLoad(error) => match error.kind() {
+            crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
+            crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
+        },
+        MetadataProjectionLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
+        MetadataProjectionLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
     }
 }
 
