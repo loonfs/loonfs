@@ -11,6 +11,7 @@ use crate::commit::{
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
+use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::catalog::{
@@ -22,7 +23,6 @@ use crate::namespace::control::{
     load_namespace_head_control, load_namespace_lease_control,
 };
 use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::read::CurrentManifestTailView;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
@@ -314,31 +314,31 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
             let descriptor = load_namespace_descriptor_control(store, namespace_id)
                 .await
                 .map_err(|error| {
-                    CoreError::FullMaterialization(
-                        FullMaterializationLoadError::LoadNamespaceDescriptor(error),
+                    CoreError::MetadataProjection(
+                        MetadataProjectionLoadError::LoadNamespaceDescriptor(error),
                     )
                 })?;
             load_content_store_descriptor_control(store, &descriptor.state.content_store_id)
                 .await
                 .map_err(|error| {
-                    CoreError::FullMaterialization(
-                        FullMaterializationLoadError::LoadContentStoreDescriptor(error),
+                    CoreError::MetadataProjection(
+                        MetadataProjectionLoadError::LoadContentStoreDescriptor(error),
                     )
                 })?;
             load_namespace_head_control(store, namespace_id)
                 .await
                 .map_err(|error| {
-                    CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
                 })?;
             load_namespace_lease_control(store, namespace_id)
                 .await
                 .map_err(|error| {
-                    CoreError::FullMaterialization(FullMaterializationLoadError::LoadLease(error))
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadLease(error))
                 })?;
             Ok(())
         }
-        Ok(NamespaceInitializationState::Absent) => Err(CoreError::FullMaterialization(
-            FullMaterializationLoadError::LoadNamespaceDescriptor(
+        Ok(NamespaceInitializationState::Absent) => Err(CoreError::MetadataProjection(
+            MetadataProjectionLoadError::LoadNamespaceDescriptor(
                 crate::namespace::control::ControlObjectLoadError::MissingObject {
                     object_key: namespace_descriptor(namespace_id.as_str()),
                 },
@@ -359,14 +359,14 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
             CoreError::InvalidNamespaceId(error)
         }
         NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadNamespaceDescriptor(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
                 error,
             ))
         }
         NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
-            CoreError::FullMaterialization(
-                FullMaterializationLoadError::LoadContentStoreDescriptor(error),
-            )
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadContentStoreDescriptor(
+                error,
+            ))
         }
         NamespaceInitializationError::InspectNamespaceDescriptor(_)
         | NamespaceInitializationError::InspectNamespaceHead(_)
@@ -655,23 +655,21 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
 ) -> Result<(PublishManifestPlusTailView<'a, S>, PublishTailProjection), CoreError> {
     let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::from(error))
-        })?;
+        .map_err(|error| CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)))?;
     let loaded_head = read_head_object(store, namespace_id)
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::MissingHeadEtag {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::MissingHeadEtag {
             object_key: loaded_head.object_key.clone(),
         })
     })?;
     let head = loaded_head.envelope.state;
     if head.state == NamespaceState::Deleted {
-        return Err(CoreError::FullMaterialization(
-            FullMaterializationLoadError::NamespaceDeleted {
+        return Err(CoreError::MetadataProjection(
+            MetadataProjectionLoadError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             },
         ));
@@ -679,7 +677,7 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
     let lease = read_lease_object(store, namespace_id)
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadLease(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadLease(error))
         })?
         .envelope
         .state;
@@ -692,7 +690,7 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
         load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
             .await
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let manifest_payload_checksum = manifest_tables.manifest().payload_checksum.clone();
@@ -760,7 +758,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|error| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::WalChainLoad(error))
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
     let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     if wal_tail_segments > options.max_wal_tail_segments {
@@ -780,7 +778,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         wal_chain.segments(),
     )
     .map_err(|error| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::WalReplay(error))
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
     })?;
     ensure_publish_reconstructed_head_matches(head, &replayed.resulting_head)?;
     let projection = PublishTailProjection {
@@ -822,8 +820,8 @@ fn ensure_publish_reconstructed_head_matches(
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
     {
-        return Err(CoreError::FullMaterialization(
-            FullMaterializationLoadError::ReconstructedHeadMismatch {
+        return Err(CoreError::MetadataProjection(
+            MetadataProjectionLoadError::ReplayedHeadMismatch {
                 expected: Box::new(current_head.clone()),
                 actual: Box::new(reconstructed.clone()),
             },
@@ -842,25 +840,25 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
         .head(&object_key)
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
                 ControlObjectLoadError::Store(error.to_string()),
             ))
         })?
         .ok_or_else(|| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
                 ControlObjectLoadError::MissingObject {
                     object_key: object_key.clone(),
                 },
             ))
         })?;
     let current_head_etag = metadata.etag.ok_or_else(|| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::MissingHeadEtag {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::MissingHeadEtag {
             object_key: object_key.clone(),
         })
     })?;
     if current_head_etag != loaded_head_etag {
-        return Err(CoreError::FullMaterialization(
-            FullMaterializationLoadError::HeadChangedDuringLoad {
+        return Err(CoreError::MetadataProjection(
+            MetadataProjectionLoadError::HeadChangedDuringLoad {
                 object_key,
                 loaded_head_etag: loaded_head_etag.to_owned(),
                 current_head_etag,
@@ -1325,7 +1323,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?
         .state;
     if head.state == NamespaceState::Deleted {
@@ -1368,7 +1366,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|error| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::WalChainLoad(error))
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
     let mut changes = Vec::with_capacity(limit.as_usize());
     let mut through_seq = head.seq;

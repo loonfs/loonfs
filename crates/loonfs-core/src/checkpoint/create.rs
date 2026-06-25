@@ -21,12 +21,12 @@ use super::runs::{
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
+use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadRequest,
 };
@@ -151,20 +151,20 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                     let write_result = write_namespace_manifest(store, &manifest).await;
                     match write_result {
                         Ok(()) => {}
-                        Err(FullMaterializationLoadError::ManifestLoad(
+                        Err(MetadataProjectionLoadError::ManifestLoad(
                             ManifestLoadError::ManifestConflict { .. },
                         )) => {
                             manifest_id = next_manifest_id_after(manifest_id)?;
                             continue;
                         }
-                        Err(error) => return Err(CoreError::FullMaterialization(error)),
+                        Err(error) => return Err(CoreError::MetadataProjection(error)),
                     }
                     manifest_ready = true;
                     break;
                 }
                 Err(error) => {
-                    return Err(CoreError::FullMaterialization(
-                        FullMaterializationLoadError::ManifestLoad(error),
+                    return Err(CoreError::MetadataProjection(
+                        MetadataProjectionLoadError::ManifestLoad(error),
                     ))
                 }
             }
@@ -184,10 +184,10 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
         )
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?
         .ok_or_else(|| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
                 ManifestLoadError::MissingManifest {
                     object_key: manifest_key.clone(),
                 },
@@ -254,16 +254,16 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
 ) -> Result<CheckpointProjection<'a, S>, CoreError> {
     load_namespace_catalog_entry(store, namespace_id)
         .await
-        .map_err(|error| CoreError::FullMaterialization(error.into()))?;
+        .map_err(|error| CoreError::MetadataProjection(error.into()))?;
     let loaded_head = read_head_object(store, namespace_id)
         .await
         .map_err(|error| {
-            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     let head = loaded_head.envelope.state;
     if head.state == NamespaceState::Deleted {
-        return Err(CoreError::FullMaterialization(
-            FullMaterializationLoadError::NamespaceDeleted {
+        return Err(CoreError::MetadataProjection(
+            MetadataProjectionLoadError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             },
         ));
@@ -277,7 +277,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
         load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
             .await
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let wal_chain = load_validated_wal_chain(
@@ -292,7 +292,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     )
     .await
     .map_err(|error| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::WalChainLoad(error))
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
     let replayed = {
         let _span = tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
@@ -301,8 +301,8 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             &MetadataState::default(),
             wal_chain.segments(),
         )
-        .map_err(FullMaterializationLoadError::WalReplay)
-        .map_err(CoreError::FullMaterialization)?
+        .map_err(MetadataProjectionLoadError::WalReplay)
+        .map_err(CoreError::MetadataProjection)?
     };
     ensure_checkpoint_reconstructed_head_matches(&head, &replayed.resulting_head)?;
     Ok(CheckpointProjection {
@@ -327,8 +327,8 @@ fn ensure_checkpoint_reconstructed_head_matches(
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
     {
-        return Err(CoreError::FullMaterialization(
-            FullMaterializationLoadError::ReconstructedHeadMismatch {
+        return Err(CoreError::MetadataProjection(
+            MetadataProjectionLoadError::ReplayedHeadMismatch {
                 expected: Box::new(current_head.clone()),
                 actual: Box::new(reconstructed.clone()),
             },
@@ -498,7 +498,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
             .scan_prefix(family, "")
             .await
             .map_err(|error| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
         rows.extend(manifest_rows_for_family(&projection.tail_state, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
@@ -542,9 +542,7 @@ pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectS
             load_verified_manifest_materialization(store, namespace_id, previous_id)
                 .await
                 .map_err(|error| {
-                    CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
-                        error,
-                    ))
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
                 })?,
         ),
         _ => None,

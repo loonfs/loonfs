@@ -176,8 +176,7 @@ pub enum MetadataViewError {
 
 /// Failures while loading a bounded manifest-plus-tail metadata projection.
 ///
-/// This intentionally mirrors the durable/control failure cases that used to
-/// be reported through `FullMaterializationLoadError`, without implying that a
+/// These variants name durable/control failure cases without implying that a
 /// full namespace state was reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MetadataProjectionLoadError {

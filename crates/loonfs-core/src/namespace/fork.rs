@@ -4,12 +4,12 @@ use crate::checkpoint::{
 };
 use crate::context::MutationContext;
 use crate::error::CoreError;
+use crate::error::MetadataProjectionLoadError;
 use crate::namespace::catalog::{
     load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
 use crate::namespace::control::read_head_object;
-use crate::namespace::full_materialization::FullMaterializationLoadError;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
@@ -44,7 +44,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         NamespaceInitializationState::Complete => {
             let head = read_head_object(store, new_namespace_id)
                 .await
-                .map_err(|error| CoreError::FullMaterialization(error.into()))?;
+                .map_err(|error| CoreError::MetadataProjection(error.into()))?;
             if head.envelope.state.state == NamespaceState::Deleted {
                 return Err(CoreError::NamespaceDeleted {
                     namespace_id: new_namespace_id.clone(),
@@ -66,7 +66,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         load_verified_manifest_materialization(store, source_namespace_id, checkpoint.manifest_id)
             .await
             .map_err(|err| {
-                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(err))
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err))
             })?;
     let source_checkpoint =
         checkpoint_record_by_id(&source_manifest.manifest, &checkpoint.checkpoint_id)?;
@@ -77,7 +77,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_checkpoint_id = source_checkpoint.checkpoint_id.clone();
     let source_content_store_id = load_namespace_content_store_id(store, source_namespace_id)
         .await
-        .map_err(FullMaterializationLoadError::from)?;
+        .map_err(MetadataProjectionLoadError::from)?;
     let target_manifest_id = ManifestId(fork_seq.0);
     let target_checkpoint_id = generate_checkpoint_id();
 
@@ -199,7 +199,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope).await?;
     write_namespace_manifest(store, &target_manifest)
         .await
-        .map_err(CoreError::FullMaterialization)?;
+        .map_err(CoreError::MetadataProjection)?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,

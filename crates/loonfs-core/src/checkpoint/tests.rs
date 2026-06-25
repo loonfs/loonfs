@@ -27,7 +27,7 @@ use super::runs::{
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
     DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
 };
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::full_materialization::{
@@ -289,7 +289,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     .expect("write hello");
 
     match create_checkpoint(&store, &namespace_id, &context).await {
-        Err(CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+        Err(CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ManifestCodec { .. },
         ))) => {}
         other => panic!("expected manifest codec manifest load error, got {other:?}"),
@@ -1785,7 +1785,7 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         .expect_err("different same-id manifest must conflict");
 
     match error {
-        FullMaterializationLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+        MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
             manifest_id,
             expected_payload_checksum,
             actual_payload_checksum,
