@@ -1,23 +1,21 @@
 use crate::commit::{
-    core_commit_fingerprint_for_v0_request, CommitHeadPublishError, SemanticMutationIdentity,
+    core_commit_fingerprint_for_v0_request, PublishMetadataPreview, SemanticMutationIdentity,
 };
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
-use crate::namespace::basis::{
-    load_verified_namespace_basis, probe_namespace_head_etag, BasisLoadError,
-    NamespaceHeadEtagProbe, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
-};
-use crate::namespace::control::load_namespace_lease_control;
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
+use crate::path::write::planner::plan_path_mutation_against_publish_view;
 use crate::path::write::{
-    path_intent_fingerprint_for_path_intent, PathMutationIntent, PathPlanner, PlannedPathMutation,
+    path_intent_fingerprint_for_path_intent, PathMutationIntent, PlannedPathMutation,
+    PublishPlanningSession,
+};
+use crate::protocol::{
+    load_publish_manifest_plus_tail_view, PublishTailOptions, PublishTailProjection,
 };
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loonfs_api::wire::control::LeaseState;
 use loonfs_api::{CommitId, MutationResult, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use std::sync::Arc;
 
 const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 
@@ -78,104 +76,27 @@ impl Default for PublishOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BasisReuseEvent {
-    Disabled,
-    ColdLoaded,
-    ReusedAfterHeadEtagMatch,
-    InvalidatedThenColdLoaded,
-}
-
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<ApiCommitResponse, CoreError>>,
-    pub basis_reuse_event: BasisReuseEvent,
-    pub verified_basis_cache_update: VerifiedBasisCacheUpdate,
-}
-
-#[derive(Debug, Clone)]
-pub enum VerifiedBasisCacheUpdate {
-    NoChange,
-    ReusableAfterHeadEtagMatch(Arc<VerifiedNamespaceBasis>),
-    AdvancedAfterHeadCas(Arc<VerifiedNamespaceBasis>),
-    Invalidated,
-}
-
-impl VerifiedBasisCacheUpdate {
-    pub fn verified_basis_to_cache(&self) -> Option<Arc<VerifiedNamespaceBasis>> {
-        match self {
-            Self::ReusableAfterHeadEtagMatch(basis) | Self::AdvancedAfterHeadCas(basis) => {
-                Some(Arc::clone(basis))
-            }
-            Self::NoChange | Self::Invalidated => None,
-        }
-    }
-
-    pub fn is_advanced(&self) -> bool {
-        matches!(self, Self::AdvancedAfterHeadCas(_))
-    }
-
-    pub fn is_invalidated(&self) -> bool {
-        matches!(self, Self::Invalidated)
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
-    basis: Option<CachedVerifiedBasis>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedVerifiedBasis {
-    basis: Arc<VerifiedNamespaceBasis>,
-    head_etag_reuse_token: String,
-    weight: VerifiedNamespaceBasisWeight,
-}
-
-impl CachedVerifiedBasis {
-    fn from_arc(basis: Arc<VerifiedNamespaceBasis>) -> Self {
-        Self {
-            head_etag_reuse_token: basis.head_etag.clone(),
-            weight: basis.weight(),
-            basis,
-        }
-    }
-
-    fn matches_head_etag_probe(&self, probe: &NamespaceHeadEtagProbe) -> bool {
-        self.head_etag_reuse_token == probe.head_etag
-    }
-
-    fn weight(&self) -> VerifiedNamespaceBasisWeight {
-        self.weight
-    }
-
-    fn basis_to_reuse_with_refreshed_lease(&self, lease: LeaseState) -> VerifiedNamespaceBasis {
-        let mut basis = self.basis.as_ref().clone();
-        basis.lease = lease;
-        basis
-    }
-
-    #[cfg(test)]
-    fn verified_basis(&self) -> &VerifiedNamespaceBasis {
-        self.basis.as_ref()
-    }
+    publish_tail_projection: Option<PublishTailProjection>,
 }
 
 impl NamespaceCommitEngine {
     pub fn new(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
-            basis: None,
+            publish_tail_projection: None,
         }
     }
 
     pub fn invalidate(&mut self) {
-        self.basis = None;
-    }
-
-    pub fn cached_basis_weight(&self) -> Option<VerifiedNamespaceBasisWeight> {
-        self.basis.as_ref().map(CachedVerifiedBasis::weight)
+        self.publish_tail_projection = None;
     }
 
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
@@ -184,11 +105,25 @@ impl NamespaceCommitEngine {
         candidates: Vec<NamespaceMutationCandidate>,
         context: &MutationContext,
     ) -> NamespaceCommitEnginePublishResult {
+        self.publish_batch_with_tail_options(
+            store,
+            candidates,
+            context,
+            &PublishTailOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_batch_with_tail_options<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+        tail_options: &PublishTailOptions,
+    ) -> NamespaceCommitEnginePublishResult {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
-                basis_reuse_event: BasisReuseEvent::Disabled,
-                verified_basis_cache_update: VerifiedBasisCacheUpdate::NoChange,
             };
         }
 
@@ -196,142 +131,101 @@ impl NamespaceCommitEngine {
         if let Err(error) =
             acquire_or_renew_namespace_lease(store, &self.namespace_id, context).await
         {
-            self.invalidate();
             return NamespaceCommitEnginePublishResult {
                 results: repeated_error(candidate_count, CoreError::Lease(error)),
-                basis_reuse_event: BasisReuseEvent::Disabled,
-                verified_basis_cache_update: VerifiedBasisCacheUpdate::Invalidated,
             };
         }
 
-        let (basis, basis_reuse_event) = match self.basis_for_publish(store).await {
+        let (publish_view, projection) = match load_publish_manifest_plus_tail_view(
+            store,
+            &self.namespace_id,
+            self.publish_tail_projection.as_ref(),
+            tail_options,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate();
                 return NamespaceCommitEnginePublishResult {
-                    results: repeated_error(candidate_count, CoreError::Basis(error)),
-                    basis_reuse_event: BasisReuseEvent::Disabled,
-                    verified_basis_cache_update: VerifiedBasisCacheUpdate::Invalidated,
+                    results: repeated_error(candidate_count, error),
                 };
             }
         };
 
-        let published = crate::protocol::publish_namespace_mutations_batch_against_basis(
+        let published = crate::protocol::publish_namespace_mutations_batch_against_publish_view(
             store,
             &self.namespace_id,
             &candidates,
             context,
-            &basis,
+            &publish_view,
         )
         .await;
-        if should_retry_reused_warm_stale_head(basis_reuse_event, &published) {
-            self.invalidate();
-            let cold_basis = match load_verified_namespace_basis(store, &self.namespace_id).await {
-                Ok(value) => value,
-                Err(error) => {
-                    return NamespaceCommitEnginePublishResult {
-                        results: repeated_error(candidate_count, CoreError::Basis(error)),
-                        basis_reuse_event: BasisReuseEvent::InvalidatedThenColdLoaded,
-                        verified_basis_cache_update: VerifiedBasisCacheUpdate::Invalidated,
-                    };
-                }
-            };
-            let retried = crate::protocol::publish_namespace_mutations_batch_against_basis(
-                store,
-                &self.namespace_id,
-                &candidates,
-                context,
-                &cold_basis,
-            )
-            .await;
-            return self.finish_publish_result(retried, BasisReuseEvent::InvalidatedThenColdLoaded);
-        }
-        self.finish_publish_result(published, basis_reuse_event)
-    }
-
-    fn finish_publish_result(
-        &mut self,
-        published: crate::protocol::PublishBatchAgainstBasisResult,
-        basis_reuse_event: BasisReuseEvent,
-    ) -> NamespaceCommitEnginePublishResult {
-        let verified_basis_cache_update = match published.basis_promotion {
-            crate::protocol::BasisPromotion::Unchanged(basis) => {
-                self.basis = Some(CachedVerifiedBasis::from_arc(Arc::clone(&basis)));
-                VerifiedBasisCacheUpdate::ReusableAfterHeadEtagMatch(basis)
-            }
-            crate::protocol::BasisPromotion::Advanced(basis) => {
-                self.basis = Some(CachedVerifiedBasis::from_arc(Arc::clone(&basis)));
-                VerifiedBasisCacheUpdate::AdvancedAfterHeadCas(basis)
-            }
-            crate::protocol::BasisPromotion::NotCacheable => {
-                self.invalidate();
-                VerifiedBasisCacheUpdate::Invalidated
-            }
-        };
-
+        self.update_publish_tail_projection(projection, &published, tail_options);
         NamespaceCommitEnginePublishResult {
             results: published.results,
-            basis_reuse_event,
-            verified_basis_cache_update,
         }
     }
 
-    async fn basis_for_publish<S: ObjectStore + ?Sized>(
+    pub async fn publish_batch_with_tail_limits<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-    ) -> Result<(VerifiedNamespaceBasis, BasisReuseEvent), BasisLoadError> {
-        let mut invalidated = false;
-        if let Some(cached) = self.basis.clone() {
-            match probe_namespace_head_etag(store, &self.namespace_id).await {
-                Ok(probe) if cached.matches_head_etag_probe(&probe) => {
-                    // A matching ETag does not make the cache authoritative; it
-                    // only proves the durable head object is unchanged since
-                    // this basis was reconstructed and verified.
-                    match load_namespace_lease_control(store, &self.namespace_id).await {
-                        Ok(lease) => {
-                            let basis = cached.basis_to_reuse_with_refreshed_lease(lease.state);
-                            return Ok((basis, BasisReuseEvent::ReusedAfterHeadEtagMatch));
-                        }
-                        Err(_) => {
-                            self.invalidate();
-                            invalidated = true;
-                        }
-                    }
-                }
-                Ok(_) | Err(_) => {
-                    self.invalidate();
-                    invalidated = true;
-                }
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+        max_wal_tail_segments: u64,
+        max_tail_rows: usize,
+        max_tail_decoded_bytes: Option<usize>,
+    ) -> NamespaceCommitEnginePublishResult {
+        let options = PublishTailOptions {
+            max_wal_tail_segments,
+            max_tail_rows,
+            max_tail_decoded_bytes,
+        };
+        self.publish_batch_with_tail_options(store, candidates, context, &options)
+            .await
+    }
+
+    fn update_publish_tail_projection(
+        &mut self,
+        mut projection: PublishTailProjection,
+        published: &crate::protocol::PublishBatchAgainstViewResult,
+        tail_options: &PublishTailOptions,
+    ) {
+        let Some(resulting_head) = published.resulting_head.clone() else {
+            if published.can_reuse_loaded_projection {
+                self.publish_tail_projection = Some(projection);
+            } else {
+                self.invalidate();
+            }
+            return;
+        };
+        let Some(resulting_head_etag) = published.resulting_head_etag.clone() else {
+            self.invalidate();
+            return;
+        };
+        if resulting_head.current_manifest_id != Some(projection.manifest_id) {
+            self.invalidate();
+            return;
+        }
+        for record in &published.published_records {
+            if projection
+                .tail_state
+                .apply_committed_wal_record_mut(record)
+                .is_err()
+            {
+                self.invalidate();
+                return;
             }
         }
-
-        let basis = load_verified_namespace_basis(store, &self.namespace_id).await?;
-        let event = if invalidated {
-            BasisReuseEvent::InvalidatedThenColdLoaded
+        projection.head_seq = resulting_head.seq;
+        projection.head_etag = resulting_head_etag;
+        projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
+        if projection.within_limits(tail_options) {
+            self.publish_tail_projection = Some(projection);
         } else {
-            BasisReuseEvent::ColdLoaded
-        };
-        Ok((basis, event))
+            self.invalidate();
+        }
     }
-}
-
-/// A reused warm basis is only probed for freshness before the publish, so a
-/// racing writer can still advance the head between the probe and our
-/// compare-and-swap. That stale-head loss says nothing about the candidates
-/// themselves; retrying them once against a cold-loaded basis keeps the warm
-/// cache transparent to callers. Rejections decided against an etag-matched
-/// basis are as authoritative as a cold load and stand without a retry.
-fn should_retry_reused_warm_stale_head(
-    basis_reuse_event: BasisReuseEvent,
-    published: &crate::protocol::PublishBatchAgainstBasisResult,
-) -> bool {
-    basis_reuse_event == BasisReuseEvent::ReusedAfterHeadEtagMatch
-        && published.results.iter().any(|result| {
-            matches!(
-                result,
-                Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
-            )
-        })
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitResponse, CoreError>> {
@@ -352,8 +246,16 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        PathPlanner::new(self.store)
-            .plan_against_basis(namespace_id, intent)
+        let (view, _projection) = load_publish_manifest_plus_tail_view(
+            self.store,
+            namespace_id,
+            None,
+            &PublishTailOptions::default(),
+        )
+        .await?;
+        let session = PublishPlanningSession::new(view.head());
+        let preview = PublishMetadataPreview::new(view.metadata_view(), session.accepted_rows());
+        plan_path_mutation_against_publish_view(namespace_id, intent, session.head(), &preview)
             .await
     }
 
@@ -427,64 +329,4 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         .publish_batch(store, candidates, context)
         .await
         .results
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::metadata::MetadataState;
-    use crate::namespace::basis::NamespaceHeadEtagProbe;
-    use loonfs_api::wire::control::{HeadState, NamespaceDescriptorState};
-    use loonfs_api::{ChangeSeq, ContentStoreId, FenceToken};
-
-    #[test]
-    fn cached_verified_basis_refreshes_only_lease_state() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let content_store_id = ContentStoreId::parse("cs_00000000000000000000000000000001")
-            .expect("valid content store id");
-        let mut head = HeadState::initial(namespace_id.clone());
-        head.seq = ChangeSeq(3);
-        let original_lease = LeaseState {
-            namespace_id: namespace_id.clone(),
-            holder_id: "writer-a".to_owned(),
-            fence_token: FenceToken(1),
-            lease_expires_at_ms: 10,
-        };
-        let basis = VerifiedNamespaceBasis {
-            namespace_descriptor: NamespaceDescriptorState {
-                namespace_id: namespace_id.clone(),
-                content_store_id: content_store_id.clone(),
-            },
-            content_store_id,
-            snapshot_floor_seq: ChangeSeq(0),
-            head: head.clone(),
-            head_etag: "etag-a".to_owned(),
-            lease: original_lease.clone(),
-            metadata_state: MetadataState::default(),
-        };
-        let cached = CachedVerifiedBasis::from_arc(Arc::new(basis.clone()));
-
-        assert!(cached.matches_head_etag_probe(&NamespaceHeadEtagProbe {
-            head_etag: "etag-a".to_owned(),
-        }));
-        assert!(!cached.matches_head_etag_probe(&NamespaceHeadEtagProbe {
-            head_etag: "etag-b".to_owned(),
-        }));
-
-        let refreshed_lease = LeaseState {
-            namespace_id,
-            holder_id: "writer-a".to_owned(),
-            fence_token: FenceToken(1),
-            lease_expires_at_ms: 20,
-        };
-        let refreshed = cached.basis_to_reuse_with_refreshed_lease(refreshed_lease.clone());
-
-        assert_eq!(cached.verified_basis().lease, original_lease);
-        assert_eq!(refreshed.lease, refreshed_lease);
-        assert_eq!(refreshed.head, basis.head);
-        assert_eq!(refreshed.head_etag, basis.head_etag);
-        assert_eq!(refreshed.metadata_state, basis.metadata_state);
-        assert_eq!(refreshed.namespace_descriptor, basis.namespace_descriptor);
-        assert_eq!(refreshed.content_store_id, basis.content_store_id);
-    }
 }

@@ -43,7 +43,7 @@ pub(crate) async fn load_verified_manifest_materialization<S: ObjectStore + ?Siz
 
 /// Loads and validates only the manifest envelope, without fetching its
 /// metadata tables. Enough for callers that need manifest framing such as
-/// the materialized basis seq, not the rows.
+/// the materialized materialization seq, not the rows.
 pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -101,7 +101,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     Ok(tables)
 }
 
-pub(crate) fn manifest_basis_head(
+pub(crate) fn head_from_manifest(
     current_head: &HeadState,
     manifest: &NamespaceManifestEnvelope,
 ) -> HeadState {

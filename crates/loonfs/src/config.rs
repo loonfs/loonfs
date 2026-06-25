@@ -11,10 +11,10 @@ pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
 /// Default maximum namespaces retained in runtime caches.
 pub const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
-/// Default maximum metadata rows retained across cached bases.
-pub const DEFAULT_MAX_CACHED_BASIS_ROWS: usize = 1_000_000;
-/// Default decoded-byte budget for cached bases.
-pub const DEFAULT_MAX_CACHED_BASIS_DECODED_BYTES: usize = 256 * 1024 * 1024;
+/// Default maximum metadata rows retained across cached WAL-tail projections.
+pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
+/// Default decoded-byte budget for cached WAL-tail projections.
+pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 /// Configuration for an embedded runtime instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,16 +50,18 @@ impl FsConfig {
 /// Cache configuration for the embedded runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
-    /// Enables verified-basis caching.
-    pub basis_cache_enabled: bool,
+    /// Enables WAL-tail projection caching.
+    pub wal_tail_projection_cache_enabled: bool,
     /// Enables namespace control-object caching.
     pub control_cache_enabled: bool,
     /// Maximum namespaces retained in runtime caches.
     pub max_cached_namespaces: usize,
-    /// Maximum metadata rows retained across cached bases.
-    pub max_cached_basis_rows: usize,
-    /// Approximate decoded-byte budget for cached bases.
-    pub max_cached_basis_decoded_bytes: Option<usize>,
+    /// Maximum metadata rows retained across cached WAL-tail projections.
+    pub max_cached_wal_tail_projection_rows: usize,
+    /// Approximate decoded-byte budget for cached WAL-tail projections.
+    pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
+    /// Maximum WAL tail segments a foreground read may project.
+    pub max_read_wal_tail_segments: u64,
     /// Cache settings for decoded metadata tables.
     pub metadata_table_cache: MetadataTableCacheConfig,
 }
@@ -68,11 +70,12 @@ impl RuntimeCacheConfig {
     /// Disables runtime caches.
     pub fn disabled() -> Self {
         Self {
-            basis_cache_enabled: false,
+            wal_tail_projection_cache_enabled: false,
             control_cache_enabled: false,
             max_cached_namespaces: 0,
-            max_cached_basis_rows: 0,
-            max_cached_basis_decoded_bytes: Some(0),
+            max_cached_wal_tail_projection_rows: 0,
+            max_cached_wal_tail_projection_decoded_bytes: Some(0),
+            max_read_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
             metadata_table_cache: MetadataTableCacheConfig {
                 enabled: false,
                 max_blocks: 0,
@@ -85,11 +88,14 @@ impl RuntimeCacheConfig {
 impl Default for RuntimeCacheConfig {
     fn default() -> Self {
         Self {
-            basis_cache_enabled: true,
+            wal_tail_projection_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: DEFAULT_MAX_CACHED_NAMESPACES,
-            max_cached_basis_rows: DEFAULT_MAX_CACHED_BASIS_ROWS,
-            max_cached_basis_decoded_bytes: Some(DEFAULT_MAX_CACHED_BASIS_DECODED_BYTES),
+            max_cached_wal_tail_projection_rows: DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS,
+            max_cached_wal_tail_projection_decoded_bytes: Some(
+                DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
+            ),
+            max_read_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
             metadata_table_cache: MetadataTableCacheConfig::default(),
         }
     }

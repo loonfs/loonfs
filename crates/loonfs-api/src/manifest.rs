@@ -64,7 +64,6 @@ pub enum MetadataTableFamily {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MetadataSegmentKey {
     Full,
-    DirentryParent { parent_inode_id: InodeId },
     RowKeyRange { shard: u32 },
 }
 

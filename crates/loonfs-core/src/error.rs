@@ -1,13 +1,13 @@
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
 use crate::metadata::{MetadataApplyError, VisiblePathError};
-use crate::namespace::basis::BasisLoadError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::namespace::lease::LeaseAcquireError;
 use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::wal::{WalBuildError, WalChainLoadError};
 use loonfs_api::{
-    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
+    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind, ManifestId,
     NamespaceId, NamespaceIdValidationError,
 };
 use thiserror::Error;
@@ -31,7 +31,9 @@ pub use loonfs_api::{ErrorCode, ErrorKind};
 #[non_exhaustive]
 pub enum CoreError {
     #[error(transparent)]
-    Basis(#[from] BasisLoadError),
+    FullMaterialization(#[from] FullMaterializationLoadError),
+    #[error(transparent)]
+    MetadataView(#[from] MetadataViewError),
     #[error(transparent)]
     VisiblePath(#[from] VisiblePathError),
     #[error(transparent)]
@@ -118,6 +120,56 @@ pub enum CoreError {
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
 }
 
+/// Failures specific to manifest-plus-tail metadata views.
+///
+/// These are not generic store failures: each variant names the recovery or
+/// caller action we expect. Normal reads and publishes must return these
+/// errors instead of falling back to full namespace materialization.
+#[derive(Debug, Clone, Error)]
+pub enum MetadataViewError {
+    #[error("namespace `{namespace_id}` head has no current manifest")]
+    MissingManifest { namespace_id: NamespaceId },
+    #[error(
+        "metadata WAL tail after manifest `{manifest_id:?}` is too long: {wal_tail_segments} segments exceeds max {max_wal_tail_segments}"
+    )]
+    TailTooLong {
+        namespace_id: NamespaceId,
+        manifest_id: ManifestId,
+        manifest_head_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+        wal_tail_segments: u64,
+        max_wal_tail_segments: u64,
+    },
+    #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
+    MaintenanceRequired {
+        namespace_id: NamespaceId,
+        reason: String,
+    },
+    #[error(
+        "metadata snapshot `{requested_seq:?}` is outside available range `{snapshot_floor_seq:?}`..=`{head_seq:?}`"
+    )]
+    SnapshotUnavailable {
+        requested_seq: ChangeSeq,
+        snapshot_floor_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    #[error(
+        "metadata view only supports the loaded head `{head_seq:?}`, not historical snapshot `{requested_seq:?}`"
+    )]
+    UnsupportedHistoricalRead {
+        requested_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    #[error(
+        "namespace `{namespace_id}` current manifest changed during metadata view load: expected `{expected_manifest_id:?}`, found `{actual_manifest_id:?}`"
+    )]
+    ManifestChangedDuringViewLoad {
+        namespace_id: NamespaceId,
+        expected_manifest_id: ManifestId,
+        actual_manifest_id: Option<ManifestId>,
+    },
+}
+
 impl From<CommitValidationError> for CoreError {
     fn from(value: CommitValidationError) -> Self {
         Self::CommitValidation(value)
@@ -152,7 +204,7 @@ impl From<CommitConversionError> for CoreError {
 
 impl From<NamespaceCatalogLoadError> for CoreError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
-        Self::Basis(value.into())
+        Self::FullMaterialization(value.into())
     }
 }
 
@@ -169,7 +221,10 @@ impl CoreError {
 
     pub fn code(&self) -> ErrorCode {
         match self {
-            CoreError::Basis(error) => classify_basis_load_error(error),
+            CoreError::FullMaterialization(error) => {
+                classify_full_materialization_load_error(error)
+            }
+            CoreError::MetadataView(error) => classify_metadata_view_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
             CoreError::Lease(error) => classify_lease_acquire_error(error),
@@ -212,6 +267,17 @@ impl CoreError {
     }
 }
 
+fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
+    match error {
+        MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
+        MetadataViewError::TailTooLong { .. } => ErrorCode::MetadataTailTooLong,
+        MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
+        MetadataViewError::SnapshotUnavailable { .. }
+        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidCursor,
+        MetadataViewError::ManifestChangedDuringViewLoad { .. } => ErrorCode::StaleHead,
+    }
+}
+
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
         ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
@@ -225,31 +291,36 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
     }
 }
 
-fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
+fn classify_full_materialization_load_error(error: &FullMaterializationLoadError) -> ErrorCode {
     match error {
-        BasisLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        BasisLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
-        BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
-        BasisLoadError::LoadContentStoreDescriptor(error) => match error {
+        FullMaterializationLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+        FullMaterializationLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
+        FullMaterializationLoadError::LoadNamespaceDescriptor(error) => {
+            classify_control_object_load_error(error)
+        }
+        FullMaterializationLoadError::LoadContentStoreDescriptor(error) => match error {
             ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
             ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
             _ => ErrorCode::NamespaceCorrupt,
         },
-        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
+        FullMaterializationLoadError::LoadHead(error)
+        | FullMaterializationLoadError::LoadLease(error) => match error {
             ControlObjectLoadError::MissingObject { .. }
             | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
             _ => classify_control_object_load_error(error),
         },
-        BasisLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
-        BasisLoadError::WalReplay(_) | BasisLoadError::ReconstructedHeadMismatch { .. } => {
+        FullMaterializationLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
+        FullMaterializationLoadError::WalReplay(_)
+        | FullMaterializationLoadError::ReconstructedHeadMismatch { .. } => {
             ErrorCode::NamespaceCorrupt
         }
-        BasisLoadError::ManifestLoad(error) => match error.kind() {
+        FullMaterializationLoadError::ManifestLoad(error) => match error.kind() {
             crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
             crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
         },
-        BasisLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
-        BasisLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
+        FullMaterializationLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
+        FullMaterializationLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
+        FullMaterializationLoadError::LimitExceeded { .. } => ErrorCode::ServerError,
     }
 }
 
@@ -394,8 +465,8 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreError, ErrorCode, ErrorKind};
-    use loonfs_api::NamespaceId;
+    use super::{CoreError, ErrorCode, ErrorKind, MetadataViewError};
+    use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
@@ -407,6 +478,10 @@ mod tests {
             ErrorKind::PreconditionFailed
         );
         assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
+        assert_eq!(
+            ErrorCode::MaintenanceRequired.kind(),
+            ErrorKind::Unavailable
+        );
         assert_eq!(
             ErrorCode::CommitOutcomeUnknown.kind(),
             ErrorKind::OutcomeUnknown
@@ -427,5 +502,67 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::NamespaceExists);
         assert_eq!(error.code().as_str(), "namespace_exists");
         assert!(error.message().contains("already exists"));
+    }
+
+    #[test]
+    fn metadata_view_errors_map_to_actionable_public_codes() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let manifest_id = ManifestId(1);
+        let head_seq = ChangeSeq(3);
+
+        let cases = [
+            (
+                MetadataViewError::MissingManifest {
+                    namespace_id: namespace_id.clone(),
+                },
+                ErrorCode::NamespaceCorrupt,
+            ),
+            (
+                MetadataViewError::TailTooLong {
+                    namespace_id: namespace_id.clone(),
+                    manifest_id,
+                    manifest_head_seq: ChangeSeq(1),
+                    head_seq,
+                    wal_tail_segments: 33,
+                    max_wal_tail_segments: 32,
+                },
+                ErrorCode::MetadataTailTooLong,
+            ),
+            (
+                MetadataViewError::MaintenanceRequired {
+                    namespace_id: namespace_id.clone(),
+                    reason: "retention progress is missing".to_owned(),
+                },
+                ErrorCode::MaintenanceRequired,
+            ),
+            (
+                MetadataViewError::SnapshotUnavailable {
+                    requested_seq: ChangeSeq(1),
+                    snapshot_floor_seq: ChangeSeq(2),
+                    head_seq,
+                },
+                ErrorCode::InvalidCursor,
+            ),
+            (
+                MetadataViewError::UnsupportedHistoricalRead {
+                    requested_seq: ChangeSeq(2),
+                    head_seq,
+                },
+                ErrorCode::InvalidCursor,
+            ),
+            (
+                MetadataViewError::ManifestChangedDuringViewLoad {
+                    namespace_id,
+                    expected_manifest_id: manifest_id,
+                    actual_manifest_id: Some(ManifestId(2)),
+                },
+                ErrorCode::StaleHead,
+            ),
+        ];
+
+        for (metadata_error, code) in cases {
+            let error = CoreError::from(metadata_error);
+            assert_eq!(error.code(), code);
+        }
     }
 }
