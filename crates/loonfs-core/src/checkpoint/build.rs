@@ -14,10 +14,9 @@ use loonfs_api::wire::manifest::{
     encode_metadata_sst_envelope_zstd, MetadataFileRef, MetadataPage, MetadataRow,
     MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload, MetadataTableFamily,
 };
-use loonfs_api::{generate_metadata_table_id, ChangeSeq, InodeId, NamespaceId};
+use loonfs_api::{generate_metadata_table_id, ChangeSeq, NamespaceId};
 use loonfs_objectstore::keys::metadata_sst;
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeMap;
 
 pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     store: &S,
@@ -123,7 +122,7 @@ where
             continue;
         }
 
-        let segments = segment_manifest_rows(family, rows, segmentation);
+        let segments = segment_manifest_rows(rows, segmentation);
         let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
@@ -235,7 +234,6 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
 }
 
 pub(super) fn segment_manifest_rows(
-    family: MetadataTableFamily,
     rows: Vec<MetadataRow>,
     segmentation: MetadataTableSegmentation,
 ) -> Vec<MetadataSstRows> {
@@ -246,36 +244,8 @@ pub(super) fn segment_manifest_rows(
         }],
         MetadataTableSegmentation::Base {
             max_rows_per_segment,
-        } => match family {
-            MetadataTableFamily::DirentryBinds | MetadataTableFamily::DirentryUnbinds => {
-                segment_rows_by_parent(rows)
-            }
-            MetadataTableFamily::Inodes
-            | MetadataTableFamily::DirentryChildBinds
-            | MetadataTableFamily::Revisions
-            | MetadataTableFamily::Tombstones
-            | MetadataTableFamily::CommitReceipts => {
-                segment_rows_by_row_key_range(rows, max_rows_per_segment.max(1))
-            }
-        },
+        } => segment_rows_by_row_key_range(rows, max_rows_per_segment.max(1)),
     }
-}
-
-pub(super) fn segment_rows_by_parent(rows: Vec<MetadataRow>) -> Vec<MetadataSstRows> {
-    let mut grouped: BTreeMap<InodeId, Vec<MetadataRow>> = BTreeMap::new();
-    for row in rows {
-        if let Some(parent_inode_id) = manifest_row_parent_inode_id(&row) {
-            grouped.entry(parent_inode_id).or_default().push(row);
-        }
-    }
-
-    grouped
-        .into_iter()
-        .map(|(parent_inode_id, rows)| MetadataSstRows {
-            segment_key: MetadataSegmentKey::DirentryParent { parent_inode_id },
-            rows,
-        })
-        .collect()
 }
 
 pub(super) fn segment_rows_by_row_key_range(
@@ -291,16 +261,4 @@ pub(super) fn segment_rows_by_row_key_range(
             rows: rows.to_vec(),
         })
         .collect()
-}
-
-pub(super) fn manifest_row_parent_inode_id(row: &MetadataRow) -> Option<InodeId> {
-    match row {
-        MetadataRow::DirentryBind {
-            parent_inode_id, ..
-        }
-        | MetadataRow::DirentryUnbind {
-            parent_inode_id, ..
-        } => Some(*parent_inode_id),
-        _ => None,
-    }
 }

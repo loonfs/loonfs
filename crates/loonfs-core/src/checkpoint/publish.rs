@@ -3,12 +3,10 @@
 
 use super::create::checkpoint_record_by_id;
 use super::error::ManifestLoadError;
-use super::load::{
-    load_namespace_manifest_envelope_if_present, load_verified_manifest_materialization,
-};
+use super::load::{load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present};
 use crate::error::CoreError;
-use crate::namespace::basis::BasisLoadError;
 use crate::namespace::control::read_head_object;
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
@@ -39,13 +37,13 @@ pub(super) enum ManifestPublicationOutcome {
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestEnvelope,
-) -> Result<(), BasisLoadError> {
+) -> Result<(), FullMaterializationLoadError> {
     let manifest_key = namespace_manifest(
         manifest.payload.namespace_id.as_str(),
         manifest.payload.manifest_id,
     );
     let manifest_bytes = encode_namespace_manifest_json(manifest).map_err(|err| {
-        BasisLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
+        FullMaterializationLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
             object_key: manifest_key.clone(),
             message: err.to_string(),
         })
@@ -63,9 +61,9 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                 &manifest_key,
             )
             .await
-            .map_err(BasisLoadError::ManifestLoad)?
+            .map_err(FullMaterializationLoadError::ManifestLoad)?
             else {
-                return Err(BasisLoadError::ManifestLoad(
+                return Err(FullMaterializationLoadError::ManifestLoad(
                     ManifestLoadError::MissingManifest {
                         object_key: manifest_key,
                     },
@@ -74,7 +72,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
             if existing.payload_checksum == manifest.payload_checksum {
                 Ok(())
             } else {
-                Err(BasisLoadError::ManifestLoad(
+                Err(FullMaterializationLoadError::ManifestLoad(
                     ManifestLoadError::ManifestConflict {
                         object_key: manifest_key,
                         manifest_id: manifest.payload.manifest_id,
@@ -84,7 +82,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                 ))
             }
         }
-        Err(error) => Err(BasisLoadError::ManifestLoad(
+        Err(error) => Err(FullMaterializationLoadError::ManifestLoad(
             ManifestLoadError::ReadManifest {
                 object_key: manifest_key,
                 message: error.to_string(),
@@ -110,7 +108,9 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
             .await
-            .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+            .map_err(|error| {
+                CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+            })?;
         let current_head = loaded_head.envelope.state;
         if current_head.current_manifest_id >= Some(manifest_id) {
             let current_manifest_id = current_head.current_manifest_id.ok_or_else(|| {
@@ -120,10 +120,14 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                 ))
             })?;
             let current_manifest =
-                load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                load_namespace_manifest_envelope(store, namespace_id, current_manifest_id)
                     .await
-                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-            if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
+                    .map_err(|error| {
+                        CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+                            error,
+                        ))
+                    })?;
+            if checkpoint_record_by_id(&current_manifest, checkpoint_id).is_some() {
                 return Ok(ManifestPublicationOutcome::Published(Box::new(
                     current_head,
                 )));

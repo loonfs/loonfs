@@ -1666,7 +1666,9 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::UploadNotFound => StatusCode::NOT_FOUND,
         ErrorCode::CommitQueueFull
         | ErrorCode::CommitOutcomeUnknown
-        | ErrorCode::CheckpointUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        | ErrorCode::CheckpointUnavailable
+        | ErrorCode::MaintenanceRequired
+        | ErrorCode::MetadataTailTooLong => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::NamespaceDeleted => StatusCode::GONE,
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
         ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,

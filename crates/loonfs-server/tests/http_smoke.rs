@@ -1444,7 +1444,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
+async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -1462,10 +1462,8 @@ async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
             .create_namespace(namespace)
             .expect("create namespace");
 
-        match post_retention_advance(&server_url, namespace) {
-            Err(ApiError { code, .. }) => assert_eq!(code, "checkpoint_unavailable"),
-            other => panic!("expected checkpoint_unavailable, got {other:?}"),
-        }
+        let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
+        assert_eq!(advanced.retention_floor_seq, ChangeSeq(0));
     })
     .await
     .expect("join blocking task");

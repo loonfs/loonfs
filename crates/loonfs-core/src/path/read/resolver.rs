@@ -1,6 +1,6 @@
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath};
-use crate::namespace::basis::VerifiedNamespaceBasis;
+use crate::namespace::full_materialization::FullNamespaceMaterialization;
 use crate::path::helpers::parse_absolute_path_for_core;
 use loonfs_api::{AuthoritativePathEntry, ChangeSeq, NamespaceId};
 
@@ -11,20 +11,20 @@ use loonfs_api::{AuthoritativePathEntry, ChangeSeq, NamespaceId};
     skip_all,
     fields(phase = "walk_path")
 )]
-pub(crate) fn resolve_path_from_basis(
-    basis: &VerifiedNamespaceBasis,
+pub(crate) fn resolve_path_from_full_materialization(
+    materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-    let resolved = basis.metadata_state.resolve_visible_path(
+    let resolved = materialization.metadata_state.resolve_visible_path(
         &absolute_path,
-        basis.head.name_policy,
-        basis.head.seq,
+        materialization.head.name_policy,
+        materialization.head.seq,
     )?;
     build_authoritative_path_entry(
-        &basis.head.namespace_id,
-        basis.head.seq,
-        &basis.metadata_state,
+        &materialization.head.namespace_id,
+        materialization.head.seq,
+        &materialization.metadata_state,
         &resolved,
     )
 }

@@ -27,11 +27,12 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RuntimeCacheConfigOverrides {
-    pub basis_cache_enabled: Option<bool>,
+    pub wal_tail_projection_cache_enabled: Option<bool>,
     pub control_cache_enabled: Option<bool>,
     pub max_cached_namespaces: Option<usize>,
-    pub max_cached_basis_rows: Option<usize>,
-    pub max_cached_basis_decoded_bytes: Option<usize>,
+    pub max_cached_wal_tail_projection_rows: Option<usize>,
+    pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
+    pub max_read_wal_tail_segments: Option<u64>,
     pub metadata_table_cache_enabled: Option<bool>,
     pub metadata_table_cache_max_blocks: Option<usize>,
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
@@ -188,8 +189,8 @@ impl ServerConfig {
 
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
         let mut config = RuntimeCacheConfig::default();
-        if let Some(value) = self.runtime_cache.basis_cache_enabled {
-            config.basis_cache_enabled = value;
+        if let Some(value) = self.runtime_cache.wal_tail_projection_cache_enabled {
+            config.wal_tail_projection_cache_enabled = value;
         }
         if let Some(value) = self.runtime_cache.control_cache_enabled {
             config.control_cache_enabled = value;
@@ -197,11 +198,17 @@ impl ServerConfig {
         if let Some(value) = self.runtime_cache.max_cached_namespaces {
             config.max_cached_namespaces = value;
         }
-        if let Some(value) = self.runtime_cache.max_cached_basis_rows {
-            config.max_cached_basis_rows = value;
+        if let Some(value) = self.runtime_cache.max_cached_wal_tail_projection_rows {
+            config.max_cached_wal_tail_projection_rows = value;
         }
-        if let Some(value) = self.runtime_cache.max_cached_basis_decoded_bytes {
-            config.max_cached_basis_decoded_bytes = Some(value);
+        if let Some(value) = self
+            .runtime_cache
+            .max_cached_wal_tail_projection_decoded_bytes
+        {
+            config.max_cached_wal_tail_projection_decoded_bytes = Some(value);
+        }
+        if let Some(value) = self.runtime_cache.max_read_wal_tail_segments {
+            config.max_read_wal_tail_segments = value;
         }
         if let Some(value) = self.runtime_cache.metadata_table_cache_enabled {
             config.metadata_table_cache.enabled = value;
@@ -809,11 +816,12 @@ writer_version = "loonfs-server/0.1.0"
 lease_duration_ms = 60000
 
 [runtime_cache]
-basis_cache_enabled = true
+wal_tail_projection_cache_enabled = true
 control_cache_enabled = false
 max_cached_namespaces = 2
-max_cached_basis_rows = 10
-max_cached_basis_decoded_bytes = 4096
+max_cached_wal_tail_projection_rows = 10
+max_cached_wal_tail_projection_decoded_bytes = 4096
+max_read_wal_tail_segments = 4
 
 [store]
 kind = "local-fs"
@@ -824,11 +832,15 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path)
             .expect("load config")
             .runtime_cache_config();
-        assert!(config.basis_cache_enabled);
+        assert!(config.wal_tail_projection_cache_enabled);
         assert!(!config.control_cache_enabled);
         assert_eq!(config.max_cached_namespaces, 2);
-        assert_eq!(config.max_cached_basis_rows, 10);
-        assert_eq!(config.max_cached_basis_decoded_bytes, Some(4096));
+        assert_eq!(config.max_cached_wal_tail_projection_rows, 10);
+        assert_eq!(
+            config.max_cached_wal_tail_projection_decoded_bytes,
+            Some(4096)
+        );
+        assert_eq!(config.max_read_wal_tail_segments, 4);
     }
 
     #[test]
@@ -842,11 +854,11 @@ writer_version = "loonfs-server/0.1.0"
 lease_duration_ms = 60000
 
 [runtime_cache]
-basis_cache_enabled = false
+wal_tail_projection_cache_enabled = false
 control_cache_enabled = false
 max_cached_namespaces = 0
-max_cached_basis_rows = 0
-max_cached_basis_decoded_bytes = 0
+max_cached_wal_tail_projection_rows = 0
+max_cached_wal_tail_projection_decoded_bytes = 0
 metadata_table_cache_enabled = false
 metadata_table_cache_max_blocks = 0
 metadata_table_cache_max_decoded_bytes = 0
@@ -874,7 +886,7 @@ writer_version = "loonfs-server/0.1.0"
 lease_duration_ms = 60000
 
 [runtime_cache]
-max_cached_basis_rows = -1
+max_cached_wal_tail_projection_rows = -1
 
 [store]
 kind = "local-fs"

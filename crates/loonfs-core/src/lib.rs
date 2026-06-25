@@ -48,13 +48,14 @@ mod wal;
 pub mod cache {
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadErrorKind, MetadataLsmPolicy, MetadataTableCache,
-        MetadataTableCacheConfig, MetadataTableCacheStats,
+        MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
+        WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
     };
-    pub use crate::namespace::basis::{
-        load_namespace_head_summary, load_verified_namespace_basis,
-        load_verified_namespace_basis_at_head, probe_namespace_head_etag, BasisLoadError,
-        NamespaceHeadEtagProbe, NamespaceHeadSummary, VerifiedNamespaceBasis,
-        VerifiedNamespaceBasisWeight,
+    pub use crate::namespace::full_materialization::{
+        load_full_namespace_materialization, load_full_namespace_materialization_at_head,
+        load_namespace_head_summary, probe_namespace_head_etag, FullMaterializationLimits,
+        FullMaterializationLoadError, FullMaterializationPurpose, FullNamespaceMaterialization,
+        FullNamespaceMaterializationWeight, NamespaceHeadEtagProbe, NamespaceHeadSummary,
     };
 }
 
@@ -71,9 +72,8 @@ pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use crate::path::write::PathMutationIntent;
     pub use crate::publisher::{
-        BasisReuseEvent, DirectObjectStorePublisher, FlushPolicy, NamespaceCommitEngine,
+        DirectObjectStorePublisher, FlushPolicy, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, NamespaceMutationCandidate, PublishOptions,
-        VerifiedBasisCacheUpdate,
     };
 }
 

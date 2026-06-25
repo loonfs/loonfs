@@ -4,20 +4,18 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
-    NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest, PaginationPolicy,
-    PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    TraceMode, TraceStoreKind, UploadContentResponse,
+    DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
+    MutationResult, NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest,
+    PaginationPolicy, PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, TraceMode, TraceStoreKind, UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_core::cache::load_verified_namespace_basis;
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
     namespace_descriptor, namespace_head, namespace_lease, namespace_manifest,
@@ -167,11 +165,6 @@ trait FsTestExt {
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
-    ) -> Vec<loonfs::Result<CommitResponse>>;
-    fn publish_namespace_mutations_batch_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<loonfs::Result<CommitResponse>>;
     fn list_changes_after_blocking(
         &self,
@@ -337,14 +330,6 @@ impl FsTestExt for Fs {
         block_on(self.commit_operations_batch(namespace_id, requests))
     }
 
-    fn publish_namespace_mutations_batch_blocking(
-        &self,
-        namespace_id: &NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<loonfs::Result<CommitResponse>> {
-        block_on(self.publish_namespace_mutations_batch(namespace_id, candidates))
-    }
-
     fn list_changes_after_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -385,30 +370,6 @@ fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: ErrorCode) {
         Err(error) => panic!("expected core error {expected:?}, got {error:?}"),
         Ok(_) => panic!("expected core error {expected:?}"),
     }
-}
-
-fn create_dir_candidate(commit_id: &str, absolute_path: &str) -> NamespaceMutationCandidate {
-    NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
-        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-        absolute_path: absolute_path.to_owned(),
-    })
-}
-
-fn delete_candidate(commit_id: &str, absolute_path: &str) -> NamespaceMutationCandidate {
-    NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
-        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-        absolute_path: absolute_path.to_owned(),
-        recursive: true,
-    })
-}
-
-fn assert_single_publish_ok(results: Vec<loonfs::Result<loonfs::CommitResponse>>) {
-    let result = results
-        .into_iter()
-        .next()
-        .expect("one publish result")
-        .expect("publish succeeds");
-    assert!(result.committed_seq.0 > 0);
 }
 
 #[test]
@@ -583,7 +544,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
 }
 
 #[test]
-fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
+fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -592,30 +553,138 @@ fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
     ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("basis-cache-test")
+        .writer_id("tail-projection-cache-test")
         .build()
         .expect("build runtime");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
-        .expect("create docs");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
 
     raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first stat should reuse write-promoted basis");
-    assert_eq!(raw_store.wal_get_count(), 0);
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .expect("first read should project WAL tail");
+    assert!(raw_store.wal_get_count() > 0);
+    let after_first = fs.runtime_cache_stats();
+    assert_eq!(after_first.wal_tail_projection_cache_misses, 1);
+    assert_eq!(after_first.wal_tail_projection_cache_inserts, 1);
 
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("second stat should reuse cached basis");
-    assert_eq!(raw_store.wal_get_count(), 0);
-
-    fs.create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
-        .expect("create other");
     raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("stat after local mutation should reuse advanced basis");
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .expect("second read should reuse cached WAL-tail projection");
     assert_eq!(raw_store.wal_get_count(), 0);
+    let after_second = fs.runtime_cache_stats();
+    assert_eq!(after_second.wal_tail_projection_cache_hits, 1);
+
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/other.txt",
+        b"other",
+        PutFileOptions::default(),
+    )
+    .expect("put other");
+    raw_store.reset_wal_get_count();
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .expect("read after local mutation should rebuild WAL-tail projection");
+    assert!(raw_store.wal_get_count() > 0);
+    let after_write = fs.runtime_cache_stats();
+    assert!(after_write.wal_tail_projection_cache_evictions > 0);
+    assert!(
+        after_write.wal_tail_projection_cache_misses
+            > after_second.wal_tail_projection_cache_misses
+    );
+}
+
+#[test]
+fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let setup = Fs::builder(object_store.clone())
+        .writer_id("publish-tail")
+        .build()
+        .expect("build setup runtime");
+    let measured = Fs::builder(object_store)
+        .writer_id("publish-tail")
+        .build()
+        .expect("build measured runtime");
+
+    setup
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    setup
+        .create_dir_blocking(&namespace_id, "/seed-a", CreateDirOptions::default())
+        .expect("seed first WAL segment");
+    setup
+        .create_dir_blocking(&namespace_id, "/seed-b", CreateDirOptions::default())
+        .expect("seed second WAL segment");
+
+    raw_store.reset_wal_get_count();
+    measured
+        .create_dir_blocking(&namespace_id, "/measured-a", CreateDirOptions::default())
+        .expect("first measured write loads existing tail");
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "first measured write should read the existing WAL tail"
+    );
+
+    raw_store.reset_wal_get_count();
+    measured
+        .create_dir_blocking(&namespace_id, "/measured-b", CreateDirOptions::default())
+        .expect("second measured write advances cached publish tail");
+    assert_eq!(
+        raw_store.wal_get_count(),
+        0,
+        "second measured write should not reread WAL tail"
+    );
+}
+
+#[test]
+fn runtime_publish_rejects_wal_tail_over_configured_bound() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let setup = Fs::builder(object_store.clone())
+        .writer_id("publish-tail-limit")
+        .build()
+        .expect("build setup runtime");
+    let measured = Fs::builder(object_store)
+        .writer_id("publish-tail-limit")
+        .runtime_cache(RuntimeCacheConfig {
+            max_read_wal_tail_segments: 1,
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build measured runtime");
+
+    setup
+        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    setup
+        .create_dir_blocking(&namespace_id, "/seed-a", CreateDirOptions::default())
+        .expect("seed first WAL segment");
+    setup
+        .create_dir_blocking(&namespace_id, "/seed-b", CreateDirOptions::default())
+        .expect("seed second WAL segment");
+
+    assert_core_error_kind(
+        measured.create_dir_blocking(&namespace_id, "/should-fail", CreateDirOptions::default()),
+        ErrorCode::MetadataTailTooLong,
+    );
 }
 
 #[test]
@@ -628,11 +697,11 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
     ));
     let object_store: SharedObjectStore = raw_store.clone();
     let reader = Fs::builder(object_store.clone())
-        .writer_id("basis-cache-reader")
+        .writer_id("tail-cache-reader")
         .build()
         .expect("build reader runtime");
     let writer = Fs::builder(object_store)
-        .writer_id("basis-cache-writer")
+        .writer_id("tail-cache-writer")
         .build()
         .expect("build writer runtime");
 
@@ -670,8 +739,131 @@ fn runtime_cache_can_be_disabled() {
     ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("basis-cache-disabled-test")
+        .writer_id("tail-cache-disabled-test")
         .runtime_cache(RuntimeCacheConfig::disabled())
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    raw_store.reset_wal_get_count();
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .expect("first read should project WAL tail");
+    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .expect("second read should project WAL tail again");
+    assert_eq!(raw_store.wal_get_count(), 2);
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.wal_tail_projection_cache_hits, 0);
+    assert_eq!(stats.wal_tail_projection_cache_misses, 0);
+}
+
+#[test]
+fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
+    let temp_dir = tempdir().expect("tempdir");
+    let shared_store = store(temp_dir.path());
+    let setup = Fs::builder(shared_store.clone())
+        .writer_id("tail-count-setup")
+        .build()
+        .expect("build setup runtime");
+    let first = NamespaceId::parse("first").expect("valid namespace id");
+    let second = NamespaceId::parse("second").expect("valid namespace id");
+
+    setup
+        .create_namespace_blocking(&first, CreateNamespaceOptions::default())
+        .expect("create first namespace");
+    setup
+        .put_file_bytes_blocking(&first, "/file.txt", b"first", PutFileOptions::default())
+        .expect("put first file");
+    setup
+        .create_namespace_blocking(&second, CreateNamespaceOptions::default())
+        .expect("create second namespace");
+    setup
+        .put_file_bytes_blocking(&second, "/file.txt", b"second", PutFileOptions::default())
+        .expect("put second file");
+
+    let fs = Fs::builder(shared_store)
+        .writer_id("tail-count-budget")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_namespaces: 1,
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+
+    fs.read_file_bytes_blocking(&first, "/file.txt")
+        .expect("cache first tail projection");
+    fs.read_file_bytes_blocking(&second, "/file.txt")
+        .expect("cache second tail projection and evict first");
+    let after_second = fs.runtime_cache_stats();
+    assert_eq!(after_second.wal_tail_projection_cache_evictions, 1);
+    assert!(after_second.wal_tail_projection_cache_cached_rows > 0);
+
+    fs.read_file_bytes_blocking(&first, "/file.txt")
+        .expect("first tail projection reloads after eviction");
+    let after_reload = fs.runtime_cache_stats();
+    assert_eq!(after_reload.wal_tail_projection_cache_misses, 3);
+    assert_eq!(after_reload.wal_tail_projection_cache_evictions, 2);
+}
+
+#[test]
+fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("tail-oversized-test")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_wal_tail_projection_rows: 0,
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    raw_store.reset_wal_get_count();
+    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
+        .expect("first read projects oversized tail");
+    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
+        .expect("second read projects oversized tail again");
+    assert_eq!(raw_store.wal_get_count(), 2);
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.wal_tail_projection_cache_misses, 2);
+    assert_eq!(stats.wal_tail_projection_cache_hits, 0);
+    assert_eq!(stats.wal_tail_projection_cache_uncacheable_count, 2);
+    assert_eq!(stats.wal_tail_projection_cache_cached_rows, 0);
+}
+
+#[test]
+fn runtime_read_rejects_wal_tail_over_configured_bound() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let fs = Fs::builder(store(temp_dir.path()))
+        .writer_id("tail-too-long-test")
+        .runtime_cache(RuntimeCacheConfig {
+            max_read_wal_tail_segments: 0,
+            ..RuntimeCacheConfig::default()
+        })
         .build()
         .expect("build runtime");
 
@@ -680,513 +872,10 @@ fn runtime_cache_can_be_disabled() {
     fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
 
-    raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first stat should load basis");
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("second stat should load basis again");
-    assert_eq!(raw_store.wal_get_count(), 2);
-}
-
-#[test]
-fn runtime_basis_cache_evicts_by_namespace_count() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = Fs::builder(store(temp_dir.path()))
-        .writer_id("basis-count-budget")
-        .runtime_cache(RuntimeCacheConfig {
-            max_cached_namespaces: 1,
-            ..RuntimeCacheConfig::default()
-        })
-        .build()
-        .expect("build runtime");
-    let first = NamespaceId::parse("first").expect("valid namespace id");
-    let second = NamespaceId::parse("second").expect("valid namespace id");
-    fs.create_namespace_blocking(&first, CreateNamespaceOptions::default())
-        .expect("create first namespace");
-    fs.create_namespace_blocking(&second, CreateNamespaceOptions::default())
-        .expect("create second namespace");
-
-    fs.stat_path_blocking(&first, "/")
-        .expect("cache first basis");
-    fs.stat_path_blocking(&second, "/")
-        .expect("cache second basis and evict first");
-    let after_second = fs.runtime_cache_stats();
-    assert_eq!(after_second.warm_basis_evictions, 1);
-    assert_eq!(after_second.warm_basis_cached_rows, 1);
-
-    fs.stat_path_blocking(&first, "/")
-        .expect("first basis rehydrates after eviction");
-    let after_reload = fs.runtime_cache_stats();
-    assert_eq!(after_reload.warm_basis_cache_misses, 3);
-    assert_eq!(after_reload.warm_basis_evictions, 2);
-}
-
-#[test]
-fn runtime_basis_cache_evicts_by_row_budget() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = Fs::builder(store(temp_dir.path()))
-        .writer_id("basis-row-budget")
-        .runtime_cache(RuntimeCacheConfig {
-            max_cached_basis_rows: 1,
-            max_cached_basis_decoded_bytes: None,
-            ..RuntimeCacheConfig::default()
-        })
-        .build()
-        .expect("build runtime");
-    let first = NamespaceId::parse("row-one").expect("valid namespace id");
-    let second = NamespaceId::parse("row-two").expect("valid namespace id");
-    fs.create_namespace_blocking(&first, CreateNamespaceOptions::default())
-        .expect("create first namespace");
-    fs.create_namespace_blocking(&second, CreateNamespaceOptions::default())
-        .expect("create second namespace");
-
-    fs.stat_path_blocking(&first, "/")
-        .expect("cache first basis");
-    fs.stat_path_blocking(&second, "/")
-        .expect("cache second basis and evict first by rows");
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.warm_basis_evictions, 1);
-    assert_eq!(stats.warm_basis_evicted_rows, 1);
-    assert_eq!(stats.warm_basis_cached_rows, 1);
-}
-
-#[test]
-fn runtime_basis_budget_includes_commit_engine_bases() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("combined-budget").expect("valid namespace id");
-    let fs = Fs::builder(store(temp_dir.path()))
-        .writer_id("combined-basis-budget")
-        .runtime_cache(RuntimeCacheConfig {
-            max_cached_basis_rows: 2,
-            max_cached_basis_decoded_bytes: None,
-            ..RuntimeCacheConfig::default()
-        })
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    fs.stat_path_blocking(&namespace_id, "/")
-        .expect("cache read basis");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("combined-budget-create-docs", "/docs")],
-    ));
-
-    let stats = fs.runtime_cache_stats();
-    assert!(stats.warm_basis_evictions > 0);
-    assert!(stats.warm_basis_cached_rows <= 2);
-
-    let misses_before = stats.warm_basis_cache_misses;
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("read still works after aggregate budget pruning");
-    let stats = fs.runtime_cache_stats();
-    assert!(stats.warm_basis_cache_misses > misses_before);
-    assert!(stats.warm_basis_cached_rows <= 2);
-}
-
-#[test]
-fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
-    let temp_dir = tempdir().expect("tempdir");
-    let setup = runtime(temp_dir.path(), "basis-byte-budget-setup");
-    let first = NamespaceId::parse("byte-one").expect("valid namespace id");
-    let second = NamespaceId::parse("byte-two").expect("valid namespace id");
-    setup
-        .create_namespace_blocking(&first, CreateNamespaceOptions::default())
-        .expect("create first namespace");
-    setup
-        .create_namespace_blocking(&second, CreateNamespaceOptions::default())
-        .expect("create second namespace");
-    let raw_store = store(temp_dir.path());
-    let basis_weight = block_on(load_verified_namespace_basis(raw_store.as_ref(), &first))
-        .expect("load basis")
-        .weight();
-    assert!(basis_weight.decoded_bytes > 1);
-
-    let fs = Fs::builder(raw_store)
-        .writer_id("basis-byte-budget")
-        .runtime_cache(RuntimeCacheConfig {
-            max_cached_basis_decoded_bytes: Some(basis_weight.decoded_bytes),
-            ..RuntimeCacheConfig::default()
-        })
-        .build()
-        .expect("build runtime");
-
-    fs.stat_path_blocking(&first, "/")
-        .expect("cache first basis");
-    fs.stat_path_blocking(&second, "/")
-        .expect("cache second basis and evict first by bytes");
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.warm_basis_evictions, 1);
-    assert!(stats.warm_basis_evicted_decoded_bytes >= basis_weight.decoded_bytes);
-    assert_eq!(stats.warm_basis_cached_rows, basis_weight.rows);
-}
-
-#[test]
-fn runtime_basis_cache_skips_oversized_basis() {
-    let temp_dir = tempdir().expect("tempdir");
-    let setup = runtime(temp_dir.path(), "basis-oversized-setup");
-    let namespace_id = namespace();
-    setup
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    let raw_store = store(temp_dir.path());
-    let basis_weight = block_on(load_verified_namespace_basis(
-        raw_store.as_ref(),
-        &namespace_id,
-    ))
-    .expect("load basis")
-    .weight();
-    assert!(basis_weight.decoded_bytes > 1);
-
-    let fs = Fs::builder(raw_store)
-        .writer_id("basis-oversized")
-        .runtime_cache(RuntimeCacheConfig {
-            max_cached_basis_decoded_bytes: Some(basis_weight.decoded_bytes - 1),
-            ..RuntimeCacheConfig::default()
-        })
-        .build()
-        .expect("build runtime");
-
-    fs.stat_path_blocking(&namespace_id, "/")
-        .expect("first stat reconstructs oversized basis");
-    fs.stat_path_blocking(&namespace_id, "/")
-        .expect("second stat reconstructs oversized basis again");
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.warm_basis_cache_misses, 2);
-    assert_eq!(stats.warm_basis_cache_hits, 0);
-    assert_eq!(stats.warm_basis_uncacheable_count, 2);
-    assert_eq!(
-        stats.warm_basis_uncacheable_rows,
-        basis_weight.rows.saturating_mul(2)
-    );
-    assert_eq!(
-        stats.warm_basis_uncacheable_decoded_bytes,
-        basis_weight.decoded_bytes.saturating_mul(2)
-    );
-    assert_eq!(stats.warm_basis_cached_rows, 0);
-    assert_eq!(stats.warm_basis_cached_decoded_bytes, 0);
-}
-
-#[test]
-fn runtime_publish_reuses_warm_basis_for_adjacent_batches() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("publish-warm-basis-test")
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("warm-create-docs", "/docs")],
-    ));
-
-    raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("warm-create-child", "/docs/child")],
-    ));
-    assert_eq!(
-        raw_store.wal_get_count(),
-        0,
-        "second adjacent publish should plan from the warm basis without replaying WAL"
-    );
-
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_misses, 1);
-    assert_eq!(stats.publish_warm_basis_hits, 1);
-    assert_eq!(stats.publish_warm_basis_advances, 2);
-    assert_eq!(stats.publish_warm_basis_invalidations, 0);
-
-    let stat = fs
-        .stat_path_blocking(&namespace_id, "/docs/child")
-        .expect("warm-published child is visible");
-    assert_eq!(stat.head_seq, ChangeSeq(2));
-}
-
-#[test]
-fn runtime_publish_cold_loads_after_external_head_advance() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let first = Fs::builder(object_store.clone())
-        .writer_id("shared-publish-writer")
-        .build()
-        .expect("build first runtime");
-    let second = Fs::builder(object_store)
-        .writer_id("shared-publish-writer")
-        .build()
-        .expect("build second runtime");
-
-    first
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("external-first", "/docs")],
-    ));
-    second
-        .create_dir_blocking(&namespace_id, "/other", CreateDirOptions::default())
-        .expect("external runtime advances head");
-
-    raw_store.reset_wal_get_count();
-    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("external-after", "/docs/child")],
-    ));
-    assert!(
-        raw_store.wal_get_count() > 0,
-        "stale warm basis should be discarded and replaced by a cold replay"
-    );
-
-    let stats = first.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_hits, 0);
-    assert_eq!(stats.publish_warm_basis_misses, 2);
-    assert_eq!(stats.publish_warm_basis_invalidations, 1);
-    assert_eq!(stats.publish_warm_basis_advances, 2);
-}
-
-#[test]
-fn runtime_publish_retries_warm_rejection_after_external_head_race() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let first = Fs::builder(object_store.clone())
-        .writer_id("shared-race-writer")
-        .build()
-        .expect("build first runtime");
-    let second = Fs::builder(object_store)
-        .writer_id("shared-race-writer")
-        .build()
-        .expect("build second runtime");
-
-    first
-        .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("race-prime", "/docs")],
-    ));
-    second
-        .create_dir_blocking(&namespace_id, "/a", CreateDirOptions::default())
-        .expect("external runtime creates /a");
-
-    raw_store.reset_wal_get_count();
-    assert_single_publish_ok(first.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![delete_candidate("race-delete-a", "/a")],
-    ));
-    assert!(
-        raw_store.wal_get_count() > 0,
-        "warm rejection should be retried from a cold basis"
-    );
-
     assert_core_error_kind(
-        first.stat_path_blocking(&namespace_id, "/a"),
-        ErrorCode::PathNotFound,
+        fs.stat_path_blocking(&namespace_id, "/docs"),
+        ErrorCode::MetadataTailTooLong,
     );
-    let stats = first.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_hits, 0);
-    assert_eq!(stats.publish_warm_basis_misses, 2);
-    assert_eq!(stats.publish_warm_basis_invalidations, 1);
-    assert_eq!(stats.publish_warm_basis_advances, 2);
-}
-
-#[test]
-fn runtime_publish_cache_disabled_replays_for_adjacent_batches() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("publish-warm-disabled-test")
-        .runtime_cache(RuntimeCacheConfig::disabled())
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("disabled-first", "/docs")],
-    ));
-
-    raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("disabled-second", "/docs/child")],
-    ));
-    assert!(
-        raw_store.wal_get_count() > 0,
-        "cache-disabled publish path should still cold-load from WAL"
-    );
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.warm_basis_cache_hits, 0);
-    assert_eq!(stats.warm_basis_cache_misses, 0);
-    assert_eq!(stats.publish_warm_basis_hits, 0);
-    assert_eq!(stats.publish_warm_basis_misses, 0);
-}
-
-#[test]
-fn runtime_publish_stale_head_invalidates_warm_basis() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("publish-warm-stale-test")
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("stale-prime", "/docs")],
-    ));
-
-    raw_store.fail_head_cas();
-    // The warm-reused attempt loses its head CAS, retries once from a cold
-    // basis, and loses again: a persistent stale head is surfaced as such.
-    let stale = fs
-        .publish_namespace_mutations_batch_blocking(
-            &namespace_id,
-            vec![create_dir_candidate("stale-loses-cas", "/stale")],
-        )
-        .into_iter()
-        .next()
-        .expect("one result")
-        .expect_err("head CAS failure should be stale");
-    assert_core_error_kind::<()>(Err(stale), ErrorCode::StaleHead);
-
-    raw_store.allow_head_cas();
-    raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("stale-after", "/after")],
-    ));
-    assert!(
-        raw_store.wal_get_count() > 0,
-        "publish after stale-head invalidation should cold-load visible WAL"
-    );
-
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_hits, 0);
-    assert_eq!(stats.publish_warm_basis_misses, 3);
-    assert_eq!(stats.publish_warm_basis_invalidations, 1);
-    assert_eq!(stats.publish_warm_basis_advances, 2);
-}
-
-#[test]
-fn runtime_publish_retries_warm_stale_head_race_from_cold_basis() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("publish-warm-race-test")
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("race-prime", "/docs")],
-    ));
-
-    // A racing writer can advance the head between the warm-reuse etag probe
-    // and our CAS; the engine must absorb that loss with one cold retry
-    // instead of surfacing a stale-head error for a transient cache race.
-    raw_store.fail_next_head_cas();
-    raw_store.reset_wal_get_count();
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("race-child", "/docs/child")],
-    ));
-    assert!(
-        raw_store.wal_get_count() > 0,
-        "stale-head retry should replan from a cold-loaded basis"
-    );
-    fs.stat_path_blocking(&namespace_id, "/docs/child")
-        .expect("retried publish is visible");
-
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_hits, 0);
-    assert_eq!(stats.publish_warm_basis_misses, 2);
-    assert_eq!(stats.publish_warm_basis_invalidations, 1);
-    assert_eq!(stats.publish_warm_basis_advances, 2);
-}
-
-#[test]
-fn runtime_publish_warm_rejection_stands_without_cold_retry() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
-        temp_dir.path(),
-        namespace_id.as_str(),
-    ));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("publish-warm-reject-test")
-        .build()
-        .expect("build runtime");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    assert_single_publish_ok(fs.publish_namespace_mutations_batch_blocking(
-        &namespace_id,
-        vec![create_dir_candidate("reject-prime", "/docs")],
-    ));
-
-    // A rejection decided against an etag-matched warm basis is as
-    // authoritative as a cold load: it must not trigger a cold replay.
-    raw_store.reset_wal_get_count();
-    let rejected = fs
-        .publish_namespace_mutations_batch_blocking(
-            &namespace_id,
-            vec![delete_candidate("reject-missing", "/missing")],
-        )
-        .into_iter()
-        .next()
-        .expect("one result");
-    assert_core_error_kind(rejected, ErrorCode::PathNotFound);
-    assert_eq!(
-        raw_store.wal_get_count(),
-        0,
-        "legitimate warm rejection should not cold-load the WAL"
-    );
-
-    let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.publish_warm_basis_hits, 1);
-    assert_eq!(stats.publish_warm_basis_misses, 1);
-    assert_eq!(stats.publish_warm_basis_invalidations, 0);
-    assert_eq!(stats.publish_warm_basis_advances, 1);
 }
 
 #[test]
@@ -1199,7 +888,7 @@ fn stale_head_write_error_invalidates_runtime_cache() {
     ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("basis-cache-stale-test")
+        .writer_id("tail-cache-stale-test")
         .build()
         .expect("build runtime");
 
@@ -1208,7 +897,7 @@ fn stale_head_write_error_invalidates_runtime_cache() {
     fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime basis cache");
+        .expect("prime read cache");
 
     raw_store.fail_head_cas();
     assert_core_error_kind(
@@ -1218,8 +907,16 @@ fn stale_head_write_error_invalidates_runtime_cache() {
 
     raw_store.allow_head_cas();
     raw_store.reset_wal_get_count();
+    fs.create_dir_blocking(&namespace_id, "/after-stale", CreateDirOptions::default())
+        .expect("write after stale head should reload publish tail");
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "failed publish attempt should invalidate cached publish tail"
+    );
+
+    raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("read after stale head should reload basis");
+        .expect("read after stale head should reload materialization");
     assert!(raw_store.wal_get_count() > 0);
 }
 
@@ -1417,7 +1114,7 @@ fn directory_pages_use_canonical_name_key_order() {
 }
 
 #[test]
-fn directory_cursor_pages_read_original_snapshot_after_later_writes() {
+fn directory_cursor_after_later_writes_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
     let namespace_id = namespace();
@@ -1454,17 +1151,17 @@ fn directory_cursor_pages_read_original_snapshot_after_later_writes() {
     )
     .expect("put later file");
 
-    let second = block_on(fs.list_path_entries_page(
-        &namespace_id,
-        "/docs",
-        PageRequest {
-            limit,
-            cursor: Some(cursor),
-        },
-    ))
-    .expect("second directory page");
-    assert_eq!(display_names(&second.entries), vec!["c.txt"]);
-    assert!(second.next_cursor.is_none());
+    assert_core_error_kind(
+        block_on(fs.list_path_entries_page(
+            &namespace_id,
+            "/docs",
+            PageRequest {
+                limit,
+                cursor: Some(cursor),
+            },
+        )),
+        ErrorCode::InvalidCursor,
+    );
 }
 
 #[test]
@@ -1688,7 +1385,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 }
 
 #[test]
-fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
+fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let fs = runtime(temp_dir.path(), "read-fallback-test");
@@ -1704,8 +1401,7 @@ fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
         .expect("list root");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_full_basis_fallbacks, 2);
-    assert_eq!(stats.read_materialized_table_hits, 0);
+    assert_eq!(stats.read_manifest_plus_tail_hits, 2);
 }
 
 #[test]
@@ -1738,8 +1434,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
         .expect("list materialized docs");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_materialized_table_hits, 2);
-    assert_eq!(stats.read_full_basis_fallbacks, 0);
+    assert_eq!(stats.read_manifest_plus_tail_hits, 2);
     assert_eq!(raw_store.content_blob_get_count(), 0);
     assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
@@ -1778,8 +1473,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     assert_eq!(list[0].absolute_path, "/docs/file.txt");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_materialized_table_hits, 2);
-    assert_eq!(stats.read_full_basis_fallbacks, 0);
+    assert_eq!(stats.read_manifest_plus_tail_hits, 2);
 }
 
 #[test]
@@ -1809,8 +1503,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 
     assert!(after_first.metadata_table_cache_inserts > 0);
     assert!(after_second.metadata_table_cache_hits > after_first.metadata_table_cache_hits);
-    assert_eq!(after_second.read_materialized_table_hits, 2);
-    assert_eq!(after_second.read_full_basis_fallbacks, 0);
+    assert_eq!(after_second.read_manifest_plus_tail_hits, 2);
 }
 
 #[test]
@@ -1887,7 +1580,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
 }
 
 #[test]
-fn runtime_control_cache_reuses_head_for_basis_validation() {
+fn runtime_control_cache_reuses_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -1906,19 +1599,19 @@ fn runtime_control_cache_reuses_head_for_basis_validation() {
         .expect("create docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime basis cache");
+        .expect("prime read cache");
 
     raw_store.reset_control_get_counts();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first cached basis validation reuses cached head state");
+        .expect("first cached materialization validation reuses cached head state");
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("second cached basis validation reuses cached head state");
+        .expect("second cached materialization validation reuses cached head state");
 
     assert_eq!(raw_store.head_get_count(), 0);
 }
 
 #[test]
-fn control_cache_eviction_reloads_head_for_basis_validation() {
+fn control_cache_eviction_reloads_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
@@ -1946,15 +1639,15 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
         .expect("create other docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime first namespace basis");
+        .expect("prime first namespace materialization");
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime first namespace head cache");
 
     raw_store.reset_control_get_counts();
     fs.stat_path_blocking(&other_namespace, "/docs")
-        .expect("load other namespace basis and evict first head cache");
+        .expect("load other namespace materialization and evict first head cache");
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("reload first namespace basis and head cache");
+        .expect("reload first namespace materialization and head cache");
 
     assert_eq!(raw_store.head_get_count(), 1);
 }
@@ -1985,7 +1678,7 @@ fn runtime_control_cache_reloads_head_after_external_change() {
         .expect("create docs");
     reader
         .stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime basis cache");
+        .expect("prime read cache");
     raw_store.reset_control_get_counts();
     reader
         .stat_path_blocking(&namespace_id, "/docs")
@@ -2159,7 +1852,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -2175,9 +1868,32 @@ fn namespace_status_reports_wal_tail_segments() {
         .namespace_status_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+}
+
+#[test]
+fn root_stat_and_list_work_immediately_after_namespace_create() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "initial-manifest-read-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    let root = fs
+        .stat_path_blocking(&namespace_id, "/")
+        .expect("stat root after create");
+    assert_eq!(root.absolute_path, "/");
+    assert_eq!(root.inode_id, InodeId(1));
+    assert_eq!(root.inode_kind, InodeKind::Dir);
+    assert_eq!(root.head_seq, ChangeSeq(0));
+
+    let entries = fs
+        .list_path_blocking(&namespace_id, "/")
+        .expect("list root after create");
+    assert!(entries.is_empty());
 }
 
 #[test]
@@ -2509,7 +2225,7 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
     let status = fs
         .namespace_status_blocking(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 1);
 }
 
@@ -2573,7 +2289,6 @@ struct HeadCasFailureStore {
     wal_prefix: String,
     manifest_prefix: String,
     fail_head_cas: AtomicBool,
-    fail_next_head_cas: AtomicBool,
     wal_get_count: AtomicUsize,
     manifest_get_count: AtomicUsize,
     head_get_count: AtomicUsize,
@@ -2587,7 +2302,6 @@ impl HeadCasFailureStore {
             wal_prefix: format!("namespaces/{namespace}/wal/"),
             manifest_prefix: format!("namespaces/{namespace}/manifest/"),
             fail_head_cas: AtomicBool::new(false),
-            fail_next_head_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
             manifest_get_count: AtomicUsize::new(0),
             head_get_count: AtomicUsize::new(0),
@@ -2600,10 +2314,6 @@ impl HeadCasFailureStore {
 
     fn allow_head_cas(&self) {
         self.fail_head_cas.store(false, Ordering::SeqCst);
-    }
-
-    fn fail_next_head_cas(&self) {
-        self.fail_next_head_cas.store(true, Ordering::SeqCst);
     }
 
     fn reset_wal_get_count(&self) {
@@ -2673,8 +2383,7 @@ impl ObjectStore for HeadCasFailureStore {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         if key == self.head_key
             && matches!(&mode, PutMode::CompareAndSwap { .. })
-            && (self.fail_head_cas.load(Ordering::SeqCst)
-                || self.fail_next_head_cas.swap(false, Ordering::SeqCst))
+            && self.fail_head_cas.load(Ordering::SeqCst)
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }

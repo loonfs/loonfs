@@ -67,6 +67,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             .await
     }
 
+    pub(crate) async fn scan_range_page(
+        &self,
+        family: MetadataTableFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.scan_range_page_rows(family, lower_bound, upper_bound, limit)
+            .await
+    }
+
     async fn scan_prefix_with_cache_mode(
         &self,
         family: MetadataTableFamily,
@@ -106,6 +120,94 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 count_matching_segments(&self.manifest_object_key, &run.tables, family, prefix)?;
         }
         Ok(count)
+    }
+
+    async fn scan_range_page_rows(
+        &self,
+        family: MetadataTableFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        let mut matching_descriptors = Vec::new();
+        for run in runs_in_scan_order(&self.manifest.payload) {
+            let context = MetadataTableLoadContext {
+                manifest_object_key: &self.manifest_object_key,
+                segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
+                row_seq_min: None,
+                row_seq_max: run.run_seq,
+            };
+            let table =
+                manifest_table_for_family(context.manifest_object_key, &run.tables, family)?;
+            for descriptor in &table.segments {
+                context.expected_segment_seq(descriptor)?;
+                let expected_key = metadata_file_object_key(descriptor);
+                if descriptor.object_key != expected_key {
+                    return Err(ManifestLoadError::SegmentObjectKeyMismatch {
+                        object_key: descriptor.object_key.clone(),
+                        expected: expected_key,
+                    });
+                }
+                if descriptor_may_intersect_range(descriptor, lower_bound, upper_bound) {
+                    matching_descriptors.push((context, descriptor.clone()));
+                }
+            }
+        }
+        matching_descriptors.sort_by(|(_, left), (_, right)| {
+            left.min_key
+                .cmp(&right.min_key)
+                .then(left.max_key.cmp(&right.max_key))
+                .then(left.object_key.cmp(&right.object_key))
+        });
+        let cache_mode = if matching_descriptors.len() <= SMALL_SCAN_CACHE_SEGMENT_LIMIT {
+            MetadataTableCacheMode::Populate
+        } else {
+            MetadataTableCacheMode::ReadOnly
+        };
+
+        let mut rows = Vec::<(String, MetadataRow)>::new();
+        let mut next_descriptor_index = 0;
+        while next_descriptor_index < matching_descriptors.len() {
+            let should_load_next = if rows.len() < limit {
+                true
+            } else {
+                let boundary_key = &rows[limit - 1].0;
+                matching_descriptors[next_descriptor_index].1.min_key <= *boundary_key
+            };
+            if !should_load_next {
+                break;
+            }
+
+            let chunk_end = (next_descriptor_index + MAX_MATERIALIZED_TABLE_FETCHES)
+                .min(matching_descriptors.len());
+            let loaded_segments = try_join_all(
+                matching_descriptors[next_descriptor_index..chunk_end]
+                    .iter()
+                    .map(|(context, descriptor)| {
+                        self.segment_rows(*context, family, descriptor, cache_mode)
+                    }),
+            )
+            .await?;
+            next_descriptor_index = chunk_end;
+
+            rows.extend(loaded_segments.into_iter().flatten().filter_map(|row| {
+                let row_key = row.row_key_for_family(family);
+                if row_key.as_str() < lower_bound {
+                    return None;
+                }
+                if upper_bound
+                    .map(|upper_bound| row_key.as_str() >= upper_bound)
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+                Some((row_key, row))
+            }));
+            rows.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+        }
+
+        rows.truncate(limit);
+        Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
     async fn scan_manifest_tables(
@@ -260,7 +362,27 @@ pub(super) fn descriptor_may_contain_prefix(descriptor: &MetadataFileRef, prefix
     true
 }
 
-pub(super) fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
+pub(super) fn descriptor_may_intersect_range(
+    descriptor: &MetadataFileRef,
+    lower_bound: &str,
+    upper_bound: Option<&str>,
+) -> bool {
+    if descriptor.row_count == 0 {
+        return false;
+    }
+    if descriptor.max_key.as_str() < lower_bound {
+        return false;
+    }
+    if upper_bound
+        .map(|upper_bound| descriptor.min_key.as_str() >= upper_bound)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    true
+}
+
+pub(crate) fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut bytes = prefix.as_bytes().to_vec();
     for index in (0..bytes.len()).rev() {
         if bytes[index] != u8::MAX {

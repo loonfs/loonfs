@@ -2,9 +2,7 @@
 //! operation surface, each method a thin, cache-aware delegation to
 //! `loonfs-core`.
 
-use crate::cache::{
-    BasisCache, CommitEngineCache, MetadataReadSource, RuntimeCacheStatsInner, RuntimeControlCache,
-};
+use crate::cache::{CommitEngineCache, RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{default_writer_version, validate_config};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
@@ -30,7 +28,10 @@ use loonfs_api::{
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
-use loonfs_core::cache::{load_namespace_head_summary, MetadataTableCache};
+use loonfs_core::cache::{
+    load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
+    WalTailProjectionCacheConfig,
+};
 use loonfs_core::{MutationContext, NamespaceEngine};
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::collections::BTreeMap;
@@ -47,10 +48,10 @@ pub struct Fs {
 pub(crate) struct FsInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: FsConfig,
-    pub(crate) basis_cache: Mutex<BasisCache>,
     pub(crate) commit_engines: Mutex<CommitEngineCache>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
+    pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
 }
 
@@ -60,10 +61,6 @@ pub(crate) struct FsInner {
 /// panicked mid-update, and serving from it could violate the consistency the
 /// caches promise.
 impl FsInner {
-    pub(crate) fn basis_cache(&self) -> MutexGuard<'_, BasisCache> {
-        self.basis_cache.lock().expect("basis cache lock poisoned")
-    }
-
     pub(crate) fn commit_engines(&self) -> MutexGuard<'_, CommitEngineCache> {
         self.commit_engines
             .lock()
@@ -183,14 +180,23 @@ impl Fs {
         let metadata_table_cache = Arc::new(MetadataTableCache::new(
             config.runtime_cache.metadata_table_cache.clone(),
         ));
+        let wal_tail_projection_cache =
+            Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
+                enabled: config.runtime_cache.wal_tail_projection_cache_enabled,
+                max_entries: config.runtime_cache.max_cached_namespaces,
+                max_rows: config.runtime_cache.max_cached_wal_tail_projection_rows,
+                max_decoded_bytes: config
+                    .runtime_cache
+                    .max_cached_wal_tail_projection_decoded_bytes,
+            }));
         Ok(Self {
             inner: Arc::new(FsInner {
                 store,
                 config,
-                basis_cache: Mutex::new(BasisCache::default()),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
+                wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
         })
@@ -425,36 +431,14 @@ impl Fs {
         self.record_trace_context(&span);
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
-        if head.state.current_manifest_id.is_some() {
-            let entry = engine
-                .resolve_path(
-                    absolute_path,
-                    loonfs_core::ReadOptions::materialized_tables_at_head(
-                        head.state.clone(),
-                        Some(Arc::clone(&self.inner.metadata_table_cache)),
-                    ),
-                )
-                .await?;
-            tracing::Span::current().record(
-                "cache_path",
-                crate::trace::CachePath::MaterializedTables.as_str(),
-            );
-            self.inner
-                .cache_stats
-                .record_metadata_read_source(MetadataReadSource::MaterializedTables);
-            return Ok(entry);
-        }
-
-        let basis = self.basis_for_read_at_head(namespace_id, &head).await?;
         let entry = engine
-            .resolve_path(
-                absolute_path,
-                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
-            )
+            .resolve_path(absolute_path, self.manifest_plus_tail_read_options(&head))
             .await?;
-        self.inner
-            .cache_stats
-            .record_metadata_read_source(MetadataReadSource::FullBasisFallback);
+        tracing::Span::current().record(
+            "cache_path",
+            crate::trace::CachePath::MaterializedTables.as_str(),
+        );
+        self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(entry)
     }
 
@@ -539,41 +523,14 @@ impl Fs {
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-        let use_materialized = head.state.current_manifest_id.is_some()
-            && request
-                .cursor
-                .as_ref()
-                .map(|cursor| cursor.head_seq == head.state.seq)
-                .unwrap_or(true);
-        let page = if use_materialized {
-            let page = engine
-                .list_path_page(
-                    listed_path.as_str(),
-                    loonfs_core::ReadOptions::materialized_tables_at_head(
-                        head.state.clone(),
-                        Some(Arc::clone(&self.inner.metadata_table_cache)),
-                    ),
-                    request,
-                )
-                .await?;
-            self.inner
-                .cache_stats
-                .record_metadata_read_source(MetadataReadSource::MaterializedTables);
-            page
-        } else {
-            let basis = self.basis_for_read_at_head(namespace_id, &head).await?;
-            let page = engine
-                .list_path_page(
-                    listed_path.as_str(),
-                    loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
-                    request,
-                )
-                .await?;
-            self.inner
-                .cache_stats
-                .record_metadata_read_source(MetadataReadSource::FullBasisFallback);
-            page
-        };
+        let page = engine
+            .list_path_page(
+                listed_path.as_str(),
+                self.manifest_plus_tail_read_options(&head),
+                request,
+            )
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
         let head_seq = page
             .items
             .first()
@@ -597,14 +554,13 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
-        let basis = self.basis_for_read(namespace_id).await?;
-        Ok(self
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let read = self
             .namespace_engine(namespace_id)
-            .read_file(
-                absolute_path,
-                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
-            )
-            .await?)
+            .read_file(absolute_path, self.manifest_plus_tail_read_options(&head))
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(read)
     }
 
     /// Lists the revision history of a file path.
@@ -613,14 +569,13 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<ListFileRevisionsResponse> {
-        let basis = self.basis_for_read(namespace_id).await?;
-        Ok(self
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let revisions = self
             .namespace_engine(namespace_id)
-            .list_file_revisions(
-                absolute_path,
-                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
-            )
-            .await?)
+            .list_file_revisions(absolute_path, self.manifest_plus_tail_read_options(&head))
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(revisions)
     }
 
     /// Lists a file's revision history by inode id, independent of its
@@ -630,14 +585,13 @@ impl Fs {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<ListFileRevisionsResponse> {
-        let basis = self.basis_for_read(namespace_id).await?;
-        Ok(self
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let revisions = self
             .namespace_engine(namespace_id)
-            .list_file_revisions_for_inode(
-                inode_id,
-                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
-            )
-            .await?)
+            .list_file_revisions_for_inode(inode_id, self.manifest_plus_tail_read_options(&head))
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(revisions)
     }
 
     /// Reads the content of one historical file revision by path.
@@ -647,15 +601,17 @@ impl Fs {
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
-        let basis = self.basis_for_read(namespace_id).await?;
-        Ok(self
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let read = self
             .namespace_engine(namespace_id)
             .read_file_revision(
                 absolute_path,
                 revision_no,
-                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                self.manifest_plus_tail_read_options(&head),
             )
-            .await?)
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(read)
     }
 
     /// Reads the content of one historical file revision by inode id.
@@ -665,15 +621,17 @@ impl Fs {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let basis = self.basis_for_read(namespace_id).await?;
-        Ok(self
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let read = self
             .namespace_engine(namespace_id)
             .read_file_revision_for_inode(
                 inode_id,
                 revision_no,
-                loonfs_core::ReadOptions::verified_basis(Arc::clone(&basis)),
+                self.manifest_plus_tail_read_options(&head),
             )
-            .await?)
+            .await?;
+        self.inner.cache_stats.record_manifest_plus_tail_read();
+        Ok(read)
     }
 
     /// Writes file bytes to a path.
@@ -1030,8 +988,18 @@ impl Fs {
             let engine = self.commit_engine(namespace_id);
             let publish = {
                 let context = self.mutation_context();
+                let cache_config = &self.inner.config.runtime_cache;
                 let mut engine = engine.lock().await;
-                engine.publish_batch(&store, candidates, &context).await
+                engine
+                    .publish_batch_with_tail_limits(
+                        &store,
+                        candidates,
+                        &context,
+                        cache_config.max_read_wal_tail_segments,
+                        cache_config.max_cached_wal_tail_projection_rows,
+                        cache_config.max_cached_wal_tail_projection_decoded_bytes,
+                    )
+                    .await
             };
             {
                 let _span = tracing::info_span!(
@@ -1042,15 +1010,12 @@ impl Fs {
                     batch_size
                 )
                 .entered();
-                self.inner.cache_stats.record_publish_result(&publish);
-                if let Some(basis) = publish
-                    .verified_basis_cache_update
-                    .verified_basis_to_cache()
-                {
-                    self.cache_basis(basis);
-                } else if publish.verified_basis_cache_update.is_invalidated() {
-                    self.invalidate_namespace_cache(namespace_id);
-                }
+                let runtime_results = publish
+                    .results
+                    .iter()
+                    .map(|result| result.clone().map_err(RuntimeError::Core))
+                    .collect::<Vec<_>>();
+                self.invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
             }
             return publish
                 .results
@@ -1082,9 +1047,10 @@ impl Fs {
 
     /// Snapshots the runtime cache counters.
     pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
-        self.inner
-            .cache_stats
-            .snapshot(self.inner.metadata_table_cache.stats())
+        self.inner.cache_stats.snapshot(
+            self.inner.metadata_table_cache.stats(),
+            self.inner.wal_tail_projection_cache.stats(),
+        )
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.

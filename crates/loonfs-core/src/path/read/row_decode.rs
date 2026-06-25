@@ -1,5 +1,6 @@
 use crate::metadata::{
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::MetadataRow;
 
@@ -91,6 +92,23 @@ pub(super) fn tombstone_from_manifest_row(row: MetadataRow) -> Option<SubtreeTom
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,
+        }),
+        _ => None,
+    }
+}
+
+pub(super) fn commit_receipt_from_manifest_row(row: MetadataRow) -> Option<CommitReceiptRecord> {
+    match row {
+        MetadataRow::CommitReceipt {
+            commit_id,
+            semantic_commit_fingerprint,
+            committed_seq,
+            results,
+        } => Some(CommitReceiptRecord {
+            commit_id,
+            semantic_commit_fingerprint,
+            committed_seq,
+            results,
         }),
         _ => None,
     }
