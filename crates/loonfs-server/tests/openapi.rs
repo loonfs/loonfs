@@ -88,6 +88,87 @@ fn openapi_documents_current_server_paths() {
     );
 }
 
+#[test]
+fn openapi_names_tagged_one_of_alternatives() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+
+    for (schema_name, expected_titles) in [
+        (
+            "CommitOp",
+            &[
+                "CommitOpCreateDir",
+                "CommitOpCreateFile",
+                "CommitOpReplaceFile",
+                "CommitOpRestoreRevision",
+                "CommitOpDeleteFile",
+                "CommitOpRename",
+                "CommitOpDeleteSubtree",
+            ][..],
+        ),
+        (
+            "CommitPrecondition",
+            &[
+                "CommitPreconditionInodeRevisionIs",
+                "CommitPreconditionAncestorsNotSubtreeDeleted",
+                "CommitPreconditionChildNameAbsent",
+                "CommitPreconditionBindingIs",
+                "CommitPreconditionDirectoryEmpty",
+            ][..],
+        ),
+        (
+            "CommitOpResult",
+            &[
+                "CommitOpResultCreateDir",
+                "CommitOpResultCreateFile",
+                "CommitOpResultReplaceFile",
+                "CommitOpResultRestoreRevision",
+                "CommitOpResultDeleteFile",
+                "CommitOpResultRename",
+                "CommitOpResultDeleteSubtree",
+            ][..],
+        ),
+        (
+            "CommitDelta",
+            &[
+                "CommitDeltaCreateInode",
+                "CommitDeltaBindDirentry",
+                "CommitDeltaUnbindDirentry",
+                "CommitDeltaAppendFileRevision",
+                "CommitDeltaTombstoneSubtree",
+            ][..],
+        ),
+        (
+            "FilesystemOperation",
+            &[
+                "FsOpCreateDir",
+                "FsOpPutFile",
+                "FsOpDeletePath",
+                "FsOpMovePath",
+                "FsOpCopyPath",
+                "FsOpRestoreRevision",
+            ][..],
+        ),
+        (
+            "ObjectTransferAccess",
+            &["ObjectTransferAccessPresignedUrl"][..],
+        ),
+    ] {
+        let titles = one_of_titles(schemas, schema_name);
+        assert_eq!(
+            titles, expected_titles,
+            "unexpected oneOf titles for `{schema_name}`"
+        );
+    }
+}
+
 fn assert_path_method(paths: &serde_json::Map<String, Value>, path: &str, method: &str) {
     let path_item = paths
         .get(path)
@@ -96,6 +177,25 @@ fn assert_path_method(paths: &serde_json::Map<String, Value>, path: &str, method
         path_item.get(method).is_some(),
         "missing OpenAPI method `{method}` for `{path}`"
     );
+}
+
+fn one_of_titles<'a>(
+    schemas: &'a serde_json::Map<String, Value>,
+    schema_name: &str,
+) -> Vec<&'a str> {
+    schemas
+        .get(schema_name)
+        .and_then(|schema| schema.get("oneOf"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("missing oneOf for schema `{schema_name}`"))
+        .iter()
+        .map(|schema| {
+            schema
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing oneOf title in schema `{schema_name}`"))
+        })
+        .collect()
 }
 
 fn assert_query_params(

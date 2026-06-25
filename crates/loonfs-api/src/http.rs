@@ -126,16 +126,20 @@ pub enum FilesystemPutBehavior {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum FilesystemOperation {
     /// Create one directory.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDir"))]
     CreateDir { path: String },
     /// Create or replace one file with an already-durable content ref.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpPutFile"))]
     PutFile {
         path: String,
         content_ref: ContentRef,
         behavior: FilesystemPutBehavior,
     },
     /// Delete one path.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
     DeletePath { path: String },
     /// Move one path to another path.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
     MovePath {
         from_path: String,
         to_path: String,
@@ -143,8 +147,10 @@ pub enum FilesystemOperation {
         mode: RenameMode,
     },
     /// Copy one file path to another path.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
     CopyPath { from_path: String, to_path: String },
     /// Restore an older revision as the current revision for a path.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
         path: String,
         source_revision_no: RevisionNo,

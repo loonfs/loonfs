@@ -2115,6 +2115,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitDeltaCreateInode",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2149,6 +2150,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaBindDirentry",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2191,6 +2193,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaUnbindDirentry",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2239,6 +2242,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaAppendFileRevision",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2277,6 +2281,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaTombstoneSubtree",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2316,6 +2321,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitOpCreateDir",
             "description": "Create a directory under a parent inode.",
             "required": [
               "parent_inode",
@@ -2339,6 +2345,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpCreateFile",
             "description": "Create a file under a parent inode.",
             "required": [
               "parent_inode",
@@ -2366,6 +2373,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpReplaceFile",
             "description": "Append a new revision to an existing file.",
             "required": [
               "inode_id",
@@ -2393,6 +2401,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpRestoreRevision",
             "description": "Restore a prior revision as a new current revision.",
             "required": [
               "inode_id",
@@ -2420,6 +2429,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpDeleteFile",
             "description": "Delete a file inode.",
             "required": [
               "inode_id",
@@ -2439,6 +2449,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpRename",
             "description": "Rename or move an inode.",
             "required": [
               "inode_id",
@@ -2469,6 +2480,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpDeleteSubtree",
             "description": "Delete a directory subtree.",
             "required": [
               "root_inode",
@@ -2493,6 +2505,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitOpResultCreateDir",
             "required": [
               "op_index",
               "inode_id",
@@ -2517,6 +2530,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultCreateFile",
             "required": [
               "op_index",
               "inode_id",
@@ -2549,6 +2563,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultReplaceFile",
             "required": [
               "op_index",
               "inode_id",
@@ -2581,6 +2596,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultRestoreRevision",
             "required": [
               "op_index",
               "inode_id",
@@ -2617,6 +2633,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultDeleteFile",
             "required": [
               "op_index",
               "inode_id",
@@ -2641,6 +2658,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultRename",
             "required": [
               "op_index",
               "inode_id",
@@ -2665,6 +2683,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultDeleteSubtree",
             "required": [
               "op_index",
               "root_inode",
@@ -2694,6 +2713,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitPreconditionInodeRevisionIs",
             "description": "File inode is still at this revision.",
             "required": [
               "inode_id",
@@ -2717,6 +2737,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionAncestorsNotSubtreeDeleted",
             "description": "Inode ancestors have not been subtree-deleted.",
             "required": [
               "inode_id",
@@ -2736,6 +2757,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionChildNameAbsent",
             "description": "Directory child name is still absent.",
             "required": [
               "parent_inode",
@@ -2759,6 +2781,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionBindingIs",
             "description": "Directory binding is still exactly the binding the caller saw.",
             "required": [
               "parent_inode",
@@ -2796,6 +2819,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionDirectoryEmpty",
             "description": "Directory is still empty.",
             "required": [
               "inode_id",
@@ -3117,6 +3141,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "FsOpCreateDir",
             "description": "Create one directory.",
             "required": [
               "path",
@@ -3136,6 +3161,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpPutFile",
             "description": "Create or replace one file with an already-durable content ref.",
             "required": [
               "path",
@@ -3163,6 +3189,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpDeletePath",
             "description": "Delete one path.",
             "required": [
               "path",
@@ -3182,6 +3209,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpMovePath",
             "description": "Move one path to another path.",
             "required": [
               "from_path",
@@ -3208,6 +3236,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpCopyPath",
             "description": "Copy one file path to another path.",
             "required": [
               "from_path",
@@ -3231,6 +3260,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpRestoreRevision",
             "description": "Restore an older revision as the current revision for a path.",
             "required": [
               "path",
@@ -3504,6 +3534,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "ObjectTransferAccessPresignedUrl",
             "description": "Short-lived URL plus required headers for one object-store write.",
             "required": [
               "method",
