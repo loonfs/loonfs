@@ -1,5 +1,8 @@
 use super::intent::{PathMutationIntent, PutFileBehavior};
-use crate::commit::{fingerprint_digest, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
+use crate::commit::{
+    fingerprint_digest, PathIntentFingerprint, PublishMetadataPreview,
+    PATH_INTENT_FINGERPRINT_DOMAIN,
+};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::namespace::full_materialization::{
@@ -201,6 +204,13 @@ fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreEr
         .to_owned())
 }
 
+fn is_missing_visible_path(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::MissingPath(_) | CoreError::VisiblePath(VisiblePathError::PathNotFound { .. })
+    )
+}
+
 pub(crate) fn plan_path_mutation_against_state(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
@@ -256,9 +266,579 @@ pub(crate) fn plan_path_mutation_against_state(
     })
 }
 
+pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Sized>(
+    namespace_id: &NamespaceId,
+    intent: &PathMutationIntent,
+    head: &HeadState,
+    metadata_state: &PublishMetadataPreview<'_, S>,
+) -> Result<PlannedPathMutation, CoreError> {
+    let commit_id = intent.commit_id().clone();
+    let path_intent_fingerprint = path_intent_fingerprint_for_path_intent(namespace_id, intent)?;
+    let view = PublishPathPlanningView {
+        head,
+        metadata_state,
+    };
+    let commit_request = match intent {
+        PathMutationIntent::CreateDir { absolute_path, .. } => {
+            plan_publish_create_dir(absolute_path, &commit_id, &view).await?
+        }
+        PathMutationIntent::PutFile {
+            absolute_path,
+            content_ref,
+            behavior,
+            ..
+        } => {
+            plan_publish_put_file_content_ref(
+                absolute_path,
+                content_ref.clone(),
+                *behavior,
+                &commit_id,
+                &view,
+            )
+            .await?
+        }
+        PathMutationIntent::DeletePath {
+            absolute_path,
+            recursive,
+            ..
+        } => plan_publish_delete_path(absolute_path, *recursive, &commit_id, &view).await?,
+        PathMutationIntent::MovePath {
+            from_path,
+            to_path,
+            mode,
+            ..
+        } => plan_publish_move_path(from_path, to_path, *mode, &commit_id, &view).await?,
+        PathMutationIntent::CopyFilePath {
+            from_path, to_path, ..
+        } => plan_publish_copy_file_path(from_path, to_path, &commit_id, &view).await?,
+        PathMutationIntent::RestoreRevision {
+            absolute_path,
+            source_revision_no,
+            ..
+        } => {
+            plan_publish_restore_revision(absolute_path, *source_revision_no, &commit_id, &view)
+                .await?
+        }
+    };
+    Ok(PlannedPathMutation {
+        commit_id,
+        path_intent_fingerprint,
+        commit_request,
+    })
+}
+
 struct PathPlanningView<'a> {
     head: &'a HeadState,
     metadata_state: &'a MetadataState,
+}
+
+struct PublishPathPlanningView<'a, 'b, S: ObjectStore + ?Sized> {
+    head: &'a HeadState,
+    metadata_state: &'a PublishMetadataPreview<'b, S>,
+}
+
+async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, S>,
+    resolved: &ResolvedVisiblePath,
+) -> Result<ApiCommitPrecondition, CoreError> {
+    let parent_inode = resolved
+        .parent_inode_id
+        .ok_or(CoreError::RootMutationForbidden)?;
+    let binding = view
+        .metadata_state
+        .current_parent_binding_for_child(resolved.inode_id, view.head.seq)
+        .await?
+        .ok_or_else(|| CoreError::MissingPath(resolved.absolute_path.clone()))?;
+    if binding.parent_inode_id != parent_inode {
+        return Err(CoreError::MissingPath(resolved.absolute_path.clone()));
+    }
+    Ok(ApiCommitPrecondition::BindingIs {
+        parent_inode,
+        name_key: NameKey::try_new(binding.name_key).map_err(|err| {
+            CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
+        })?,
+        child_inode: binding.child_inode_id,
+        bind_seq: binding.bind_seq,
+        bind_delta_index: binding.bind_delta_index,
+    })
+}
+
+fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, S>,
+    parent_inode: InodeId,
+    display_name: &str,
+) -> ApiCommitPrecondition {
+    let display_name =
+        DisplayName::parse(display_name).expect("path planner should provide valid display name");
+    let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+    ApiCommitPrecondition::ChildNameAbsent {
+        parent_inode,
+        name_key,
+    }
+}
+
+async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, S>,
+    absolute_path: &AbsolutePath,
+) -> Result<(), CoreError> {
+    let mut current_inode = InodeId(1);
+    let mut current_path = AbsolutePath::root();
+
+    for component in absolute_path.components() {
+        let display_name = component.to_display_name();
+        let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+        let Some(bound_child) = view
+            .metadata_state
+            .bound_child_at_seq(current_inode, name_key.as_str(), view.head.seq)
+            .await?
+        else {
+            return Ok(());
+        };
+        let visible_component = DisplayName::parse(&bound_child.display_name)
+            .map_err(crate::path::helpers::map_path_error_to_core)?;
+        let visible_path = current_path.join(&visible_component);
+        if let Some(tombstone) = view
+            .metadata_state
+            .covering_subtree_tombstone(bound_child.child_inode_id, view.head.seq)
+            .await?
+        {
+            return Err(CoreError::TombstoneConflict {
+                path: visible_path.as_str().to_owned(),
+                root_inode: tombstone.root_inode_id,
+                tombstone_seq: tombstone.tombstone_seq,
+            });
+        }
+        let Some(latest_binding) = view
+            .metadata_state
+            .current_parent_binding_for_child(bound_child.child_inode_id, view.head.seq)
+            .await?
+        else {
+            return Ok(());
+        };
+        if latest_binding.parent_inode_id != bound_child.parent_inode_id
+            || latest_binding.name_key != bound_child.name_key
+            || latest_binding.bind_seq != bound_child.bind_seq
+            || latest_binding.bind_delta_index != bound_child.bind_delta_index
+        {
+            return Ok(());
+        }
+        current_inode = bound_child.child_inode_id;
+        current_path = visible_path;
+    }
+    Ok(())
+}
+
+async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
+    absolute_path: &str,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, &absolute_path).await?;
+    match view
+        .metadata_state
+        .resolve_visible_path(&absolute_path, view.head.name_policy, view.head.seq)
+        .await
+    {
+        Ok(_) => {
+            return Err(CoreError::DestinationExists(
+                absolute_path.as_str().to_owned(),
+            ));
+        }
+        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) => return Err(error),
+    }
+    let parent_inode = publish_resolve_parent_directory(view, &absolute_path).await?;
+    let display_name = final_component(&absolute_path)?;
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::CreateDir {
+            parent_inode,
+            display_name: display_name.clone(),
+        }],
+        preconditions: vec![
+            publish_child_name_absent_precondition(view, parent_inode, &display_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: parent_inode,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
+}
+
+async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
+    absolute_path: &str,
+    content_ref: ContentRef,
+    behavior: PutFileBehavior,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, &absolute_path).await?;
+    let target = view
+        .metadata_state
+        .resolve_visible_path(&absolute_path, view.head.name_policy, view.head.seq)
+        .await;
+
+    let mut ops = Vec::new();
+    let mut next_inode_id = view.head.next_inode_id;
+    let final_parent_inode =
+        publish_ensure_parent_directories(&absolute_path, view, &mut ops, &mut next_inode_id)
+            .await?;
+    let final_name = final_component(&absolute_path)?;
+    let mut preconditions = Vec::new();
+
+    match target {
+        Ok(existing) => {
+            if behavior == PutFileBehavior::CreateOnly {
+                return Err(CoreError::DestinationExists(
+                    absolute_path.as_str().to_owned(),
+                ));
+            }
+            if existing.inode_kind != InodeKind::File {
+                return Err(CoreError::ExpectedFile {
+                    path: absolute_path.as_str().to_owned(),
+                    kind: existing.inode_kind,
+                });
+            }
+            let revision = view
+                .metadata_state
+                .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
+                .await?
+                .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
+            preconditions.push(publish_binding_is_precondition(view, &existing).await?);
+            ops.push(ApiCommitOp::ReplaceFile {
+                inode_id: existing.inode_id,
+                base_revision_no: revision.revision_no,
+                content_ref: content_ref.clone(),
+            });
+            preconditions.push(ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: existing.inode_id,
+                revision_no: revision.revision_no,
+            });
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: existing.inode_id,
+            });
+        }
+        Err(error) if is_missing_visible_path(&error) => {
+            ops.push(ApiCommitOp::CreateFile {
+                parent_inode: final_parent_inode,
+                display_name: final_name.clone(),
+                content_ref,
+            });
+            if view
+                .metadata_state
+                .visible_inode(final_parent_inode, view.head.seq)
+                .await?
+                .is_some()
+            {
+                preconditions.push(publish_child_name_absent_precondition(
+                    view,
+                    final_parent_inode,
+                    &final_name,
+                ));
+                preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                    inode_id: final_parent_inode,
+                });
+            }
+        }
+        Err(other) => return Err(other),
+    }
+
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops,
+        preconditions,
+        message: None,
+        annotations: None,
+    })
+}
+
+async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
+    absolute_path: &str,
+    recursive: bool,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    let resolved = view
+        .metadata_state
+        .resolve_visible_path(&absolute_path, view.head.name_policy, view.head.seq)
+        .await?;
+    let op = match resolved.inode_kind {
+        InodeKind::File => ApiCommitOp::DeleteFile {
+            inode_id: resolved.inode_id,
+        },
+        InodeKind::Dir if recursive => ApiCommitOp::DeleteSubtree {
+            root_inode: resolved.inode_id,
+        },
+        InodeKind::Dir => {
+            let children = view
+                .metadata_state
+                .visible_children(resolved.inode_id, view.head.seq)
+                .await?;
+            if !children.is_empty() {
+                return Err(CoreError::DirectoryNotEmpty(
+                    absolute_path.as_str().to_owned(),
+                ));
+            }
+            ApiCommitOp::DeleteSubtree {
+                root_inode: resolved.inode_id,
+            }
+        }
+    };
+    let mut preconditions = vec![publish_binding_is_precondition(view, &resolved).await?];
+    if !recursive && resolved.inode_kind == InodeKind::Dir {
+        preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
+            inode_id: resolved.inode_id,
+        });
+    }
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![op],
+        preconditions,
+        message: None,
+        annotations: None,
+    })
+}
+
+async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
+    from_path: &str,
+    to_path: &str,
+    mode: RenameMode,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    if mode != RenameMode::NoReplace {
+        return Err(CoreError::CommitValidation(
+            crate::commit::CommitValidationError::UnsupportedRenameMode { mode },
+        ));
+    }
+    let from_path = parse_mutation_path(from_path)?;
+    let to_path = parse_mutation_path(to_path)?;
+    publish_reject_tombstoned_path_ancestor(view, &from_path).await?;
+    publish_reject_tombstoned_path_ancestor(view, &to_path).await?;
+    let source = view
+        .metadata_state
+        .resolve_visible_path(&from_path, view.head.name_policy, view.head.seq)
+        .await?;
+    let target_parent = publish_resolve_parent_directory(view, &to_path).await?;
+    let target_name = final_component(&to_path)?;
+    match view
+        .metadata_state
+        .resolve_visible_path(&to_path, view.head.name_policy, view.head.seq)
+        .await
+    {
+        Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
+        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::Rename {
+            inode_id: source.inode_id,
+            new_parent_inode: target_parent,
+            new_display_name: target_name.clone(),
+            mode,
+        }],
+        preconditions: vec![
+            publish_binding_is_precondition(view, &source).await?,
+            publish_child_name_absent_precondition(view, target_parent, &target_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: source.inode_id,
+            },
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: target_parent,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
+}
+
+async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
+    from_path: &str,
+    to_path: &str,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    let from_path = parse_mutation_path(from_path)?;
+    let to_path = parse_mutation_path(to_path)?;
+    publish_reject_tombstoned_path_ancestor(view, &from_path).await?;
+    publish_reject_tombstoned_path_ancestor(view, &to_path).await?;
+
+    let source = view
+        .metadata_state
+        .resolve_visible_path(&from_path, view.head.name_policy, view.head.seq)
+        .await?;
+    if source.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: from_path.as_str().to_owned(),
+            kind: source.inode_kind,
+        });
+    }
+
+    match view
+        .metadata_state
+        .resolve_visible_path(&to_path, view.head.name_policy, view.head.seq)
+        .await
+    {
+        Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
+        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    let revision = view
+        .metadata_state
+        .latest_revision_head_at_seq(source.inode_id, view.head.seq)
+        .await?
+        .ok_or_else(|| CoreError::MissingPath(from_path.as_str().to_owned()))?;
+
+    let target_parent = publish_resolve_parent_directory(view, &to_path).await?;
+    let target_name = final_component(&to_path)?;
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::CreateFile {
+            parent_inode: target_parent,
+            display_name: target_name.clone(),
+            content_ref: revision.content_ref,
+        }],
+        preconditions: vec![
+            publish_binding_is_precondition(view, &source).await?,
+            ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: source.inode_id,
+                revision_no: revision.revision_no,
+            },
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: source.inode_id,
+            },
+            publish_child_name_absent_precondition(view, target_parent, &target_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: target_parent,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
+}
+
+async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
+    absolute_path: &str,
+    source_revision_no: RevisionNo,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, &absolute_path).await?;
+    let target = view
+        .metadata_state
+        .resolve_visible_path(&absolute_path, view.head.name_policy, view.head.seq)
+        .await?;
+    if target.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: absolute_path.as_str().to_owned(),
+            kind: target.inode_kind,
+        });
+    }
+    let revision = view
+        .metadata_state
+        .latest_revision_head_at_seq(target.inode_id, view.head.seq)
+        .await?
+        .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
+
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::RestoreRevision {
+            inode_id: target.inode_id,
+            source_revision_no,
+            base_revision_no: revision.revision_no,
+        }],
+        preconditions: vec![
+            publish_binding_is_precondition(view, &target).await?,
+            ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: target.inode_id,
+                revision_no: revision.revision_no,
+            },
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: target.inode_id,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
+}
+
+async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
+    absolute_path: &AbsolutePath,
+    view: &PublishPathPlanningView<'_, '_, S>,
+    ops: &mut Vec<ApiCommitOp>,
+    next_inode_id: &mut InodeId,
+) -> Result<InodeId, CoreError> {
+    let components = absolute_path.components();
+    if components.len() <= 1 {
+        return Ok(InodeId(1));
+    }
+
+    let mut current_inode = InodeId(1);
+    let mut creating_missing_ancestors = false;
+    for component in &components[..components.len() - 1] {
+        let display_name = component.to_display_name();
+        let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+        if !creating_missing_ancestors {
+            if let Some(child) = view
+                .metadata_state
+                .visible_child(current_inode, name_key.as_str(), view.head.seq)
+                .await?
+            {
+                let inode = view
+                    .metadata_state
+                    .visible_inode(child.child_inode_id, view.head.seq)
+                    .await?
+                    .ok_or_else(|| CoreError::MissingPath(component.as_str().to_owned()))?;
+                if inode.inode_kind != InodeKind::Dir {
+                    return Err(CoreError::NonDirectoryPathComponent(
+                        component.as_str().to_owned(),
+                    ));
+                }
+                current_inode = child.child_inode_id;
+                continue;
+            }
+            creating_missing_ancestors = true;
+        }
+
+        ops.push(ApiCommitOp::CreateDir {
+            parent_inode: current_inode,
+            display_name: display_name.as_str().to_owned(),
+        });
+        let allocated = *next_inode_id;
+        *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
+        current_inode = allocated;
+    }
+    Ok(current_inode)
+}
+
+async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, S>,
+    absolute_path: &AbsolutePath,
+) -> Result<InodeId, CoreError> {
+    let Some(parent_path) = absolute_path.parent() else {
+        return Ok(InodeId(1));
+    };
+    if parent_path.is_root() {
+        return Ok(InodeId(1));
+    }
+    let resolved = view
+        .metadata_state
+        .resolve_visible_path(&parent_path, view.head.name_policy, view.head.seq)
+        .await?;
+    if resolved.inode_kind != InodeKind::Dir {
+        return Err(CoreError::ExpectedDirectory {
+            path: parent_path.as_str().to_owned(),
+            kind: resolved.inode_kind,
+        });
+    }
+    Ok(resolved.inode_id)
 }
 
 fn binding_is_precondition(

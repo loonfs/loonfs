@@ -2,11 +2,11 @@ use crate::checkpoint::{
     head_from_manifest, load_verified_manifest_tables_with_cache, VerifiedMetadataTables,
 };
 use crate::commit::{
-    build_commit_plan, commit_request_from_v0, core_commit_fingerprint, materialize_commit,
-    prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
-    wal_payload_from_materialized_commit, CommitExecutionContext, CommitIdentitySource, CommitOp,
-    CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
-    PreparedCommit, SemanticMutationIdentity,
+    build_commit_plan_for_publish, commit_request_from_v0, core_commit_fingerprint,
+    materialize_commit, prepare_commit_head_publish, publish_commit_head,
+    resolve_restore_content_refs_for_publish, wal_payload_from_materialized_commit,
+    CommitExecutionContext, CommitIdentitySource, CommitOp, CommitRequest as CoreCommitRequest,
+    MaterializedCommit, PreparedCommit, PublishCommitValidationContext, SemanticMutationIdentity,
 };
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
@@ -113,10 +113,6 @@ pub(crate) struct PublishManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
     lease: loonfs_api::wire::control::LeaseState,
     manifest_tables: VerifiedMetadataTables<'a, S>,
     tail_state: MetadataState,
-    // Transitional: publish validation is still synchronous and expects a
-    // MetadataState. Keep this scoped to one publish attempt; do not cache it
-    // as a full namespace materialization.
-    metadata_state: MetadataState,
 }
 
 impl<S: ObjectStore + ?Sized> PublishManifestPlusTailView<'_, S> {
@@ -698,10 +694,6 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
             })?;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let manifest_payload_checksum = manifest_tables.manifest().payload_checksum.clone();
-    let manifest_metadata_state = manifest_tables.materialize().await.map_err(|error| {
-        CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
-    })?;
-
     let projection = if let Some(cached) = cached_projection.filter(|cached| {
         cached.matches(
             namespace_id,
@@ -727,8 +719,6 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
         .await?
     };
 
-    let mut metadata_state = manifest_metadata_state;
-    append_metadata_rows(&mut metadata_state, &projection.tail_state);
     let tail_state = projection.tail_state.clone();
     ensure_publish_head_etag_still_current(store, namespace_id, &head_etag).await?;
 
@@ -740,7 +730,6 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
             lease,
             manifest_tables,
             tail_state,
-            metadata_state,
         },
         projection,
     ))
@@ -877,27 +866,6 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn append_metadata_rows(target: &mut MetadataState, rows: &MetadataState) {
-    for record in rows.inodes() {
-        target.push_inode_record(record.clone());
-    }
-    for record in rows.direntry_binds() {
-        target.push_direntry_bind_record(record.clone());
-    }
-    for record in rows.direntry_unbinds() {
-        target.push_direntry_unbind_record(record.clone());
-    }
-    for record in rows.revisions() {
-        target.push_revision_record(record.clone());
-    }
-    for record in rows.subtree_tombstones() {
-        target.push_subtree_tombstone_record(record.clone());
-    }
-    for record in rows.commit_receipts() {
-        target.push_commit_receipt_record(record.clone());
-    }
-}
-
 pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
@@ -924,7 +892,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     }
     let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
         (0..candidates.len()).map(|_| None).collect();
-    let mut session = PublishPlanningSession::new(&view.head, &view.metadata_state);
+    let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut in_batch_requests: HashMap<CommitId, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
@@ -954,14 +922,22 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             let Some(candidate_request) = candidate_request else {
                 continue;
             };
-            let validation = CommitValidationContext {
-                head: session.head().clone(),
-                lease: view.lease.clone(),
+            let validation = PublishCommitValidationContext {
+                head: session.head(),
+                lease: &view.lease,
                 now_ms: context.now_ms,
-                metadata_state: session.metadata_state(),
+                metadata_view: view.metadata_view(),
+                accepted_rows: session.accepted_rows(),
             };
             let request = candidate_request.request;
-            let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
+            let resolved_restore_content_refs =
+                match resolve_restore_content_refs_for_publish(&request, &validation).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error));
+                        continue;
+                    }
+                };
             let admissions = CommitContentAdmissions {
                 namespace_id,
                 admissions: candidate_content_admissions(candidate),
@@ -981,12 +957,14 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 continue;
             }
             let plan = {
-                let _span =
-                    tracing::info_span!("loon.phase", phase = "build_commit_plan").entered();
-                match build_commit_plan(&request, &validation) {
+                let span = tracing::info_span!("loon.phase", phase = "build_commit_plan");
+                match build_commit_plan_for_publish(&request, &validation)
+                    .instrument(span)
+                    .await
+                {
                     Ok(plan) => plan,
                     Err(error) => {
-                        outcomes[index] = Some(Err(error.into()));
+                        outcomes[index] = Some(Err(error));
                         continue;
                     }
                 }
@@ -1263,7 +1241,10 @@ async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             if !should_prepare {
                 return None;
             }
-            let planned = match session.plan_path_mutation(namespace_id, intent) {
+            let planned = match session
+                .plan_path_mutation(namespace_id, intent, view.metadata_view())
+                .await
+            {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error));

@@ -1,30 +1,31 @@
 use super::intent::PathMutationIntent;
-use super::planner::{plan_path_mutation_against_state, PlannedPathMutation};
-use crate::commit::CommitPlan;
+use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
+use crate::commit::{CommitPlan, PublishMetadataPreview};
 use crate::error::CoreError;
 use crate::metadata::{MetadataApplyError, MetadataState};
+use crate::path::read::CurrentManifestTailView;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
+use loonfs_objectstore::ObjectStore;
 
 /// Working view of one publish attempt.
 ///
-/// The session owns the batch's evolving head and metadata state: it is
-/// derived from the loaded publish view once per publish attempt, every path
-/// mutation is planned against it, every accepted commit is applied back into
-/// it, and it is discarded after the attempt. Keeping head and state behind
-/// one seam guarantees planner reads always observe the same sequence the
-/// indexes are built at.
+/// The session owns the batch's evolving head and only the rows accepted
+/// during this publish attempt. Durable base reads come from the loaded
+/// manifest-plus-tail view; accepted rows are a small overlay so later
+/// candidates observe earlier accepted candidates without cloning the whole
+/// namespace.
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
-    metadata_state: MetadataState,
+    accepted_rows: MetadataState,
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(head: &HeadState, metadata_state: &MetadataState) -> Self {
+    pub(crate) fn new(head: &HeadState) -> Self {
         Self {
             head: head.clone(),
-            metadata_state: metadata_state.clone(),
+            accepted_rows: MetadataState::default(),
         }
     }
 
@@ -32,16 +33,18 @@ impl PublishPlanningSession {
         &self.head
     }
 
-    pub(crate) fn metadata_state(&self) -> &MetadataState {
-        &self.metadata_state
+    pub(crate) fn accepted_rows(&self) -> &MetadataState {
+        &self.accepted_rows
     }
 
-    pub(crate) fn plan_path_mutation(
+    pub(crate) async fn plan_path_mutation<S: ObjectStore + ?Sized>(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
+        base_view: CurrentManifestTailView<'_, S>,
     ) -> Result<PlannedPathMutation, CoreError> {
-        plan_path_mutation_against_state(namespace_id, intent, &self.head, &self.metadata_state)
+        let preview = PublishMetadataPreview::new(base_view, &self.accepted_rows);
+        plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &preview).await
     }
 
     /// Folds an accepted commit into the session so later candidates in the
@@ -51,8 +54,7 @@ impl PublishPlanningSession {
         preview: &WalCommitPayload,
         plan: &CommitPlan,
     ) -> Result<(), MetadataApplyError> {
-        self.metadata_state
-            .apply_committed_wal_record_mut(preview)?;
+        self.accepted_rows.apply_committed_wal_record_mut(preview)?;
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
         Ok(())

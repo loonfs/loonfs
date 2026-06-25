@@ -15,6 +15,14 @@ pub(crate) struct CurrentManifestTailView<'a, S: ObjectStore + ?Sized> {
     wal_tail_rows: &'a MetadataState,
 }
 
+impl<S: ObjectStore + ?Sized> Copy for CurrentManifestTailView<'_, S> {}
+
+impl<S: ObjectStore + ?Sized> Clone for CurrentManifestTailView<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
     pub(crate) fn new(
         head: &'a HeadState,
@@ -325,6 +333,19 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
             })
     }
 
+    pub(crate) async fn revision_at_head(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Option<RevisionRecord>, CoreError> {
+        Ok(self
+            .revisions_for_inode_at_head(inode_id)
+            .await?
+            .into_iter()
+            .filter(|revision| revision.revision_no == revision_no)
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index)))
+    }
+
     pub(crate) async fn find_commit_receipt(
         &self,
         commit_id: &CommitId,
@@ -389,7 +410,7 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         Ok(None)
     }
 
-    async fn bound_child(
+    pub(crate) async fn bound_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
@@ -412,7 +433,10 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
     }
 
-    async fn is_direntry_unbound(&self, direntry: &DirentryBindRecord) -> Result<bool, CoreError> {
+    pub(crate) async fn is_direntry_unbound(
+        &self,
+        direntry: &DirentryBindRecord,
+    ) -> Result<bool, CoreError> {
         let mut unbinds = self.direntry_unbinds_for_binding(direntry).await?;
         unbinds.extend(
             self.wal_tail_rows
@@ -426,7 +450,7 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
             .any(|unbind| unbind.unbind_seq <= self.head.seq))
     }
 
-    async fn active_subtree_tombstone(
+    pub(crate) async fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
