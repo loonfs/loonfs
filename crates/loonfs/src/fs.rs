@@ -24,10 +24,10 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_directory_cursor, encode_file_revisions_cursor, AbsolutePath, CapabilityDocument,
-    DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
-    NamespacesPageCursor, Page, PageRequest, PaginationPolicy, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page, PageRequest,
+    PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
@@ -295,7 +295,6 @@ impl Fs {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
             features: BTreeMap::from([
-                (FEATURE_NAMESPACES_LIST.to_owned(), true),
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
@@ -303,19 +302,6 @@ impl Fs {
             ]),
             limits: PaginationPolicy::default().capability_limits(),
         }
-    }
-
-    /// Lists complete namespaces visible in the object store.
-    pub async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
-        Ok(loonfs_core::list_namespaces(self.store()).await?)
-    }
-
-    /// Lists one page of complete namespaces in namespace id order.
-    pub async fn list_namespaces_page(
-        &self,
-        request: PageRequest<NamespacesPageCursor>,
-    ) -> Result<Page<NamespaceSummary, NamespacesPageCursor>> {
-        Ok(loonfs_core::list_namespaces_page(self.store(), request).await?)
     }
 
     /// Summarizes a namespace's current head: manifest, latest checkpoint,

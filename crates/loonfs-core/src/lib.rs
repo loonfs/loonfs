@@ -84,7 +84,7 @@ pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuil
 pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
 };
-pub use namespace::{list_namespaces, list_namespaces_page, BootstrapNamespaceError};
+pub use namespace::BootstrapNamespaceError;
 pub use options::{
     BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
     WriteOptions,

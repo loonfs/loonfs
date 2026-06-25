@@ -14,8 +14,7 @@ use loonfs::{
     TraceStoreKind,
 };
 use loonfs_api::{
-    decode_directory_cursor, decode_file_revisions_cursor, decode_namespaces_cursor,
-    encode_namespaces_cursor,
+    decode_directory_cursor, decode_file_revisions_cursor,
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
@@ -25,9 +24,9 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
     CreateNamespaceRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
     FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ForkNamespaceRequest, InodeId, LimitError, ListFileRevisionsResponse, ListNamespacesResponse,
-    NamespaceId, NamespaceIdValidationError, NamespacesPageCursor, PageCursorError, PageRequest,
-    PaginationPolicy, RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+    ForkNamespaceRequest, InodeId, LimitError, ListFileRevisionsResponse, NamespaceId,
+    NamespaceIdValidationError, PageCursorError, PageRequest, PaginationPolicy,
+    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_core::content::{
     mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
@@ -60,14 +59,14 @@ struct PathQuery {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct PageQuery {
+struct PathPageQuery {
+    path: String,
     limit: Option<String>,
     cursor: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct PathPageQuery {
-    path: String,
+struct PageQuery {
     limit: Option<String>,
     cursor: Option<String>,
 }
@@ -128,10 +127,7 @@ fn app_with_fs(
     Router::new()
         .route("/health", get(health))
         .route("/v0/config", get(config_handler))
-        .route(
-            "/v0/namespaces",
-            post(create_namespace).get(list_namespaces_handler),
-        )
+        .route("/v0/namespaces", post(create_namespace))
         .route(
             "/v0/namespaces/:namespace",
             get(namespace_status_handler).delete(delete_namespace_handler),
@@ -387,50 +383,6 @@ async fn create_namespace(
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(summary))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        get,
-        path = "/v0/namespaces",
-        tag = "namespaces",
-        summary = "List namespaces",
-        params(
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque namespace-list page cursor")
-        ),
-        responses(
-            (status = 200, description = "Namespace page", body = ListNamespacesResponse),
-            (status = 400, description = "Invalid limit or cursor", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError)
-        )
-    )
-)]
-async fn list_namespaces_handler(
-    State(state): State<AppState>,
-    Query(query): Query<PageQuery>,
-    headers: HeaderMap,
-) -> Result<Json<ListNamespacesResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let page = state
-        .fs
-        .list_namespaces_page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
-            cursor: decode_namespaces_page_cursor(query.cursor)?,
-        })
-        .await
-        .map_err(ApiResponseError::runtime)?;
-    let next_cursor = page
-        .next_cursor
-        .as_ref()
-        .map(encode_namespaces_cursor)
-        .transpose()
-        .map_err(page_cursor_response_error)?;
-    Ok(Json(ListNamespacesResponse {
-        namespaces: page.items,
-        next_cursor,
-    }))
 }
 
 #[cfg_attr(
@@ -1365,7 +1317,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         health,
         config_handler,
         create_namespace,
-        list_namespaces_handler,
         namespace_status_handler,
         delete_namespace_handler,
         fork_namespace_handler,
@@ -1391,7 +1342,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         CreateNamespaceRequest,
         ForkNamespaceRequest,
         loonfs_api::NamespaceSummary,
-        ListNamespacesResponse,
         loonfs_api::NamespaceStatusResponse,
         loonfs_api::DeleteNamespaceResponse,
         FilesystemPutBehavior,
@@ -1514,16 +1464,6 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
             &format!("invalid limit `{value}`: {error}"),
         )
     })
-}
-
-fn decode_namespaces_page_cursor(
-    cursor: Option<String>,
-) -> Result<Option<NamespacesPageCursor>, ApiResponseError> {
-    cursor
-        .as_deref()
-        .map(decode_namespaces_cursor)
-        .transpose()
-        .map_err(page_cursor_response_error)
 }
 
 fn decode_directory_page_cursor(

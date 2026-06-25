@@ -35,10 +35,9 @@ Notes:
   `admin/v0` (maintenance is manually triggerable). A minimal server that
   wraps the embedded engine over HTTP advertises the same two profiles and is
   fully conformant.
-- A hosted server may disable individual features per tenant (for example,
-  `core.namespaces.list` for tenancy isolation) and typically hides
-  `admin/v0` because maintenance runs automatically. Both choices are fully
-  conformant.
+- A hosted server may disable individual features per tenant and typically
+  hides `admin/v0` because maintenance runs automatically. Both choices are
+  fully conformant.
 - Profiles version independently (`core/v0` could coexist with a future
   `admin/v1`). The plane name — the segment before the slash — is the stable
   identity that feature keys reference.
@@ -71,7 +70,6 @@ therefore identical for both backends.
   "protocol_version": "v0",
   "profiles": ["core/v0", "admin/v0"],
   "features": {
-    "core.namespaces.list": true,
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
@@ -118,7 +116,6 @@ hoc.
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
-| `core.namespaces.list` | Enumerating namespaces (`GET /v0/namespaces`, `loon namespace list`). | Deniable for tenancy reasons; a deployment that disables it still resolves namespaces by id. |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
@@ -126,6 +123,9 @@ hoc.
 
 `admin/v0` currently has required ops only and no feature keys. `query.*` and
 `acl.*` keys are unregistered until their planes materialize.
+
+Namespace listing is intentionally not supported in v0. Callers must address
+namespaces by id until LoonFS has a scalable namespace catalog/index design.
 
 ### 2.3 Namespace-level features
 
@@ -305,7 +305,6 @@ A representative v0 binding is shown below.
 | --- | --- |
 | Read deployment capabilities | `GET /v0/config` |
 | Create a namespace | `POST /v0/namespaces` |
-| List namespaces | `GET /v0/namespaces?limit=100&cursor=...` |
 | Read one namespace's status | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs&limit=100&cursor=...` |
@@ -453,22 +452,7 @@ code `namespace_not_found`.
 }
 ```
 
-### 6.3 `GET /v0/namespaces`
-
-Namespace pagination advances in namespace id order. Responses include
-`next_cursor` only when another page is available.
-
-```json
-{
-  "namespaces": [
-    { "namespace_id": "demo" },
-    { "namespace_id": "logs" }
-  ],
-  "next_cursor": "7b2e2e2e7d"
-}
-```
-
-### 6.4 `DELETE /v0/namespaces/{ns}`
+### 6.3 `DELETE /v0/namespaces/{ns}`
 
 Deletion is a fenced, terminal head transition (`format.md`, "Tombstones and
 deletion"). It linearizes at the head swap: commits acknowledged before it

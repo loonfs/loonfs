@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, InodeId, NameKey, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -176,13 +176,6 @@ pub struct Page<T, C> {
     pub next_cursor: Option<C>,
 }
 
-/// Cursor for namespace listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamespacesPageCursor {
-    /// Last namespace id returned to the client.
-    pub last_namespace_id: NamespaceId,
-}
-
 /// Cursor for one directory listing snapshot.
 ///
 /// Directory pagination advances in canonical `name_key` order.
@@ -224,10 +217,6 @@ pub struct FileRevisionsPageCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum EncodedPageCursor {
-    Namespaces {
-        v: u8,
-        last_namespace_id: NamespaceId,
-    },
     Directory {
         v: u8,
         head_seq: ChangeSeq,
@@ -247,15 +236,12 @@ enum EncodedPageCursor {
 impl EncodedPageCursor {
     fn version(&self) -> u8 {
         match self {
-            Self::Namespaces { v, .. }
-            | Self::Directory { v, .. }
-            | Self::FileRevisions { v, .. } => *v,
+            Self::Directory { v, .. } | Self::FileRevisions { v, .. } => *v,
         }
     }
 
     fn kind(&self) -> &'static str {
         match self {
-            Self::Namespaces { .. } => "namespaces",
             Self::Directory { .. } => "directory",
             Self::FileRevisions { .. } => "file_revisions",
         }
@@ -271,27 +257,6 @@ impl EncodedPageCursor {
                 actual,
             })
         }
-    }
-}
-
-/// Encodes a namespace-list cursor as an opaque string for clients.
-pub fn encode_namespaces_cursor(cursor: &NamespacesPageCursor) -> Result<String, PageCursorError> {
-    encode_cursor(&EncodedPageCursor::Namespaces {
-        v: PAGE_CURSOR_VERSION,
-        last_namespace_id: cursor.last_namespace_id.clone(),
-    })
-}
-
-/// Decodes a namespace-list cursor returned by [`encode_namespaces_cursor`].
-pub fn decode_namespaces_cursor(value: &str) -> Result<NamespacesPageCursor, PageCursorError> {
-    match decode_cursor(value)? {
-        EncodedPageCursor::Namespaces {
-            last_namespace_id, ..
-        } => Ok(NamespacesPageCursor { last_namespace_id }),
-        other => Err(PageCursorError::WrongKind {
-            expected: "namespaces",
-            actual: other.kind(),
-        }),
     }
 }
 
@@ -388,15 +353,15 @@ pub enum PageCursorError {
     /// The cursor JSON did not match a supported cursor shape.
     #[error("invalid page cursor JSON: {0}")]
     InvalidJson(String),
-    /// The cursor format version is not supported by this build.
-    #[error("unsupported page cursor version `{actual}`; expected `{expected}`")]
-    UnsupportedVersion { expected: u8, actual: u8 },
-    /// The cursor was well-formed but belongs to another endpoint.
-    #[error("page cursor is for `{actual}` but `{expected}` was required")]
+    /// The cursor was valid, but for a different paginated endpoint.
+    #[error("page cursor kind `{actual}` cannot be used as `{expected}` cursor")]
     WrongKind {
         expected: &'static str,
         actual: &'static str,
     },
+    /// The cursor format version is not supported by this build.
+    #[error("unsupported page cursor version `{actual}`; expected `{expected}`")]
+    UnsupportedVersion { expected: u8, actual: u8 },
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -490,18 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn namespace_cursor_round_trips() {
-        let cursor = NamespacesPageCursor {
-            last_namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-        };
-
-        let encoded = encode_namespaces_cursor(&cursor).expect("encode cursor");
-        let decoded = decode_namespaces_cursor(&encoded).expect("decode cursor");
-
-        assert_eq!(decoded, cursor);
-    }
-
-    #[test]
     fn directory_cursor_round_trips() {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
@@ -533,16 +486,20 @@ mod tests {
 
     #[test]
     fn cursor_kind_must_match_decoder() {
-        let cursor = NamespacesPageCursor {
-            last_namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+        let cursor = FileRevisionsPageCursor {
+            head_seq: ChangeSeq(11),
+            inode_id: InodeId(7),
+            last_revision_no: RevisionNo(5),
+            last_committed_seq: ChangeSeq(10),
+            last_revision_delta_index: 3,
         };
-        let encoded = encode_namespaces_cursor(&cursor).expect("encode cursor");
+        let encoded = encode_file_revisions_cursor(&cursor).expect("encode cursor");
 
         assert_eq!(
             decode_directory_cursor(&encoded),
             Err(PageCursorError::WrongKind {
                 expected: "directory",
-                actual: "namespaces",
+                actual: "file_revisions",
             })
         );
     }
@@ -550,21 +507,23 @@ mod tests {
     #[test]
     fn malformed_cursor_is_invalid_encoding() {
         assert_eq!(
-            decode_namespaces_cursor("not-hex"),
+            decode_directory_cursor("not-hex"),
             Err(PageCursorError::InvalidEncoding)
         );
     }
 
     #[test]
     fn unsupported_cursor_version_is_rejected() {
-        let encoded = encode_cursor(&EncodedPageCursor::Namespaces {
+        let encoded = encode_cursor(&EncodedPageCursor::Directory {
             v: PAGE_CURSOR_VERSION + 1,
-            last_namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            head_seq: ChangeSeq(11),
+            dir_inode_id: InodeId(7),
+            last_name_key: NameKey::parse("plan.md").expect("name key"),
         })
         .expect("encode cursor");
 
         assert_eq!(
-            decode_namespaces_cursor(&encoded),
+            decode_directory_cursor(&encoded),
             Err(PageCursorError::UnsupportedVersion {
                 expected: PAGE_CURSOR_VERSION,
                 actual: PAGE_CURSOR_VERSION + 1,

@@ -269,9 +269,9 @@ fn init_creates_embedded_profile_and_current_reports_namespace_unset() {
     assert!(json_data(&current)["namespace"].is_null());
 
     assert_success(&harness.run(&["namespace", "create", "demo"]));
-    let list = harness.run(&["--json", "namespace", "list"]);
-    assert_success(&list);
-    assert_eq!(json_data(&list)["namespaces"].as_array().unwrap().len(), 1);
+    let use_namespace = harness.run(&["--json", "use", "demo"]);
+    assert_success(&use_namespace);
+    assert_eq!(json_data(&use_namespace)["namespace"], "demo");
 }
 
 #[test]
@@ -340,7 +340,7 @@ fn removing_default_profile_requires_explicit_reselection() {
     assert_failure(&current);
     assert_eq!(json_error(&current)["code"], "no_default_profile");
 
-    let namespace = harness.run(&["--json", "namespace", "list"]);
+    let namespace = harness.run(&["--json", "namespace", "create", "new-ns"]);
     assert_failure(&namespace);
     assert_eq!(json_error(&namespace)["code"], "no_default_profile");
 
@@ -723,13 +723,9 @@ fn external_remote_profile_executes_through_http() {
     let use_namespace = harness.run(&["--json", "use", "demo"]);
     assert_success(&use_namespace);
 
-    let list = harness.run(&["--json", "namespace", "list"]);
-    assert_success(&list);
-    let list_data = json_data(&list);
-    let namespaces = list_data["namespaces"].as_array().unwrap();
-    assert_eq!(namespaces.len(), 2);
-    assert_eq!(namespaces[0]["namespace_id"], "clone");
-    assert_eq!(namespaces[1]["namespace_id"], "demo");
+    let use_clone = harness.run(&["--json", "use", "clone"]);
+    assert_success(&use_clone);
+    assert_eq!(json_data(&use_clone)["namespace"], "clone");
 }
 
 #[test]

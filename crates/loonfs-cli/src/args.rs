@@ -202,7 +202,6 @@ pub(crate) enum NamespaceCommand {
     Create(NamespaceCreateArgs),
     Delete(NamespaceDeleteArgs),
     Fork(NamespaceForkArgs),
-    List(NamespaceListArgs),
 }
 
 #[derive(Debug, Args)]
@@ -231,12 +230,6 @@ pub(crate) struct NamespaceForkArgs {
     pub profile: ProfileSelectorArgs,
     pub source: String,
     pub new_namespace_id: String,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct NamespaceListArgs {
-    #[command(flatten)]
-    pub profile: ProfileSelectorArgs,
 }
 
 #[derive(Debug, Args)]
@@ -349,7 +342,6 @@ pub(crate) enum CommandKind {
     NamespaceCreate,
     NamespaceDelete,
     NamespaceFork,
-    NamespaceList,
     NamespaceUse,
     Current,
     FilesystemLs,
@@ -381,7 +373,6 @@ impl CommandKind {
             CommandKind::NamespaceCreate => "namespace_create",
             CommandKind::NamespaceDelete => "namespace_delete",
             CommandKind::NamespaceFork => "namespace_fork",
-            CommandKind::NamespaceList => "namespace_list",
             CommandKind::NamespaceUse => "namespace_use",
             CommandKind::Current => "current",
             CommandKind::FilesystemLs => "filesystem_ls",
@@ -422,7 +413,6 @@ impl Cli {
                 NamespaceCommand::Create(_) => CommandKind::NamespaceCreate,
                 NamespaceCommand::Delete(_) => CommandKind::NamespaceDelete,
                 NamespaceCommand::Fork(_) => CommandKind::NamespaceFork,
-                NamespaceCommand::List(_) => CommandKind::NamespaceList,
             },
             Command::Use(_) => CommandKind::NamespaceUse,
             Command::Current(_) => CommandKind::Current,

@@ -56,9 +56,6 @@ Namespace management
   loon namespace create [--profile <name>] <namespace>
     Create a namespace in a profile
 
-  loon namespace list [--profile <name>]
-    List namespaces for a profile
-
   loon use [--profile <name>] <namespace>
     Set the default namespace for a profile
 

@@ -10,8 +10,6 @@ pub const PROFILE_CORE_V0: &str = "core/v0";
 /// The optional maintenance plane.
 pub const PROFILE_ADMIN_V0: &str = "admin/v0";
 
-/// Gates namespace enumeration.
-pub const FEATURE_NAMESPACES_LIST: &str = "core.namespaces.list";
 /// Gates namespace creation.
 pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
 /// Gates namespace forking.
@@ -120,7 +118,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
             features: BTreeMap::from([
-                (FEATURE_NAMESPACES_LIST.to_owned(), true),
+                (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), false),
             ]),
             limits: BTreeMap::new(),
@@ -132,7 +130,7 @@ mod tests {
         let document = document();
         assert!(document.has_profile(PROFILE_CORE_V0));
         assert!(!document.has_profile("query/v0"));
-        assert!(document.supports(FEATURE_NAMESPACES_LIST));
+        assert!(document.supports(FEATURE_NAMESPACES_CREATE));
         // Advertised-false and absent keys are both unsupported.
         assert!(!document.supports(FEATURE_NAMESPACES_DELETE));
         assert!(!document.supports(FEATURE_NAMESPACES_FORK));
@@ -155,7 +153,7 @@ mod tests {
         document.retain_well_formed();
         assert!(document.validate().is_ok());
         assert!(!document.features.contains_key("query.index.fulltext"));
-        assert!(document.features.contains_key(FEATURE_NAMESPACES_LIST));
+        assert!(document.features.contains_key(FEATURE_NAMESPACES_CREATE));
     }
 
     #[test]

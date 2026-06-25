@@ -116,12 +116,6 @@ fn fork_namespace<S: ObjectStore + ?Sized>(
     )
 }
 
-fn list_namespaces<S: ObjectStore + ?Sized>(
-    store: &S,
-) -> Result<Vec<loonfs_api::NamespaceSummary>, CoreError> {
-    block_on(loonfs_core::namespace::list_namespaces(store))
-}
-
 fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1124,7 +1118,7 @@ async fn restore_revision_overflow_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
+async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1201,9 +1195,6 @@ async fn namespace_creation_writes_descriptors_and_listing_uses_completion_marke
         )
         .await
         .expect("write partial namespace key");
-    let listed = list_namespaces(&store).expect("list namespaces");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].namespace_id.as_str(), "demo");
 
     let partial_error = bootstrap_namespace(
         &store,
@@ -2557,10 +2548,6 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         fork.expect_err("fork of deleted source").code(),
         ErrorCode::NamespaceDeleted
     );
-    let listed = list_namespaces(&store).expect("list namespaces");
-    assert!(listed
-        .iter()
-        .all(|summary| summary.namespace_id != namespace_id));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2602,9 +2589,6 @@ async fn fork_clone_survives_source_delete() {
         .expect("clone head survives source delete");
     assert_eq!(clone_head.state.seq, ChangeSeq(1));
     resolve_path(&store, &clone, "/shared.txt").expect("clone reads forked file");
-    let listed = list_namespaces(&store).expect("list namespaces");
-    assert!(listed.iter().any(|summary| summary.namespace_id == clone));
-    assert!(listed.iter().all(|summary| summary.namespace_id != source));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3787,13 +3771,13 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
             .is_empty(),
         "target manifest must not be written before source retention is pinned"
     );
-    assert_eq!(
-        list_namespaces(&store)
-            .expect("list namespaces")
-            .into_iter()
-            .map(|summary| summary.namespace_id)
-            .collect::<Vec<_>>(),
-        vec![source_namespace_id]
+    assert!(
+        store
+            .head(&namespace_descriptor(source_namespace_id.as_str()))
+            .await
+            .expect("head source descriptor")
+            .is_some(),
+        "source descriptor should remain published"
     );
 }
 
@@ -3845,13 +3829,13 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
             .is_empty(),
         "target manifest should not exist after injected manifest write failure"
     );
-    assert_eq!(
-        list_namespaces(&store)
-            .expect("list namespaces")
-            .into_iter()
-            .map(|summary| summary.namespace_id)
-            .collect::<Vec<_>>(),
-        vec![source_namespace_id]
+    assert!(
+        store
+            .head(&namespace_descriptor(source_namespace_id.as_str()))
+            .await
+            .expect("head source descriptor")
+            .is_some(),
+        "source descriptor should remain published"
     );
 }
 
@@ -4000,13 +3984,21 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect_err("target head conflict should re-check complete namespace");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    assert_eq!(
-        list_namespaces(&store)
-            .expect("list namespaces")
-            .into_iter()
-            .map(|summary| summary.namespace_id)
-            .collect::<Vec<_>>(),
-        vec![clone_namespace_id, source_namespace_id]
+    assert!(
+        store
+            .head(&namespace_descriptor(source_namespace_id.as_str()))
+            .await
+            .expect("head source descriptor")
+            .is_some(),
+        "source descriptor should remain published"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
+            .expect("head clone descriptor")
+            .is_some(),
+        "clone descriptor should be present for the simulated complete target"
     );
 }
 

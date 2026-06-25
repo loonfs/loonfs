@@ -34,7 +34,6 @@ fn openapi_documents_current_server_paths() {
         ("/health", "get"),
         ("/v0/config", "get"),
         ("/v0/namespaces", "post"),
-        ("/v0/namespaces", "get"),
         ("/v0/namespaces/{namespace}", "get"),
         ("/v0/namespaces/{namespace}", "delete"),
         ("/v0/namespaces/{namespace}/forks", "post"),
@@ -73,7 +72,6 @@ fn openapi_documents_current_server_paths() {
     }
 
     assert!(!paths.contains_key("/openapi.json"));
-    assert_query_params(paths, "/v0/namespaces", "get", &["limit", "cursor"]);
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace}/filesystem/list",

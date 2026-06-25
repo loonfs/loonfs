@@ -29,7 +29,6 @@ pub(crate) trait Backend {
         source: &str,
         new_namespace_id: &str,
     ) -> Result<NamespaceSummary, CliError>;
-    fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError>;
     fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError>;
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError>;
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError>;
@@ -101,10 +100,6 @@ impl Backend for RemoteBackend {
         self.client
             .fork_namespace(source, new_namespace_id)
             .map_err(map_client_error)
-    }
-
-    fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
-        self.client.list_namespaces().map_err(map_client_error)
     }
 
     fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError> {
@@ -274,10 +269,6 @@ impl Backend for EmbeddedBackend {
             self.fs
                 .fork_namespace(&source_namespace_id, &new_namespace_id),
         )
-    }
-
-    fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
-        self.block_on(self.fs.list_namespaces())
     }
 
     fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError> {
