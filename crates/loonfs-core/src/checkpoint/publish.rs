@@ -3,9 +3,7 @@
 
 use super::create::checkpoint_record_by_id;
 use super::error::ManifestLoadError;
-use super::load::{
-    load_namespace_manifest_envelope_if_present, load_verified_manifest_materialization,
-};
+use super::load::{load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present};
 use crate::error::CoreError;
 use crate::namespace::control::read_head_object;
 use crate::namespace::full_materialization::FullMaterializationLoadError;
@@ -122,14 +120,14 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                 ))
             })?;
             let current_manifest =
-                load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                load_namespace_manifest_envelope(store, namespace_id, current_manifest_id)
                     .await
                     .map_err(|error| {
                         CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
                             error,
                         ))
                     })?;
-            if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
+            if checkpoint_record_by_id(&current_manifest, checkpoint_id).is_some() {
                 return Ok(ManifestPublicationOutcome::Published(Box::new(
                     current_head,
                 )));

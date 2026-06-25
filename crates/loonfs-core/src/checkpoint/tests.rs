@@ -1895,6 +1895,59 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
 }
 
 #[tokio::test]
+async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/first.txt",
+        b"first\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write first");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create first checkpoint");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/second.txt",
+        b"second\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write second");
+    store.reset_metadata_sst_gets();
+
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create L0 checkpoint");
+
+    assert_eq!(
+        store.metadata_sst_gets(),
+        0,
+        "L0 checkpoint update should use the WAL tail and copy existing metadata file refs"
+    );
+    let materialized =
+        load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+            .await
+            .expect("load checkpoint manifest");
+    assert_eq!(l0_runs(&materialized.manifest).len(), 1);
+}
+
+#[tokio::test]
 async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2175,6 +2228,85 @@ impl ObjectStore for HeadCasFailureStore {
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct MetadataSstGetCountingStore {
+    inner: LocalFsStore,
+    metadata_sst_gets: Mutex<usize>,
+}
+
+impl MetadataSstGetCountingStore {
+    fn new(inner: LocalFsStore) -> Self {
+        Self {
+            inner,
+            metadata_sst_gets: Mutex::new(0),
+        }
+    }
+
+    fn metadata_sst_gets(&self) -> usize {
+        *self
+            .metadata_sst_gets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn reset_metadata_sst_gets(&self) {
+        *self
+            .metadata_sst_gets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0;
+    }
+
+    fn record_if_metadata_sst(&self, key: &str) {
+        if key.contains("/tables/metadata/") && key.ends_with(".sst.zst") {
+            *self
+                .metadata_sst_gets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for MetadataSstGetCountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.record_if_metadata_sst(key);
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_if_metadata_sst(key);
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode).await
     }
 
