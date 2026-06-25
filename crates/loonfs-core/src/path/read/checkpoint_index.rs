@@ -7,13 +7,13 @@ use crate::error::CoreError;
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
-use crate::namespace::basis::BasisLoadError;
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use loonfs_api::wire::manifest::{hex_encode_row_key_component, MetadataTableFamily};
 use loonfs_api::InodeId;
 use loonfs_objectstore::ObjectStore;
 
 pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
-    CoreError::Basis(BasisLoadError::ManifestLoad(error))
+    CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
 }
 
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(

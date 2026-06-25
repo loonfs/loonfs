@@ -1,7 +1,9 @@
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
-use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
+use crate::namespace::full_materialization::{
+    load_full_namespace_materialization, FullMaterializationPurpose, FullNamespaceMaterialization,
+};
 use crate::namespace::{bootstrap, catalog, delete, fork, BootstrapNamespaceError};
 use crate::options::{
     BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
@@ -234,9 +236,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::resolve_path_from_basis(&basis, path)
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::resolve_path_from_full_materialization(&materialization, path)
             }
         }
     }
@@ -279,9 +281,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::list_path_from_basis(&basis, path)
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::list_path_from_full_materialization(&materialization, path)
             }
         }
     }
@@ -327,9 +329,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::list_path_page_from_basis(&basis, path, request)
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::list_path_page_from_full_materialization(
+                    &materialization,
+                    path,
+                    request,
+                )
             }
         }
     }
@@ -375,9 +381,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path).await
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::read_file_bytes_from_full_materialization(
+                    &self.store,
+                    &materialization,
+                    path,
+                )
+                .await
             }
         }
     }
@@ -420,9 +431,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::list_file_revisions_from_basis(&basis, path)
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::list_file_revisions_from_full_materialization(
+                    &materialization,
+                    path,
+                )
             }
         }
     }
@@ -464,9 +478,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::list_file_revisions_for_inode_from_basis(&basis, inode_id)
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::list_file_revisions_for_inode_from_full_materialization(
+                    &materialization,
+                    inode_id,
+                )
             }
         }
     }
@@ -512,11 +529,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::read_file_revision_bytes_from_basis(
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::read_file_revision_bytes_from_full_materialization(
                     &self.store,
-                    &basis,
+                    &materialization,
                     path,
                     revision_no,
                 )
@@ -565,11 +582,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 )
                 .await
             }
-            ReadSource::VerifiedBasis(_) => {
-                let basis = self.basis_for_read_options(options).await?;
-                crate::path::query::read_file_revision_bytes_for_inode_from_basis(
+            ReadSource::FullMaterialization(_) => {
+                let materialization = self.full_materialization_for_read_options(options).await?;
+                crate::path::query::read_file_revision_bytes_for_inode_from_full_materialization(
                     &self.store,
-                    &basis,
+                    &materialization,
                     inode_id,
                     revision_no,
                 )
@@ -895,15 +912,22 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    async fn basis_for_read_options(
+    async fn full_materialization_for_read_options(
         &self,
         options: ReadOptions,
-    ) -> CoreResult<Arc<VerifiedNamespaceBasis>> {
+    ) -> CoreResult<Arc<FullNamespaceMaterialization>> {
         match options.into_source() {
-            ReadSource::VerifiedBasis(basis) => Ok(basis),
-            ReadSource::ManifestPlusTail | ReadSource::ManifestPlusTailAtHead { .. } => Ok(
-                Arc::new(load_verified_namespace_basis(&self.store, &self.namespace_id).await?),
-            ),
+            ReadSource::FullMaterialization(materialization) => Ok(materialization),
+            ReadSource::ManifestPlusTail | ReadSource::ManifestPlusTailAtHead { .. } => {
+                Ok(Arc::new(
+                    load_full_namespace_materialization(
+                        &self.store,
+                        &self.namespace_id,
+                        FullMaterializationPurpose::ExplicitReadOption,
+                    )
+                    .await?,
+                ))
+            }
         }
     }
 

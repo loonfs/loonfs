@@ -916,7 +916,7 @@ fn stale_head_write_error_invalidates_runtime_cache() {
 
     raw_store.reset_wal_get_count();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("read after stale head should reload basis");
+        .expect("read after stale head should reload materialization");
     assert!(raw_store.wal_get_count() > 0);
 }
 
@@ -1580,7 +1580,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
 }
 
 #[test]
-fn runtime_control_cache_reuses_head_for_basis_validation() {
+fn runtime_control_cache_reuses_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -1603,15 +1603,15 @@ fn runtime_control_cache_reuses_head_for_basis_validation() {
 
     raw_store.reset_control_get_counts();
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("first cached basis validation reuses cached head state");
+        .expect("first cached materialization validation reuses cached head state");
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("second cached basis validation reuses cached head state");
+        .expect("second cached materialization validation reuses cached head state");
 
     assert_eq!(raw_store.head_get_count(), 0);
 }
 
 #[test]
-fn control_cache_eviction_reloads_head_for_basis_validation() {
+fn control_cache_eviction_reloads_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
@@ -1639,15 +1639,15 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
         .expect("create other docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime first namespace basis");
+        .expect("prime first namespace materialization");
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime first namespace head cache");
 
     raw_store.reset_control_get_counts();
     fs.stat_path_blocking(&other_namespace, "/docs")
-        .expect("load other namespace basis and evict first head cache");
+        .expect("load other namespace materialization and evict first head cache");
     fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("reload first namespace basis and head cache");
+        .expect("reload first namespace materialization and head cache");
 
     assert_eq!(raw_store.head_get_count(), 1);
 }

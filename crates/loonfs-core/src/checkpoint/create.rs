@@ -1,5 +1,5 @@
 //! Checkpoint creation: project a manifest from the current verified
-//! basis, write its tables, and publish it under one checkpoint record.
+//! materialization, write its tables, and publish it under one checkpoint record.
 
 use super::build::{
     build_manifest_l0_run_tables, build_manifest_tables,
@@ -20,8 +20,10 @@ use super::runs::{
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
-use crate::namespace::bootstrap::bootstrap_basis_metadata_state;
+use crate::namespace::bootstrap::bootstrap_metadata_state;
+use crate::namespace::full_materialization::{
+    load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
+};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestPayload,
@@ -66,18 +68,26 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     let checkpoint_id = generate_checkpoint_id();
     let mut saw_head_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
-        let basis = load_verified_namespace_basis(store, namespace_id)
-            .instrument(tracing::info_span!(
-                "loon.phase",
-                phase = "scan_namespace_state"
-            ))
-            .await?;
-        let head_seq = basis.head.seq;
-        if let Some(current_manifest_id) = basis.head.current_manifest_id {
+        let materialization = load_full_namespace_materialization(
+            store,
+            namespace_id,
+            FullMaterializationPurpose::CheckpointBuildTemporary,
+        )
+        .instrument(tracing::info_span!(
+            "loon.phase",
+            phase = "scan_namespace_state"
+        ))
+        .await?;
+        let head_seq = materialization.head.seq;
+        if let Some(current_manifest_id) = materialization.head.current_manifest_id {
             let materialized =
                 load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
                     .await
-                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+                    .map_err(|error| {
+                        CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+                            error,
+                        ))
+                    })?;
             if materialized.manifest.payload.head_seq == head_seq {
                 if let Some(checkpoint) = checkpoint_record_for_manifest(&materialized.manifest) {
                     return Ok(CreateCheckpointResponse {
@@ -85,21 +95,21 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                         checkpoint_id: checkpoint.checkpoint_id.clone(),
                         checkpoint_seq: checkpoint.head_seq,
                         manifest_id: checkpoint.manifest_id,
-                        current_manifest_id: basis.head.current_manifest_id,
-                        latest_checkpoint_id: basis.head.latest_checkpoint_id.clone(),
+                        current_manifest_id: materialization.head.current_manifest_id,
+                        latest_checkpoint_id: materialization.head.latest_checkpoint_id.clone(),
                     });
                 }
             }
         }
 
-        let mut manifest_id = next_manifest_id(&basis.head)?;
+        let mut manifest_id = next_manifest_id(&materialization.head)?;
         let mut manifest_ready = false;
         for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
             let checkpoint_record = NamespaceCheckpointRecord {
                 checkpoint_id: checkpoint_id.clone(),
                 manifest_id,
                 head_seq,
-                head_commit_id: basis.head.head_commit_id.clone(),
+                head_commit_id: materialization.head.head_commit_id.clone(),
                 created_at_ms: context.now_ms,
                 expires_at_ms: None,
                 name: None,
@@ -121,10 +131,10 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                     continue;
                 }
                 Ok(None) => {
-                    let manifest = build_namespace_manifest_for_basis(
+                    let manifest = build_namespace_manifest_for_full_materialization(
                         store,
                         namespace_id,
-                        &basis,
+                        &materialization,
                         &context.writer_version,
                         policy,
                         manifest_id,
@@ -138,11 +148,17 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                         &manifest,
                     )
                     .await
-                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-                    if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
-                        return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
-                            ManifestLoadError::MetadataMismatch,
-                        )));
+                    .map_err(|error| {
+                        CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+                            error,
+                        ))
+                    })?;
+                    if !metadata_states_equivalent(&materialization.metadata_state, &materialized) {
+                        return Err(CoreError::FullMaterialization(
+                            FullMaterializationLoadError::ManifestLoad(
+                                ManifestLoadError::MetadataMismatch,
+                            ),
+                        ));
                     }
 
                     // `write_namespace_manifest` owns the idempotent "manifest
@@ -153,18 +169,22 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                     let write_result = write_namespace_manifest(store, &manifest).await;
                     match write_result {
                         Ok(()) => {}
-                        Err(BasisLoadError::ManifestLoad(
+                        Err(FullMaterializationLoadError::ManifestLoad(
                             ManifestLoadError::ManifestConflict { .. },
                         )) => {
                             manifest_id = next_manifest_id_after(manifest_id)?;
                             continue;
                         }
-                        Err(error) => return Err(CoreError::Basis(error)),
+                        Err(error) => return Err(CoreError::FullMaterialization(error)),
                     }
                     manifest_ready = true;
                     break;
                 }
-                Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
+                Err(error) => {
+                    return Err(CoreError::FullMaterialization(
+                        FullMaterializationLoadError::ManifestLoad(error),
+                    ))
+                }
             }
         }
         if !manifest_ready {
@@ -175,7 +195,9 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
 
         let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
             .await
-            .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+            .map_err(|error| {
+                CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(error))
+            })?;
         let checkpoint = checkpoint_record_by_id(&materialized.manifest, &checkpoint_id)
             .ok_or_else(|| {
                 CoreError::CheckpointUnavailable(format!(
@@ -247,7 +269,7 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
     writer_version: &str,
 ) -> Result<NamespaceManifestEnvelope, CoreError> {
     let manifest_id = ManifestId(initial_head.seq.0);
-    let metadata_state = bootstrap_basis_metadata_state();
+    let metadata_state = bootstrap_metadata_state();
     let run_tables = build_manifest_tables(
         store,
         namespace_id,
@@ -290,21 +312,25 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "project_manifest")
 )]
-pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
+pub(super) async fn build_namespace_manifest_for_full_materialization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    basis: &crate::namespace::basis::VerifiedNamespaceBasis,
+    materialization: &crate::namespace::full_materialization::FullNamespaceMaterialization,
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
     checkpoint_to_add: Option<NamespaceCheckpointRecord>,
 ) -> Result<NamespaceManifestEnvelope, CoreError> {
-    let head_seq = basis.head.seq;
-    let previous_manifest = match basis.head.current_manifest_id {
+    let head_seq = materialization.head.seq;
+    let previous_manifest = match materialization.head.current_manifest_id {
         Some(previous_id) => Some(
             load_verified_manifest_materialization(store, namespace_id, previous_id)
                 .await
-                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?,
+                .map_err(|error| {
+                    CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+                        error,
+                    ))
+                })?,
         ),
         _ => None,
     };
@@ -324,7 +350,7 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
                 namespace_id,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
-                &basis.metadata_state,
+                &materialization.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )
@@ -341,7 +367,7 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
                         namespace_id,
                         head_seq,
                         previous.manifest.payload.head_seq,
-                        &basis.metadata_state,
+                        &materialization.metadata_state,
                         writer_version,
                     )
                     .await?,
@@ -355,7 +381,7 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
                 namespace_id,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
-                &basis.metadata_state,
+                &materialization.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )
@@ -369,7 +395,7 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
                 namespace_id,
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
-                &basis.metadata_state,
+                &materialization.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
             )
@@ -384,12 +410,12 @@ pub(super) async fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             manifest_id,
             head_seq,
-            head_commit_id: basis.head.head_commit_id.clone(),
+            head_commit_id: materialization.head.head_commit_id.clone(),
             base_seq,
-            active_fence_token: basis.head.active_fence_token,
-            next_inode_id: basis.head.next_inode_id,
-            name_policy: basis.head.name_policy,
-            retention_floor_seq: basis.head.retention_floor_seq,
+            active_fence_token: materialization.head.active_fence_token,
+            next_inode_id: materialization.head.next_inode_id,
+            name_policy: materialization.head.name_policy,
+            retention_floor_seq: materialization.head.retention_floor_seq,
             initialized: true,
             verified: true,
             fork: None,

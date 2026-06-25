@@ -1,7 +1,7 @@
 use super::resolver::build_authoritative_path_entry;
 use crate::error::CoreError;
 use crate::metadata::{DirentryBindRecord, ResolvedVisiblePath};
-use crate::namespace::basis::VerifiedNamespaceBasis;
+use crate::namespace::full_materialization::FullNamespaceMaterialization;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use loonfs_api::{
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, DirectoryPageCursor, DisplayName, InodeKind,
@@ -15,21 +15,21 @@ use loonfs_api::{
     skip_all,
     fields(phase = "walk_path")
 )]
-pub(crate) fn list_path_from_basis(
-    basis: &VerifiedNamespaceBasis,
+pub(crate) fn list_path_from_full_materialization(
+    materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-    let resolved = basis.metadata_state.resolve_visible_path(
+    let resolved = materialization.metadata_state.resolve_visible_path(
         &absolute_path,
-        basis.head.name_policy,
-        basis.head.seq,
+        materialization.head.name_policy,
+        materialization.head.seq,
     )?;
     if resolved.inode_kind == InodeKind::File {
         return Ok(vec![build_authoritative_path_entry(
-            &basis.head.namespace_id,
-            basis.head.seq,
-            &basis.metadata_state,
+            &materialization.head.namespace_id,
+            materialization.head.seq,
+            &materialization.metadata_state,
             &resolved,
         )?]);
     }
@@ -40,22 +40,22 @@ pub(crate) fn list_path_from_basis(
         });
     }
 
-    basis
+    materialization
         .metadata_state
-        .visible_children(resolved.inode_id, basis.head.seq)
+        .visible_children(resolved.inode_id, materialization.head.seq)
         .into_iter()
         .map(|direntry| {
-            let child = basis
+            let child = materialization
                 .metadata_state
-                .visible_inode(direntry.child_inode_id, basis.head.seq)
+                .visible_inode(direntry.child_inode_id, materialization.head.seq)
                 .expect("visible child listing should resolve inode");
             let child_path = AbsolutePath::parse(&resolved.absolute_path)
                 .map_err(map_path_error_to_core)?
                 .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
             build_authoritative_path_entry(
-                &basis.head.namespace_id,
-                basis.head.seq,
-                &basis.metadata_state,
+                &materialization.head.namespace_id,
+                materialization.head.seq,
+                &materialization.metadata_state,
                 &ResolvedVisiblePath {
                     absolute_path: child_path.as_str().to_owned(),
                     inode_id: direntry.child_inode_id,
@@ -75,20 +75,22 @@ pub(crate) fn list_path_from_basis(
     skip_all,
     fields(phase = "walk_path")
 )]
-pub(crate) fn list_path_page_from_basis(
-    basis: &VerifiedNamespaceBasis,
+pub(crate) fn list_path_page_from_full_materialization(
+    materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
     request: PageRequest<DirectoryPageCursor>,
 ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
     let page_head_seq = page_head_seq(
-        basis.head.seq,
-        basis.snapshot_floor_seq.max(basis.head.retention_floor_seq),
+        materialization.head.seq,
+        materialization
+            .snapshot_floor_seq
+            .max(materialization.head.retention_floor_seq),
         request.cursor.as_ref(),
     )?;
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-    let resolved = basis.metadata_state.resolve_visible_path(
+    let resolved = materialization.metadata_state.resolve_visible_path(
         &absolute_path,
-        basis.head.name_policy,
+        materialization.head.name_policy,
         page_head_seq,
     )?;
     if let Some(cursor) = request.cursor.as_ref() {
@@ -103,9 +105,9 @@ pub(crate) fn list_path_page_from_basis(
         }
         return Ok(Page {
             items: vec![build_authoritative_path_entry(
-                &basis.head.namespace_id,
+                &materialization.head.namespace_id,
                 page_head_seq,
-                &basis.metadata_state,
+                &materialization.metadata_state,
                 &resolved,
             )?],
             next_cursor: None,
@@ -122,16 +124,18 @@ pub(crate) fn list_path_page_from_basis(
         .cursor
         .as_ref()
         .map(|cursor| cursor.last_name_key.as_str());
-    let children = basis.metadata_state.visible_children_page_by_name_key(
-        resolved.inode_id,
-        page_head_seq,
-        start_after,
-        request.limit.limit_plus_one(),
-    );
+    let children = materialization
+        .metadata_state
+        .visible_children_page_by_name_key(
+            resolved.inode_id,
+            page_head_seq,
+            start_after,
+            request.limit.limit_plus_one(),
+        );
     page_directory_children(
-        &basis.head.namespace_id,
+        &materialization.head.namespace_id,
         page_head_seq,
-        &basis.metadata_state,
+        &materialization.metadata_state,
         &resolved,
         children,
         request,

@@ -1,6 +1,6 @@
 use crate::{
     checkpoint::{MetadataTableCache, WalTailProjectionCache},
-    namespace::basis::VerifiedNamespaceBasis,
+    namespace::full_materialization::FullNamespaceMaterialization,
     path::write::PutFileBehavior,
 };
 use loonfs_api::wire::control::HeadState;
@@ -43,12 +43,12 @@ impl ReadOptions {
         }
     }
 
-    /// Reuses a caller-supplied verified basis for maintenance/debug callers.
+    /// Reuses a caller-supplied full materialization for maintenance/debug callers.
     ///
     /// This is useful when several reads should share the same namespace view.
-    pub fn verified_basis(basis: Arc<VerifiedNamespaceBasis>) -> Self {
+    pub fn full_materialization(materialization: Arc<FullNamespaceMaterialization>) -> Self {
         Self {
-            source: ReadSource::VerifiedBasis(basis),
+            source: ReadSource::FullMaterialization(materialization),
         }
     }
 
@@ -95,8 +95,8 @@ impl Default for ReadOptions {
 pub enum ReadSource {
     /// Use the current manifest and bounded WAL tail.
     ManifestPlusTail,
-    /// Use this already-verified namespace basis.
-    VerifiedBasis(Arc<VerifiedNamespaceBasis>),
+    /// Use this already-loaded full namespace materialization.
+    FullMaterialization(Arc<FullNamespaceMaterialization>),
     /// Use manifest-plus-tail for a specific already-loaded head.
     ManifestPlusTailAtHead {
         /// The namespace head to read against.

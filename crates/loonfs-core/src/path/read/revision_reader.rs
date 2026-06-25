@@ -1,19 +1,19 @@
-use super::resolver::resolve_path_from_basis;
+use super::resolver::resolve_path_from_full_materialization;
 use crate::error::CoreError;
 use crate::metadata::RevisionRecord;
-use crate::namespace::basis::VerifiedNamespaceBasis;
+use crate::namespace::full_materialization::FullNamespaceMaterialization;
 use crate::storage::content::read_durable_content_bytes;
 use loonfs_api::{
     AuthoritativeFileBytes, FileRevision, InodeId, InodeKind, ListFileRevisionsResponse, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
-pub(crate) async fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_file_bytes_from_full_materialization<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &VerifiedNamespaceBasis,
+    materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
-    let entry = resolve_path_from_basis(basis, absolute_path)?;
+    let entry = resolve_path_from_full_materialization(materialization, absolute_path)?;
     if entry.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: entry.absolute_path,
@@ -24,34 +24,35 @@ pub(crate) async fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
         .content_ref
         .clone()
         .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-    let read = read_durable_content_bytes(store, &basis.content_store_id, &content_ref).await?;
+    let read =
+        read_durable_content_bytes(store, &materialization.content_store_id, &content_ref).await?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
     })
 }
 
-pub(crate) fn list_file_revisions_from_basis(
-    basis: &VerifiedNamespaceBasis,
+pub(crate) fn list_file_revisions_from_full_materialization(
+    materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
 ) -> Result<ListFileRevisionsResponse, CoreError> {
-    let entry = resolve_path_from_basis(basis, absolute_path)?;
+    let entry = resolve_path_from_full_materialization(materialization, absolute_path)?;
     if entry.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: entry.absolute_path,
             kind: entry.inode_kind,
         });
     }
-    list_file_revisions_for_inode_from_basis(basis, entry.inode_id)
+    list_file_revisions_for_inode_from_full_materialization(materialization, entry.inode_id)
 }
 
-pub(crate) fn list_file_revisions_for_inode_from_basis(
-    basis: &VerifiedNamespaceBasis,
+pub(crate) fn list_file_revisions_for_inode_from_full_materialization(
+    materialization: &FullNamespaceMaterialization,
     inode_id: InodeId,
 ) -> Result<ListFileRevisionsResponse, CoreError> {
-    let inode = basis
+    let inode = materialization
         .metadata_state
-        .inode_at_seq(inode_id, basis.head.seq)
+        .inode_at_seq(inode_id, materialization.head.seq)
         .ok_or_else(|| CoreError::MissingPath(inode_id.to_string()))?;
     if inode.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
@@ -60,12 +61,12 @@ pub(crate) fn list_file_revisions_for_inode_from_basis(
         });
     }
 
-    let mut revisions = basis
+    let mut revisions = materialization
         .metadata_state
         .revisions()
         .iter()
         .filter(|revision| {
-            revision.inode_id == inode_id && revision.committed_seq <= basis.head.seq
+            revision.inode_id == inode_id && revision.committed_seq <= materialization.head.seq
         })
         .map(|revision| FileRevision {
             inode_id: revision.inode_id,
@@ -77,58 +78,68 @@ pub(crate) fn list_file_revisions_for_inode_from_basis(
     revisions.sort_by_key(|revision| revision.revision_no);
 
     Ok(ListFileRevisionsResponse {
-        namespace_id: basis.head.namespace_id.clone(),
+        namespace_id: materialization.head.namespace_id.clone(),
         inode_id,
-        head_seq: basis.head.seq,
+        head_seq: materialization.head.seq,
         revisions,
     })
 }
 
-pub(crate) async fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_file_revision_bytes_from_full_materialization<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &VerifiedNamespaceBasis,
+    materialization: &FullNamespaceMaterialization,
     absolute_path: &str,
     revision_no: RevisionNo,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
-    let mut entry = resolve_path_from_basis(basis, absolute_path)?;
+    let mut entry = resolve_path_from_full_materialization(materialization, absolute_path)?;
     if entry.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: entry.absolute_path,
             kind: entry.inode_kind,
         });
     }
-    let revision = revision_for_inode(basis, entry.inode_id, revision_no)?;
+    let revision = revision_for_inode(materialization, entry.inode_id, revision_no)?;
     entry.revision_no = Some(revision.revision_no);
     entry.size_bytes = Some(revision.content_ref.size_bytes);
     entry.content_ref = Some(revision.content_ref.clone());
-    let read =
-        read_durable_content_bytes(store, &basis.content_store_id, &revision.content_ref).await?;
+    let read = read_durable_content_bytes(
+        store,
+        &materialization.content_store_id,
+        &revision.content_ref,
+    )
+    .await?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
     })
 }
 
-pub(crate) async fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_file_revision_bytes_for_inode_from_full_materialization<
+    S: ObjectStore + ?Sized,
+>(
     store: &S,
-    basis: &VerifiedNamespaceBasis,
+    materialization: &FullNamespaceMaterialization,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
-    let revision = revision_for_inode(basis, inode_id, revision_no)?;
-    let read =
-        read_durable_content_bytes(store, &basis.content_store_id, &revision.content_ref).await?;
+    let revision = revision_for_inode(materialization, inode_id, revision_no)?;
+    let read = read_durable_content_bytes(
+        store,
+        &materialization.content_store_id,
+        &revision.content_ref,
+    )
+    .await?;
     Ok(read.bytes)
 }
 
 fn revision_for_inode(
-    basis: &VerifiedNamespaceBasis,
+    materialization: &FullNamespaceMaterialization,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<RevisionRecord, CoreError> {
-    let inode = basis
+    let inode = materialization
         .metadata_state
-        .inode_at_seq(inode_id, basis.head.seq)
+        .inode_at_seq(inode_id, materialization.head.seq)
         .ok_or_else(|| CoreError::MissingPath(inode_id.to_string()))?;
     if inode.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
@@ -136,9 +147,9 @@ fn revision_for_inode(
             kind: inode.inode_kind,
         });
     }
-    basis
+    materialization
         .metadata_state
-        .revision_at_seq(inode_id, revision_no, basis.head.seq)
+        .revision_at_seq(inode_id, revision_no, materialization.head.seq)
         .ok_or(CoreError::MissingRevision {
             inode_id,
             revision_no,

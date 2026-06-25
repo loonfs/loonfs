@@ -6,7 +6,9 @@ use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{
     path_intent_fingerprint_for_path_intent, PathMutationIntent, PathPlanner, PlannedPathMutation,
 };
-use crate::protocol::{load_publish_validation_basis, PublishTailOptions, PublishTailProjection};
+use crate::protocol::{
+    load_publish_validation_materialization, PublishTailOptions, PublishTailProjection,
+};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, MutationResult, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -130,7 +132,7 @@ impl NamespaceCommitEngine {
             };
         }
 
-        let (basis, projection) = match load_publish_validation_basis(
+        let (materialization, projection) = match load_publish_validation_materialization(
             store,
             &self.namespace_id,
             self.publish_tail_projection.as_ref(),
@@ -147,14 +149,15 @@ impl NamespaceCommitEngine {
             }
         };
 
-        let published = crate::protocol::publish_namespace_mutations_batch_against_basis(
-            store,
-            &self.namespace_id,
-            &candidates,
-            context,
-            &basis,
-        )
-        .await;
+        let published =
+            crate::protocol::publish_namespace_mutations_batch_against_full_materialization(
+                store,
+                &self.namespace_id,
+                &candidates,
+                context,
+                &materialization,
+            )
+            .await;
         self.update_publish_tail_projection(projection, &published, tail_options);
         NamespaceCommitEnginePublishResult {
             results: published.results,
@@ -182,7 +185,7 @@ impl NamespaceCommitEngine {
     fn update_publish_tail_projection(
         &mut self,
         mut projection: PublishTailProjection,
-        published: &crate::protocol::PublishBatchAgainstBasisResult,
+        published: &crate::protocol::PublishBatchAgainstMaterializationResult,
         tail_options: &PublishTailOptions,
     ) {
         let Some(resulting_head) = published.resulting_head.clone() else {
@@ -241,7 +244,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
         PathPlanner::new(self.store)
-            .plan_against_basis(namespace_id, intent)
+            .plan_against_current_full_materialization(namespace_id, intent)
             .await
     }
 

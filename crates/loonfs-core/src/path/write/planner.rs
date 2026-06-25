@@ -2,7 +2,9 @@ use super::intent::{PathMutationIntent, PutFileBehavior};
 use crate::commit::{fingerprint_digest, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
+use crate::namespace::full_materialization::{
+    load_full_namespace_materialization, FullMaterializationPurpose, FullNamespaceMaterialization,
+};
 use crate::path::helpers::{
     final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
 };
@@ -35,22 +37,32 @@ impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
         Self { store }
     }
 
-    pub(crate) async fn plan_against_basis(
+    pub(crate) async fn plan_against_current_full_materialization(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let basis = load_verified_namespace_basis(self.store, namespace_id).await?;
-        self.plan_against_verified_basis(namespace_id, intent, &basis)
+        let materialization = load_full_namespace_materialization(
+            self.store,
+            namespace_id,
+            FullMaterializationPurpose::DirectPathPlanningTemporary,
+        )
+        .await?;
+        self.plan_against_full_materialization(namespace_id, intent, &materialization)
     }
 
-    pub(crate) fn plan_against_verified_basis(
+    pub(crate) fn plan_against_full_materialization(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
-        basis: &VerifiedNamespaceBasis,
+        materialization: &FullNamespaceMaterialization,
     ) -> Result<PlannedPathMutation, CoreError> {
-        self.plan_against_state(namespace_id, intent, &basis.head, &basis.metadata_state)
+        self.plan_against_state(
+            namespace_id,
+            intent,
+            &materialization.head,
+            &materialization.metadata_state,
+        )
     }
 
     pub(crate) fn plan_against_state(
@@ -826,11 +838,20 @@ mod tests {
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> PlannedPathMutation {
-        let basis = load_verified_namespace_basis(store, namespace_id)
-            .await
-            .expect("basis");
+        let materialization = load_full_namespace_materialization(
+            store,
+            namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
         PathPlanner::new(store)
-            .plan_against_state(namespace_id, intent, &basis.head, &basis.metadata_state)
+            .plan_against_state(
+                namespace_id,
+                intent,
+                &materialization.head,
+                &materialization.metadata_state,
+            )
             .expect("plan")
     }
 
@@ -1158,9 +1179,13 @@ mod tests {
         let staged = store_bytes_as_content(&store, &namespace_id, b"new")
             .await
             .expect("stage");
-        let basis = load_verified_namespace_basis(&store, &namespace_id)
-            .await
-            .expect("basis");
+        let materialization = load_full_namespace_materialization(
+            &store,
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
         let error = PathPlanner::new(&store)
             .plan_against_state(
                 &namespace_id,
@@ -1170,8 +1195,8 @@ mod tests {
                     content_ref: staged.content_ref,
                     behavior: PutFileBehavior::CreateOnly,
                 },
-                &basis.head,
-                &basis.metadata_state,
+                &materialization.head,
+                &materialization.metadata_state,
             )
             .expect_err("tombstoned ancestor");
 

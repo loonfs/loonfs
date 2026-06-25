@@ -39,7 +39,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     for _attempt in 0..MAX_DELETE_CAS_ATTEMPTS {
         let loaded = read_head_object(store, namespace_id)
             .await
-            .map_err(|error| CoreError::Basis(error.into()))?;
+            .map_err(|error| CoreError::FullMaterialization(error.into()))?;
         let head = loaded.envelope.state.clone();
 
         if head.state == NamespaceState::Deleted {

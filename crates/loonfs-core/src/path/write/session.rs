@@ -3,15 +3,15 @@ use super::planner::{plan_path_mutation_against_state, PlannedPathMutation};
 use crate::commit::CommitPlan;
 use crate::error::CoreError;
 use crate::metadata::{MetadataApplyError, MetadataState};
-use crate::namespace::basis::VerifiedNamespaceBasis;
+use crate::namespace::full_materialization::FullNamespaceMaterialization;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
 
-/// Working view of one publish attempt against a verified basis.
+/// Working view of one publish attempt against a full materialization.
 ///
 /// The session owns the batch's evolving head and metadata state: it is
-/// derived from the basis once per publish attempt, every path mutation is
+/// derived from the materialization once per publish attempt, every path mutation is
 /// planned against it, every accepted commit is applied back into it, and it
 /// is discarded after the attempt. Keeping head and state behind one seam guarantees planner reads
 /// always observe the same sequence the indexes are built at.
@@ -21,10 +21,10 @@ pub(crate) struct PublishPlanningSession {
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(basis: &VerifiedNamespaceBasis) -> Self {
+    pub(crate) fn new(materialization: &FullNamespaceMaterialization) -> Self {
         Self {
-            head: basis.head.clone(),
-            metadata_state: basis.metadata_state.clone(),
+            head: materialization.head.clone(),
+            metadata_state: materialization.metadata_state.clone(),
         }
     }
 
@@ -65,8 +65,10 @@ mod tests {
     use super::*;
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
-    use crate::namespace::basis::load_verified_namespace_basis;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::full_materialization::{
+        load_full_namespace_materialization, FullMaterializationPurpose,
+    };
     use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::CommitId;
@@ -136,14 +138,22 @@ mod tests {
         let second = results[1].as_ref().expect("second create succeeds");
         assert!(second.committed_seq > first.committed_seq);
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id)
-            .await
-            .expect("basis");
+        let materialization = load_full_namespace_materialization(
+            &store,
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
         for path in ["/wide/a.txt", "/wide/b.txt"] {
             let absolute_path = loonfs_api::AbsolutePath::parse(path).expect("path");
-            basis
+            materialization
                 .metadata_state
-                .resolve_visible_path(&absolute_path, basis.head.name_policy, basis.head.seq)
+                .resolve_visible_path(
+                    &absolute_path,
+                    materialization.head.name_policy,
+                    materialization.head.seq,
+                )
                 .expect("published file is visible");
         }
     }
@@ -203,13 +213,21 @@ mod tests {
             .as_ref()
             .expect("delete sees the create from the same batch");
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id)
-            .await
-            .expect("basis");
+        let materialization = load_full_namespace_materialization(
+            &store,
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
         let absolute_path = loonfs_api::AbsolutePath::parse("/docs/doomed.txt").expect("path");
-        basis
+        materialization
             .metadata_state
-            .resolve_visible_path(&absolute_path, basis.head.name_policy, basis.head.seq)
+            .resolve_visible_path(
+                &absolute_path,
+                materialization.head.name_policy,
+                materialization.head.seq,
+            )
             .expect_err("deleted file is no longer visible");
     }
 }

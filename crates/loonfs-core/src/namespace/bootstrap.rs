@@ -220,7 +220,7 @@ async fn create_new_content_store<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub(crate) fn bootstrap_basis_metadata_state() -> MetadataState {
+pub(crate) fn bootstrap_metadata_state() -> MetadataState {
     MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: InodeId(1),

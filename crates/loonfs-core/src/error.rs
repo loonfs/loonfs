@@ -1,8 +1,8 @@
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
 use crate::metadata::{MetadataApplyError, VisiblePathError};
-use crate::namespace::basis::BasisLoadError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::namespace::lease::LeaseAcquireError;
 use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::wal::{WalBuildError, WalChainLoadError};
@@ -31,7 +31,7 @@ pub use loonfs_api::{ErrorCode, ErrorKind};
 #[non_exhaustive]
 pub enum CoreError {
     #[error(transparent)]
-    Basis(#[from] BasisLoadError),
+    FullMaterialization(#[from] FullMaterializationLoadError),
     #[error(transparent)]
     VisiblePath(#[from] VisiblePathError),
     #[error(transparent)]
@@ -163,7 +163,7 @@ impl From<CommitConversionError> for CoreError {
 
 impl From<NamespaceCatalogLoadError> for CoreError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
-        Self::Basis(value.into())
+        Self::FullMaterialization(value.into())
     }
 }
 
@@ -180,7 +180,9 @@ impl CoreError {
 
     pub fn code(&self) -> ErrorCode {
         match self {
-            CoreError::Basis(error) => classify_basis_load_error(error),
+            CoreError::FullMaterialization(error) => {
+                classify_full_materialization_load_error(error)
+            }
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
             CoreError::Lease(error) => classify_lease_acquire_error(error),
@@ -237,31 +239,36 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
     }
 }
 
-fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
+fn classify_full_materialization_load_error(error: &FullMaterializationLoadError) -> ErrorCode {
     match error {
-        BasisLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        BasisLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
-        BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
-        BasisLoadError::LoadContentStoreDescriptor(error) => match error {
+        FullMaterializationLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+        FullMaterializationLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
+        FullMaterializationLoadError::LoadNamespaceDescriptor(error) => {
+            classify_control_object_load_error(error)
+        }
+        FullMaterializationLoadError::LoadContentStoreDescriptor(error) => match error {
             ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
             ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
             _ => ErrorCode::NamespaceCorrupt,
         },
-        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
+        FullMaterializationLoadError::LoadHead(error)
+        | FullMaterializationLoadError::LoadLease(error) => match error {
             ControlObjectLoadError::MissingObject { .. }
             | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
             _ => classify_control_object_load_error(error),
         },
-        BasisLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
-        BasisLoadError::WalReplay(_) | BasisLoadError::ReconstructedHeadMismatch { .. } => {
+        FullMaterializationLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
+        FullMaterializationLoadError::WalReplay(_)
+        | FullMaterializationLoadError::ReconstructedHeadMismatch { .. } => {
             ErrorCode::NamespaceCorrupt
         }
-        BasisLoadError::ManifestLoad(error) => match error.kind() {
+        FullMaterializationLoadError::ManifestLoad(error) => match error.kind() {
             crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
             crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
         },
-        BasisLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
-        BasisLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
+        FullMaterializationLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
+        FullMaterializationLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
+        FullMaterializationLoadError::LimitExceeded { .. } => ErrorCode::ServerError,
     }
 }
 

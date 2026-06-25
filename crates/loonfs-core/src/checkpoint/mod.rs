@@ -6,7 +6,7 @@
 //! the manifest lifecycle:
 //!
 //! - [`create`] orchestrates checkpoint creation: project a manifest from the
-//!   current basis, then publish it.
+//!   current materialization, then publish it.
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`publish`] writes manifest objects and advances `current_manifest_id`
 //!   on the head by compare-and-swap.
@@ -40,8 +40,8 @@ pub use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::load::{
-    load_namespace_manifest_envelope, load_verified_manifest_materialization,
-    load_verified_manifest_tables_with_cache, manifest_basis_head,
+    head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_materialization,
+    load_verified_manifest_tables_with_cache,
 };
 pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::retention::advance_retention_floor;
