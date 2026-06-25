@@ -224,65 +224,6 @@
       }
     },
     "/v0/namespaces": {
-      "get": {
-        "tags": [
-          "namespaces"
-        ],
-        "summary": "List namespaces",
-        "operationId": "list_namespaces_handler",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Maximum page size",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Opaque namespace-list page cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Namespace page",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListNamespacesResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid limit or cursor",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      },
       "post": {
         "tags": [
           "namespaces"
@@ -3458,29 +3399,6 @@
           }
         }
       },
-      "ListNamespacesResponse": {
-        "type": "object",
-        "description": "Response for namespace listing.",
-        "required": [
-          "namespaces"
-        ],
-        "properties": {
-          "namespaces": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NamespaceSummary"
-            },
-            "description": "Complete namespaces visible to the store for this page."
-          },
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Cursor for the next page, if more namespaces remain."
-          }
-        }
-      },
       "ListPathEntriesResponse": {
         "type": "object",
         "description": "One directory listing and the namespace head it was answered at.\n\nThe envelope names the listing target and head so an empty directory\nstill tells the caller which state it observed, and so the response can\ngrow without reshaping `entries`.",
@@ -3583,7 +3501,7 @@
       },
       "NamespaceSummary": {
         "type": "object",
-        "description": "Short namespace listing entry.",
+        "description": "Short namespace identifier returned by namespace create/fork operations.",
         "required": [
           "namespace_id"
         ],

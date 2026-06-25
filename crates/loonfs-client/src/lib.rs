@@ -17,9 +17,9 @@ use loonfs_api::{
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
     CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
     FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListNamespacesResponse,
-    ListPathEntriesResponse, MutationResult, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, RestoreFileRevisionRequest, RevisionNo,
+    ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -181,29 +181,6 @@ impl Client {
                 namespace_id: namespace_id.as_str().to_owned(),
             }),
         )
-    }
-
-    pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, ClientError> {
-        let mut namespaces = Vec::new();
-        let mut cursor = None;
-        loop {
-            let page = self.list_namespaces_page(None, cursor.as_deref())?;
-            namespaces.extend(page.namespaces);
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                return Ok(namespaces);
-            }
-        }
-    }
-
-    pub fn list_namespaces_page(
-        &self,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListNamespacesResponse, ClientError> {
-        let mut url = format!("{}/v0/namespaces", self.base_url);
-        append_optional_pagination_query(&mut url, false, limit, cursor);
-        self.request_json::<(), ListNamespacesResponse>(self.agent.get(&url), None)
     }
 
     pub fn namespace_status(

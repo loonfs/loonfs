@@ -39,8 +39,8 @@ pub mod wire {
 
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_NAMESPACES_LIST,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
@@ -49,8 +49,8 @@ pub use http::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteNamespaceResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
     FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest,
-    ListFileRevisionsResponse, ListNamespacesResponse, MutationResult, NamespaceStatusResponse,
-    NamespaceSummary, RestoreFileRevisionRequest,
+    ListFileRevisionsResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
+    RestoreFileRevisionRequest,
 };
 pub use ids::{
     generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
@@ -62,10 +62,9 @@ pub use ids::{
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{
-    decode_directory_cursor, decode_file_revisions_cursor, decode_namespaces_cursor,
-    encode_directory_cursor, encode_file_revisions_cursor, encode_namespaces_cursor,
-    DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, LimitError, NamespacesPageCursor,
-    Page, PageCursorError, PageRequest, PaginationPolicy, PaginationPolicyError,
+    decode_directory_cursor, decode_file_revisions_cursor, encode_directory_cursor,
+    encode_file_revisions_cursor, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
+    LimitError, Page, PageCursorError, PageRequest, PaginationPolicy, PaginationPolicyError,
     DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
     PAGE_CURSOR_VERSION,
 };

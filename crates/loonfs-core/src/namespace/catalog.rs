@@ -1,17 +1,10 @@
-use crate::error::CoreError;
-use crate::namespace::control::read_head_object;
 use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
 use loonfs_api::wire::control::NamespaceDescriptorState;
-use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::{
-    ContentStoreId, NamespaceId, NamespaceIdValidationError, NamespaceSummary,
-    NamespacesPageCursor, Page, PageRequest,
-};
+use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
 use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -84,104 +77,6 @@ pub(crate) async fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
     Ok(load_namespace_catalog_entry(store, expected_namespace)
         .await?
         .content_store_id)
-}
-
-pub(crate) async fn list_namespaces<S: ObjectStore + ?Sized>(
-    store: &S,
-) -> Result<Vec<NamespaceSummary>, CoreError> {
-    let keys = store
-        .list_prefix("namespaces/")
-        .await
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    let mut names = BTreeSet::new();
-    for key in keys {
-        let Some(rest) = key.strip_prefix("namespaces/") else {
-            continue;
-        };
-        let Some((namespace, leaf)) = rest.split_once('/') else {
-            continue;
-        };
-        if leaf != "descriptor.json" {
-            continue;
-        };
-        let namespace_id = NamespaceId::parse(namespace)?;
-        load_namespace_descriptor(store, &namespace_id).await?;
-        // Deleted namespaces keep their descriptor forever as the id-reuse
-        // tombstone; the head's lifecycle state is what excludes them here.
-        let head = read_head_object(store, &namespace_id)
-            .await
-            .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-        if head.envelope.state.state == NamespaceState::Deleted {
-            continue;
-        }
-        names.insert(namespace_id);
-    }
-    Ok(names
-        .into_iter()
-        .map(|namespace_id| NamespaceSummary { namespace_id })
-        .collect())
-}
-
-pub(crate) async fn list_namespaces_page<S: ObjectStore + ?Sized>(
-    store: &S,
-    request: PageRequest<NamespacesPageCursor>,
-) -> Result<Page<NamespaceSummary, NamespacesPageCursor>, CoreError> {
-    let start_after = request.cursor.map(|cursor| cursor.last_namespace_id);
-    let keys = store
-        .list_prefix("namespaces/")
-        .await
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    let mut items = Vec::with_capacity(request.limit.limit_plus_one());
-    for key in keys {
-        let Some(namespace_id) = namespace_id_from_descriptor_key(&key)? else {
-            continue;
-        };
-        if start_after
-            .as_ref()
-            .map(|last| namespace_id.as_str() <= last.as_str())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        load_namespace_descriptor(store, &namespace_id).await?;
-        let head = read_head_object(store, &namespace_id)
-            .await
-            .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-        if head.envelope.state.state == NamespaceState::Deleted {
-            continue;
-        }
-        items.push(NamespaceSummary { namespace_id });
-        if items.len() == request.limit.limit_plus_one() {
-            break;
-        }
-    }
-
-    let has_more = items.len() > request.limit.as_usize();
-    if has_more {
-        items.truncate(request.limit.as_usize());
-    }
-    let next_cursor = has_more.then(|| NamespacesPageCursor {
-        last_namespace_id: items
-            .last()
-            .expect("non-zero page limit with more results must return an item")
-            .namespace_id
-            .clone(),
-    });
-
-    Ok(Page { items, next_cursor })
-}
-
-fn namespace_id_from_descriptor_key(key: &str) -> Result<Option<NamespaceId>, CoreError> {
-    let Some(rest) = key.strip_prefix("namespaces/") else {
-        return Ok(None);
-    };
-    let Some((namespace, leaf)) = rest.split_once('/') else {
-        return Ok(None);
-    };
-    if leaf != "descriptor.json" {
-        return Ok(None);
-    }
-    Ok(Some(NamespaceId::parse(namespace)?))
 }
 
 pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(

@@ -46,23 +46,12 @@ pub struct ForkNamespaceRequest {
     pub new_namespace_id: String,
 }
 
-/// Short namespace listing entry.
+/// Short namespace identifier returned by namespace create/fork operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceSummary {
     /// Durable namespace id.
     pub namespace_id: NamespaceId,
-}
-
-/// Response for namespace listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ListNamespacesResponse {
-    /// Complete namespaces visible to the store for this page.
-    pub namespaces: Vec<NamespaceSummary>,
-    /// Cursor for the next page, if more namespaces remain.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
 }
 
 /// Status summary for one namespace.

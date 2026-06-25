@@ -2,7 +2,7 @@ use super::context::{fail, validate_namespace_id};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
-    NamespaceForkArgs, NamespaceListArgs, NamespaceUseArgs,
+    NamespaceForkArgs, NamespaceUseArgs,
 };
 use crate::config::save_config;
 use crate::error::CliError;
@@ -20,7 +20,6 @@ pub(crate) fn run_namespace_command(
         NamespaceCommand::Create(args) => run_namespace_create(kind, args),
         NamespaceCommand::Delete(args) => run_namespace_delete(kind, args),
         NamespaceCommand::Fork(args) => run_namespace_fork(kind, args),
-        NamespaceCommand::List(args) => run_namespace_list(kind, args),
     }
 }
 
@@ -169,35 +168,6 @@ fn run_namespace_fork(
         profile: Some(resolved.profile_name),
         mode: Some(mode),
         data: CommandData::NamespaceSummary(namespace),
-    })
-}
-
-fn run_namespace_list(
-    kind: CommandKind,
-    args: NamespaceListArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(explicit_profile)
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let namespaces = resolved
-        .target
-        .backend()
-        .list_namespaces()
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: CommandData::NamespaceList { namespaces },
     })
 }
 

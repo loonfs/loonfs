@@ -8,12 +8,12 @@ use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
     ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    MutationResult, NamespaceId, NamespaceStatus, NamespacesPageCursor, PageRequest,
-    PaginationPolicy, PutFileBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError,
-    SharedObjectStore, TraceMode, TraceStoreKind, UploadContentResponse,
+    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
+    DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
+    NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutFileBehavior, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    UploadContentResponse,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::fs::LocalFsStore;
@@ -86,7 +86,6 @@ trait FsTestExt {
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs::NamespaceSummary>;
-    fn list_namespaces_blocking(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>>;
     fn namespace_status_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -200,10 +199,6 @@ impl FsTestExt for Fs {
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs::NamespaceSummary> {
         block_on(self.fork_namespace(source, target))
-    }
-
-    fn list_namespaces_blocking(&self) -> loonfs::Result<Vec<loonfs::NamespaceSummary>> {
-        block_on(self.list_namespaces())
     }
 
     fn namespace_status_blocking(
@@ -964,101 +959,6 @@ fn delete_options_select_recursive_behavior() {
         error,
         RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
     ));
-}
-
-#[test]
-fn namespace_pages_resume_by_namespace_id_and_omit_deleted_namespaces() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "namespace-page-test");
-    for namespace in ["alpha", "beta", "charlie", "delta"] {
-        fs.create_namespace_blocking(
-            &NamespaceId::parse(namespace).expect("valid namespace id"),
-            CreateNamespaceOptions::default(),
-        )
-        .expect("create namespace");
-    }
-    block_on(fs.delete_namespace(
-        &NamespaceId::parse("beta").expect("valid namespace id"),
-        DeleteNamespaceOptions::default(),
-    ))
-    .expect("delete beta");
-
-    let limit = page_limit(2);
-    let first = block_on(fs.list_namespaces_page(PageRequest {
-        limit,
-        cursor: None,
-    }))
-    .expect("first namespace page");
-    assert_eq!(
-        first
-            .items
-            .iter()
-            .map(|summary| summary.namespace_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha", "charlie"]
-    );
-    let second = block_on(fs.list_namespaces_page(PageRequest {
-        limit,
-        cursor: first.next_cursor,
-    }))
-    .expect("second namespace page");
-    assert_eq!(
-        second
-            .items
-            .iter()
-            .map(|summary| summary.namespace_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["delta"]
-    );
-    assert!(second.next_cursor.is_none());
-
-    let full = fs.list_namespaces_blocking().expect("full namespace list");
-    assert_eq!(
-        full.iter()
-            .map(|summary| summary.namespace_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["alpha", "charlie", "delta"]
-    );
-}
-
-#[test]
-fn namespace_pages_do_not_read_skipped_namespace_heads() {
-    let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(HeadCasFailureStore::new(temp_dir.path(), "ns-000"));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("namespace-page-read-count")
-        .build()
-        .expect("build runtime");
-
-    for index in 0..20 {
-        let namespace_id =
-            NamespaceId::parse(format!("ns-{index:03}")).expect("valid namespace id");
-        fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-            .expect("create namespace");
-    }
-
-    raw_store.reset_control_get_counts();
-    let page = block_on(fs.list_namespaces_page(PageRequest {
-        limit: page_limit(2),
-        cursor: Some(NamespacesPageCursor {
-            last_namespace_id: NamespaceId::parse("ns-009").expect("valid namespace id"),
-        }),
-    }))
-    .expect("list namespace page");
-
-    assert_eq!(
-        page.items
-            .iter()
-            .map(|summary| summary.namespace_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["ns-010", "ns-011"]
-    );
-    assert_eq!(
-        raw_store.head_get_count(),
-        0,
-        "page should not read namespace heads before the cursor"
-    );
 }
 
 #[test]
@@ -2359,9 +2259,6 @@ fn separate_runtime_instances_share_object_store_state() {
         )
         .expect("put file");
 
-    let namespaces = reader.list_namespaces_blocking().expect("list namespaces");
-    assert_eq!(namespaces.len(), 1);
-    assert_eq!(namespaces[0].namespace_id, namespace_id);
     let file = reader
         .read_file_bytes_blocking(&namespace_id, "/docs/shared.txt")
         .expect("read shared file");

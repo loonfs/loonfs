@@ -1,7 +1,7 @@
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
-use crate::namespace::{bootstrap, catalog, delete, fork, BootstrapNamespaceError};
+use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{
     BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
     WriteOptions,
@@ -16,7 +16,7 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
     FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, MutationResult, NamespaceId,
-    NamespaceSummary, NamespacesPageCursor, Page, PageRequest, RevisionNo, DEFAULT_PAGE_LIMIT,
+    NamespaceSummary, Page, PageRequest, RevisionNo, DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroU32;
@@ -180,19 +180,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.mutation_context(),
         )
         .await
-    }
-
-    /// Lists complete namespaces visible in the object store.
-    pub async fn list_namespaces(&self) -> CoreResult<Vec<NamespaceSummary>> {
-        catalog::list_namespaces(&self.store).await
-    }
-
-    /// Lists one page of complete namespaces visible in the object store.
-    pub async fn list_namespaces_page(
-        &self,
-        request: PageRequest<NamespacesPageCursor>,
-    ) -> CoreResult<Page<NamespaceSummary, NamespacesPageCursor>> {
-        catalog::list_namespaces_page(&self.store, request).await
     }
 
     /// Resolves one absolute path to the authoritative entry at the current head.

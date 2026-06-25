@@ -13,9 +13,8 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, InodeId, InodeKind, ListNamespacesResponse, ListPathEntriesResponse,
-    ManifestId, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
-    LIMIT_PAGINATION_MAX,
+    FilesystemPutBehavior, InodeId, InodeKind, ListPathEntriesResponse, ManifestId, RevisionNo,
+    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_objectstore::keys::{namespace_lease, namespace_manifest};
@@ -83,8 +82,8 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         assert_eq!(response.namespace_id.as_str(), "doomed");
         assert_eq!(response.head_seq, ChangeSeq(1));
 
-        // Terminal: status is 410, reads fail, the namespace leaves the
-        // list, repeat deletes report deleted, and the id is retired.
+        // Terminal: status is 410, reads fail, repeat deletes report
+        // deleted, and the id is retired.
         let status = harness
             .client
             .namespace_status("doomed")
@@ -104,10 +103,6 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             ClientError::Api { code, .. } => assert_eq!(code, "namespace_deleted"),
             other => panic!("expected namespace_deleted, got {other:?}"),
         }
-        let namespaces = harness.client.list_namespaces().expect("list");
-        assert!(namespaces
-            .iter()
-            .all(|namespace| namespace.namespace_id.as_str() != "doomed"));
         let again = harness
             .client
             .delete_namespace("doomed", None)
@@ -151,7 +146,7 @@ async fn config_endpoint_advertises_capabilities() {
         assert_eq!(capabilities.protocol_version, "v0");
         assert!(capabilities.has_profile("core/v0"));
         assert!(capabilities.has_profile("admin/v0"));
-        assert!(capabilities.supports("core.namespaces.list"));
+        assert!(!capabilities.supports("core.namespaces.list"));
         assert!(capabilities.supports("core.namespaces.create"));
         assert!(capabilities.supports("core.namespaces.fork"));
         assert!(capabilities.supports("core.namespaces.delete"));
@@ -170,107 +165,6 @@ async fn config_endpoint_advertises_capabilities() {
     })
     .await
     .expect("blocking task");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_paginates_namespaces_and_rejects_bad_namespace_cursors() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-test",
-        "http-namespace-pagination",
-        60_000,
-    ))
-    .await;
-
-    tokio::task::spawn_blocking(move || {
-        for namespace in ["alpha", "bravo", "charlie", "pages"] {
-            harness
-                .client
-                .create_namespace(namespace)
-                .expect("create namespace");
-        }
-
-        let first_page = harness
-            .client
-            .list_namespaces_page(Some(2), None)
-            .expect("first namespace page");
-        assert_eq!(
-            namespace_ids(&first_page),
-            vec!["alpha".to_owned(), "bravo".to_owned()]
-        );
-        let cursor = first_page.next_cursor.expect("namespace cursor");
-
-        let second_page = harness
-            .client
-            .list_namespaces_page(Some(2), Some(&cursor))
-            .expect("second namespace page");
-        assert_eq!(
-            namespace_ids(&second_page),
-            vec!["charlie".to_owned(), "pages".to_owned()]
-        );
-        assert_eq!(second_page.next_cursor, None);
-
-        let bad_limit = harness
-            .client
-            .list_namespaces_page(Some(0), None)
-            .expect_err("zero limit rejected");
-        match bad_limit {
-            ClientError::Api { status, code, .. } => {
-                assert_eq!(status, 400);
-                assert_eq!(code, "invalid_config");
-            }
-            other => panic!("expected invalid_config, got {other:?}"),
-        }
-        let over_limit = harness
-            .client
-            .list_namespaces_page(Some(DEFAULT_MAX_PAGE_LIMIT + 1), None)
-            .expect_err("oversized limit rejected");
-        match over_limit {
-            ClientError::Api { status, code, .. } => {
-                assert_eq!(status, 400);
-                assert_eq!(code, "invalid_config");
-            }
-            other => panic!("expected invalid_config, got {other:?}"),
-        }
-        let nonnumeric_limit: Result<ListNamespacesResponse, ApiError> = get_json(
-            &format!("{}/v0/namespaces?limit=not-a-number", harness.server_url),
-            "test-token",
-        );
-        let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
-        assert_eq!(error.code, "invalid_config");
-        assert!(error.message.contains("invalid limit"));
-
-        let dir = NamespacePath::parse("pages:/docs").expect("docs path");
-        harness.client.create_dir(&dir).expect("create docs dir");
-        for name in ["a.txt", "b.txt"] {
-            let path = NamespacePath::parse(&format!("pages:/docs/{name}")).expect("file path");
-            harness
-                .client
-                .write_file_bytes(&path, name.as_bytes())
-                .expect("write file");
-        }
-        let directory_page = harness
-            .client
-            .list_path_page(&dir, Some(1), None)
-            .expect("directory page");
-        let wrong_cursor = directory_page.next_cursor.expect("directory cursor");
-        let wrong_kind = harness
-            .client
-            .list_namespaces_page(Some(1), Some(&wrong_cursor))
-            .expect_err("directory cursor rejected by namespace endpoint");
-        match wrong_kind {
-            ClientError::Api { status, code, .. } => {
-                assert_eq!(status, 400);
-                assert_eq!(code, "invalid_cursor");
-            }
-            other => panic!("expected invalid_cursor, got {other:?}"),
-        }
-    })
-    .await
-    .expect("join blocking task");
-
-    harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -418,6 +312,43 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
                 assert_eq!(code, "namespace_not_found");
             }
             other => panic!("expected API error for missing namespace, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_listing_route_is_not_exposed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-no-namespace-list",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create demo");
+
+        let response = ureq::get(&format!("{}/v0/namespaces", harness.server_url))
+            .set("authorization", "Bearer test-token")
+            .call();
+        match response {
+            Err(ureq::Error::Status(status, _)) => {
+                assert!(
+                    status == 404 || status == 405,
+                    "GET /v0/namespaces should be missing or method-not-allowed, got {status}"
+                );
+            }
+            Ok(_) => panic!("GET /v0/namespaces must not return a namespace list"),
+            Err(error) => panic!("unexpected transport error: {error}"),
         }
     })
     .await
@@ -1628,14 +1559,6 @@ fn test_config(
             key_prefix: Some(key_prefix.to_owned()),
         },
     }
-}
-
-fn namespace_ids(response: &ListNamespacesResponse) -> Vec<String> {
-    response
-        .namespaces
-        .iter()
-        .map(|namespace| namespace.namespace_id.as_str().to_owned())
-        .collect()
 }
 
 fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {

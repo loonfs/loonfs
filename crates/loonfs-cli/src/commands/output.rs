@@ -41,9 +41,6 @@ pub(crate) enum CommandData {
     },
     NamespaceSummary(NamespaceSummary),
     NamespaceDeleted(DeleteNamespaceResponse),
-    NamespaceList {
-        namespaces: Vec<NamespaceSummary>,
-    },
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
     },
