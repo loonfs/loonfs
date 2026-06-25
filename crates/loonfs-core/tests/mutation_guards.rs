@@ -2145,7 +2145,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .iter()
             .map(|revision| revision.revision_no)
             .collect::<Vec<_>>(),
-        vec![RevisionNo(1), RevisionNo(2)]
+        vec![RevisionNo(2), RevisionNo(1)]
     );
 
     let historical =
@@ -2196,7 +2196,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
             .iter()
             .map(|revision| revision.revision_no)
             .collect::<Vec<_>>(),
-        vec![RevisionNo(1), RevisionNo(2), RevisionNo(3)]
+        vec![RevisionNo(3), RevisionNo(2), RevisionNo(1)]
     );
 }
 

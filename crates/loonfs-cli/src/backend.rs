@@ -7,8 +7,9 @@ use loonfs::{
     RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{
-    AuthoritativePathEntry, ChangeSeq, CommitId, ListFileRevisionsResponse, MutationResult,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CommitId, EffectiveLimit, ListFileRevisionsResponse,
+    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
+    RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use std::future::Future;
@@ -41,6 +42,8 @@ pub(crate) trait Backend {
     fn list_file_revisions(
         &self,
         spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, CliError>;
     fn put_file_bytes(
         &self,
@@ -139,9 +142,11 @@ impl Backend for RemoteBackend {
     fn list_file_revisions(
         &self,
         spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, CliError> {
         self.client
-            .list_file_revisions(spec)
+            .list_file_revisions_page(spec, limit, cursor)
             .map_err(map_client_error)
     }
 
@@ -330,12 +335,23 @@ impl Backend for EmbeddedBackend {
     fn list_file_revisions(
         &self,
         spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, CliError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         self.block_on_scoped(
             &spec.namespace,
-            self.fs
-                .list_file_revisions(&namespace_id, &spec.absolute_path),
+            self.fs.list_file_revisions_page(
+                &namespace_id,
+                &spec.absolute_path,
+                loonfs_api::PageRequest {
+                    limit: resolve_cli_page_limit(limit)?,
+                    cursor: cursor
+                        .map(loonfs_api::decode_file_revisions_cursor)
+                        .transpose()
+                        .map_err(|error| CliError::new("invalid_cursor", error.to_string()))?,
+                },
+            ),
         )
     }
 
@@ -460,6 +476,12 @@ impl Backend for EmbeddedBackend {
 
 fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
     NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))
+}
+
+fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, CliError> {
+    PaginationPolicy::default()
+        .resolve_limit(limit)
+        .map_err(|error| CliError::invalid_input(error.to_string()))
 }
 
 fn generated_commit_id() -> CommitId {

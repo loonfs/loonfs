@@ -85,8 +85,8 @@ Filesystem operations
   loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force]
     Upload a local file
 
-  loon revisions [--profile <name>] [--namespace <name>] <path>
-    List file revisions
+  loon revisions [--profile <name>] [--namespace <name>] [--limit <n>] [--cursor <cursor>] <path>
+    List file revisions newest-first
 
   loon mkdir [--profile <name>] [--namespace <name>] <path>
     Create a directory

@@ -14,9 +14,9 @@ use loonfs_api::v0::{
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, InodeId, ListFileRevisionsResponse,
-    MutationResult, NamespaceId, NamespaceSummary, NamespacesPageCursor, Page, PageRequest,
-    RevisionNo, DEFAULT_PAGE_LIMIT,
+    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
+    FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, MutationResult, NamespaceId,
+    NamespaceSummary, NamespacesPageCursor, Page, PageRequest, RevisionNo, DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroU32;
@@ -406,6 +406,50 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         }
     }
 
+    /// Lists one page of retained revisions for the file currently visible at `path`.
+    pub async fn list_file_revisions_page(
+        &self,
+        path: impl AsRef<str>,
+        options: ReadOptions,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::list_file_revisions_page_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                    request,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::list_file_revisions_page_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    path,
+                    request,
+                )
+                .await
+            }
+        }
+    }
+
     /// Lists retained revisions for a file inode, independent of its current path.
     pub async fn list_file_revisions_for_inode(
         &self,
@@ -440,6 +484,49 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                     head,
                     cache_context,
                     inode_id,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Lists one page of retained revisions for a file inode.
+    pub async fn list_file_revisions_for_inode_page(
+        &self,
+        inode_id: InodeId,
+        options: ReadOptions,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        match options.source() {
+            ReadSource::ManifestPlusTail => {
+                crate::path::query::list_file_revisions_for_inode_page_from_manifest_plus_tail(
+                    &self.store,
+                    &self.namespace_id,
+                    inode_id,
+                    request,
+                )
+                .await
+            }
+            ReadSource::ManifestPlusTailAtHead {
+                head,
+                head_etag,
+                table_cache,
+                tail_cache,
+                max_wal_tail_segments,
+            } => {
+                let cache_context = manifest_plus_tail_cache_context(
+                    head_etag.as_str(),
+                    table_cache,
+                    tail_cache,
+                    *max_wal_tail_segments,
+                );
+                crate::path::query::list_file_revisions_for_inode_page_from_manifest_plus_tail_at_head_with_cache(
+                    &self.store,
+                    &self.namespace_id,
+                    head,
+                    cache_context,
+                    inode_id,
+                    request,
                 )
                 .await
             }

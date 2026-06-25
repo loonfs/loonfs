@@ -182,7 +182,11 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
-        CommandData::FileRevisions { target, revisions } => {
+        CommandData::FileRevisions {
+            target,
+            revisions,
+            next_cursor,
+        } => {
             let mut lines = vec![
                 format!("revisions for {target}"),
                 "REVISION\tSEQ\tSIZE\tDIGEST".to_owned(),
@@ -195,6 +199,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     revision.content_ref.size_bytes,
                     revision.content_ref.digest
                 ));
+            }
+            if let Some(cursor) = next_cursor {
+                lines.push(format!("next_cursor: {cursor}"));
             }
             lines.join("\n")
         }

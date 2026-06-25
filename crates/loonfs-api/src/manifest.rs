@@ -56,6 +56,7 @@ pub enum MetadataTableFamily {
     DirentryChildBinds,
     DirentryUnbinds,
     Revisions,
+    RevisionsByInodeDesc,
     Tombstones,
     CommitReceipts,
 }
@@ -223,14 +224,26 @@ impl MetadataRow {
             Self::Revision {
                 inode_id,
                 revision_no,
+                committed_seq,
                 revision_delta_index,
                 ..
-            } => {
-                format!(
-                    "revision-{:020}-{:020}-{:010}",
-                    inode_id.0, revision_no.0, revision_delta_index
-                )
-            }
+            } => match family {
+                MetadataTableFamily::RevisionsByInodeDesc => {
+                    let reverse_revision_no = u64::MAX - revision_no.0;
+                    let reverse_committed_seq = u64::MAX - committed_seq.0;
+                    let reverse_delta_index = u32::MAX - revision_delta_index;
+                    format!(
+                        "revision-by-inode-desc-{:020}-{:020}-{:020}-{:010}",
+                        inode_id.0, reverse_revision_no, reverse_committed_seq, reverse_delta_index
+                    )
+                }
+                _ => {
+                    format!(
+                        "revision-{:020}-{:020}-{:010}",
+                        inode_id.0, revision_no.0, revision_delta_index
+                    )
+                }
+            },
             Self::Tombstone {
                 root_inode_id,
                 tombstone_seq,
@@ -780,6 +793,30 @@ mod tests {
         assert_eq!(
             row.row_key_for_family(MetadataTableFamily::DirentryBinds),
             "direntry-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
+        );
+    }
+
+    #[test]
+    fn revision_row_key_supports_newest_first_inode_index() {
+        let row = super::MetadataRow::Revision {
+            inode_id: InodeId(42),
+            revision_no: crate::RevisionNo(7),
+            committed_seq: ChangeSeq(12),
+            revision_delta_index: 3,
+            content_ref: crate::ContentRef {
+                kind: crate::ContentRefKind::WholeFileV0,
+                digest: "sha256:abc".to_owned(),
+                size_bytes: 123,
+            },
+        };
+
+        assert_eq!(
+            row.row_key_for_family(MetadataTableFamily::Revisions),
+            "revision-00000000000000000042-00000000000000000007-0000000003"
+        );
+        assert_eq!(
+            row.row_key_for_family(MetadataTableFamily::RevisionsByInodeDesc),
+            "revision-by-inode-desc-00000000000000000042-18446744073709551608-18446744073709551603-4294967292"
         );
     }
 

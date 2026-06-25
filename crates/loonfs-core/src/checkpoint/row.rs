@@ -53,17 +53,19 @@ pub(super) fn manifest_rows_for_family(
                 unbind_delta_index: unbind.unbind_delta_index,
             })
             .collect::<Vec<_>>(),
-        MetadataTableFamily::Revisions => metadata_state
-            .revisions()
-            .iter()
-            .map(|revision| MetadataRow::Revision {
-                inode_id: revision.inode_id,
-                revision_no: revision.revision_no,
-                committed_seq: revision.committed_seq,
-                revision_delta_index: revision.revision_delta_index,
-                content_ref: revision.content_ref.clone(),
-            })
-            .collect::<Vec<_>>(),
+        MetadataTableFamily::Revisions | MetadataTableFamily::RevisionsByInodeDesc => {
+            metadata_state
+                .revisions()
+                .iter()
+                .map(|revision| MetadataRow::Revision {
+                    inode_id: revision.inode_id,
+                    revision_no: revision.revision_no,
+                    committed_seq: revision.committed_seq,
+                    revision_delta_index: revision.revision_delta_index,
+                    content_ref: revision.content_ref.clone(),
+                })
+                .collect::<Vec<_>>()
+        }
         MetadataTableFamily::Tombstones => metadata_state
             .subtree_tombstones()
             .iter()
@@ -138,6 +140,10 @@ pub(super) fn manifest_row_matches_family(row: &MetadataRow, family: MetadataTab
                 MetadataRow::DirentryUnbind { .. }
             )
             | (MetadataTableFamily::Revisions, MetadataRow::Revision { .. })
+            | (
+                MetadataTableFamily::RevisionsByInodeDesc,
+                MetadataRow::Revision { .. },
+            )
             | (
                 MetadataTableFamily::Tombstones,
                 MetadataRow::Tombstone { .. }

@@ -21,8 +21,9 @@ use crate::wal::{
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ContentStoreId,
-    DirectoryPageCursor, DisplayName, FileRevision, InodeId, InodeKind, ListFileRevisionsResponse,
-    NameKey, NamespaceId, Page, PageRequest, RevisionNo,
+    DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
+    ListFileRevisionsResponse, NameKey, NamespaceId, Page, PageRequest, PaginationPolicy,
+    RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -222,6 +223,42 @@ pub(crate) async fn list_file_revisions_from_manifest_plus_tail_at_head_with_cac
     view.list_file_revisions(absolute_path).await
 }
 
+pub(crate) async fn list_file_revisions_page_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    absolute_path: &str,
+    request: PageRequest<FileRevisionsPageCursor>,
+) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+    if request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.head_seq != head.seq)
+        .unwrap_or(false)
+    {
+        let cursor = request
+            .cursor
+            .as_ref()
+            .expect("cursor presence checked above");
+        return Err(MetadataViewError::UnsupportedHistoricalRead {
+            requested_seq: cursor.head_seq,
+            head_seq: head.seq,
+        }
+        .into());
+    }
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.list_file_revisions_page(absolute_path, request).await
+}
+
 pub(crate) async fn list_file_revisions_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -229,6 +266,26 @@ pub(crate) async fn list_file_revisions_from_manifest_plus_tail<S: ObjectStore +
 ) -> Result<ListFileRevisionsResponse, CoreError> {
     let view = ManifestPlusTailView::load(store, namespace_id).await?;
     view.list_file_revisions(absolute_path).await
+}
+
+pub(crate) async fn list_file_revisions_page_from_manifest_plus_tail<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    request: PageRequest<FileRevisionsPageCursor>,
+) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    if request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.head_seq != view.head.seq)
+        .unwrap_or(false)
+    {
+        return Err(invalid_cursor(
+            "cursor snapshot does not match the current namespace head",
+        ));
+    }
+    view.list_file_revisions_page(absolute_path, request).await
 }
 
 pub(crate) async fn list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache<
@@ -250,6 +307,43 @@ pub(crate) async fn list_file_revisions_for_inode_from_manifest_plus_tail_at_hea
     view.list_file_revisions_for_inode(inode_id).await
 }
 
+pub(crate) async fn list_file_revisions_for_inode_page_from_manifest_plus_tail_at_head_with_cache<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    cache_context: ManifestPlusTailCacheContext<'_>,
+    inode_id: InodeId,
+    request: PageRequest<FileRevisionsPageCursor>,
+) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+    if request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.head_seq != head.seq)
+        .unwrap_or(false)
+    {
+        let cursor = request
+            .cursor
+            .as_ref()
+            .expect("cursor presence checked above");
+        return Err(MetadataViewError::UnsupportedHistoricalRead {
+            requested_seq: cursor.head_seq,
+            head_seq: head.seq,
+        }
+        .into());
+    }
+    let view = ManifestPlusTailView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        cache_context,
+    )
+    .await?;
+    view.list_file_revisions_for_inode_page(inode_id, request)
+        .await
+}
+
 pub(crate) async fn list_file_revisions_for_inode_from_manifest_plus_tail<
     S: ObjectStore + ?Sized,
 >(
@@ -259,6 +353,29 @@ pub(crate) async fn list_file_revisions_for_inode_from_manifest_plus_tail<
 ) -> Result<ListFileRevisionsResponse, CoreError> {
     let view = ManifestPlusTailView::load(store, namespace_id).await?;
     view.list_file_revisions_for_inode(inode_id).await
+}
+
+pub(crate) async fn list_file_revisions_for_inode_page_from_manifest_plus_tail<
+    S: ObjectStore + ?Sized,
+>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    request: PageRequest<FileRevisionsPageCursor>,
+) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    if request
+        .cursor
+        .as_ref()
+        .map(|cursor| cursor.head_seq != view.head.seq)
+        .unwrap_or(false)
+    {
+        return Err(invalid_cursor(
+            "cursor snapshot does not match the current namespace head",
+        ));
+    }
+    view.list_file_revisions_for_inode_page(inode_id, request)
+        .await
 }
 
 pub(crate) async fn read_file_revision_bytes_from_manifest_plus_tail_at_head_with_cache<
@@ -555,10 +672,60 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         self.list_file_revisions_for_inode(entry.inode_id).await
     }
 
+    pub(crate) async fn list_file_revisions_page(
+        &self,
+        absolute_path: &str,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+        let entry = self.resolve_path(absolute_path).await?;
+        if entry.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: entry.absolute_path,
+                kind: entry.inode_kind,
+            });
+        }
+        self.list_file_revisions_for_inode_page(entry.inode_id, request)
+            .await
+    }
+
     pub(crate) async fn list_file_revisions_for_inode(
         &self,
         inode_id: InodeId,
     ) -> Result<ListFileRevisionsResponse, CoreError> {
+        let limit = PaginationPolicy::default()
+            .resolve_limit(None)
+            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        let mut cursor = None;
+        let mut revisions = Vec::new();
+        loop {
+            let page = self
+                .list_file_revisions_for_inode_page(
+                    inode_id,
+                    PageRequest {
+                        limit,
+                        cursor: cursor.clone(),
+                    },
+                )
+                .await?;
+            revisions.extend(page.items);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(ListFileRevisionsResponse {
+                    namespace_id: self.namespace_id.clone(),
+                    inode_id,
+                    head_seq: self.head.seq,
+                    revisions,
+                    next_cursor: None,
+                });
+            }
+        }
+    }
+
+    pub(crate) async fn list_file_revisions_for_inode_page(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
         let inode = self
             .metadata_view()
             .inode_at_seq(inode_id)
@@ -570,11 +737,43 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 kind: inode.inode_kind,
             });
         }
+        if let Some(cursor) = request.cursor.as_ref() {
+            validate_file_revisions_cursor(cursor, self.head.seq, inode_id)?;
+        }
 
-        let mut revisions = self
+        let start_after =
+            request
+                .cursor
+                .as_ref()
+                .map(|cursor| super::manifest_index::RevisionPagePosition {
+                    revision_no: cursor.last_revision_no,
+                    committed_seq: cursor.last_committed_seq,
+                    revision_delta_index: cursor.last_revision_delta_index,
+                });
+        let mut revision_records = self
             .metadata_view()
-            .revisions_for_inode_at_head(inode_id)
-            .await?
+            .session()
+            .revisions_for_inode_page_desc(inode_id, start_after, request.limit.limit_plus_one())
+            .await?;
+        let has_more = revision_records.len() > request.limit.as_usize();
+        if has_more {
+            revision_records.truncate(request.limit.as_usize());
+        }
+        let next_cursor = if has_more {
+            let last = revision_records
+                .last()
+                .expect("non-zero page limit with more revisions must return an item");
+            Some(FileRevisionsPageCursor {
+                head_seq: self.head.seq,
+                inode_id,
+                last_revision_no: last.revision_no,
+                last_committed_seq: last.committed_seq,
+                last_revision_delta_index: last.revision_delta_index,
+            })
+        } else {
+            None
+        };
+        let revisions = revision_records
             .into_iter()
             .map(|revision| FileRevision {
                 inode_id: revision.inode_id,
@@ -582,14 +781,11 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
                 committed_seq: revision.committed_seq,
                 content_ref: revision.content_ref,
             })
-            .collect::<Vec<_>>();
-        revisions.sort_by_key(|revision| revision.revision_no);
+            .collect();
 
-        Ok(ListFileRevisionsResponse {
-            namespace_id: self.namespace_id.clone(),
-            inode_id,
-            head_seq: self.head.seq,
-            revisions,
+        Ok(Page {
+            items: revisions,
+            next_cursor,
         })
     }
 
@@ -733,7 +929,6 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             list_page_current_parent_binding_calls = tracing::field::Empty,
             list_page_covering_tombstone_calls = tracing::field::Empty,
             list_page_latest_revision_calls = tracing::field::Empty,
-            list_page_revision_scan_calls = tracing::field::Empty,
             list_page_direntry_child_scan_calls = tracing::field::Empty,
             list_page_scan_prefix_calls = tracing::field::Empty,
             list_page_scan_range_page_calls = tracing::field::Empty,
@@ -774,10 +969,6 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         build_span.record(
             "list_page_latest_revision_calls",
             counters.latest_revision_calls,
-        );
-        build_span.record(
-            "list_page_revision_scan_calls",
-            counters.revision_scan_calls,
         );
         build_span.record(
             "list_page_direntry_child_scan_calls",
@@ -892,4 +1083,22 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
     fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
         CurrentManifestTailView::new(&self.head, &self.tables, self.wal_tail_rows.as_ref())
     }
+}
+
+fn validate_file_revisions_cursor(
+    cursor: &FileRevisionsPageCursor,
+    head_seq: loonfs_api::ChangeSeq,
+    inode_id: InodeId,
+) -> Result<(), CoreError> {
+    if cursor.head_seq != head_seq {
+        return Err(invalid_cursor(
+            "file revisions cursor snapshot does not match the current namespace head",
+        ));
+    }
+    if cursor.inode_id != inode_id {
+        return Err(invalid_cursor(
+            "file revisions cursor inode does not match the requested file",
+        ));
+    }
+    Ok(())
 }
