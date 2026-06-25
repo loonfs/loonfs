@@ -8,12 +8,12 @@ use loonfs_api::{validate_wal_segment_id, ChangeSeq, InodeId, NamespaceId};
 use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn replay_validated_wal_tail_with_metadata(
-    basis_head: &HeadState,
-    basis_metadata_state: &MetadataState,
+    base_head: &HeadState,
+    base_metadata_state: &MetadataState,
     wal_tail: &[ValidatedWalSegment],
 ) -> Result<ReplayedWalTail, WalReplayError> {
-    let mut current_head = basis_head.clone();
-    let mut current_metadata_state = basis_metadata_state.clone();
+    let mut current_head = base_head.clone();
+    let mut current_metadata_state = base_metadata_state.clone();
     let mut checked_invariants = Vec::new();
 
     for wal_segment in wal_tail {

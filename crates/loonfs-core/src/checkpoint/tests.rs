@@ -9,13 +9,13 @@ use super::build::{
 };
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::{
-    build_namespace_manifest_for_basis, checkpoint_record_by_id, create_checkpoint,
+    build_namespace_manifest_for_full_materialization, checkpoint_record_by_id, create_checkpoint,
     create_checkpoint_with_policy,
 };
 use super::error::ManifestLoadError;
 use super::load::{
-    load_manifest_materialization_from_manifest, load_verified_manifest_materialization,
-    manifest_basis_head,
+    head_from_manifest, load_manifest_materialization_from_manifest,
+    load_verified_manifest_materialization,
 };
 use super::publish::{
     publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
@@ -29,8 +29,10 @@ use super::runs::{
 };
 use crate::error::CoreError;
 use crate::metadata::MetadataState;
-use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::bootstrap::bootstrap_namespace;
+use crate::namespace::full_materialization::{
+    load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
+};
 use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
 use crate::{MutationContext, PutFileBehavior};
 use async_trait::async_trait;
@@ -53,7 +55,7 @@ use std::sync::Mutex;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn manifest_round_trip_uses_manifest_basis_for_mixed_namespace() {
+async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -93,15 +95,23 @@ async fn manifest_round_trip_uses_manifest_basis_for_mixed_namespace() {
     .await
     .expect("replace");
 
-    let before = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis before");
+    let before = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization before");
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis after");
+    let after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization after");
 
     assert_eq!(after.head.current_manifest_id, Some(checkpoint.manifest_id));
     assert_eq!(before.head.seq, after.head.seq);
@@ -141,16 +151,24 @@ async fn manifest_round_trip_preserves_direntry_unbind_rows() {
     .await
     .expect("move hello");
 
-    let before = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis before");
+    let before = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization before");
     assert_eq!(before.metadata_state.direntry_unbinds().len(), 1);
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis after");
+    let after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization after");
 
     assert_eq!(
         after.metadata_state.direntry_unbinds(),
@@ -175,11 +193,18 @@ async fn manifest_round_trip_supports_empty_namespace() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    assert_eq!(basis.head.current_manifest_id, Some(ManifestId(1)));
-    assert!(basis.head.latest_checkpoint_id.is_some());
+    let materialization = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    assert_eq!(
+        materialization.head.current_manifest_id,
+        Some(ManifestId(1))
+    );
+    assert!(materialization.head.latest_checkpoint_id.is_some());
     let bootstrap_manifest =
         load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
             .await
@@ -224,8 +249,16 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         .await
         .expect("corrupt manifest");
 
-    match load_verified_namespace_basis(&store, &namespace_id).await {
-        Err(BasisLoadError::ManifestLoad(ManifestLoadError::ManifestCodec { .. })) => {}
+    match load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    {
+        Err(FullMaterializationLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
+            ..
+        })) => {}
         other => panic!("expected manifest codec manifest load error, got {other:?}"),
     }
 }
@@ -256,16 +289,23 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     .expect("write hello");
 
     match create_checkpoint(&store, &namespace_id, &context).await {
-        Err(CoreError::Basis(BasisLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
-            ..
-        }))) => {}
+        Err(CoreError::FullMaterialization(FullMaterializationLoadError::ManifestLoad(
+            ManifestLoadError::ManifestCodec { .. },
+        ))) => {}
         other => panic!("expected manifest codec manifest load error, got {other:?}"),
     }
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
+    let materialization = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    assert_eq!(
+        materialization.head.current_manifest_id,
+        Some(ManifestId(0))
+    );
 }
 
 #[tokio::test]
@@ -301,10 +341,14 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    assert_eq!(basis.head.retention_floor_seq, ChangeSeq(1));
+    let materialization = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    assert_eq!(materialization.head.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
         store
             .list_prefix(&format!("namespaces/{}/wal/", namespace_id.as_str()))
@@ -346,11 +390,15 @@ async fn manifest_materialization_uses_written_segments() {
     let materialized = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
         .await
         .expect("load materialized manifest");
-    let current = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    let basis_head = manifest_basis_head(&current.head, &materialized.manifest);
-    assert_eq!(basis_head.seq, ChangeSeq(1));
+    let current = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let manifest_head = head_from_manifest(&current.head, &materialized.manifest);
+    assert_eq!(manifest_head.seq, ChangeSeq(1));
     assert!(metadata_states_equivalent(
         &materialized.metadata_state,
         &current.metadata_state
@@ -371,7 +419,7 @@ async fn manifest_materialization_uses_written_segments() {
 }
 
 #[tokio::test]
-async fn manifest_l0_run_materialization_matches_full_basis() {
+async fn manifest_l0_run_materialization_matches_full_materialization() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -410,9 +458,13 @@ async fn manifest_l0_run_materialization_matches_full_basis() {
     let second = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("second checkpoint");
-    let basis_after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization_after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
     let second_materialized =
         load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
             .await
@@ -440,7 +492,7 @@ async fn manifest_l0_run_materialization_matches_full_basis() {
         second.checkpoint_id
     );
     assert!(metadata_states_equivalent(
-        &basis_after.metadata_state,
+        &materialization_after.metadata_state,
         &second_materialized.metadata_state
     ));
 }
@@ -610,16 +662,20 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     )
     .await
     .expect("write second file");
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
     let malformed_run_tables = build_manifest_tables_from_rows(
         &store,
         &namespace_id,
         first,
         CHECKPOINT_BASE_RUN_LEVEL,
         &context.writer_version,
-        |family| manifest_rows_for_family(&basis.metadata_state, family),
+        |family| manifest_rows_for_family(&materialization.metadata_state, family),
         MetadataTableSegmentation::Full,
     )
     .await
@@ -627,11 +683,15 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     let metadata_ssts = build_manifest_tables_from_rows(
         &store,
         &namespace_id,
-        basis.head.seq,
+        materialization.head.seq,
         CHECKPOINT_L0_RUN_LEVEL,
         &context.writer_version,
         |family| {
-            super::row::manifest_rows_for_family_after_seq(&basis.metadata_state, family, first)
+            super::row::manifest_rows_for_family_after_seq(
+                &materialization.metadata_state,
+                family,
+                first,
+            )
         },
         MetadataTableSegmentation::Full,
     )
@@ -643,14 +703,14 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         &context.writer_version,
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
-            manifest_id: manifest_id(basis.head.seq),
-            head_seq: basis.head.seq,
-            head_commit_id: basis.head.head_commit_id.clone(),
+            manifest_id: manifest_id(materialization.head.seq),
+            head_seq: materialization.head.seq,
+            head_commit_id: materialization.head.head_commit_id.clone(),
             base_seq: first,
-            active_fence_token: basis.head.active_fence_token,
-            next_inode_id: basis.head.next_inode_id,
-            name_policy: basis.head.name_policy,
-            retention_floor_seq: basis.head.retention_floor_seq,
+            active_fence_token: materialization.head.active_fence_token,
+            next_inode_id: materialization.head.next_inode_id,
+            name_policy: materialization.head.name_policy,
+            retention_floor_seq: materialization.head.retention_floor_seq,
             initialized: true,
             verified: true,
             fork: None,
@@ -664,7 +724,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     match load_manifest_materialization_from_manifest(
         &store,
         &namespace_id,
-        &namespace_manifest(namespace_id.as_str(), manifest_id(basis.head.seq)),
+        &namespace_manifest(namespace_id.as_str(), manifest_id(materialization.head.seq)),
         &manifest,
     )
     .await
@@ -742,9 +802,13 @@ async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
     let compacted = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
         .await
         .expect("load compacted manifest");
-    let basis_after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization_after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
     assert_eq!(compacted.manifest.payload.base_seq, ChangeSeq(4));
     assert!(l0_runs(&compacted.manifest).is_empty());
     assert_eq!(
@@ -752,7 +816,7 @@ async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
         1
     );
     assert!(metadata_states_equivalent(
-        &basis_after.metadata_state,
+        &materialization_after.metadata_state,
         &compacted.metadata_state
     ));
 }
@@ -834,9 +898,13 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         max_rows_per_segment: 2,
         ..MetadataLsmPolicy::default()
     };
-    let basis_before = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis before checkpoint");
+    let materialization_before = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization before checkpoint");
 
     let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
         .await
@@ -865,10 +933,14 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         .iter()
         .find(|table| table.family == ApiMetadataTableFamily::DirentryBinds)
         .expect("direntry table");
+    assert!(
+        direntries.segments.len() >= 3,
+        "hot directory direntry rows should be range-split"
+    );
     assert!(direntries.segments.iter().all(|descriptor| {
         matches!(
             descriptor.segment_key,
-            MetadataSegmentKey::DirentryParent { .. }
+            MetadataSegmentKey::RowKeyRange { .. }
         )
     }));
 
@@ -883,7 +955,7 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         }
     }
     assert!(metadata_states_equivalent(
-        &basis_before.metadata_state,
+        &materialization_before.metadata_state,
         &materialized.metadata_state
     ));
 }
@@ -930,6 +1002,67 @@ async fn large_table_scan_does_not_insert_metadata_cache_blocks() {
     assert!(revisions.len() >= 8);
     assert_eq!(after.inserts, before.inserts);
     assert!(after.misses > before.misses);
+}
+
+#[tokio::test]
+async fn table_range_page_merges_base_and_l0_in_row_key_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/docs/a.txt", b"a\n", &context, None)
+        .await
+        .expect("write a");
+    write_file_bytes(&store, &namespace_id, "/docs/c.txt", b"c\n", &context, None)
+        .await
+        .expect("write c");
+
+    let policy = MetadataLsmPolicy {
+        max_rows_per_segment: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("first checkpoint");
+    write_file_bytes(&store, &namespace_id, "/docs/b.txt", b"b\n", &context, None)
+        .await
+        .expect("write b");
+    let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("second checkpoint");
+    let tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        None,
+        &namespace_id,
+        manifest.manifest_id,
+    )
+    .await
+    .expect("load tables");
+
+    let docs_inode_id = InodeId(2);
+    let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
+    let upper_bound = super::string_prefix_upper_bound(&lower_bound);
+    let page = tables
+        .scan_range_page(
+            ApiMetadataTableFamily::DirentryBinds,
+            &lower_bound,
+            upper_bound.as_deref(),
+            2,
+        )
+        .await
+        .expect("scan range page");
+    let display_names = page
+        .into_iter()
+        .filter_map(|row| match row {
+            MetadataRow::DirentryBind { display_name, .. } => Some(display_name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(display_names, vec!["a.txt", "b.txt"]);
 }
 
 #[tokio::test]
@@ -1088,9 +1221,13 @@ async fn whole_run_compaction_rewrites_base_segments() {
         load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
             .await
             .expect("load compacted manifest");
-    let basis_after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization_after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
     let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
     let compacted_run_prefix = format!("namespaces/{}/tables/metadata/tbl_", namespace_id.as_str());
 
@@ -1112,7 +1249,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .all(|key| !first_run_keys.contains(key)));
     assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
     assert!(metadata_states_equivalent(
-        &basis_after.metadata_state,
+        &materialization_after.metadata_state,
         &compacted_materialized.metadata_state
     ));
 }
@@ -1184,9 +1321,13 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         &compacted_materialized.manifest,
         ApiMetadataTableFamily::Revisions,
     );
-    let basis_after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization_after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
 
     assert!(l0_runs(&compacted_materialized.manifest).is_empty());
     assert_eq!(
@@ -1197,7 +1338,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         .iter()
         .all(|key| !revision_keys_before.contains(key)));
     assert!(metadata_states_equivalent(
-        &basis_after.metadata_state,
+        &materialization_after.metadata_state,
         &compacted_materialized.metadata_state
     ));
     assert_manifest_rows_have_unique_keys(&compacted_materialized.metadata_state);
@@ -1490,7 +1631,7 @@ async fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
 }
 
 #[tokio::test]
-async fn unreferenced_manifest_run_is_ignored_by_basis_load() {
+async fn unreferenced_manifest_run_is_ignored_by_full_materialization_load() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1522,13 +1663,17 @@ async fn unreferenced_manifest_run_is_ignored_by_basis_load() {
     .await
     .expect("write second");
 
-    let basis_before = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    let orphan_manifest = build_namespace_manifest_for_basis(
+    let materialization_before = load_full_namespace_materialization(
         &store,
         &namespace_id,
-        &basis_before,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let orphan_manifest = build_namespace_manifest_for_full_materialization(
+        &store,
+        &namespace_id,
+        &materialization_before,
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(2),
@@ -1540,17 +1685,24 @@ async fn unreferenced_manifest_run_is_ignored_by_basis_load() {
         .await
         .expect("write orphan manifest");
 
-    let basis_after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization_after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
     assert_eq!(
-        basis_after.head.current_manifest_id,
+        materialization_after.head.current_manifest_id,
         Some(first.manifest_id)
     );
-    assert_eq!(basis_after.head.seq, orphan_manifest.payload.head_seq);
+    assert_eq!(
+        materialization_after.head.seq,
+        orphan_manifest.payload.head_seq
+    );
     assert!(metadata_states_equivalent(
-        &basis_before.metadata_state,
-        &basis_after.metadata_state
+        &materialization_before.metadata_state,
+        &materialization_after.metadata_state
     ));
 }
 
@@ -1564,13 +1716,17 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         .await
         .expect("bootstrap");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    let manifest = build_namespace_manifest_for_basis(
+    let materialization = load_full_namespace_materialization(
         &store,
         &namespace_id,
-        &basis,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let manifest = build_namespace_manifest_for_full_materialization(
+        &store,
+        &namespace_id,
+        &materialization,
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
@@ -1597,13 +1753,17 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         .await
         .expect("bootstrap");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    let manifest = build_namespace_manifest_for_basis(
+    let materialization = load_full_namespace_materialization(
         &store,
         &namespace_id,
-        &basis,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let manifest = build_namespace_manifest_for_full_materialization(
+        &store,
+        &namespace_id,
+        &materialization,
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
@@ -1625,7 +1785,7 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         .expect_err("different same-id manifest must conflict");
 
     match error {
-        BasisLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+        FullMaterializationLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
             manifest_id,
             expected_payload_checksum,
             actual_payload_checksum,
@@ -1662,13 +1822,17 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
     .await
     .expect("write hello");
 
-    let basis = load_verified_namespace_basis(&raw_store, &namespace_id)
-        .await
-        .expect("basis");
-    let conflicting = build_namespace_manifest_for_basis(
+    let materialization = load_full_namespace_materialization(
         &raw_store,
         &namespace_id,
-        &basis,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let conflicting = build_namespace_manifest_for_full_materialization(
+        &raw_store,
+        &namespace_id,
+        &materialization,
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
@@ -1704,10 +1868,17 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
             .await
             .expect("load retried manifest");
     assert!(checkpoint_record_by_id(&retried.manifest, &checkpoint.checkpoint_id).is_some());
-    let basis_after = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    assert_eq!(basis_after.head.current_manifest_id, Some(ManifestId(2)));
+    let materialization_after = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    assert_eq!(
+        materialization_after.head.current_manifest_id,
+        Some(ManifestId(2))
+    );
 }
 
 #[tokio::test]
@@ -1730,13 +1901,17 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
     .await
     .expect("write hello");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    let manifest_without_checkpoint = build_namespace_manifest_for_basis(
+    let materialization = load_full_namespace_materialization(
         &store,
         &namespace_id,
-        &basis,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let manifest_without_checkpoint = build_namespace_manifest_for_full_materialization(
+        &store,
+        &namespace_id,
+        &materialization,
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
@@ -1785,6 +1960,59 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
 }
 
 #[tokio::test]
+async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/first.txt",
+        b"first\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write first");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create first checkpoint");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/second.txt",
+        b"second\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write second");
+    store.reset_metadata_sst_gets();
+
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create L0 checkpoint");
+
+    assert_eq!(
+        store.metadata_sst_gets(),
+        0,
+        "L0 checkpoint update should use the WAL tail and copy existing metadata file refs"
+    );
+    let materialized =
+        load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+            .await
+            .expect("load checkpoint manifest");
+    assert_eq!(l0_runs(&materialized.manifest).len(), 1);
+}
+
+#[tokio::test]
 async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1804,13 +2032,17 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
     .await
     .expect("write hello");
 
-    let basis = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
-    let manifest = build_namespace_manifest_for_basis(
+    let materialization = load_full_namespace_materialization(
         &store,
         &namespace_id,
-        &basis,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
+    let manifest = build_namespace_manifest_for_full_materialization(
+        &store,
+        &namespace_id,
+        &materialization,
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
@@ -1819,11 +2051,11 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
     .await
     .expect("build manifest without checkpoint");
     assert!(manifest.payload.checkpoints.is_empty());
-    let mut newer_live_head = basis.head.clone();
+    let mut newer_live_head = materialization.head.clone();
     newer_live_head.head_commit_id =
         CommitId::parse("c_00000000000000000000000000000099").expect("commit id");
 
-    let reconstructed = manifest_basis_head(&newer_live_head, &manifest);
+    let reconstructed = head_from_manifest(&newer_live_head, &manifest);
 
     assert_eq!(
         reconstructed.head_commit_id,
@@ -1852,15 +2084,19 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
     .await
     .expect("write hello");
 
-    let basis_before = load_verified_namespace_basis(&store, &namespace_id)
-        .await
-        .expect("basis");
+    let materialization_before = load_full_namespace_materialization(
+        &store,
+        &namespace_id,
+        FullMaterializationPurpose::TestOracle,
+    )
+    .await
+    .expect("materialization");
     let tables = build_manifest_tables(
         &store,
         &namespace_id,
-        basis_before.head.seq,
+        materialization_before.head.seq,
         CHECKPOINT_BASE_RUN_LEVEL,
-        &basis_before.metadata_state,
+        &materialization_before.metadata_state,
         &context.writer_version,
         MetadataLsmPolicy::default().max_rows_per_segment,
     )
@@ -1870,14 +2106,14 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         &context.writer_version,
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
-            manifest_id: ManifestId(basis_before.head.seq.0),
-            head_seq: basis_before.head.seq,
-            head_commit_id: basis_before.head.head_commit_id.clone(),
-            base_seq: basis_before.head.seq,
-            active_fence_token: basis_before.head.active_fence_token,
-            next_inode_id: basis_before.head.next_inode_id,
-            name_policy: basis_before.head.name_policy,
-            retention_floor_seq: basis_before.head.retention_floor_seq,
+            manifest_id: ManifestId(materialization_before.head.seq.0),
+            head_seq: materialization_before.head.seq,
+            head_commit_id: materialization_before.head.head_commit_id.clone(),
+            base_seq: materialization_before.head.seq,
+            active_fence_token: materialization_before.head.active_fence_token,
+            next_inode_id: materialization_before.head.next_inode_id,
+            name_policy: materialization_before.head.name_policy,
+            retention_floor_seq: materialization_before.head.retention_floor_seq,
             initialized: true,
             verified: true,
             fork: None,
@@ -1904,13 +2140,13 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
     let later_checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("later checkpoint");
-    assert!(later_checkpoint.manifest_id > ManifestId(basis_before.head.seq.0));
+    assert!(later_checkpoint.manifest_id > ManifestId(materialization_before.head.seq.0));
 
     let checkpoint_id = "chk_00000000000000000000000000000099";
     let outcome = publish_current_manifest_id(
         &store,
         &namespace_id,
-        ManifestId(basis_before.head.seq.0),
+        ManifestId(materialization_before.head.seq.0),
         checkpoint_id,
         &context.writer_version,
     )
@@ -2057,6 +2293,85 @@ impl ObjectStore for HeadCasFailureStore {
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct MetadataSstGetCountingStore {
+    inner: LocalFsStore,
+    metadata_sst_gets: Mutex<usize>,
+}
+
+impl MetadataSstGetCountingStore {
+    fn new(inner: LocalFsStore) -> Self {
+        Self {
+            inner,
+            metadata_sst_gets: Mutex::new(0),
+        }
+    }
+
+    fn metadata_sst_gets(&self) -> usize {
+        *self
+            .metadata_sst_gets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn reset_metadata_sst_gets(&self) {
+        *self
+            .metadata_sst_gets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0;
+    }
+
+    fn record_if_metadata_sst(&self, key: &str) {
+        if key.contains("/tables/metadata/") && key.ends_with(".sst.zst") {
+            *self
+                .metadata_sst_gets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for MetadataSstGetCountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.record_if_metadata_sst(key);
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_if_metadata_sst(key);
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode).await
     }
 

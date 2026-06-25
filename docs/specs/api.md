@@ -205,6 +205,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is not yet available; retry. |
+| `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
 | `metadata_tail_too_long` | 503 | The WAL tail after the current manifest is too long to serve directly; run checkpoint maintenance and retry. |
 | `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |

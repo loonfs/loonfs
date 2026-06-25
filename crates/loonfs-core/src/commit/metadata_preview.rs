@@ -1,14 +1,501 @@
 use super::ValidatedOp;
+use crate::error::CoreError;
 use crate::metadata::{
-    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, RevisionRecord,
-    SubtreeTombstoneRecord,
+    DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, ResolvedVisiblePath,
+    RevisionRecord, SubtreeTombstoneRecord, VisiblePathError,
 };
-use loonfs_api::{ChangeSeq, InodeId, InodeKind, RevisionNo};
+use crate::path::read::CurrentManifestTailView;
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo};
+use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 pub(super) struct MetadataPreview<'a> {
     base: &'a MetadataState,
     rows: MetadataState,
+}
+
+pub(crate) struct PublishMetadataPreview<'a, S: ObjectStore + ?Sized> {
+    base: CurrentManifestTailView<'a, S>,
+    rows: MetadataState,
+}
+
+impl<'a, S: ObjectStore + ?Sized> PublishMetadataPreview<'a, S> {
+    pub(crate) fn new(base: CurrentManifestTailView<'a, S>, accepted_rows: &MetadataState) -> Self {
+        Self {
+            base,
+            rows: accepted_rows.clone(),
+        }
+    }
+
+    pub(crate) fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp) {
+        let empty = MetadataState::default();
+        let mut preview = MetadataPreview {
+            base: &empty,
+            rows: std::mem::take(&mut self.rows),
+        };
+        preview.apply_validated_op_mut(committed_seq, op);
+        self.rows = preview.rows;
+    }
+
+    pub(crate) async fn inode_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<InodeRecord>, CoreError> {
+        if let Some(inode) = self.rows.inode_at_seq(inode_id, base_seq) {
+            return Ok(Some(inode));
+        }
+        self.base.inode_at_seq(inode_id).await
+    }
+
+    pub(crate) async fn latest_revision_head_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<RevisionRecord>, CoreError> {
+        let row_revision = self.rows_latest_revision_head_at_seq(inode_id, base_seq);
+        let base_revision = self.base.latest_revision_head(inode_id).await?;
+        Ok(row_revision
+            .into_iter()
+            .chain(base_revision)
+            .max_by_key(|revision| {
+                (
+                    revision.revision_no,
+                    revision.committed_seq,
+                    revision.revision_delta_index,
+                )
+            }))
+    }
+
+    pub(crate) async fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<RevisionRecord>, CoreError> {
+        let row_revision = self.rows_revision_at_seq(inode_id, revision_no, base_seq);
+        let base_revision = self.base.revision_at_head(inode_id, revision_no).await?;
+        Ok(row_revision
+            .into_iter()
+            .chain(base_revision)
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index)))
+    }
+
+    pub(crate) async fn current_parent_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        let Some(direntry) = self
+            .latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if self.is_direntry_unbound_at_seq(&direntry, base_seq).await? {
+            return Ok(None);
+        }
+        Ok(Some(direntry))
+    }
+
+    pub(crate) async fn covering_subtree_tombstone(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
+        let mut current = Some(inode_id);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+
+            if let Some(tombstone) = self
+                .active_subtree_tombstone(candidate_inode_id, base_seq)
+                .await?
+            {
+                return Ok(Some(tombstone));
+            }
+
+            current = self
+                .current_parent_binding_for_child(candidate_inode_id, base_seq)
+                .await?
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        Ok(None)
+    }
+
+    pub(crate) async fn visible_inode(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<InodeRecord>, CoreError> {
+        let Some(inode) = self.inode_at_seq(inode_id, base_seq).await? else {
+            return Ok(None);
+        };
+        if self
+            .covering_subtree_tombstone(inode_id, base_seq)
+            .await?
+            .is_some()
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(inode))
+    }
+
+    pub(crate) async fn visible_child(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        let Some(parent) = self.visible_inode(parent_inode_id, base_seq).await? else {
+            return Ok(None);
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Ok(None);
+        }
+
+        let Some(direntry) = self
+            .active_child_binding_at_seq(parent_inode_id, name_key, base_seq)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if self
+            .visible_inode(direntry.child_inode_id, base_seq)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(direntry))
+    }
+
+    pub(crate) async fn visible_children(
+        &self,
+        parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
+        let Some(parent) = self.visible_inode(parent_inode_id, base_seq).await? else {
+            return Ok(Vec::new());
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Ok(Vec::new());
+        }
+
+        let mut children = self
+            .rows
+            .direntry_binds()
+            .iter()
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id && direntry.bind_seq <= base_seq
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        children.extend(self.base.visible_children(parent_inode_id).await?);
+
+        let mut active_children = Vec::new();
+        for direntry in children {
+            let active = self
+                .active_child_binding_at_seq(parent_inode_id, &direntry.name_key, base_seq)
+                .await?;
+            if active
+                .map(|active| {
+                    active.child_inode_id == direntry.child_inode_id
+                        && active.bind_seq == direntry.bind_seq
+                        && active.bind_delta_index == direntry.bind_delta_index
+                })
+                .unwrap_or(false)
+                && self
+                    .visible_inode(direntry.child_inode_id, base_seq)
+                    .await?
+                    .is_some()
+            {
+                active_children.push(direntry);
+            }
+        }
+        active_children.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
+        });
+        Ok(active_children)
+    }
+
+    pub(crate) async fn resolve_visible_path(
+        &self,
+        absolute_path: &AbsolutePath,
+        name_policy: NamePolicy,
+        base_seq: ChangeSeq,
+    ) -> Result<ResolvedVisiblePath, CoreError> {
+        let root_inode_id = InodeId(1);
+        let root = self
+            .visible_inode(root_inode_id, base_seq)
+            .await?
+            .ok_or(VisiblePathError::RootMissing)?;
+        if absolute_path.is_root() {
+            return Ok(ResolvedVisiblePath {
+                absolute_path: "/".to_owned(),
+                inode_id: root_inode_id,
+                inode_kind: root.inode_kind,
+                parent_inode_id: None,
+                display_name: String::new(),
+            });
+        }
+
+        let mut current_inode_id = root_inode_id;
+        let mut current_absolute_path = "/".to_owned();
+        let mut current_parent_inode_id = None;
+        let mut current_display_name = String::new();
+
+        for component in absolute_path.components() {
+            let current_inode = self
+                .visible_inode(current_inode_id, base_seq)
+                .await?
+                .ok_or(VisiblePathError::PathNotFound {
+                    absolute_path: current_absolute_path.clone(),
+                })?;
+            if current_inode.inode_kind != InodeKind::Dir {
+                return Err(VisiblePathError::PathComponentNotDirectory {
+                    absolute_path: current_absolute_path,
+                    inode_id: current_inode_id,
+                    inode_kind: current_inode.inode_kind,
+                }
+                .into());
+            }
+
+            let requested_absolute_path = if current_absolute_path == "/" {
+                format!("/{}", component.as_str())
+            } else {
+                format!("{}/{}", current_absolute_path, component.as_str())
+            };
+            let display_name = component.to_display_name();
+            let name_key = NameKey::for_display_name(name_policy, &display_name);
+            let direntry = self
+                .visible_child(current_inode_id, name_key.as_str(), base_seq)
+                .await?
+                .ok_or(VisiblePathError::PathNotFound {
+                    absolute_path: requested_absolute_path,
+                })?;
+
+            current_parent_inode_id = Some(current_inode_id);
+            current_inode_id = direntry.child_inode_id;
+            current_absolute_path =
+                absolute_path_prefix(&current_absolute_path, &direntry.display_name);
+            current_display_name = direntry.display_name;
+        }
+
+        let inode = self
+            .visible_inode(current_inode_id, base_seq)
+            .await?
+            .ok_or_else(|| VisiblePathError::PathNotFound {
+                absolute_path: current_absolute_path.clone(),
+            })?;
+        Ok(ResolvedVisiblePath {
+            absolute_path: current_absolute_path,
+            inode_id: current_inode_id,
+            inode_kind: inode.inode_kind,
+            parent_inode_id: current_parent_inode_id,
+            display_name: current_display_name,
+        })
+    }
+
+    pub(crate) async fn would_create_directory_cycle(
+        &self,
+        inode_id: InodeId,
+        new_parent_inode: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<bool, CoreError> {
+        let mut current = Some(new_parent_inode);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if candidate_inode_id == inode_id {
+                return Ok(true);
+            }
+            current = self
+                .current_parent_binding_for_child(candidate_inode_id, base_seq)
+                .await?
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        Ok(false)
+    }
+
+    pub(crate) async fn bound_child_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        let row_binding = self
+            .rows
+            .direntry_binds()
+            .iter()
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id
+                    && direntry.name_key == name_key
+                    && direntry.bind_seq <= base_seq
+            })
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned();
+        let base_binding = self.base.bound_child(parent_inode_id, name_key).await?;
+        Ok(row_binding
+            .into_iter()
+            .chain(base_binding)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
+    }
+
+    async fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
+        let row_tombstone = self
+            .rows
+            .subtree_tombstones()
+            .iter()
+            .filter(|tombstone| {
+                tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
+            })
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
+            .cloned();
+        let base_tombstone = self.base.active_subtree_tombstone(root_inode_id).await?;
+        Ok(row_tombstone
+            .into_iter()
+            .chain(base_tombstone)
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index)))
+    }
+
+    async fn active_child_binding_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        let Some(direntry) = self
+            .bound_child_at_seq(parent_inode_id, name_key, base_seq)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if self.is_direntry_unbound_at_seq(&direntry, base_seq).await? {
+            return Ok(None);
+        }
+        let Some(latest_binding) = self
+            .latest_parent_binding_for_child_at_seq(direntry.child_inode_id, base_seq)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if latest_binding.parent_inode_id != direntry.parent_inode_id
+            || latest_binding.name_key != direntry.name_key
+            || latest_binding.bind_seq != direntry.bind_seq
+            || latest_binding.bind_delta_index != direntry.bind_delta_index
+            || self
+                .is_direntry_unbound_at_seq(&latest_binding, base_seq)
+                .await?
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(direntry))
+    }
+
+    async fn latest_parent_binding_for_child_at_seq(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        let row_binding = self
+            .rows
+            .direntry_binds()
+            .iter()
+            .filter(|direntry| {
+                direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
+            })
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned();
+        let base_binding = self
+            .base
+            .current_parent_binding_for_child(child_inode_id)
+            .await?;
+        Ok(row_binding
+            .into_iter()
+            .chain(base_binding)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
+    }
+
+    async fn is_direntry_unbound_at_seq(
+        &self,
+        direntry: &DirentryBindRecord,
+        base_seq: ChangeSeq,
+    ) -> Result<bool, CoreError> {
+        let row_unbound = self.rows.direntry_unbinds().iter().any(|unbind| {
+            unbind.unbind_seq <= base_seq
+                && unbind.parent_inode_id == direntry.parent_inode_id
+                && unbind.name_key == direntry.name_key
+                && unbind.child_inode_id == direntry.child_inode_id
+                && unbind.bind_seq == direntry.bind_seq
+                && unbind.bind_delta_index == direntry.bind_delta_index
+        });
+        if row_unbound {
+            return Ok(true);
+        }
+        self.base.is_direntry_unbound(direntry).await
+    }
+
+    fn rows_latest_revision_head_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.rows
+            .revisions()
+            .iter()
+            .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
+            .max_by_key(|revision| {
+                (
+                    revision.revision_no,
+                    revision.committed_seq,
+                    revision.revision_delta_index,
+                )
+            })
+            .cloned()
+    }
+
+    fn rows_revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.rows
+            .revisions()
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.revision_no == revision_no
+                    && revision.committed_seq <= base_seq
+            })
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
+            .cloned()
+    }
+}
+
+fn absolute_path_prefix(current: &str, component: &str) -> String {
+    if current == "/" {
+        format!("/{component}")
+    } else {
+        format!("{current}/{component}")
+    }
 }
 
 impl<'a> MetadataPreview<'a> {

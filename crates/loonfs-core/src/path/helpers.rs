@@ -1,7 +1,11 @@
 use crate::error::CoreError;
+#[cfg(test)]
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-use loonfs_api::{AbsolutePath, ChangeSeq, PathError};
+#[cfg(test)]
+use loonfs_api::ChangeSeq;
+use loonfs_api::{AbsolutePath, PathError};
 
+#[cfg(test)]
 pub(crate) fn lookup_path(
     metadata_state: &MetadataState,
     absolute_path: &AbsolutePath,

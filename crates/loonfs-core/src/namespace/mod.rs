@@ -4,12 +4,12 @@
 //! [`crate::NamespaceEngine`]; these helpers are for runtime and admin code
 //! that needs direct namespace inspection.
 
-pub(crate) mod basis;
 pub(crate) mod bootstrap;
 pub(crate) mod catalog;
 pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
+pub(crate) mod full_materialization;
 pub(crate) mod lease;
 
 pub use bootstrap::BootstrapNamespaceError;

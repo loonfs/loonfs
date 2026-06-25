@@ -1,30 +1,31 @@
 use super::intent::PathMutationIntent;
-use super::planner::{plan_path_mutation_against_state, PlannedPathMutation};
-use crate::commit::CommitPlan;
+use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
+use crate::commit::{CommitPlan, PublishMetadataPreview};
 use crate::error::CoreError;
 use crate::metadata::{MetadataApplyError, MetadataState};
-use crate::namespace::basis::VerifiedNamespaceBasis;
+use crate::path::read::CurrentManifestTailView;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
+use loonfs_objectstore::ObjectStore;
 
-/// Working view of one publish attempt against a verified basis.
+/// Working view of one publish attempt.
 ///
-/// The session owns the batch's evolving head and metadata state: it is
-/// derived from the basis once per publish attempt, every path mutation is
-/// planned against it, every accepted commit is applied back into it, and it
-/// is discarded after the attempt. Keeping head and state behind one seam guarantees planner reads
-/// always observe the same sequence the indexes are built at.
+/// The session owns the batch's evolving head and only the rows accepted
+/// during this publish attempt. Durable base reads come from the loaded
+/// manifest-plus-tail view; accepted rows are a small overlay so later
+/// candidates observe earlier accepted candidates without cloning the whole
+/// namespace.
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
-    metadata_state: MetadataState,
+    accepted_rows: MetadataState,
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(basis: &VerifiedNamespaceBasis) -> Self {
+    pub(crate) fn new(head: &HeadState) -> Self {
         Self {
-            head: basis.head.clone(),
-            metadata_state: basis.metadata_state.clone(),
+            head: head.clone(),
+            accepted_rows: MetadataState::default(),
         }
     }
 
@@ -32,16 +33,18 @@ impl PublishPlanningSession {
         &self.head
     }
 
-    pub(crate) fn metadata_state(&self) -> &MetadataState {
-        &self.metadata_state
+    pub(crate) fn accepted_rows(&self) -> &MetadataState {
+        &self.accepted_rows
     }
 
-    pub(crate) fn plan_path_mutation(
+    pub(crate) async fn plan_path_mutation<S: ObjectStore + ?Sized>(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
+        base_view: CurrentManifestTailView<'_, S>,
     ) -> Result<PlannedPathMutation, CoreError> {
-        plan_path_mutation_against_state(namespace_id, intent, &self.head, &self.metadata_state)
+        let preview = PublishMetadataPreview::new(base_view, &self.accepted_rows);
+        plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &preview).await
     }
 
     /// Folds an accepted commit into the session so later candidates in the
@@ -51,8 +54,7 @@ impl PublishPlanningSession {
         preview: &WalCommitPayload,
         plan: &CommitPlan,
     ) -> Result<(), MetadataApplyError> {
-        self.metadata_state
-            .apply_committed_wal_record_mut(preview)?;
+        self.accepted_rows.apply_committed_wal_record_mut(preview)?;
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
         Ok(())
@@ -65,8 +67,10 @@ mod tests {
     use super::*;
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
-    use crate::namespace::basis::load_verified_namespace_basis;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::full_materialization::{
+        load_full_namespace_materialization, FullMaterializationPurpose,
+    };
     use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::CommitId;
@@ -136,14 +140,22 @@ mod tests {
         let second = results[1].as_ref().expect("second create succeeds");
         assert!(second.committed_seq > first.committed_seq);
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id)
-            .await
-            .expect("basis");
+        let materialization = load_full_namespace_materialization(
+            &store,
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
         for path in ["/wide/a.txt", "/wide/b.txt"] {
             let absolute_path = loonfs_api::AbsolutePath::parse(path).expect("path");
-            basis
+            materialization
                 .metadata_state
-                .resolve_visible_path(&absolute_path, basis.head.name_policy, basis.head.seq)
+                .resolve_visible_path(
+                    &absolute_path,
+                    materialization.head.name_policy,
+                    materialization.head.seq,
+                )
                 .expect("published file is visible");
         }
     }
@@ -203,13 +215,21 @@ mod tests {
             .as_ref()
             .expect("delete sees the create from the same batch");
 
-        let basis = load_verified_namespace_basis(&store, &namespace_id)
-            .await
-            .expect("basis");
+        let materialization = load_full_namespace_materialization(
+            &store,
+            &namespace_id,
+            FullMaterializationPurpose::TestOracle,
+        )
+        .await
+        .expect("materialization");
         let absolute_path = loonfs_api::AbsolutePath::parse("/docs/doomed.txt").expect("path");
-        basis
+        materialization
             .metadata_state
-            .resolve_visible_path(&absolute_path, basis.head.name_policy, basis.head.seq)
+            .resolve_visible_path(
+                &absolute_path,
+                materialization.head.name_policy,
+                materialization.head.seq,
+            )
             .expect_err("deleted file is no longer visible");
     }
 }
