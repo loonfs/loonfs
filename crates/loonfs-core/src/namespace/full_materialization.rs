@@ -31,15 +31,13 @@ use thiserror::Error;
 #[serde(rename_all = "snake_case")]
 pub enum FullMaterializationPurpose {
     ForkInitializationTemporary,
-    ChangeFeedTemporary,
     InspectionDebug,
     TestOracle,
 }
 
 impl FullMaterializationPurpose {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 3] = [
         Self::ForkInitializationTemporary,
-        Self::ChangeFeedTemporary,
         Self::InspectionDebug,
         Self::TestOracle,
     ];
@@ -47,7 +45,6 @@ impl FullMaterializationPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ForkInitializationTemporary => "fork_initialization_temporary",
-            Self::ChangeFeedTemporary => "change_feed_temporary",
             Self::InspectionDebug => "inspection_debug",
             Self::TestOracle => "test_oracle",
         }
@@ -818,7 +815,12 @@ mod tests {
             .map(|purpose| purpose.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(names.len(), FullMaterializationPurpose::ALL.len());
-        for forbidden in ["current_head_read", "publish_validation", "normal_write"] {
+        for forbidden in [
+            "change_feed_temporary",
+            "current_head_read",
+            "publish_validation",
+            "normal_write",
+        ] {
             assert!(!names.contains(forbidden));
         }
         for name in names {
@@ -831,12 +833,14 @@ mod tests {
         for (label, source) in [
             ("engine", include_str!("../engine.rs")),
             ("options", include_str!("../options.rs")),
+            ("protocol", include_str!("../protocol.rs")),
             ("publisher", include_str!("../publisher.rs")),
         ] {
             for forbidden in [
                 concat!("ReadOptions::", "full_materialization"),
                 concat!("ReadSource::", "FullMaterialization"),
                 "load_full_namespace_materialization(",
+                concat!("FullMaterializationPurpose::", "ChangeFeedTemporary"),
                 concat!(
                     "FullMaterializationPurpose::",
                     "DirectPathPlanning",
