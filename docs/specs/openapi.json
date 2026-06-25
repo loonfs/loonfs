@@ -16,6 +16,7 @@
           "health"
         ],
         "summary": "Check health",
+        "description": "Returns `ok` when the server is running and can accept requests.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -40,6 +41,7 @@
           "admin"
         ],
         "summary": "Create checkpoint",
+        "description": "Pins the current namespace view with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
         "operationId": "create_checkpoint_handler",
         "parameters": [
           {
@@ -122,6 +124,7 @@
           "admin"
         ],
         "summary": "Advance retention",
+        "description": "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
         "operationId": "advance_retention_handler",
         "parameters": [
           {
@@ -194,6 +197,7 @@
           "config"
         ],
         "summary": "Get config",
+        "description": "Returns a summary of supported features and limits.",
         "operationId": "config_handler",
         "responses": {
           "200": {
@@ -284,6 +288,7 @@
           "namespaces"
         ],
         "summary": "Create namespace",
+        "description": "Creates a new empty namespace.",
         "operationId": "create_namespace",
         "requestBody": {
           "content": {
@@ -355,6 +360,7 @@
           "namespaces"
         ],
         "summary": "Get namespace status",
+        "description": "Returns the current head, manifest, checkpoint, WAL tail, and retention state for a namespace.",
         "operationId": "namespace_status_handler",
         "parameters": [
           {
@@ -425,6 +431,7 @@
           "namespaces"
         ],
         "summary": "Delete namespace",
+        "description": "Marks a namespace as deleted.",
         "operationId": "delete_namespace_handler",
         "parameters": [
           {
@@ -518,6 +525,7 @@
           "commits"
         ],
         "summary": "List changes",
+        "description": "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         "operationId": "list_changes_handler",
         "parameters": [
           {
@@ -610,6 +618,7 @@
           "commits"
         ],
         "summary": "Commit operations",
+        "description": "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this for advanced cases that require inode-specificity, preconditions, or batch transactions.",
         "operationId": "commit_operations_handler",
         "parameters": [
           {
@@ -712,6 +721,7 @@
           "filesystem"
         ],
         "summary": "Read file",
+        "description": "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
         "operationId": "get_content",
         "parameters": [
           {
@@ -807,6 +817,7 @@
           "filesystem"
         ],
         "summary": "List directory",
+        "description": "Lists a directory at the current namespace head.",
         "operationId": "list_entries",
         "parameters": [
           {
@@ -906,6 +917,7 @@
           "filesystem"
         ],
         "summary": "Run filesystem operation",
+        "description": "Runs one path-oriented filesystem mutation, such as create directory, put file, move, copy, delete, or restore revision. The commit id makes retries idempotent.",
         "operationId": "filesystem_operation",
         "parameters": [
           {
@@ -1008,6 +1020,7 @@
           "filesystem"
         ],
         "summary": "List file revisions",
+        "description": "Resolves the current path to a file inode and returns revisions for that file. If the file could be renamed, use the inode revision API for stable identity.",
         "operationId": "list_path_revisions",
         "parameters": [
           {
@@ -1107,6 +1120,7 @@
           "filesystem"
         ],
         "summary": "Stat path",
+        "description": "Returns the current metadata for a path, including inode identity, kind, display name, and file content metadata.",
         "operationId": "stat_entry",
         "parameters": [
           {
@@ -1188,6 +1202,7 @@
           "namespaces"
         ],
         "summary": "Fork namespace",
+        "description": "Creates a new namespace as a fork from the source namespace's current durable view.",
         "operationId": "fork_namespace_handler",
         "parameters": [
           {
@@ -1280,6 +1295,7 @@
           "inodes"
         ],
         "summary": "List inode revisions",
+        "description": "Returns revisions for a file inode, independent of the file's current path or later renames.",
         "operationId": "list_inode_revisions",
         "parameters": [
           {
@@ -1379,6 +1395,7 @@
           "inodes"
         ],
         "summary": "Read inode revision",
+        "description": "Returns bytes for one retained file revision by inode id and revision number.",
         "operationId": "get_inode_revision_content",
         "parameters": [
           {
@@ -1474,6 +1491,7 @@
           "inodes"
         ],
         "summary": "Restore inode revision",
+        "description": "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
         "operationId": "restore_inode_revision",
         "parameters": [
           {
@@ -1584,6 +1602,7 @@
           "uploads"
         ],
         "summary": "Begin upload",
+        "description": "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
         "operationId": "begin_upload_handler",
         "parameters": [
           {
@@ -1676,6 +1695,7 @@
           "uploads"
         ],
         "summary": "Complete upload",
+        "description": "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
         "operationId": "complete_upload_handler",
         "parameters": [
           {
@@ -1777,6 +1797,7 @@
           "uploads"
         ],
         "summary": "Upload content",
+        "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
         "operationId": "upload_content_handler",
         "parameters": [
           {
@@ -2151,6 +2172,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitDeltaCreateInode",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2185,6 +2207,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaBindDirentry",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2227,6 +2250,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaUnbindDirentry",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2275,6 +2299,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaAppendFileRevision",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2313,6 +2338,7 @@
           },
           {
             "type": "object",
+            "title": "CommitDeltaTombstoneSubtree",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -2352,6 +2378,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitOpCreateDir",
             "description": "Create a directory under a parent inode.",
             "required": [
               "parent_inode",
@@ -2375,6 +2402,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpCreateFile",
             "description": "Create a file under a parent inode.",
             "required": [
               "parent_inode",
@@ -2402,6 +2430,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpReplaceFile",
             "description": "Append a new revision to an existing file.",
             "required": [
               "inode_id",
@@ -2429,6 +2458,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpRestoreRevision",
             "description": "Restore a prior revision as a new current revision.",
             "required": [
               "inode_id",
@@ -2456,6 +2486,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpDeleteFile",
             "description": "Delete a file inode.",
             "required": [
               "inode_id",
@@ -2475,6 +2506,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpRename",
             "description": "Rename or move an inode.",
             "required": [
               "inode_id",
@@ -2505,6 +2537,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpDeleteSubtree",
             "description": "Delete a directory subtree.",
             "required": [
               "root_inode",
@@ -2529,6 +2562,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitOpResultCreateDir",
             "required": [
               "op_index",
               "inode_id",
@@ -2553,6 +2587,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultCreateFile",
             "required": [
               "op_index",
               "inode_id",
@@ -2585,6 +2620,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultReplaceFile",
             "required": [
               "op_index",
               "inode_id",
@@ -2617,6 +2653,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultRestoreRevision",
             "required": [
               "op_index",
               "inode_id",
@@ -2653,6 +2690,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultDeleteFile",
             "required": [
               "op_index",
               "inode_id",
@@ -2677,6 +2715,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultRename",
             "required": [
               "op_index",
               "inode_id",
@@ -2701,6 +2740,7 @@
           },
           {
             "type": "object",
+            "title": "CommitOpResultDeleteSubtree",
             "required": [
               "op_index",
               "root_inode",
@@ -2730,6 +2770,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "CommitPreconditionInodeRevisionIs",
             "description": "File inode is still at this revision.",
             "required": [
               "inode_id",
@@ -2753,6 +2794,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionAncestorsNotSubtreeDeleted",
             "description": "Inode ancestors have not been subtree-deleted.",
             "required": [
               "inode_id",
@@ -2772,6 +2814,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionChildNameAbsent",
             "description": "Directory child name is still absent.",
             "required": [
               "parent_inode",
@@ -2795,6 +2838,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionBindingIs",
             "description": "Directory binding is still exactly the binding the caller saw.",
             "required": [
               "parent_inode",
@@ -2832,6 +2876,7 @@
           },
           {
             "type": "object",
+            "title": "CommitPreconditionDirectoryEmpty",
             "description": "Directory is still empty.",
             "required": [
               "inode_id",
@@ -3153,6 +3198,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "FsOpCreateDir",
             "description": "Create one directory.",
             "required": [
               "path",
@@ -3172,6 +3218,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpPutFile",
             "description": "Create or replace one file with an already-durable content ref.",
             "required": [
               "path",
@@ -3199,6 +3246,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpDeletePath",
             "description": "Delete one path.",
             "required": [
               "path",
@@ -3218,6 +3266,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpMovePath",
             "description": "Move one path to another path.",
             "required": [
               "from_path",
@@ -3244,6 +3293,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpCopyPath",
             "description": "Copy one file path to another path.",
             "required": [
               "from_path",
@@ -3267,6 +3317,7 @@
           },
           {
             "type": "object",
+            "title": "FsOpRestoreRevision",
             "description": "Restore an older revision as the current revision for a path.",
             "required": [
               "path",
@@ -3547,6 +3598,7 @@
         "oneOf": [
           {
             "type": "object",
+            "title": "ObjectTransferAccessPresignedUrl",
             "description": "Short-lived URL plus required headers for one object-store write.",
             "required": [
               "method",

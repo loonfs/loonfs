@@ -61,6 +61,10 @@ pub struct BeginUploadRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectTransferAccess {
     /// Short-lived URL plus required headers for one object-store write.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "ObjectTransferAccessPresignedUrl")
+    )]
     PresignedUrl {
         /// HTTP method the client must use.
         method: String,
@@ -168,31 +172,37 @@ pub struct CommitResponse {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOp {
     /// Create a directory under a parent inode.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDir"))]
     CreateDir {
         parent_inode: InodeId,
         display_name: String,
     },
     /// Create a file under a parent inode.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateFile"))]
     CreateFile {
         parent_inode: InodeId,
         display_name: String,
         content_ref: ContentRef,
     },
     /// Append a new revision to an existing file.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpReplaceFile"))]
     ReplaceFile {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
         content_ref: ContentRef,
     },
     /// Restore a prior revision as a new current revision.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpRestoreRevision"))]
     RestoreRevision {
         inode_id: InodeId,
         source_revision_no: RevisionNo,
         base_revision_no: RevisionNo,
     },
     /// Delete a file inode.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteFile"))]
     DeleteFile { inode_id: InodeId },
     /// Rename or move an inode.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpRename"))]
     Rename {
         inode_id: InodeId,
         new_parent_inode: InodeId,
@@ -201,6 +211,7 @@ pub enum CommitOp {
         mode: RenameMode,
     },
     /// Delete a directory subtree.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
     DeleteSubtree { root_inode: InodeId },
 }
 
@@ -210,18 +221,31 @@ pub enum CommitOp {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommitPrecondition {
     /// File inode is still at this revision.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionInodeRevisionIs")
+    )]
     InodeRevisionIs {
         inode_id: InodeId,
         revision_no: RevisionNo,
     },
     /// Inode ancestors have not been subtree-deleted.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionAncestorsNotSubtreeDeleted")
+    )]
     AncestorsNotSubtreeDeleted { inode_id: InodeId },
     /// Directory child name is still absent.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionChildNameAbsent")
+    )]
     ChildNameAbsent {
         parent_inode: InodeId,
         name_key: NameKey,
     },
     /// Directory binding is still exactly the binding the caller saw.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionBindingIs"))]
     BindingIs {
         parent_inode: InodeId,
         name_key: NameKey,
@@ -230,6 +254,10 @@ pub enum CommitPrecondition {
         bind_delta_index: u32,
     },
     /// Directory is still empty.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitPreconditionDirectoryEmpty")
+    )]
     DirectoryEmpty { inode_id: InodeId },
 }
 
@@ -238,22 +266,23 @@ pub enum CommitPrecondition {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOpResult {
-    CreateDir {
-        op_index: u32,
-        inode_id: InodeId,
-    },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateDir"))]
+    CreateDir { op_index: u32, inode_id: InodeId },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateFile"))]
     CreateFile {
         op_index: u32,
         inode_id: InodeId,
         revision_no: RevisionNo,
         content_ref: ContentRef,
     },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultReplaceFile"))]
     ReplaceFile {
         op_index: u32,
         inode_id: InodeId,
         revision_no: RevisionNo,
         content_ref: ContentRef,
     },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultRestoreRevision"))]
     RestoreRevision {
         op_index: u32,
         inode_id: InodeId,
@@ -261,18 +290,12 @@ pub enum CommitOpResult {
         revision_no: RevisionNo,
         content_ref: ContentRef,
     },
-    DeleteFile {
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    Rename {
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    DeleteSubtree {
-        op_index: u32,
-        root_inode: InodeId,
-    },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultDeleteFile"))]
+    DeleteFile { op_index: u32, inode_id: InodeId },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultRename"))]
+    Rename { op_index: u32, inode_id: InodeId },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultDeleteSubtree"))]
+    DeleteSubtree { op_index: u32, root_inode: InodeId },
 }
 
 /// Durable metadata fact exposed through the change feed.
@@ -283,12 +306,14 @@ pub enum CommitOpResult {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "delta", rename_all = "snake_case")]
 pub enum CommitDelta {
+    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaCreateInode"))]
     CreateInode {
         semantic_op_index: u32,
         delta_index: u32,
         inode_id: InodeId,
         inode_kind: InodeKind,
     },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaBindDirentry"))]
     BindDirentry {
         semantic_op_index: u32,
         delta_index: u32,
@@ -297,6 +322,7 @@ pub enum CommitDelta {
         display_name: String,
         child_inode: InodeId,
     },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaUnbindDirentry"))]
     UnbindDirentry {
         semantic_op_index: u32,
         delta_index: u32,
@@ -306,6 +332,7 @@ pub enum CommitDelta {
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
     },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaAppendFileRevision"))]
     AppendFileRevision {
         semantic_op_index: u32,
         delta_index: u32,
@@ -313,6 +340,7 @@ pub enum CommitDelta {
         revision_no: RevisionNo,
         content_ref: ContentRef,
     },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaTombstoneSubtree"))]
     TombstoneSubtree {
         semantic_op_index: u32,
         delta_index: u32,

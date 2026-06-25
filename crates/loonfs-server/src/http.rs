@@ -283,6 +283,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), String> {
         path = "/health",
         tag = "health",
         summary = "Check health",
+        description = "Returns `ok` when the server is running and can accept requests.",
         security(()),
         responses((status = 200, description = "Server health check", body = String))
     )
@@ -298,6 +299,7 @@ async fn health() -> &'static str {
         path = "/v0/config",
         tag = "config",
         summary = "Get config",
+        description = "Returns a summary of supported features and limits.",
         responses(
             (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
             (status = 401, description = "Unauthorized", body = ApiError)
@@ -324,6 +326,7 @@ async fn config_handler(
         path = "/v0/namespaces/{namespace}",
         tag = "namespaces",
         summary = "Delete namespace",
+        description = "Marks a namespace as deleted.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("expected_head_seq" = Option<u64>, Query, description = "Delete only if the namespace head is still at this sequence")
@@ -364,6 +367,7 @@ async fn delete_namespace_handler(
         path = "/v0/namespaces",
         tag = "namespaces",
         summary = "Create namespace",
+        description = "Creates a new empty namespace.",
         request_body = CreateNamespaceRequest,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_api::NamespaceSummary),
@@ -440,6 +444,7 @@ async fn list_namespaces_handler(
         path = "/v0/namespaces/{namespace}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
+        description = "Creates a new namespace as a fork from the source namespace's current durable view.",
         params(("namespace" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
@@ -476,6 +481,7 @@ async fn fork_namespace_handler(
         path = "/v0/namespaces/{namespace}/filesystem/list",
         tag = "filesystem",
         summary = "List directory",
+        description = "Lists a directory at the current namespace head.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
@@ -522,6 +528,7 @@ async fn list_entries(
         path = "/v0/namespaces/{namespace}",
         tag = "namespaces",
         summary = "Get namespace status",
+        description = "Returns the current head, manifest, checkpoint, WAL tail, and retention state for a namespace.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace status", body = loonfs_api::NamespaceStatusResponse),
@@ -561,6 +568,7 @@ async fn namespace_status_handler(
         path = "/v0/namespaces/{namespace}/filesystem/stat",
         tag = "filesystem",
         summary = "Stat path",
+        description = "Returns the current metadata for a path, including inode identity, kind, display name, and file content metadata.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path")
@@ -598,6 +606,7 @@ async fn stat_entry(
         path = "/v0/namespaces/{namespace}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
+        description = "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
@@ -646,6 +655,7 @@ async fn get_content(
         path = "/v0/namespaces/{namespace}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
+        description = "Resolves the current path to a file inode and returns revisions for that file. If the file could be renamed, use the inode revision API for stable identity.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
@@ -692,6 +702,7 @@ async fn list_path_revisions(
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List inode revisions",
+        description = "Returns revisions for a file inode, independent of the file's current path or later renames.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode id"),
@@ -738,6 +749,7 @@ async fn list_inode_revisions(
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read inode revision",
+        description = "Returns bytes for one retained file revision by inode id and revision number.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode id"),
@@ -776,6 +788,7 @@ async fn get_inode_revision_content(
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore",
         tag = "inodes",
         summary = "Restore inode revision",
+        description = "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode id"),
@@ -831,6 +844,7 @@ async fn restore_inode_revision(
         path = "/v0/namespaces/{namespace}/filesystem/operations",
         tag = "filesystem",
         summary = "Run filesystem operation",
+        description = "Runs one path-oriented filesystem mutation, such as create directory, put file, move, copy, delete, or restore revision. The commit id makes retries idempotent.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = FilesystemOperationRequest,
         responses(
@@ -966,6 +980,7 @@ async fn filesystem_operation(
         path = "/v0/namespaces/{namespace}/uploads",
         tag = "uploads",
         summary = "Begin upload",
+        description = "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = BeginUploadRequest,
         responses(
@@ -1124,6 +1139,7 @@ fn current_unix_ms() -> Result<u64, ApiResponseError> {
         path = "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
+        description = "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -1163,6 +1179,7 @@ async fn upload_content_handler(
         path = "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
+        description = "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("upload_id" = String, Path, description = "Upload session id")
@@ -1210,6 +1227,7 @@ async fn complete_upload_handler(
         path = "/v0/namespaces/{namespace}/commits",
         tag = "commits",
         summary = "Commit operations",
+        description = "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this for advanced cases that require inode-specificity, preconditions, or batch transactions.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = ApiCommitRequest,
         responses(
@@ -1246,6 +1264,7 @@ async fn commit_operations_handler(
         path = "/v0/namespaces/{namespace}/changes",
         tag = "commits",
         summary = "List changes",
+        description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("after_seq" = u64, Query, description = "Return committed changes after this sequence"),
@@ -1285,6 +1304,7 @@ async fn list_changes_handler(
         path = "/v0/admin/namespaces/{namespace}/checkpoint",
         tag = "admin",
         summary = "Create checkpoint",
+        description = "Pins the current namespace view with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
@@ -1318,6 +1338,7 @@ async fn create_checkpoint_handler(
         path = "/v0/admin/namespaces/{namespace}/retention/advance",
         tag = "admin",
         summary = "Advance retention",
+        description = "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Retention floor advanced", body = AdvanceRetentionResponse),
