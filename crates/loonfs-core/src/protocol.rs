@@ -22,9 +22,7 @@ use crate::namespace::control::{
     load_namespace_head_control, load_namespace_lease_control,
 };
 use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
-use crate::namespace::full_materialization::{
-    load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
-};
+use crate::namespace::full_materialization::FullMaterializationLoadError;
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::read::CurrentManifestTailView;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
@@ -1323,23 +1321,36 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
 ) -> Result<ChangesResponse, CoreError> {
-    let materialization = load_full_namespace_materialization(
-        store,
-        namespace_id,
-        FullMaterializationPurpose::ChangeFeedTemporary,
-    )
-    .await?;
-    if after_seq < materialization.head.retention_floor_seq {
-        return Err(CoreError::RebootstrapRequired {
-            after_seq,
-            retention_floor_seq: materialization.head.retention_floor_seq,
+    load_namespace_catalog_entry(store, namespace_id).await?;
+    let head = load_namespace_head_control(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::FullMaterialization(FullMaterializationLoadError::LoadHead(error))
+        })?
+        .state;
+    if head.state == NamespaceState::Deleted {
+        return Err(CoreError::NamespaceDeleted {
+            namespace_id: namespace_id.clone(),
         });
     }
-    if after_seq >= materialization.head.seq {
+    if head.current_manifest_id.is_none() {
+        return Err(MetadataViewError::MissingManifest {
+            namespace_id: namespace_id.clone(),
+        }
+        .into());
+    }
+
+    if after_seq < head.retention_floor_seq {
+        return Err(CoreError::RebootstrapRequired {
+            after_seq,
+            retention_floor_seq: head.retention_floor_seq,
+        });
+    }
+    if after_seq >= head.seq {
         return Ok(ChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq,
-            through_seq: materialization.head.seq,
+            through_seq: head.seq,
             next_after_seq: None,
             changes: Vec::new(),
         });
@@ -1349,9 +1360,9 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         store,
         WalChainLoadRequest {
             namespace_id,
-            chain_base_seq: materialization.head.retention_floor_seq,
-            head_seq: materialization.head.seq,
-            visible_tip: materialization.head.visible_wal_tip.clone(),
+            chain_base_seq: head.retention_floor_seq,
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: Some(after_seq),
         },
     )
@@ -1360,7 +1371,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         CoreError::FullMaterialization(FullMaterializationLoadError::WalChainLoad(error))
     })?;
     let mut changes = Vec::with_capacity(limit.as_usize());
-    let mut through_seq = materialization.head.seq;
+    let mut through_seq = head.seq;
     let mut next_after_seq = None;
     'segments: for segment in wal_chain.segments() {
         for record in segment.records() {
@@ -1380,7 +1391,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                 });
                 if changes.len() == limit.as_usize() {
                     through_seq = seq;
-                    if seq < materialization.head.seq {
+                    if seq < head.seq {
                         next_after_seq = Some(seq);
                     }
                     break 'segments;
