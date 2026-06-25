@@ -3,28 +3,28 @@ use super::planner::{plan_path_mutation_against_state, PlannedPathMutation};
 use crate::commit::CommitPlan;
 use crate::error::CoreError;
 use crate::metadata::{MetadataApplyError, MetadataState};
-use crate::namespace::full_materialization::FullNamespaceMaterialization;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
 
-/// Working view of one publish attempt against a full materialization.
+/// Working view of one publish attempt.
 ///
 /// The session owns the batch's evolving head and metadata state: it is
-/// derived from the materialization once per publish attempt, every path mutation is
-/// planned against it, every accepted commit is applied back into it, and it
-/// is discarded after the attempt. Keeping head and state behind one seam guarantees planner reads
-/// always observe the same sequence the indexes are built at.
+/// derived from the loaded publish view once per publish attempt, every path
+/// mutation is planned against it, every accepted commit is applied back into
+/// it, and it is discarded after the attempt. Keeping head and state behind
+/// one seam guarantees planner reads always observe the same sequence the
+/// indexes are built at.
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
     metadata_state: MetadataState,
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(materialization: &FullNamespaceMaterialization) -> Self {
+    pub(crate) fn new(head: &HeadState, metadata_state: &MetadataState) -> Self {
         Self {
-            head: materialization.head.clone(),
-            metadata_state: materialization.metadata_state.clone(),
+            head: head.clone(),
+            metadata_state: metadata_state.clone(),
         }
     }
 

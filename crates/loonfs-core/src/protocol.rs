@@ -22,7 +22,6 @@ use crate::namespace::control::{
 use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::full_materialization::{
     load_full_namespace_materialization, FullMaterializationLoadError, FullMaterializationPurpose,
-    FullNamespaceMaterialization,
 };
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
@@ -59,7 +58,7 @@ use tracing::Instrument;
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PublishBatchAgainstMaterializationResult {
+pub(crate) struct PublishBatchAgainstViewResult {
     pub(crate) results: Vec<Result<ApiCommitResponse, CoreError>>,
     pub(crate) published_records: Vec<WalCommitPayload>,
     pub(crate) resulting_head: Option<HeadState>,
@@ -67,7 +66,7 @@ pub(crate) struct PublishBatchAgainstMaterializationResult {
     pub(crate) can_reuse_loaded_projection: bool,
 }
 
-impl PublishBatchAgainstMaterializationResult {
+impl PublishBatchAgainstViewResult {
     fn new(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
         Self {
             results,
@@ -102,6 +101,18 @@ impl PublishBatchAgainstMaterializationResult {
             can_reuse_loaded_projection: false,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PublishManifestPlusTailView {
+    content_store_id: ContentStoreId,
+    head: HeadState,
+    head_etag: String,
+    lease: loonfs_api::wire::control::LeaseState,
+    // Transitional: publish validation is still synchronous and expects a
+    // MetadataState. Keep this scoped to one publish attempt; do not cache it
+    // as a full namespace materialization.
+    metadata_state: MetadataState,
 }
 
 #[derive(Debug, Clone)]
@@ -595,7 +606,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .collect();
     }
     let publish_tail_options = PublishTailOptions::default();
-    let materialization = match load_publish_validation_materialization(
+    let publish_view = match load_publish_manifest_plus_tail_view(
         store,
         namespace_id,
         None,
@@ -607,26 +618,26 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     ))
     .await
     {
-        Ok((materialization, _projection)) => materialization,
+        Ok((publish_view, _projection)) => publish_view,
         Err(error) => return (0..candidates.len()).map(|_| Err(error.clone())).collect(),
     };
-    publish_namespace_mutations_batch_against_full_materialization(
+    publish_namespace_mutations_batch_against_publish_view(
         store,
         namespace_id,
         &candidates,
         context,
-        &materialization,
+        &publish_view,
     )
     .await
     .results
 }
 
-pub(crate) async fn load_publish_validation_materialization<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_publish_manifest_plus_tail_view<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
-) -> Result<(FullNamespaceMaterialization, PublishTailProjection), CoreError> {
+) -> Result<(PublishManifestPlusTailView, PublishTailProjection), CoreError> {
     let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| {
@@ -700,10 +711,8 @@ pub(crate) async fn load_publish_validation_materialization<S: ObjectStore + ?Si
     ensure_publish_head_etag_still_current(store, namespace_id, &head_etag).await?;
 
     Ok((
-        FullNamespaceMaterialization {
-            namespace_descriptor: catalog_entry.namespace_descriptor,
+        PublishManifestPlusTailView {
             content_store_id: catalog_entry.content_store_id,
-            snapshot_floor_seq: manifest_head.seq,
             head,
             head_etag,
             lease,
@@ -865,25 +874,25 @@ fn append_metadata_rows(target: &mut MetadataState, rows: &MetadataState) {
     }
 }
 
-pub(crate) async fn publish_namespace_mutations_batch_against_full_materialization<
+pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: &[NamespaceMutationCandidate],
     context: &MutationContext,
-    materialization: &FullNamespaceMaterialization,
-) -> PublishBatchAgainstMaterializationResult {
+    view: &PublishManifestPlusTailView,
+) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
-        return PublishBatchAgainstMaterializationResult::new(Vec::new());
+        return PublishBatchAgainstViewResult::new(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-    if materialization.head.namespace_id != *namespace_id {
-        return PublishBatchAgainstMaterializationResult::new(
+    if view.head.namespace_id != *namespace_id {
+        return PublishBatchAgainstViewResult::new(
             (0..candidates.len())
                 .map(|_| {
                     Err(CoreError::Store(
-                        "publish materialization namespace mismatch".to_owned(),
+                        "publish view namespace mismatch".to_owned(),
                     ))
                 })
                 .collect(),
@@ -891,7 +900,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
     }
     let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
         (0..candidates.len()).map(|_| None).collect();
-    let mut session = PublishPlanningSession::new(materialization);
+    let mut session = PublishPlanningSession::new(&view.head, &view.metadata_state);
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut in_batch_requests: HashMap<CommitId, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
@@ -909,7 +918,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
                 let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
                 prepare_candidate_request(
                     namespace_id,
-                    materialization,
+                    view,
                     &session,
                     candidate,
                     context,
@@ -924,7 +933,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
             };
             let validation = CommitValidationContext {
                 head: session.head().clone(),
-                lease: materialization.lease.clone(),
+                lease: view.lease.clone(),
                 now_ms: context.now_ms,
                 metadata_state: session.metadata_state(),
             };
@@ -937,7 +946,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
             };
             if let Err(error) = validate_commit_content_references(
                 store,
-                &materialization.content_store_id,
+                &view.content_store_id,
                 &request,
                 &resolved_restore_content_refs,
                 admissions,
@@ -1015,7 +1024,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
     drop(prepare_span);
 
     if accepted.is_empty() {
-        return PublishBatchAgainstMaterializationResult::new(finish_batch_outcomes_with_aliases(
+        return PublishBatchAgainstViewResult::new(finish_batch_outcomes_with_aliases(
             outcomes, &aliases,
         ));
     }
@@ -1037,7 +1046,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
         let _span = wal_span.enter();
         match prepare_wal_segment(
             namespace_id.clone(),
-            materialization.head.visible_wal_tip.clone(),
+            view.head.visible_wal_tip.clone(),
             &records,
             &context.writer_version,
         ) {
@@ -1057,7 +1066,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
         Ok(wal) => wal,
         Err(error) => {
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
-            return PublishBatchAgainstMaterializationResult::invalidate_projection(
+            return PublishBatchAgainstViewResult::invalidate_projection(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
         }
@@ -1068,18 +1077,14 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
         .expect("non-empty accepted records")
         .prepared
         .plan;
-    let head_publish = prepare_commit_head_publish(
-        &materialization.head,
-        last_plan,
-        &wal,
-        &context.writer_version,
-    );
+    let head_publish =
+        prepare_commit_head_publish(&view.head, last_plan, &wal, &context.writer_version);
     let head_publish = match head_publish {
         Ok(value) => value,
         Err(error) => {
             let error = CoreError::Store(format!("head publish preparation failed: {error:?}"));
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
-            return PublishBatchAgainstMaterializationResult::invalidate_projection(
+            return PublishBatchAgainstViewResult::invalidate_projection(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
         }
@@ -1094,7 +1099,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
     );
     let head_metadata_result = {
         let _span = head_cas_span.enter();
-        publish_commit_head(store, &materialization.head_etag, &head_publish).await
+        publish_commit_head(store, &view.head_etag, &head_publish).await
     };
     head_cas_span.record(
         "result",
@@ -1109,7 +1114,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
         Ok(metadata) => metadata.etag,
         Err(error) => {
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error.into());
-            return PublishBatchAgainstMaterializationResult::invalidate_projection(
+            return PublishBatchAgainstViewResult::invalidate_projection(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
         }
@@ -1125,7 +1130,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
         }));
     }
     let results = finish_batch_outcomes_with_aliases(outcomes, &aliases);
-    PublishBatchAgainstMaterializationResult::published(
+    PublishBatchAgainstViewResult::published(
         results,
         published_records,
         head_publish.resulting_head,
@@ -1136,7 +1141,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_full_materializati
 #[allow(clippy::too_many_arguments)]
 fn prepare_candidate_request(
     namespace_id: &NamespaceId,
-    materialization: &FullNamespaceMaterialization,
+    view: &PublishManifestPlusTailView,
     session: &PublishPlanningSession,
     candidate: &NamespaceMutationCandidate,
     context: &MutationContext,
@@ -1148,7 +1153,7 @@ fn prepare_candidate_request(
     let conversion_context = CommitExecutionContext {
         namespace_id: namespace_id.clone(),
         writer_id: context.writer_id.clone(),
-        writer_fence_token: materialization.head.active_fence_token,
+        writer_fence_token: view.head.active_fence_token,
     };
     match candidate {
         NamespaceMutationCandidate::Commit(request) => {
@@ -1173,7 +1178,7 @@ fn prepare_candidate_request(
             let semantic_identity = SemanticMutationIdentity::CoreCommit(semantic_identity);
             if !record_primary_request_or_complete_idempotent(
                 namespace_id,
-                &materialization.metadata_state,
+                &view.metadata_state,
                 outcomes,
                 in_batch_requests,
                 aliases,
@@ -1207,7 +1212,7 @@ fn prepare_candidate_request(
             let commit_id = intent.commit_id().clone();
             if !record_primary_request_or_complete_idempotent(
                 namespace_id,
-                &materialization.metadata_state,
+                &view.metadata_state,
                 outcomes,
                 in_batch_requests,
                 aliases,
@@ -1572,8 +1577,8 @@ fn commit_response_from_commit_receipt(
 /// revision, ...) it correctly treats as non-retryable, for a precondition
 /// that was never durably true (format.md section 3.1.5).
 ///
-/// Rejections recorded before any acceptance were decided against the
-/// durable materialization alone and stand. Idempotent `Ok` completions replay durable
+/// Rejections recorded before any acceptance were decided against the loaded
+/// durable publish view and stand. Idempotent `Ok` completions replay durable
 /// commit receipts and stand. Alias slots stay unfilled here and inherit
 /// their primary's final outcome.
 fn fail_outcomes_contingent_on_unpublished_batch(

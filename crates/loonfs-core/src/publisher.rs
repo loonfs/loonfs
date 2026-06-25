@@ -7,7 +7,7 @@ use crate::path::write::{
     path_intent_fingerprint_for_path_intent, PathMutationIntent, PathPlanner, PlannedPathMutation,
 };
 use crate::protocol::{
-    load_publish_validation_materialization, PublishTailOptions, PublishTailProjection,
+    load_publish_manifest_plus_tail_view, PublishTailOptions, PublishTailProjection,
 };
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, MutationResult, NamespaceId};
@@ -132,7 +132,7 @@ impl NamespaceCommitEngine {
             };
         }
 
-        let (materialization, projection) = match load_publish_validation_materialization(
+        let (publish_view, projection) = match load_publish_manifest_plus_tail_view(
             store,
             &self.namespace_id,
             self.publish_tail_projection.as_ref(),
@@ -149,15 +149,14 @@ impl NamespaceCommitEngine {
             }
         };
 
-        let published =
-            crate::protocol::publish_namespace_mutations_batch_against_full_materialization(
-                store,
-                &self.namespace_id,
-                &candidates,
-                context,
-                &materialization,
-            )
-            .await;
+        let published = crate::protocol::publish_namespace_mutations_batch_against_publish_view(
+            store,
+            &self.namespace_id,
+            &candidates,
+            context,
+            &publish_view,
+        )
+        .await;
         self.update_publish_tail_projection(projection, &published, tail_options);
         NamespaceCommitEnginePublishResult {
             results: published.results,
@@ -185,7 +184,7 @@ impl NamespaceCommitEngine {
     fn update_publish_tail_projection(
         &mut self,
         mut projection: PublishTailProjection,
-        published: &crate::protocol::PublishBatchAgainstMaterializationResult,
+        published: &crate::protocol::PublishBatchAgainstViewResult,
         tail_options: &PublishTailOptions,
     ) {
         let Some(resulting_head) = published.resulting_head.clone() else {
