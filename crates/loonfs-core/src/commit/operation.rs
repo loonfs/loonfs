@@ -1,4 +1,4 @@
-use loonfs_api::v0::RenameMode;
+use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{ContentRef, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOp {
-    CreateDir {
+    CreateDirectory {
         parent_inode: InodeId,
         display_name: String,
     },
@@ -38,7 +38,7 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
-        mode: RenameMode,
+        behavior: MoveBehavior,
     },
     DeleteSubtree {
         root_inode: InodeId,

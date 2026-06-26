@@ -251,7 +251,12 @@ fn compute_commit_shape_from_head(
     let create_op_count = request
         .ops
         .iter()
-        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
+        .filter(|op| {
+            matches!(
+                op,
+                CommitOp::CreateDirectory { .. } | CommitOp::CreateFile { .. }
+            )
+        })
         .count();
     let allocated_inode_ids = (0..create_op_count)
         .map(|offset| {
@@ -304,7 +309,7 @@ fn validate_metadata_preconditions(
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
         let validated_op = match op {
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode,
                 display_name,
             } => {
@@ -454,10 +459,12 @@ fn validate_metadata_preconditions(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                mode,
+                behavior,
             } => {
-                if *mode != loonfs_api::v0::RenameMode::NoReplace {
-                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode });
+                if *behavior != loonfs_api::v0::MoveBehavior::NoReplace {
+                    return Err(CommitValidationError::UnsupportedMoveBehavior {
+                        behavior: *behavior,
+                    });
                 }
                 let source_binding = resolve_current_binding_for_mutation(
                     &ephemeral_metadata_state,
@@ -558,7 +565,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
         let validated_op = match op {
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode,
                 display_name,
             } => {
@@ -720,10 +727,13 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                mode,
+                behavior,
             } => {
-                if *mode != loonfs_api::v0::RenameMode::NoReplace {
-                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode }.into());
+                if *behavior != loonfs_api::v0::MoveBehavior::NoReplace {
+                    return Err(CommitValidationError::UnsupportedMoveBehavior {
+                        behavior: *behavior,
+                    }
+                    .into());
                 }
                 let source_binding = resolve_publish_current_binding_for_mutation(
                     &metadata_state,

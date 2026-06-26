@@ -2319,7 +2319,7 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "CommitOpCreateDir",
+            "title": "CommitOpCreateDirectory",
             "description": "Create a directory under a parent inode.",
             "required": [
               "parent_inode",
@@ -2333,7 +2333,7 @@
               "op": {
                 "type": "string",
                 "enum": [
-                  "create_dir"
+                  "create_directory"
                 ]
               },
               "parent_inode": {
@@ -2456,11 +2456,11 @@
               "op"
             ],
             "properties": {
+              "behavior": {
+                "$ref": "#/components/schemas/MoveBehavior"
+              },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
-              },
-              "mode": {
-                "$ref": "#/components/schemas/RenameMode"
               },
               "new_display_name": {
                 "type": "string"
@@ -2503,7 +2503,7 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "CommitOpResultCreateDir",
+            "title": "CommitOpResultCreateDirectory",
             "required": [
               "op_index",
               "inode_id",
@@ -2516,7 +2516,7 @@
               "op": {
                 "type": "string",
                 "enum": [
-                  "create_dir"
+                  "create_directory"
                 ]
               },
               "op_index": {
@@ -3073,6 +3073,14 @@
           }
         }
       },
+      "DeleteDirectoryBehavior": {
+        "type": "string",
+        "description": "Directory delete behavior for path-oriented deletes.",
+        "enum": [
+          "non_recursive",
+          "recursive"
+        ]
+      },
       "DeleteNamespaceResponse": {
         "type": "object",
         "description": "Result of deleting a namespace.",
@@ -3139,7 +3147,7 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "FsOpCreateDir",
+            "title": "FsOpCreateDirectory",
             "description": "Create one directory.",
             "required": [
               "path",
@@ -3149,7 +3157,7 @@
               "op": {
                 "type": "string",
                 "enum": [
-                  "create_dir"
+                  "create_directory"
                 ]
               },
               "path": {
@@ -3164,12 +3172,11 @@
             "required": [
               "path",
               "content_ref",
-              "behavior",
               "op"
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/FilesystemPutBehavior"
+                "$ref": "#/components/schemas/PutBehavior"
               },
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef"
@@ -3194,6 +3201,9 @@
               "op"
             ],
             "properties": {
+              "behavior": {
+                "$ref": "#/components/schemas/DeleteDirectoryBehavior"
+              },
               "op": {
                 "type": "string",
                 "enum": [
@@ -3215,11 +3225,11 @@
               "op"
             ],
             "properties": {
+              "behavior": {
+                "$ref": "#/components/schemas/MoveBehavior"
+              },
               "from_path": {
                 "type": "string"
-              },
-              "mode": {
-                "$ref": "#/components/schemas/RenameMode"
               },
               "op": {
                 "type": "string",
@@ -3325,14 +3335,6 @@
             "description": "Namespace that changed."
           }
         }
-      },
-      "FilesystemPutBehavior": {
-        "type": "string",
-        "description": "Put behavior for path-oriented file writes.",
-        "enum": [
-          "create_only",
-          "replace_existing"
-        ]
       },
       "ForkNamespaceRequest": {
         "type": "object",
@@ -3442,6 +3444,15 @@
         "format": "int64",
         "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
         "minimum": 0
+      },
+      "MoveBehavior": {
+        "type": "string",
+        "description": "Move behavior.",
+        "enum": [
+          "no_replace",
+          "replace",
+          "exchange"
+        ]
       },
       "NameKey": {
         "type": "string",
@@ -3560,13 +3571,12 @@
         ],
         "description": "Client-facing direct transfer capability."
       },
-      "RenameMode": {
+      "PutBehavior": {
         "type": "string",
-        "description": "Rename behavior.",
+        "description": "Put behavior for path-oriented file writes.",
         "enum": [
           "no_replace",
-          "replace_existing",
-          "exchange"
+          "replace"
         ]
       },
       "RestoreFileRevisionRequest": {

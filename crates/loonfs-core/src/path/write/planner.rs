@@ -1,4 +1,4 @@
-use super::intent::{PathMutationIntent, PutFileBehavior};
+use super::intent::PathMutationIntent;
 use crate::commit::{
     fingerprint_digest, PathIntentFingerprint, PublishMetadataPreview,
     PATH_INTENT_FINGERPRINT_DOMAIN,
@@ -14,10 +14,10 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest, RenameMode,
+        CommitRequest as ApiCommitRequest, MoveBehavior,
     },
-    AbsolutePath, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo,
+    AbsolutePath, CommitId, ContentRef, DeleteDirectoryBehavior, DisplayName, InodeId, InodeKind,
+    NameKey, NamespaceId, PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
@@ -45,19 +45,19 @@ enum PathFingerprintInput {
     PutFile {
         namespace_id: NamespaceId,
         absolute_path: String,
-        behavior: PutFileBehavior,
+        behavior: PutBehavior,
         content_ref: ContentRef,
     },
     DeletePath {
         namespace_id: NamespaceId,
         absolute_path: String,
-        recursive: bool,
+        behavior: DeleteDirectoryBehavior,
     },
     MovePath {
         namespace_id: NamespaceId,
         from_path: String,
         to_path: String,
-        mode: RenameMode,
+        behavior: MoveBehavior,
     },
     CopyFilePath {
         namespace_id: NamespaceId,
@@ -110,23 +110,23 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
         },
         PathMutationIntent::DeletePath {
             absolute_path,
-            recursive,
+            behavior,
             ..
         } => PathFingerprintInput::DeletePath {
             namespace_id: namespace_id.clone(),
             absolute_path: normalized_path_for_fingerprint(absolute_path)?,
-            recursive: *recursive,
+            behavior: *behavior,
         },
         PathMutationIntent::MovePath {
             from_path,
             to_path,
-            mode,
+            behavior,
             ..
         } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
             from_path: normalized_path_for_fingerprint(from_path)?,
             to_path: normalized_path_for_fingerprint(to_path)?,
-            mode: *mode,
+            behavior: *behavior,
         },
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
@@ -194,15 +194,15 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
         }
         PathMutationIntent::DeletePath {
             absolute_path,
-            recursive,
+            behavior,
             ..
-        } => plan_publish_delete_path(absolute_path, *recursive, &commit_id, &view).await?,
+        } => plan_publish_delete_path(absolute_path, *behavior, &commit_id, &view).await?,
         PathMutationIntent::MovePath {
             from_path,
             to_path,
-            mode,
+            behavior,
             ..
-        } => plan_publish_move_path(from_path, to_path, *mode, &commit_id, &view).await?,
+        } => plan_publish_move_path(from_path, to_path, *behavior, &commit_id, &view).await?,
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
         } => plan_publish_copy_file_path(from_path, to_path, &commit_id, &view).await?,
@@ -348,7 +348,7 @@ async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
     let display_name = final_component(&absolute_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode,
             display_name: display_name.clone(),
         }],
@@ -366,7 +366,7 @@ async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
 async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     content_ref: ContentRef,
-    behavior: PutFileBehavior,
+    behavior: PutBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -387,7 +387,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
 
     match target {
         Ok(existing) => {
-            if behavior == PutFileBehavior::CreateOnly {
+            if behavior == PutBehavior::NoReplace {
                 return Err(CoreError::DestinationExists(
                     absolute_path.as_str().to_owned(),
                 ));
@@ -453,7 +453,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
 
 async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
-    recursive: bool,
+    behavior: DeleteDirectoryBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -462,6 +462,7 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
         .metadata_state
         .resolve_visible_path(&absolute_path, view.head.name_policy, view.head.seq)
         .await?;
+    let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let op = match resolved.inode_kind {
         InodeKind::File => ApiCommitOp::DeleteFile {
             inode_id: resolved.inode_id,
@@ -502,13 +503,13 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
 async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     from_path: &str,
     to_path: &str,
-    mode: RenameMode,
+    behavior: MoveBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    if mode != RenameMode::NoReplace {
+    if behavior != MoveBehavior::NoReplace {
         return Err(CoreError::CommitValidation(
-            crate::commit::CommitValidationError::UnsupportedRenameMode { mode },
+            crate::commit::CommitValidationError::UnsupportedMoveBehavior { behavior },
         ));
     }
     let from_path = parse_mutation_path(from_path)?;
@@ -536,7 +537,7 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
             inode_id: source.inode_id,
             new_parent_inode: target_parent,
             new_display_name: target_name.clone(),
-            mode,
+            behavior,
         }],
         preconditions: vec![
             publish_binding_is_precondition(view, &source).await?,
@@ -703,7 +704,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
             creating_missing_ancestors = true;
         }
 
-        ops.push(ApiCommitOp::CreateDir {
+        ops.push(ApiCommitOp::CreateDirectory {
             parent_inode: current_inode,
             display_name: display_name.as_str().to_owned(),
         });
@@ -917,7 +918,7 @@ mod tests {
             &ApiCommitRequest {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "docs".to_owned(),
                 }],
@@ -945,7 +946,7 @@ mod tests {
 
         assert_eq!(
             planned.commit_request.ops,
-            vec![CommitOp::CreateDir {
+            vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }]
@@ -976,7 +977,7 @@ mod tests {
                 commit_id: CommitId::parse("put-nested").expect("valid commit id"),
                 absolute_path: "/docs/nested/a.txt".to_owned(),
                 content_ref: staged.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         )
         .await;
@@ -984,14 +985,14 @@ mod tests {
         assert_eq!(planned.commit_request.ops.len(), 3);
         assert!(matches!(
             &planned.commit_request.ops[0],
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name,
             } if display_name == "docs"
         ));
         assert!(matches!(
             &planned.commit_request.ops[1],
-            CommitOp::CreateDir { display_name, .. } if display_name == "nested"
+            CommitOp::CreateDirectory { display_name, .. } if display_name == "nested"
         ));
         assert!(matches!(
             &planned.commit_request.ops[2],
@@ -1011,7 +1012,7 @@ mod tests {
             &namespace_id,
             "/docs/a.txt",
             b"hello",
-            PutFileBehavior::CreateOnly,
+            PutBehavior::NoReplace,
             &context,
             Some("seed-file"),
         )
@@ -1025,7 +1026,7 @@ mod tests {
                 commit_id: CommitId::parse("move-file").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
-                mode: RenameMode::NoReplace,
+                behavior: MoveBehavior::NoReplace,
             },
         )
         .await;
@@ -1034,7 +1035,7 @@ mod tests {
             planned.commit_request.ops.as_slice(),
             [CommitOp::Rename {
                 new_display_name,
-                mode: RenameMode::NoReplace,
+                behavior: MoveBehavior::NoReplace,
                 ..
             }] if new_display_name == "b.txt"
         ));
@@ -1110,7 +1111,7 @@ mod tests {
             &namespace_id,
             "/docs/a.txt",
             b"hello",
-            PutFileBehavior::CreateOnly,
+            PutBehavior::NoReplace,
             &context,
             Some("seed-copy-source"),
         )
@@ -1161,7 +1162,7 @@ mod tests {
             &namespace_id,
             "/dead/file.txt",
             b"hello",
-            PutFileBehavior::CreateOnly,
+            PutBehavior::NoReplace,
             &context,
             Some("seed-dead-tree"),
         )
@@ -1186,7 +1187,7 @@ mod tests {
                 commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
                 absolute_path: "/dead/new.txt".to_owned(),
                 content_ref: staged.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         )
         .await

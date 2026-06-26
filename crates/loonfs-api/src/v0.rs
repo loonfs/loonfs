@@ -8,21 +8,18 @@ use std::collections::BTreeMap;
 
 pub type CommitAnnotations = BTreeMap<String, Value>;
 
-/// Rename behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Move behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum RenameMode {
+pub enum MoveBehavior {
     /// Move only if the destination name is absent.
+    #[default]
     NoReplace,
     /// Reserved for a future version.
-    ReplaceExisting,
+    Replace,
     /// Reserved for a future version.
     Exchange,
-}
-
-pub fn default_rename_mode() -> RenameMode {
-    RenameMode::NoReplace
 }
 
 /// Upload transport mode.
@@ -172,8 +169,8 @@ pub struct CommitResponse {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOp {
     /// Create a directory under a parent inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDir"))]
-    CreateDir {
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDirectory"))]
+    CreateDirectory {
         parent_inode: InodeId,
         display_name: String,
     },
@@ -207,8 +204,8 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
-        #[serde(default = "default_rename_mode")]
-        mode: RenameMode,
+        #[serde(default)]
+        behavior: MoveBehavior,
     },
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
@@ -266,8 +263,8 @@ pub enum CommitPrecondition {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOpResult {
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateDir"))]
-    CreateDir { op_index: u32, inode_id: InodeId },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateDirectory"))]
+    CreateDirectory { op_index: u32, inode_id: InodeId },
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateFile"))]
     CreateFile {
         op_index: u32,
@@ -435,8 +432,8 @@ impl CommitPrecondition {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CommitDelta, CommitPrecondition, DirectPutUpload,
-        ObjectTransferAccess, UploadMode,
+        BeginUploadRequest, BeginUploadResponse, CommitDelta, CommitOp, CommitPrecondition,
+        DirectPutUpload, MoveBehavior, ObjectTransferAccess, UploadMode,
     };
     use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NameKey, NamespaceId};
     use std::collections::BTreeMap;
@@ -535,6 +532,46 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&create_inode).expect("serialize create inode"),
             r#"{"delta":"create_inode","semantic_op_index":0,"delta_index":0,"inode_id":2,"inode_kind":"file"}"#
+        );
+    }
+
+    #[test]
+    fn commit_rename_defaults_omitted_behavior_to_no_replace() {
+        assert_eq!(MoveBehavior::default(), MoveBehavior::NoReplace);
+
+        let op: CommitOp = serde_json::from_value(serde_json::json!({
+            "op": "rename",
+            "inode_id": 2,
+            "new_parent_inode": 1,
+            "new_display_name": "renamed.txt"
+        }))
+        .expect("rename defaults behavior");
+
+        assert_eq!(
+            op,
+            CommitOp::Rename {
+                inode_id: InodeId(2),
+                new_parent_inode: InodeId(1),
+                new_display_name: "renamed.txt".to_owned(),
+                behavior: MoveBehavior::NoReplace,
+            }
+        );
+    }
+
+    #[test]
+    fn commit_create_directory_uses_directory_wire_name() {
+        let op = CommitOp::CreateDirectory {
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&op).expect("create directory op json"),
+            serde_json::json!({
+                "op": "create_directory",
+                "parent_inode": 1,
+                "display_name": "docs"
+            })
         );
     }
 }

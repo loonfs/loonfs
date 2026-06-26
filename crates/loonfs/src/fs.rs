@@ -18,7 +18,7 @@ use crate::{
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
     NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
-    RenameMode, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
+    RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
     UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
@@ -780,9 +780,8 @@ impl Fs {
 
     /// Deletes a file or directory path.
     ///
-    /// Deletion is tombstone-first: the commit hides the path (or, with
-    /// `options.recursive`, the subtree) without erasing history. Physical
-    /// reclamation is background garbage collection.
+    /// Deletion is tombstone-first: the commit hides the path without erasing
+    /// history. Physical reclamation is background garbage collection.
     pub async fn delete_path(
         &self,
         namespace_id: &NamespaceId,
@@ -794,14 +793,13 @@ impl Fs {
             PathMutationIntent::DeletePath {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 absolute_path: absolute_path.to_owned(),
-                recursive: options.recursive,
+                behavior: options.behavior,
             },
         )
         .await
     }
 
-    /// Moves a path within the same namespace, never replacing an existing
-    /// destination.
+    /// Moves a path within the same namespace.
     pub async fn move_path(
         &self,
         namespace_id: &NamespaceId,
@@ -815,7 +813,7 @@ impl Fs {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 from_path: from_path.to_owned(),
                 to_path: to_path.to_owned(),
-                mode: RenameMode::NoReplace,
+                behavior: options.behavior,
             },
         )
         .await
@@ -1257,7 +1255,7 @@ fn file_revisions_page_response(
 mod tests {
     use crate::{
         ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, DisplayName, InodeId,
-        NameKey, NamePolicy, RenameMode, RevisionNo,
+        MoveBehavior, NameKey, NamePolicy, RevisionNo,
     };
 
     #[test]
@@ -1280,7 +1278,7 @@ mod tests {
                     inode_id: InodeId(2),
                     new_parent_inode: InodeId(1),
                     new_display_name: "report.txt".to_owned(),
-                    mode: RenameMode::NoReplace,
+                    behavior: MoveBehavior::NoReplace,
                 },
             ],
             message: None,

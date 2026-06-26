@@ -65,7 +65,7 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                     child_inode: *child_inode,
                 },
             );
-            CommitOpResult::CreateDir {
+            CommitOpResult::CreateDirectory {
                 op_index: *op_index,
                 inode_id: *child_inode,
             }

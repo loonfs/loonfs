@@ -1220,7 +1220,7 @@ fn commit_op_result_decoded_bytes(result: &CommitOpResult) -> usize {
             | CommitOpResult::RestoreRevision { content_ref, .. } => {
                 content_ref_decoded_bytes(content_ref)
             }
-            CommitOpResult::CreateDir { .. }
+            CommitOpResult::CreateDirectory { .. }
             | CommitOpResult::DeleteFile { .. }
             | CommitOpResult::Rename { .. }
             | CommitOpResult::DeleteSubtree { .. } => 0,

@@ -32,7 +32,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
-use crate::{MutationContext, PutFileBehavior};
+use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -43,7 +43,9 @@ use loonfs_api::wire::manifest::{
     MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
-use loonfs_api::{validate_checkpoint_id, ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId};
+use loonfs_api::{
+    validate_checkpoint_id, ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, PutBehavior,
+};
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
 use loonfs_objectstore::{
@@ -105,7 +107,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         &namespace_id,
         "/docs/hello.txt",
         b"hello again\n",
-        PutFileBehavior::ReplaceExisting,
+        PutBehavior::Replace,
         &context,
         None,
     )

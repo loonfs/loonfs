@@ -89,7 +89,7 @@ mod tests {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
@@ -181,7 +181,7 @@ mod tests {
         ));
         assert!(matches!(
             materialized.results[0],
-            CommitOpResult::CreateDir { .. }
+            CommitOpResult::CreateDirectory { .. }
         ));
     }
 }

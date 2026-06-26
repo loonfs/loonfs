@@ -479,7 +479,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
             ErrorCode::PathNotFound
         }
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-        CommitValidationError::UnsupportedRenameMode { .. } => ErrorCode::UnsupportedRenameMode,
+        CommitValidationError::UnsupportedMoveBehavior { .. } => ErrorCode::UnsupportedMoveBehavior,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidPath,
         CommitValidationError::StaleWriterFenceToken { .. }
         | CommitValidationError::LeaseHolderMismatch { .. }

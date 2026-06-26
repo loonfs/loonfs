@@ -89,4 +89,3 @@ pub use options::{
     BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
     WriteOptions,
 };
-pub use path::write::PutFileBehavior;

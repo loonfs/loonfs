@@ -19,23 +19,24 @@ use thiserror::Error;
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta,
     CommitOp, CommitOpResult, CommitPrecondition, CommitRequest, CommitResponse, CommittedChange,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
-    RenameMode, UploadContentResponse, UploadMode,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, MoveBehavior,
+    ObjectTransferAccess, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
     ChangeSeq, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse,
-    DeleteNamespaceResponse, DirectoryPageCursor, DisplayName, EffectiveLimit, FileRevision,
-    FileRevisionsPageCursor, FilesystemOperationResponse, InodeId, InodeKind,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult, NameKey,
-    NamePolicy, NamespaceId, NamespaceSummary, Page, PageRequest, PaginationPolicy, RevisionNo,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DirectoryPageCursor, DisplayName,
+    EffectiveLimit, FileRevision, FileRevisionsPageCursor, FilesystemOperationResponse, InodeId,
+    InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult,
+    NameKey, NamePolicy, NamespaceId, NamespaceSummary, Page, PageRequest, PaginationPolicy,
+    PutBehavior, RevisionNo, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapNamespaceError, DeleteNamespaceOptions,
-    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, PutFileBehavior,
+    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind,
 };
 
 /// Server-integration seam: the vocabulary a batching publisher uses to

@@ -4,7 +4,7 @@
 use loonfs_api::{
     v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
     ChangeSeq, CommitId, ContentRef, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior,
+    FilesystemOperationResponse, PutBehavior,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
@@ -86,7 +86,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
 
         assert_wrong_direct_put_bytes_rejected(&harness.client, namespace);
         assert_direct_put_requires_signed_checksum_header(&harness.client, namespace);
-        assert_direct_put_is_create_only(&harness.client, namespace);
+        assert_direct_put_is_no_replace(&harness.client, namespace);
 
         let begin = harness
             .client
@@ -127,7 +127,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
                 operation: FilesystemOperation::PutFile {
                     path: target.absolute_path.clone(),
                     content_ref,
-                    behavior: FilesystemPutBehavior::CreateOnly,
+                    behavior: PutBehavior::NoReplace,
                 },
             },
         );
@@ -191,7 +191,7 @@ fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace:
     );
 }
 
-fn assert_direct_put_is_create_only(client: &Client, namespace: &str) {
+fn assert_direct_put_is_no_replace(client: &Client, namespace: &str) {
     let bytes = b"duplicate direct put bytes\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client

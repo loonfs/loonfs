@@ -19,9 +19,9 @@ use loonfs_api::{
     },
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind, DirectoryPageCursor,
-    EffectiveLimit, FenceToken, InodeId, InodeKind, ManifestId, NameKey, NamespaceId, Page,
-    PageRequest, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+    DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, FenceToken, InodeId, InodeKind,
+    ManifestId, NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo,
 };
 use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
@@ -36,8 +36,8 @@ use loonfs_core::publish::{
 };
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    ForkOptions, MetadataProjectionLoadError, MutationContext, NamespaceEngine, PutFileBehavior,
-    ReadOptions, WriteOptions,
+    ForkOptions, MetadataProjectionLoadError, MutationContext, NamespaceEngine, ReadOptions,
+    WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
@@ -230,10 +230,10 @@ fn create_checkpoint<S: ObjectStore + ?Sized>(
     block_on(namespace_engine(store, namespace_id, context).create_checkpoint())
 }
 
-fn write_options(commit_id: Option<&str>, behavior: PutFileBehavior) -> WriteOptions {
+fn write_options(commit_id: Option<&str>, behavior: PutBehavior) -> WriteOptions {
     WriteOptions {
         commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-        put_file_behavior: behavior,
+        put_behavior: behavior,
         ..WriteOptions::default()
     }
 }
@@ -243,7 +243,7 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
-    behavior: PutFileBehavior,
+    behavior: PutBehavior,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
@@ -267,7 +267,7 @@ fn write_file_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         absolute_path,
         bytes,
-        PutFileBehavior::ReplaceExisting,
+        PutBehavior::Replace,
         context,
         commit_id,
     )
@@ -300,7 +300,7 @@ fn delete_path<S: ObjectStore + ?Sized>(
         absolute_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            recursive_delete: true,
+            delete_behavior: DeleteDirectoryBehavior::Recursive,
             ..WriteOptions::default()
         },
     ))
@@ -317,7 +317,7 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
         absolute_path,
         WriteOptions {
             commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            recursive_delete: false,
+            delete_behavior: DeleteDirectoryBehavior::NonRecursive,
             ..WriteOptions::default()
         },
     ))
@@ -686,7 +686,7 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         ops: vec![
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             },
@@ -1301,7 +1301,7 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("upload-guard-create"),
     )
@@ -1312,7 +1312,7 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         &namespace_id,
         "/docs/hello.txt",
         b"updated",
-        PutFileBehavior::ReplaceExisting,
+        PutBehavior::Replace,
         &context,
         Some("upload-guard-replace"),
     )
@@ -1459,7 +1459,7 @@ async fn path_put_file_uses_checksum_metadata_for_content_validation() {
                 commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
                 absolute_path: "/docs/hello.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         )],
         &context,
@@ -1489,7 +1489,7 @@ async fn path_planning_does_not_validate_content() {
                 commit_id: CommitId::parse("plan-put-content").expect("valid commit id"),
                 absolute_path: "/docs/planned.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         )
         .await
@@ -1523,13 +1523,13 @@ async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
                 commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
                 absolute_path: "/docs/b.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
         ],
         &context,
@@ -1577,7 +1577,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
                 absolute_path: "/docs/admitted.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             admissions: vec![admission],
         }],
@@ -1629,7 +1629,7 @@ async fn expired_content_admission_falls_back_to_durable_validation() {
                 commit_id: CommitId::parse("put-expired-admission").expect("valid commit id"),
                 absolute_path: "/docs/expired.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             admissions: vec![admission],
         }],
@@ -1661,7 +1661,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
             &namespace_id,
             &path,
             bytes.as_bytes(),
-            PutFileBehavior::CreateOnly,
+            PutBehavior::NoReplace,
             &context,
             Some(&commit_id),
         )
@@ -1704,7 +1704,7 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-file"),
     )
@@ -1734,7 +1734,7 @@ async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_o
         &namespace_id,
         "/docs/a.txt",
         b"alpha",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-alpha"),
     )
@@ -1744,7 +1744,7 @@ async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_o
         &namespace_id,
         "/docs/b.txt",
         b"bravo",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-bravo"),
     )
@@ -1754,7 +1754,7 @@ async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_o
         &namespace_id,
         "/dead/leaf.txt",
         b"dead",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-dead"),
     )
@@ -1775,7 +1775,7 @@ async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_o
         &namespace_id,
         "/docs/b.txt",
         b"bravo two",
-        PutFileBehavior::ReplaceExisting,
+        PutBehavior::Replace,
         &context,
         Some("replace-bravo"),
     )
@@ -1795,7 +1795,7 @@ async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_o
         &namespace_id,
         "/docs/wal.txt",
         b"wal",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-wal"),
     )
@@ -1850,7 +1850,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         &namespace_id,
         "/docs/report",
         b"short",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-report"),
     )
@@ -1860,7 +1860,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         &namespace_id,
         "/docs/report-2024",
         b"newer-longer",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-report-2024"),
     )
@@ -1900,7 +1900,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/c-file.txt",
         b"charlie",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-c-file"),
     )
@@ -1910,7 +1910,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/stale.txt",
         b"stale",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-stale"),
     )
@@ -1929,7 +1929,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/dead/leaf.txt",
         b"dead",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-dead"),
     )
@@ -1949,7 +1949,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/d-tail.txt",
         b"delta",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-d-tail"),
     )
@@ -1967,7 +1967,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/tail-dead/leaf.txt",
         b"tail-dead",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-tail-dead"),
     )
@@ -2110,7 +2110,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         &namespace_id,
         "/docs/rev.txt",
         b"one",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("rev-create"),
     )
@@ -2206,7 +2206,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-batch-a").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
@@ -2216,7 +2216,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-batch-b").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
@@ -2364,7 +2364,7 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                     inode_id: file_inode,
                     new_parent_inode: docs_inode,
                     new_display_name: "moved.txt".to_owned(),
-                    mode: loonfs_api::v0::RenameMode::NoReplace,
+                    behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 }],
                 message: None,
                 annotations: None,
@@ -2411,7 +2411,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
         ApiCommitRequest {
             commit_id: CommitId::parse("seed-empty-dir").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDir {
+            ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
@@ -2422,7 +2422,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     )
     .expect("seed docs");
     let docs_inode = match seed.results[0] {
-        loonfs_api::v0::CommitOpResult::CreateDir { inode_id, .. } => inode_id,
+        loonfs_api::v0::CommitOpResult::CreateDirectory { inode_id, .. } => inode_id,
         ref other => panic!("unexpected seed result: {other:?}"),
     };
     let content = store_bytes_as_content(&store, &namespace_id, b"child")
@@ -2489,7 +2489,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
                 commit_id: CommitId::parse("before-delete").expect("valid commit id"),
                 absolute_path: "/keep.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -2524,7 +2524,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
                 commit_id: CommitId::parse("after-delete").expect("valid commit id"),
                 absolute_path: "/late.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -2569,7 +2569,7 @@ async fn fork_clone_survives_source_delete() {
                 commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
                 absolute_path: "/shared.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -2606,7 +2606,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
         absolute_path: "/ack.txt".to_owned(),
         content_ref: content.content_ref.clone(),
-        behavior: PutFileBehavior::CreateOnly,
+        behavior: PutBehavior::NoReplace,
     };
 
     // The CAS landed but its acknowledgment was lost: this must surface as
@@ -2649,7 +2649,7 @@ async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
                 commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
                 absolute_path: "/retry.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -2732,14 +2732,14 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: "/missing.txt".to_owned(),
-                recursive: false,
+                behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
             // Accepted into the batch.
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
             // Rejected only because of the accepted candidate's speculative
             // in-batch create.
@@ -2747,13 +2747,13 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
             // Alias of the materialization-decided rejection.
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: "/missing.txt".to_owned(),
-                recursive: false,
+                behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
         ]
     };
@@ -2820,19 +2820,19 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: "/missing.txt".to_owned(),
-                recursive: false,
+                behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
         ]
     };
@@ -2904,7 +2904,7 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
         &namespace_id,
         "/file.txt",
         b"first contents",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("write-first"),
     )
@@ -2914,7 +2914,7 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
         &namespace_id,
         "/file.txt",
         b"second contents win",
-        PutFileBehavior::ReplaceExisting,
+        PutBehavior::Replace,
         &context,
         Some("write-second"),
     )
@@ -2961,7 +2961,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let request = ApiCommitRequest {
         commit_id: CommitId::parse("req-duplicate").expect("valid commit id"),
         preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
@@ -3011,7 +3011,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let request = ApiCommitRequest {
         commit_id: CommitId::parse("retry-across-writer").expect("valid commit id"),
         preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
@@ -3052,7 +3052,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
@@ -3062,7 +3062,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
@@ -3115,7 +3115,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
         ApiCommitRequest {
             commit_id: CommitId::parse("invalid-create-name").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDir {
+            ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "a/b".to_owned(),
             }],
@@ -3154,7 +3154,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
                 inode_id: file.inode_id,
                 new_parent_inode: InodeId(1),
                 new_display_name: ".".to_owned(),
-                mode: loonfs_api::v0::RenameMode::NoReplace,
+                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }],
             message: None,
             annotations: None,
@@ -3190,7 +3190,7 @@ async fn direct_publisher_path_intents_cover_basic_mutations() {
                 commit_id: CommitId::parse("put-path").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -3206,7 +3206,7 @@ async fn direct_publisher_path_intents_cover_basic_mutations() {
                 commit_id: CommitId::parse("move-path").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
-                mode: loonfs_api::v0::RenameMode::NoReplace,
+                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -3236,7 +3236,7 @@ async fn direct_publisher_path_intents_cover_basic_mutations() {
             PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("delete-path").expect("valid commit id"),
                 absolute_path: "/docs/b.txt".to_owned(),
-                recursive: false,
+                behavior: DeleteDirectoryBehavior::NonRecursive,
             },
             &context,
             PublishOptions::default(),
@@ -3266,7 +3266,7 @@ async fn direct_publisher_uses_durable_path_commit_receipt_index() {
         commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
         absolute_path: "/same//path.txt".to_owned(),
         content_ref: content.content_ref.clone(),
-        behavior: PutFileBehavior::CreateOnly,
+        behavior: PutBehavior::NoReplace,
     };
     let first = publisher
         .submit_path_intent(
@@ -3284,7 +3284,7 @@ async fn direct_publisher_uses_durable_path_commit_receipt_index() {
                 commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
                 absolute_path: "/same/path.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -3299,7 +3299,7 @@ async fn direct_publisher_uses_durable_path_commit_receipt_index() {
             PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
                 absolute_path: "/same/path.txt".to_owned(),
-                recursive: false,
+                behavior: DeleteDirectoryBehavior::NonRecursive,
             },
             &context,
             PublishOptions::default(),
@@ -3337,13 +3337,13 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
-                mode: loonfs_api::v0::RenameMode::NoReplace,
+                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }),
         ],
         &context,
@@ -4342,7 +4342,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 commit_id: commit_id.clone(),
                 absolute_path: "/docs/idempotent.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         )],
         &context,
@@ -4364,7 +4364,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 commit_id,
                 absolute_path: "/docs/idempotent.txt".to_owned(),
                 content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         )],
         &context,
@@ -4592,7 +4592,7 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_rename_mode_is_named_bad_request_failure() {
+async fn unsupported_move_behavior_is_named_bad_request_failure() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -4618,7 +4618,7 @@ async fn unsupported_rename_mode_is_named_bad_request_failure() {
                 inode_id: file.inode_id,
                 new_parent_inode: InodeId(1),
                 new_display_name: "b.txt".to_owned(),
-                mode: loonfs_api::v0::RenameMode::ReplaceExisting,
+                behavior: loonfs_api::v0::MoveBehavior::Replace,
             }],
             message: None,
             annotations: None,
@@ -4626,11 +4626,11 @@ async fn unsupported_rename_mode_is_named_bad_request_failure() {
         &context,
     )
     .expect_err("unsupported rename mode");
-    assert_eq!(error.code(), ErrorCode::UnsupportedRenameMode);
+    assert_eq!(error.code(), ErrorCode::UnsupportedMoveBehavior);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn put_file_create_only_rejects_existing_target_without_force() {
+async fn put_file_no_replace_rejects_existing_target_without_force() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -4650,7 +4650,7 @@ async fn put_file_create_only_rejects_existing_target_without_force() {
         &namespace_id(),
         "/docs/hello.txt",
         b"new-bytes",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("put-no-force"),
     )
@@ -4744,7 +4744,7 @@ async fn resolve_path_uses_nfc_casefold_name_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
+async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -4764,7 +4764,7 @@ async fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
         &namespace_id(),
         "/CAF\u{00c9}.TXT",
         b"new-bytes",
-        PutFileBehavior::CreateOnly,
+        PutBehavior::NoReplace,
         &context,
         Some("create-only-conflict"),
     )

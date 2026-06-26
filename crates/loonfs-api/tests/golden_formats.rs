@@ -227,7 +227,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                 annotations: Some(annotations),
                 deltas,
                 preconditions,
-                results: vec![CommitOpResult::CreateDir {
+                results: vec![CommitOpResult::CreateDirectory {
                     op_index: 0,
                     inode_id: InodeId(7),
                 }],
@@ -279,7 +279,7 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
                 "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
                     .to_owned(),
             committed_seq: ChangeSeq(2),
-            results: vec![CommitOpResult::CreateDir {
+            results: vec![CommitOpResult::CreateDirectory {
                 op_index: 0,
                 inode_id: InodeId(7),
             }],

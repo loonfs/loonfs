@@ -168,7 +168,7 @@ mod tests {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token,
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
@@ -201,7 +201,7 @@ mod tests {
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:571632b55898f3ee1eba2ce0a82dfb499c9cf01f60e0029b79123b96762e8dda"
+            "v0:sha256:5b206ae374cfe7bd855793991416ee93186c89c4c736a7279d7633c1371352c4"
         );
     }
 
@@ -215,7 +215,7 @@ mod tests {
             &loonfs_api::DisplayName::parse("Docs").expect("display name"),
         );
         let v0_ops = vec![
-            api_v0::CommitOp::CreateDir {
+            api_v0::CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "Docs".to_owned(),
             },
@@ -241,7 +241,7 @@ mod tests {
                 inode_id: InodeId(5),
                 new_parent_inode: InodeId(2),
                 new_display_name: "b.txt".to_owned(),
-                mode: api_v0::RenameMode::NoReplace,
+                behavior: api_v0::MoveBehavior::NoReplace,
             },
             api_v0::CommitOp::DeleteSubtree {
                 root_inode: InodeId(9),
@@ -311,7 +311,7 @@ mod tests {
         let baseline =
             core_commit_fingerprint(&core_request(FenceToken(1))).expect("baseline fingerprint");
         let mut changed = core_request(FenceToken(1));
-        changed.ops = vec![CommitOp::CreateDir {
+        changed.ops = vec![CommitOp::CreateDirectory {
             parent_inode: InodeId(1),
             display_name: "drafts".to_owned(),
         }];
@@ -327,7 +327,7 @@ mod tests {
         let api_request = api_v0::CommitRequest {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![api_v0::CommitOp::CreateDir {
+            ops: vec![api_v0::CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],

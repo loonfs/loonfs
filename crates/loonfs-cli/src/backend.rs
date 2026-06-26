@@ -3,13 +3,13 @@ use crate::error::CliError;
 use loonfs::{
     BootstrapNamespaceError, CopyOptions, CoreError, CreateDirOptions, CreateNamespaceOptions,
     DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, Fs, FsConfig,
-    MoveOptions, PutFileBehavior, PutFileOptions, RestoreRevisionOptions, RuntimeCacheConfig,
-    RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{
-    AuthoritativePathEntry, ChangeSeq, CommitId, EffectiveLimit, ListFileRevisionsResponse,
-    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
-    RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CommitId, DeleteDirectoryBehavior, EffectiveLimit,
+    ListFileRevisionsResponse, MoveBehavior, MutationResult, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, PaginationPolicy, PutBehavior, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use std::future::Future;
@@ -354,9 +354,9 @@ impl Backend for EmbeddedBackend {
     ) -> Result<MutationResult, CliError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         let behavior = if force {
-            PutFileBehavior::ReplaceExisting
+            PutBehavior::Replace
         } else {
-            PutFileBehavior::CreateOnly
+            PutBehavior::NoReplace
         };
         let commit_id = generated_commit_id();
         self.block_on_scoped(
@@ -382,7 +382,7 @@ impl Backend for EmbeddedBackend {
                 &namespace_id,
                 &spec.absolute_path,
                 DeleteOptions {
-                    recursive: false,
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
                     commit_id: Some(commit_id),
                 },
             ),
@@ -418,6 +418,7 @@ impl Backend for EmbeddedBackend {
                 &from.absolute_path,
                 &to.absolute_path,
                 MoveOptions {
+                    behavior: MoveBehavior::NoReplace,
                     commit_id: Some(commit_id),
                 },
             ),

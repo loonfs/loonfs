@@ -1,14 +1,6 @@
-use loonfs_api::{v0::RenameMode, CommitId, ContentRef, RevisionNo};
-use serde::{Deserialize, Serialize};
-
-/// Behavior for path-based file put operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PutFileBehavior {
-    /// Create the file only if the target path is absent.
-    CreateOnly,
-    /// Replace an existing file if the target path already exists.
-    ReplaceExisting,
-}
+use loonfs_api::{
+    v0::MoveBehavior, CommitId, ContentRef, DeleteDirectoryBehavior, PutBehavior, RevisionNo,
+};
 
 /// User-facing path mutation before it is planned against namespace state.
 ///
@@ -26,20 +18,20 @@ pub enum PathMutationIntent {
         commit_id: CommitId,
         absolute_path: String,
         content_ref: ContentRef,
-        behavior: PutFileBehavior,
+        behavior: PutBehavior,
     },
     /// Delete one path.
     DeletePath {
         commit_id: CommitId,
         absolute_path: String,
-        recursive: bool,
+        behavior: DeleteDirectoryBehavior,
     },
     /// Move one path to another path.
     MovePath {
         commit_id: CommitId,
         from_path: String,
         to_path: String,
-        mode: RenameMode,
+        behavior: MoveBehavior,
     },
     /// Copy one file path to another path.
     CopyFilePath {

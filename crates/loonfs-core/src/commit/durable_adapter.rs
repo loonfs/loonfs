@@ -99,7 +99,7 @@ mod tests {
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],

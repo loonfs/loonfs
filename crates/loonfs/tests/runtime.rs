@@ -11,7 +11,7 @@ use loonfs::{
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
     DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
-    NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutFileBehavior, PutFileOptions,
+    NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
     UploadContentResponse,
 };
@@ -483,7 +483,7 @@ fn filesystem_operations_match_core_semantics() {
         "/docs/hello.txt",
         b"updated",
         PutFileOptions {
-            behavior: PutFileBehavior::ReplaceExisting,
+            behavior: PutBehavior::Replace,
             commit_id: None,
         },
     )
@@ -947,7 +947,7 @@ fn delete_options_select_recursive_behavior() {
         &namespace_id,
         "/docs",
         DeleteOptions {
-            recursive: true,
+            behavior: loonfs::DeleteDirectoryBehavior::Recursive,
             commit_id: None,
         },
     )
@@ -1026,7 +1026,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         .expect("create namespace");
 
     let replace = PutFileOptions {
-        behavior: PutFileBehavior::ReplaceExisting,
+        behavior: PutBehavior::Replace,
         commit_id: None,
     };
     fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v1", PutFileOptions::default())
@@ -1274,7 +1274,7 @@ fn forked_namespace_shares_content_then_diverges() {
         "/docs/shared.txt",
         b"clone",
         PutFileOptions {
-            behavior: PutFileBehavior::ReplaceExisting,
+            behavior: PutBehavior::Replace,
             commit_id: None,
         },
     )
@@ -1549,7 +1549,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         "/docs/hello.txt",
         b"updated",
         PutFileOptions {
-            behavior: PutFileBehavior::ReplaceExisting,
+            behavior: PutBehavior::Replace,
             commit_id: None,
         },
     )
@@ -1807,7 +1807,7 @@ fn explicit_commit_appears_in_change_feed() {
             CommitRequest {
                 commit_id: commit_id.clone(),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "docs".to_owned(),
                 }],
@@ -2076,7 +2076,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             CommitRequest {
                 commit_id: CommitId::parse("create-a").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "a".to_owned(),
                 }],
@@ -2086,7 +2086,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             CommitRequest {
                 commit_id: CommitId::parse("create-b").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "b".to_owned(),
                 }],
@@ -2118,7 +2118,7 @@ fn maintenance_tick_counts_segments_not_commits() {
         CommitRequest {
             commit_id: CommitId::parse("create-c").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "c".to_owned(),
             }],

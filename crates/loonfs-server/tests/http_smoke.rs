@@ -12,8 +12,8 @@ use loonfs_api::{
         decode_control_object, encode_control_object, ControlObjectKind, LeaseStateEnvelope,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, InodeId, InodeKind, ListPathEntriesResponse, ManifestId, RevisionNo,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, InodeId,
+    InodeKind, ListPathEntriesResponse, ManifestId, MoveBehavior, PutBehavior, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
@@ -426,7 +426,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_put_create_only_and_copy_preserve_cli_semantics() {
+async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -769,7 +769,7 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
             operation: FilesystemOperation::PutFile {
                 path: "/bad-token.txt".to_owned(),
                 content_ref: completed.content_ref,
-                behavior: FilesystemPutBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
             },
         };
         let response = ureq::post(&format!(
@@ -1304,6 +1304,114 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         match harness.client.stat_path(&moved) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
             other => panic!("expected path_not_found for deleted path, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_delete_path_behavior_controls_recursive_delete() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-delete-behavior",
+        "http-delete-behavior",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let child = NamespacePath::parse("demo:/docs/child.txt").expect("child path");
+        harness
+            .client
+            .write_file_bytes(&child, b"child")
+            .expect("write child");
+
+        let dir = NamespacePath::parse("demo:/docs").expect("dir path");
+        let non_recursive = harness
+            .client
+            .delete_path(&dir)
+            .expect_err("non-recursive delete rejects non-empty dir");
+        match non_recursive {
+            ClientError::Api { status, code, .. } => {
+                assert_eq!(status, 409);
+                assert_eq!(code, "directory_not_empty");
+            }
+            other => panic!("expected directory_not_empty, got {other:?}"),
+        }
+
+        harness
+            .client
+            .delete_path_recursive(&dir)
+            .expect("recursive delete succeeds");
+        match harness.client.stat_path(&child) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+            other => panic!("expected path_not_found after recursive delete, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_reserved_move_behaviors_return_named_error() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-move-behavior",
+        "http-move-behavior",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
+        harness
+            .client
+            .write_file_bytes(&source, b"source")
+            .expect("seed source");
+
+        for (commit_id, behavior) in [
+            ("move-replace", MoveBehavior::Replace),
+            ("move-exchange", MoveBehavior::Exchange),
+        ] {
+            let request = FilesystemOperationRequest {
+                commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                content_tokens: Vec::new(),
+                operation: FilesystemOperation::MovePath {
+                    from_path: "/docs/source.txt".to_owned(),
+                    to_path: "/docs/target.txt".to_owned(),
+                    behavior,
+                },
+            };
+            match ureq::post(&format!(
+                "{}/v0/namespaces/demo/filesystem/operations",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .send_json(request)
+            {
+                Err(ureq::Error::Status(status, response)) => {
+                    assert_eq!(status, 400);
+                    let error: ApiError =
+                        serde_json::from_reader(response.into_reader()).expect("decode api error");
+                    assert_eq!(error.code, "unsupported_move_behavior");
+                }
+                other => panic!("expected unsupported_move_behavior, got {other:?}"),
+            }
         }
     })
     .await
