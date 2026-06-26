@@ -9,11 +9,12 @@ use std::collections::BTreeMap;
 pub type CommitAnnotations = BTreeMap<String, Value>;
 
 /// Move behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MoveBehavior {
     /// Move only if the destination name is absent.
+    #[default]
     NoReplace,
     /// Reserved for a future version.
     Replace,
@@ -203,6 +204,7 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
+        #[serde(default)]
         behavior: MoveBehavior,
     },
     /// Delete a directory subtree.
@@ -430,8 +432,8 @@ impl CommitPrecondition {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, CommitDelta, CommitPrecondition, DirectPutUpload,
-        ObjectTransferAccess, UploadMode,
+        BeginUploadRequest, BeginUploadResponse, CommitDelta, CommitOp, CommitPrecondition,
+        DirectPutUpload, MoveBehavior, ObjectTransferAccess, UploadMode,
     };
     use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NameKey, NamespaceId};
     use std::collections::BTreeMap;
@@ -530,6 +532,29 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&create_inode).expect("serialize create inode"),
             r#"{"delta":"create_inode","semantic_op_index":0,"delta_index":0,"inode_id":2,"inode_kind":"file"}"#
+        );
+    }
+
+    #[test]
+    fn commit_rename_defaults_omitted_behavior_to_no_replace() {
+        assert_eq!(MoveBehavior::default(), MoveBehavior::NoReplace);
+
+        let op: CommitOp = serde_json::from_value(serde_json::json!({
+            "op": "rename",
+            "inode_id": 2,
+            "new_parent_inode": 1,
+            "new_display_name": "renamed.txt"
+        }))
+        .expect("rename defaults behavior");
+
+        assert_eq!(
+            op,
+            CommitOp::Rename {
+                inode_id: InodeId(2),
+                new_parent_inode: InodeId(1),
+                new_display_name: "renamed.txt".to_owned(),
+                behavior: MoveBehavior::NoReplace,
+            }
         );
     }
 }

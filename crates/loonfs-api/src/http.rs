@@ -99,22 +99,24 @@ pub struct MutationResult {
 }
 
 /// Put behavior for path-oriented file writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PutBehavior {
     /// Fail if the path already exists.
+    #[default]
     NoReplace,
     /// Replace the current file if it exists.
     Replace,
 }
 
 /// Directory delete behavior for path-oriented deletes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteDirectoryBehavior {
     /// Fail if the target is a non-empty directory.
+    #[default]
     NonRecursive,
     /// Delete a directory subtree.
     Recursive,
@@ -133,12 +135,14 @@ pub enum FilesystemOperation {
     PutFile {
         path: String,
         content_ref: ContentRef,
+        #[serde(default)]
         behavior: PutBehavior,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
     DeletePath {
         path: String,
+        #[serde(default)]
         behavior: DeleteDirectoryBehavior,
     },
     /// Move one path to another path.
@@ -146,6 +150,7 @@ pub enum FilesystemOperation {
     MovePath {
         from_path: String,
         to_path: String,
+        #[serde(default)]
         behavior: MoveBehavior,
     },
     /// Copy one file path to another path.
@@ -275,6 +280,11 @@ mod tests {
 
     #[test]
     fn behavior_enums_use_snake_case_wire_values() {
+        assert_eq!(PutBehavior::default(), PutBehavior::NoReplace);
+        assert_eq!(
+            DeleteDirectoryBehavior::default(),
+            DeleteDirectoryBehavior::NonRecursive
+        );
         assert_eq!(
             serde_json::to_value(PutBehavior::NoReplace).expect("put behavior json"),
             serde_json::json!("no_replace")
@@ -326,6 +336,55 @@ mod tests {
                 "to_path": "/docs/b.txt",
                 "behavior": "no_replace"
             })
+        );
+    }
+
+    #[test]
+    fn filesystem_operations_default_omitted_behavior_fields() {
+        let put: FilesystemOperation = serde_json::from_value(serde_json::json!({
+            "op": "put_file",
+            "path": "/docs/a.txt",
+            "content_ref": {
+                "kind": "whole_file_v0",
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size_bytes": 1
+            }
+        }))
+        .expect("put op defaults behavior");
+        assert!(matches!(
+            put,
+            FilesystemOperation::PutFile {
+                behavior: PutBehavior::NoReplace,
+                ..
+            }
+        ));
+
+        let delete: FilesystemOperation = serde_json::from_value(serde_json::json!({
+            "op": "delete_path",
+            "path": "/docs"
+        }))
+        .expect("delete op defaults behavior");
+        assert_eq!(
+            delete,
+            FilesystemOperation::DeletePath {
+                path: "/docs".to_owned(),
+                behavior: DeleteDirectoryBehavior::NonRecursive,
+            }
+        );
+
+        let move_path: FilesystemOperation = serde_json::from_value(serde_json::json!({
+            "op": "move_path",
+            "from_path": "/docs/a.txt",
+            "to_path": "/docs/b.txt"
+        }))
+        .expect("move op defaults behavior");
+        assert_eq!(
+            move_path,
+            FilesystemOperation::MovePath {
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+                behavior: MoveBehavior::NoReplace,
+            }
         );
     }
 }

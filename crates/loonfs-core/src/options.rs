@@ -111,7 +111,7 @@ impl Default for WriteOptions {
         Self {
             commit_id: None,
             put_behavior: PutBehavior::NoReplace,
-            delete_behavior: DeleteDirectoryBehavior::Recursive,
+            delete_behavior: DeleteDirectoryBehavior::NonRecursive,
         }
     }
 }

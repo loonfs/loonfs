@@ -2453,7 +2453,6 @@
               "inode_id",
               "new_parent_inode",
               "new_display_name",
-              "behavior",
               "op"
             ],
             "properties": {
@@ -3173,7 +3172,6 @@
             "required": [
               "path",
               "content_ref",
-              "behavior",
               "op"
             ],
             "properties": {
@@ -3200,7 +3198,6 @@
             "description": "Delete one path.",
             "required": [
               "path",
-              "behavior",
               "op"
             ],
             "properties": {
@@ -3225,7 +3222,6 @@
             "required": [
               "from_path",
               "to_path",
-              "behavior",
               "op"
             ],
             "properties": {

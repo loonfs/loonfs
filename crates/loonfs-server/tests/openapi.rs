@@ -189,7 +189,7 @@ fn openapi_documents_delete_path_behavior() {
         })
         .expect("FsOpDeletePath oneOf schema");
 
-    assert!(delete_schema
+    assert!(!delete_schema
         .get("required")
         .and_then(Value::as_array)
         .expect("delete required fields")
