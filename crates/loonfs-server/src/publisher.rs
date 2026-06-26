@@ -1211,7 +1211,7 @@ mod tests {
         CommitRequest {
             commit_id: CommitId::try_new(commit_id.into()).expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: display_name.into(),
             }],
@@ -1670,7 +1670,7 @@ mod tests {
         let request_a = CommitRequest {
             commit_id: CommitId::parse("req-a").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "alpha".to_owned(),
             }],
@@ -1680,7 +1680,7 @@ mod tests {
         let request_b = CommitRequest {
             commit_id: CommitId::parse("req-b").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "beta".to_owned(),
             }],
@@ -1730,7 +1730,7 @@ mod tests {
         let explicit = CommitRequest {
             commit_id: CommitId::parse("explicit-commit").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "alpha".to_owned(),
             }],

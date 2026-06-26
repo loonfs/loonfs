@@ -2319,7 +2319,7 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "CommitOpCreateDir",
+            "title": "CommitOpCreateDirectory",
             "description": "Create a directory under a parent inode.",
             "required": [
               "parent_inode",
@@ -2333,7 +2333,7 @@
               "op": {
                 "type": "string",
                 "enum": [
-                  "create_dir"
+                  "create_directory"
                 ]
               },
               "parent_inode": {
@@ -2503,7 +2503,7 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "CommitOpResultCreateDir",
+            "title": "CommitOpResultCreateDirectory",
             "required": [
               "op_index",
               "inode_id",
@@ -2516,7 +2516,7 @@
               "op": {
                 "type": "string",
                 "enum": [
-                  "create_dir"
+                  "create_directory"
                 ]
               },
               "op_index": {
@@ -3147,7 +3147,7 @@
         "oneOf": [
           {
             "type": "object",
-            "title": "FsOpCreateDir",
+            "title": "FsOpCreateDirectory",
             "description": "Create one directory.",
             "required": [
               "path",
@@ -3157,7 +3157,7 @@
               "op": {
                 "type": "string",
                 "enum": [
-                  "create_dir"
+                  "create_directory"
                 ]
               },
               "path": {

@@ -904,7 +904,7 @@ writers.
 
 The first standard lower-level mutation set includes:
 
-- `create_dir(parent_inode_id, display_name)`
+- `create_directory(parent_inode_id, display_name)`
 - `create_file(parent_inode_id, display_name, content_ref)`
 - `replace_file(inode_id, base_revision_no, content_ref)`
 - `rename(inode_id, new_parent_inode_id, new_display_name, behavior = no_replace)`

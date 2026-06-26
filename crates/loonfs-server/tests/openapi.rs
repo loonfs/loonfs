@@ -102,7 +102,7 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "CommitOp",
             &[
-                "CommitOpCreateDir",
+                "CommitOpCreateDirectory",
                 "CommitOpCreateFile",
                 "CommitOpReplaceFile",
                 "CommitOpRestoreRevision",
@@ -124,7 +124,7 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "CommitOpResult",
             &[
-                "CommitOpResultCreateDir",
+                "CommitOpResultCreateDirectory",
                 "CommitOpResultCreateFile",
                 "CommitOpResultReplaceFile",
                 "CommitOpResultRestoreRevision",
@@ -146,7 +146,7 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "FilesystemOperation",
             &[
-                "FsOpCreateDir",
+                "FsOpCreateDirectory",
                 "FsOpPutFile",
                 "FsOpDeletePath",
                 "FsOpMovePath",

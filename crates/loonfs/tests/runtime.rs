@@ -1807,7 +1807,7 @@ fn explicit_commit_appears_in_change_feed() {
             CommitRequest {
                 commit_id: commit_id.clone(),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "docs".to_owned(),
                 }],
@@ -2076,7 +2076,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             CommitRequest {
                 commit_id: CommitId::parse("create-a").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "a".to_owned(),
                 }],
@@ -2086,7 +2086,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             CommitRequest {
                 commit_id: CommitId::parse("create-b").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "b".to_owned(),
                 }],
@@ -2118,7 +2118,7 @@ fn maintenance_tick_counts_segments_not_commits() {
         CommitRequest {
             commit_id: CommitId::parse("create-c").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDir {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "c".to_owned(),
             }],

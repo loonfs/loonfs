@@ -839,7 +839,7 @@ async fn filesystem_operation(
         _ => Vec::new(),
     };
     let intent = match operation {
-        FilesystemOperation::CreateDir { path } => PathMutationIntent::CreateDir {
+        FilesystemOperation::CreateDirectory { path } => PathMutationIntent::CreateDir {
             commit_id,
             absolute_path: path,
         },

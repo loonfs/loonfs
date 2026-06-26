@@ -613,7 +613,7 @@ impl Client {
             &FilesystemOperationRequest {
                 commit_id,
                 content_tokens: Vec::new(),
-                operation: FilesystemOperation::CreateDir {
+                operation: FilesystemOperation::CreateDirectory {
                     path: spec.absolute_path.clone(),
                 },
             },

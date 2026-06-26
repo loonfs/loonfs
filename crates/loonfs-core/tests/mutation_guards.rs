@@ -686,7 +686,7 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         ops: vec![
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             },
@@ -2206,7 +2206,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-batch-a").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
@@ -2216,7 +2216,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-batch-b").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
@@ -2411,7 +2411,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
         ApiCommitRequest {
             commit_id: CommitId::parse("seed-empty-dir").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDir {
+            ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
@@ -2422,7 +2422,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     )
     .expect("seed docs");
     let docs_inode = match seed.results[0] {
-        loonfs_api::v0::CommitOpResult::CreateDir { inode_id, .. } => inode_id,
+        loonfs_api::v0::CommitOpResult::CreateDirectory { inode_id, .. } => inode_id,
         ref other => panic!("unexpected seed result: {other:?}"),
     };
     let content = store_bytes_as_content(&store, &namespace_id, b"child")
@@ -2961,7 +2961,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let request = ApiCommitRequest {
         commit_id: CommitId::parse("req-duplicate").expect("valid commit id"),
         preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
@@ -3011,7 +3011,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let request = ApiCommitRequest {
         commit_id: CommitId::parse("retry-across-writer").expect("valid commit id"),
         preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
@@ -3052,7 +3052,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
@@ -3062,7 +3062,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
@@ -3115,7 +3115,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
         ApiCommitRequest {
             commit_id: CommitId::parse("invalid-create-name").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDir {
+            ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "a/b".to_owned(),
             }],

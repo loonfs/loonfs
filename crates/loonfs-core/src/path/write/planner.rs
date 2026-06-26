@@ -348,7 +348,7 @@ async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
     let display_name = final_component(&absolute_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode,
             display_name: display_name.clone(),
         }],
@@ -704,7 +704,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
             creating_missing_ancestors = true;
         }
 
-        ops.push(ApiCommitOp::CreateDir {
+        ops.push(ApiCommitOp::CreateDirectory {
             parent_inode: current_inode,
             display_name: display_name.as_str().to_owned(),
         });
@@ -918,7 +918,7 @@ mod tests {
             &ApiCommitRequest {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDir {
+                ops: vec![CommitOp::CreateDirectory {
                     parent_inode: InodeId(1),
                     display_name: "docs".to_owned(),
                 }],
@@ -946,7 +946,7 @@ mod tests {
 
         assert_eq!(
             planned.commit_request.ops,
-            vec![CommitOp::CreateDir {
+            vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }]
@@ -985,14 +985,14 @@ mod tests {
         assert_eq!(planned.commit_request.ops.len(), 3);
         assert!(matches!(
             &planned.commit_request.ops[0],
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name,
             } if display_name == "docs"
         ));
         assert!(matches!(
             &planned.commit_request.ops[1],
-            CommitOp::CreateDir { display_name, .. } if display_name == "nested"
+            CommitOp::CreateDirectory { display_name, .. } if display_name == "nested"
         ));
         assert!(matches!(
             &planned.commit_request.ops[2],

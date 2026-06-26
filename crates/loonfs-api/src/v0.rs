@@ -169,8 +169,8 @@ pub struct CommitResponse {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOp {
     /// Create a directory under a parent inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDir"))]
-    CreateDir {
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDirectory"))]
+    CreateDirectory {
         parent_inode: InodeId,
         display_name: String,
     },
@@ -263,8 +263,8 @@ pub enum CommitPrecondition {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOpResult {
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateDir"))]
-    CreateDir { op_index: u32, inode_id: InodeId },
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateDirectory"))]
+    CreateDirectory { op_index: u32, inode_id: InodeId },
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateFile"))]
     CreateFile {
         op_index: u32,
@@ -555,6 +555,23 @@ mod tests {
                 new_display_name: "renamed.txt".to_owned(),
                 behavior: MoveBehavior::NoReplace,
             }
+        );
+    }
+
+    #[test]
+    fn commit_create_directory_uses_directory_wire_name() {
+        let op = CommitOp::CreateDirectory {
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&op).expect("create directory op json"),
+            serde_json::json!({
+                "op": "create_directory",
+                "parent_inode": 1,
+                "display_name": "docs"
+            })
         );
     }
 }

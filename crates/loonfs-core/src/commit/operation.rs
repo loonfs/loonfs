@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CommitOp {
-    CreateDir {
+    CreateDirectory {
         parent_inode: InodeId,
         display_name: String,
     },

@@ -251,7 +251,12 @@ fn compute_commit_shape_from_head(
     let create_op_count = request
         .ops
         .iter()
-        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
+        .filter(|op| {
+            matches!(
+                op,
+                CommitOp::CreateDirectory { .. } | CommitOp::CreateFile { .. }
+            )
+        })
         .count();
     let allocated_inode_ids = (0..create_op_count)
         .map(|offset| {
@@ -304,7 +309,7 @@ fn validate_metadata_preconditions(
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
         let validated_op = match op {
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode,
                 display_name,
             } => {
@@ -560,7 +565,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
         let validated_op = match op {
-            CommitOp::CreateDir {
+            CommitOp::CreateDirectory {
                 parent_inode,
                 display_name,
             } => {

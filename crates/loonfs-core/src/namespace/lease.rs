@@ -418,7 +418,7 @@ mod tests {
         ApiCommitRequest {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDir {
+            ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: display_name.to_owned(),
             }],

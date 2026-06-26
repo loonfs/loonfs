@@ -615,7 +615,7 @@ The same endpoint also accepts path directory creation:
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
   "operation": {
-    "op": "create_dir",
+    "op": "create_directory",
     "path": "/docs"
   }
 }

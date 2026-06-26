@@ -128,8 +128,8 @@ pub enum DeleteDirectoryBehavior {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum FilesystemOperation {
     /// Create one directory.
-    #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDir"))]
-    CreateDir { path: String },
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
+    CreateDirectory { path: String },
     /// Create or replace one file with an already-durable content ref.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpPutFile"))]
     PutFile {
@@ -310,6 +310,17 @@ mod tests {
 
     #[test]
     fn filesystem_delete_and_move_operations_use_behavior_field() {
+        let create_directory = FilesystemOperation::CreateDirectory {
+            path: "/docs".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&create_directory).expect("create directory op json"),
+            serde_json::json!({
+                "op": "create_directory",
+                "path": "/docs"
+            })
+        );
+
         let delete = FilesystemOperation::DeletePath {
             path: "/docs".to_owned(),
             behavior: DeleteDirectoryBehavior::Recursive,
