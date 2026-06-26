@@ -167,17 +167,15 @@ impl NamespaceCommitEngine {
         }
     }
 
-    pub async fn publish_batch_with_tail_limits<S: ObjectStore + ?Sized>(
+    pub async fn publish_batch_with_tail_cache_limits<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: Vec<NamespaceMutationCandidate>,
         context: &MutationContext,
-        max_wal_tail_segments: u64,
         max_tail_rows: usize,
         max_tail_decoded_bytes: Option<usize>,
     ) -> NamespaceCommitEnginePublishResult {
         let options = PublishTailOptions {
-            max_wal_tail_segments,
             max_tail_rows,
             max_tail_decoded_bytes,
         };

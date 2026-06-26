@@ -34,13 +34,11 @@ fn manifest_plus_tail_cache_context<'a>(
     head_etag: &'a str,
     table_cache: &'a Option<Arc<MetadataTableCache>>,
     tail_cache: &'a Option<Arc<WalTailProjectionCache>>,
-    max_wal_tail_segments: u64,
 ) -> crate::path::query::ManifestPlusTailCacheContext<'a> {
     crate::path::query::ManifestPlusTailCacheContext::new(
         Some(head_etag),
         table_cache.as_deref(),
         tail_cache.as_deref(),
-        max_wal_tail_segments,
     )
 }
 
@@ -203,14 +201,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::resolve_path_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -244,14 +237,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::list_path_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -287,14 +275,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::list_path_page_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -332,14 +315,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::read_file_bytes_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -373,14 +351,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::list_file_revisions_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -416,14 +389,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::list_file_revisions_page_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -457,14 +425,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -499,14 +462,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::list_file_revisions_for_inode_page_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -543,14 +501,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::read_file_revision_bytes_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,
@@ -586,14 +539,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             } => {
-                let cache_context = manifest_plus_tail_cache_context(
-                    head_etag.as_str(),
-                    table_cache,
-                    tail_cache,
-                    *max_wal_tail_segments,
-                );
+                let cache_context =
+                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
                 crate::path::query::read_file_revision_bytes_for_inode_from_manifest_plus_tail_at_head_with_cache(
                     &self.store,
                     &self.namespace_id,

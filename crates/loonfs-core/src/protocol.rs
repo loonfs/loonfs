@@ -145,7 +145,6 @@ struct InBatchRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishTailOptions {
-    pub(crate) max_wal_tail_segments: u64,
     pub(crate) max_tail_rows: usize,
     pub(crate) max_tail_decoded_bytes: Option<usize>,
 }
@@ -153,7 +152,6 @@ pub(crate) struct PublishTailOptions {
 impl Default for PublishTailOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: 32,
             max_tail_rows: 1_000_000,
             max_tail_decoded_bytes: Some(256 * 1024 * 1024),
         }
@@ -191,8 +189,7 @@ impl PublishTailProjection {
     }
 
     pub(crate) fn within_limits(&self, options: &PublishTailOptions) -> bool {
-        self.wal_tail_segments <= options.max_wal_tail_segments
-            && self.tail_state.row_count() <= options.max_tail_rows
+        self.tail_state.row_count() <= options.max_tail_rows
             && options
                 .max_tail_decoded_bytes
                 .map(|max| self.tail_state.decoded_bytes() <= max)
@@ -714,7 +711,6 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
             manifest_id,
             &manifest_head,
             manifest_payload_checksum,
-            options,
         )
         .await?
     };
@@ -744,7 +740,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     manifest_id: ManifestId,
     manifest_head: &HeadState,
     manifest_payload_checksum: String,
-    options: &PublishTailOptions,
 ) -> Result<PublishTailProjection, CoreError> {
     let wal_chain = load_validated_wal_chain(
         store,
@@ -761,17 +756,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
     let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
-    if wal_tail_segments > options.max_wal_tail_segments {
-        return Err(MetadataViewError::TailTooLong {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_head_seq: manifest_head.seq,
-            head_seq: head.seq,
-            wal_tail_segments,
-            max_wal_tail_segments: options.max_wal_tail_segments,
-        }
-        .into());
-    }
     let replayed = replay_validated_wal_tail_with_metadata(
         manifest_head,
         &MetadataState::default(),
@@ -791,17 +775,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         wal_tail_segments,
         tail_state: replayed.resulting_metadata_state,
     };
-    if !projection.within_limits(options) {
-        return Err(MetadataViewError::TailTooLong {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_head_seq: manifest_head.seq,
-            head_seq: head.seq,
-            wal_tail_segments,
-            max_wal_tail_segments: options.max_wal_tail_segments,
-        }
-        .into());
-    }
     Ok(projection)
 }
 

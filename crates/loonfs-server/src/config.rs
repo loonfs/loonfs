@@ -32,7 +32,6 @@ pub struct RuntimeCacheConfigOverrides {
     pub max_cached_namespaces: Option<usize>,
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
-    pub max_read_wal_tail_segments: Option<u64>,
     pub metadata_table_cache_enabled: Option<bool>,
     pub metadata_table_cache_max_blocks: Option<usize>,
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
@@ -206,9 +205,6 @@ impl ServerConfig {
             .max_cached_wal_tail_projection_decoded_bytes
         {
             config.max_cached_wal_tail_projection_decoded_bytes = Some(value);
-        }
-        if let Some(value) = self.runtime_cache.max_read_wal_tail_segments {
-            config.max_read_wal_tail_segments = value;
         }
         if let Some(value) = self.runtime_cache.metadata_table_cache_enabled {
             config.metadata_table_cache.enabled = value;
@@ -821,7 +817,6 @@ control_cache_enabled = false
 max_cached_namespaces = 2
 max_cached_wal_tail_projection_rows = 10
 max_cached_wal_tail_projection_decoded_bytes = 4096
-max_read_wal_tail_segments = 4
 
 [store]
 kind = "local-fs"
@@ -840,7 +835,6 @@ root = "/tmp/loonfs-server"
             config.max_cached_wal_tail_projection_decoded_bytes,
             Some(4096)
         );
-        assert_eq!(config.max_read_wal_tail_segments, 4);
     }
 
     #[test]

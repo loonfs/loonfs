@@ -381,7 +381,6 @@ impl Fs {
             head.identity.etag.clone(),
             Some(Arc::clone(&self.inner.metadata_table_cache)),
             tail_cache,
-            cache_config.max_read_wal_tail_segments,
         )
     }
 

@@ -29,14 +29,11 @@ use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 use tracing::Instrument;
 
-const DEFAULT_MAX_READ_WAL_TAIL_SEGMENTS: u64 = 32;
-
 #[derive(Clone, Copy)]
 pub(crate) struct ManifestPlusTailCacheContext<'a> {
     head_etag: Option<&'a str>,
     table_cache: Option<&'a MetadataTableCache>,
     tail_cache: Option<&'a WalTailProjectionCache>,
-    max_wal_tail_segments: u64,
 }
 
 impl<'a> ManifestPlusTailCacheContext<'a> {
@@ -44,13 +41,11 @@ impl<'a> ManifestPlusTailCacheContext<'a> {
         head_etag: Option<&'a str>,
         table_cache: Option<&'a MetadataTableCache>,
         tail_cache: Option<&'a WalTailProjectionCache>,
-        max_wal_tail_segments: u64,
     ) -> Self {
         Self {
             head_etag,
             table_cache,
             tail_cache,
-            max_wal_tail_segments,
         }
     }
 
@@ -59,7 +54,6 @@ impl<'a> ManifestPlusTailCacheContext<'a> {
             head_etag: None,
             table_cache: None,
             tail_cache: None,
-            max_wal_tail_segments: DEFAULT_MAX_READ_WAL_TAIL_SEGMENTS,
         }
     }
 }
@@ -536,18 +530,6 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
         })?;
-        let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
-        if wal_tail_segments > cache_context.max_wal_tail_segments {
-            return Err(MetadataViewError::TailTooLong {
-                namespace_id: namespace_id.clone(),
-                manifest_id,
-                manifest_head_seq: manifest_head.seq,
-                head_seq: head.seq,
-                wal_tail_segments,
-                max_wal_tail_segments: cache_context.max_wal_tail_segments,
-            }
-            .into());
-        }
         let replayed = {
             let _span =
                 tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();

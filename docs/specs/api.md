@@ -206,7 +206,6 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is not yet available; retry. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
-| `metadata_tail_too_long` | 503 | The WAL tail after the current manifest is too long to serve directly; run checkpoint maintenance and retry. |
 | `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
