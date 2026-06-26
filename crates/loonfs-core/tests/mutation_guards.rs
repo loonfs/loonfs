@@ -24,8 +24,8 @@ use loonfs_api::{
     ManifestId, NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo,
 };
 use loonfs_core::commit::{
-    build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
-    CommitValidationError, PreparedCommit,
+    build_commit_plan, materialize_commit, CommitOp, CommitOpResult, CommitRequest,
+    CommitValidationContext, CommitValidationError, PreparedCommit,
 };
 use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
 use loonfs_core::control::load_namespace_head_control;
@@ -662,7 +662,6 @@ async fn stale_revision_precondition_is_rejected() {
         }],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("stale revision");
@@ -703,7 +702,6 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         ],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("late op fails");
@@ -746,7 +744,6 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -772,7 +769,6 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -803,7 +799,6 @@ async fn restore_revision_validation_rejects_missing_inode() {
         }],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("restore missing inode");
@@ -832,7 +827,6 @@ async fn restore_revision_validation_rejects_non_file_target() {
         }],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("restore non-file");
@@ -873,7 +867,6 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -900,7 +893,6 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -947,7 +939,6 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
         ],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
     let plan = build_commit_plan(&request, &context)
         .expect("replace then restore in same request should validate");
@@ -956,7 +947,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let expected = content_ref("content-2");
     assert!(matches!(
         &materialized.results[1],
-        loonfs_api::v0::CommitOpResult::RestoreRevision {
+        CommitOpResult::RestoreRevision {
             content_ref,
             ..
         } if *content_ref == expected
@@ -997,7 +988,6 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         ],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
     let plan = build_commit_plan(&request, &context)
         .expect("restore then restore in same request should validate");
@@ -1006,14 +996,14 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let expected = content_ref("content-1");
     assert!(matches!(
         &materialized.results[0],
-        loonfs_api::v0::CommitOpResult::RestoreRevision {
+        CommitOpResult::RestoreRevision {
             content_ref,
             ..
         } if *content_ref == expected
     ));
     assert!(matches!(
         &materialized.results[1],
-        loonfs_api::v0::CommitOpResult::RestoreRevision {
+        CommitOpResult::RestoreRevision {
             content_ref,
             ..
         } if *content_ref == expected
@@ -1048,7 +1038,6 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -1104,7 +1093,6 @@ async fn restore_revision_overflow_is_rejected() {
         }],
         preconditions: Vec::new(),
         message: None,
-        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("restore overflow");
@@ -2211,7 +2199,6 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
                     display_name: "alpha".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-batch-b").expect("valid commit id"),
@@ -2221,7 +2208,6 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
                     display_name: "beta".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
         ],
         &context,
@@ -2277,7 +2263,6 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         changes.changes[1].commit_id,
         CommitId::parse("req-batch-b").expect("valid commit id")
     );
-    assert_eq!(changes.changes[0].ops, first.results);
     assert_eq!(changes.changes[0].deltas.len(), 2);
     assert!(matches!(
         &changes.changes[0].deltas[0],
@@ -2367,7 +2352,6 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                     behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 }],
                 message: None,
-                annotations: None,
             },
             ApiCommitRequest {
                 commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
@@ -2382,7 +2366,6 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                     inode_id: file_inode,
                 }],
                 message: None,
-                annotations: None,
             },
         ],
         &context,
@@ -2405,7 +2388,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let seed = commit_operations(
+    commit_operations(
         &store,
         &namespace_id,
         ApiCommitRequest {
@@ -2416,15 +2399,13 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
                 display_name: "docs".to_owned(),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
     .expect("seed docs");
-    let docs_inode = match seed.results[0] {
-        loonfs_api::v0::CommitOpResult::CreateDirectory { inode_id, .. } => inode_id,
-        ref other => panic!("unexpected seed result: {other:?}"),
-    };
+    let docs_inode = resolve_path(&store, &namespace_id, "/docs")
+        .expect("resolve seeded directory")
+        .inode_id;
     let content = store_bytes_as_content(&store, &namespace_id, b"child")
         .await
         .expect("stage content");
@@ -2443,7 +2424,6 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
                     content_ref: content.content_ref,
                 }],
                 message: None,
-                annotations: None,
             },
             ApiCommitRequest {
                 commit_id: CommitId::parse("delete-dir-with-stale-empty-check")
@@ -2455,7 +2435,6 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
                     root_inode: docs_inode,
                 }],
                 message: None,
-                annotations: None,
             },
         ],
         &context,
@@ -2966,7 +2945,6 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
             display_name: "alpha".to_owned(),
         }],
         message: None,
-        annotations: None,
     };
 
     let responses = commit_operations_batch(
@@ -3016,7 +2994,6 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
             display_name: "alpha".to_owned(),
         }],
         message: None,
-        annotations: None,
     };
 
     let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
@@ -3057,7 +3034,6 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                     display_name: "alpha".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
             ApiCommitRequest {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
@@ -3067,7 +3043,6 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                     display_name: "beta".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
         ],
         &context,
@@ -3120,7 +3095,6 @@ async fn explicit_commit_rejects_invalid_display_names() {
                 display_name: "a/b".to_owned(),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -3157,7 +3131,6 @@ async fn explicit_commit_rejects_invalid_display_names() {
                 behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4012,7 +3985,7 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
     let first = store_bytes_as_content(&store, &namespace_id(), b"first")
         .await
         .expect("stage first");
-    let create = commit_operations(
+    commit_operations(
         &store,
         &namespace_id(),
         ApiCommitRequest {
@@ -4024,15 +3997,13 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
                 content_ref: first.content_ref.clone(),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
     .expect("create file");
-    let inode_id = match &create.results[0] {
-        loonfs_api::v0::CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
-        other => panic!("unexpected create result: {other:?}"),
-    };
+    let inode_id = resolve_path(&store, &namespace_id(), "/restore.txt")
+        .expect("resolve created file")
+        .inode_id;
 
     let second = store_bytes_as_content(&store, &namespace_id(), b"second")
         .await
@@ -4049,7 +4020,6 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
                 content_ref: second.content_ref,
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4075,7 +4045,6 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
                 base_revision_no: RevisionNo(2),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4116,7 +4085,6 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::DeleteFile { inode_id }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4150,7 +4118,6 @@ async fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
                 content_ref: content_ref("missing-content"),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4194,7 +4161,6 @@ async fn replace_file_prioritizes_missing_durable_content_over_stale_revision() 
                 content_ref: content_ref("missing-content"),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4238,7 +4204,6 @@ async fn restore_revision_missing_source_is_revision_not_found() {
                 base_revision_no: RevisionNo(1),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4256,7 +4221,7 @@ async fn restore_revision_resolves_same_request_source_before_durable_content_va
     let first = store_bytes_as_content(&store, &namespace_id(), b"first")
         .await
         .expect("stage first");
-    let create = commit_operations(
+    commit_operations(
         &store,
         &namespace_id(),
         ApiCommitRequest {
@@ -4269,15 +4234,13 @@ async fn restore_revision_resolves_same_request_source_before_durable_content_va
                 content_ref: first.content_ref.clone(),
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
     .expect("create file");
-    let inode_id = match &create.results[0] {
-        loonfs_api::v0::CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
-        other => panic!("unexpected create result: {other:?}"),
-    };
+    let inode_id = resolve_path(&store, &namespace_id(), "/restore.txt")
+        .expect("resolve created file")
+        .inode_id;
 
     let second = store_bytes_as_content(&store, &namespace_id(), b"second")
         .await
@@ -4310,7 +4273,6 @@ async fn restore_revision_resolves_same_request_source_before_durable_content_va
                 },
             ],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4583,7 +4545,6 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
                 inode_id: file.inode_id,
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )
@@ -4621,7 +4582,6 @@ async fn unsupported_move_behavior_is_named_bad_request_failure() {
                 behavior: loonfs_api::v0::MoveBehavior::Replace,
             }],
             message: None,
-            annotations: None,
         },
         &context,
     )

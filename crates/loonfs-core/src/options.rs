@@ -119,6 +119,6 @@ impl Default for WriteOptions {
 /// Options for explicit commit submission.
 ///
 /// This is currently empty because the commit request carries the important
-/// choices: commit id, preconditions, operations, message, and annotations.
+/// choices: commit id, preconditions, operations, and message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitOptions {}

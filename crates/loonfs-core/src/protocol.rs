@@ -1129,7 +1129,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             namespace_id: namespace_id.clone(),
             commit_id: record.prepared.request.commit_id,
             committed_seq: published_records[accepted_index].seq,
-            results: record.results,
         }));
     }
     let results = finish_batch_outcomes_with_aliases(outcomes, &aliases);
@@ -1379,8 +1378,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                     seq,
                     commit_id: record.commit_id.clone(),
                     message: record.message.clone(),
-                    annotations: record.annotations.clone(),
-                    ops: record.results.clone(),
                     deltas: record
                         .deltas
                         .iter()
@@ -1593,7 +1590,6 @@ fn commit_response_from_commit_receipt(
         namespace_id: namespace_id.clone(),
         commit_id: record.commit_id.clone(),
         committed_seq: record.committed_seq,
-        results: record.results.clone(),
     }
 }
 

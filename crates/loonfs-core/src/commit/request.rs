@@ -1,5 +1,4 @@
 use super::{CommitOp, Precondition};
-use loonfs_api::v0::CommitAnnotations;
 use loonfs_api::{CommitId, FenceToken, NamespaceId};
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +12,4 @@ pub struct CommitRequest {
     pub preconditions: Vec<Precondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<CommitAnnotations>,
 }

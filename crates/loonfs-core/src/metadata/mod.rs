@@ -4,8 +4,8 @@ use crate::invariants::InvariantId;
 use indexes::MetadataIndexes;
 use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
 use loonfs_api::{
-    v0::CommitOpResult, AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
-    NamePolicy, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamePolicy,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -129,7 +129,8 @@ pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
     pub semantic_commit_fingerprint: String,
     pub committed_seq: ChangeSeq,
-    pub results: Vec<CommitOpResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,7 +459,7 @@ impl MetadataState {
             commit_id: record.commit_id.clone(),
             semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
             committed_seq: record.seq,
-            results: record.results.clone(),
+            message: record.message.clone(),
         });
         push_unique_invariant(
             &mut checked_invariants,
@@ -1205,26 +1206,7 @@ fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
     size_of::<CommitReceiptRecord>()
         + record.commit_id.as_str().len()
         + record.semantic_commit_fingerprint.len()
-        + record
-            .results
-            .iter()
-            .map(commit_op_result_decoded_bytes)
-            .sum::<usize>()
-}
-
-fn commit_op_result_decoded_bytes(result: &CommitOpResult) -> usize {
-    size_of::<CommitOpResult>()
-        + match result {
-            CommitOpResult::CreateFile { content_ref, .. }
-            | CommitOpResult::ReplaceFile { content_ref, .. }
-            | CommitOpResult::RestoreRevision { content_ref, .. } => {
-                content_ref_decoded_bytes(content_ref)
-            }
-            CommitOpResult::CreateDirectory { .. }
-            | CommitOpResult::DeleteFile { .. }
-            | CommitOpResult::Rename { .. }
-            | CommitOpResult::DeleteSubtree { .. } => 0,
-        }
+        + record.message.as_ref().map_or(0, String::len)
 }
 
 fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {
@@ -1637,19 +1619,19 @@ mod tests {
                     commit_id: commit_id.clone(),
                     semantic_commit_fingerprint: "old".to_owned(),
                     committed_seq: ChangeSeq(1),
-                    results: Vec::new(),
+                    message: Some("old message".to_owned()),
                 },
                 CommitReceiptRecord {
                     commit_id: CommitId::parse("other-commit").expect("valid commit id"),
                     semantic_commit_fingerprint: "other".to_owned(),
                     committed_seq: ChangeSeq(3),
-                    results: Vec::new(),
+                    message: None,
                 },
                 CommitReceiptRecord {
                     commit_id: commit_id.clone(),
                     semantic_commit_fingerprint: "new".to_owned(),
                     committed_seq: ChangeSeq(2),
-                    results: Vec::new(),
+                    message: Some("new message".to_owned()),
                 },
             ],
         );
@@ -1701,12 +1683,7 @@ mod tests {
             commit_id: commit_id.clone(),
             semantic_commit_fingerprint: "fingerprint".to_owned(),
             committed_seq: ChangeSeq(3),
-            results: vec![CommitOpResult::ReplaceFile {
-                op_index: 0,
-                inode_id: InodeId(7),
-                revision_no: RevisionNo(2),
-                content_ref: replacement_ref.clone(),
-            }],
+            message: Some("replace indexed file".to_owned()),
         });
         let metadata_state = builder.finish();
 

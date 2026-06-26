@@ -94,7 +94,6 @@ pub fn core_commit_fingerprint(
         &request.preconditions,
         &request.ops,
         &request.message,
-        &request.annotations,
     )
 }
 
@@ -114,13 +113,7 @@ pub fn core_commit_fingerprint_for_v0_request(
         .cloned()
         .map(commit_op_from_v0)
         .collect::<Vec<_>>();
-    core_commit_fingerprint_from_parts(
-        namespace_id,
-        &preconditions,
-        &ops,
-        &request.message,
-        &request.annotations,
-    )
+    core_commit_fingerprint_from_parts(namespace_id, &preconditions, &ops, &request.message)
 }
 
 fn core_commit_fingerprint_from_parts(
@@ -128,7 +121,6 @@ fn core_commit_fingerprint_from_parts(
     preconditions: &[Precondition],
     ops: &[CommitOp],
     message: &Option<String>,
-    annotations: &Option<api_v0::CommitAnnotations>,
 ) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
     // This struct's compact JSON is the v0 fingerprint preimage (format
     // spec, "Commit identity fingerprints"): field order, field names, and
@@ -141,7 +133,6 @@ fn core_commit_fingerprint_from_parts(
         preconditions: &'a [Precondition],
         ops: &'a [CommitOp],
         message: &'a Option<String>,
-        annotations: &'a Option<api_v0::CommitAnnotations>,
     }
 
     fingerprint_digest(&CanonicalCoreCommit {
@@ -150,7 +141,6 @@ fn core_commit_fingerprint_from_parts(
         preconditions,
         ops,
         message,
-        annotations,
     })
     .map(CoreCommitFingerprint::new_unchecked)
     .map_err(|err| CommitFingerprintError::Codec(err.to_string()))
@@ -174,7 +164,6 @@ mod tests {
             }],
             preconditions: Vec::new(),
             message: Some("create docs".to_owned()),
-            annotations: None,
         }
     }
 
@@ -201,7 +190,7 @@ mod tests {
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:5b206ae374cfe7bd855793991416ee93186c89c4c736a7279d7633c1371352c4"
+            "v0:sha256:99748ecdf47502f2be08817699c571d4cd69ecabd6827fb66c9e2f587384a841"
         );
     }
 
@@ -332,7 +321,6 @@ mod tests {
                 display_name: "docs".to_owned(),
             }],
             message: Some("create docs".to_owned()),
-            annotations: None,
         };
         let core = super::super::commit_request_from_v0(
             super::super::CommitExecutionContext {

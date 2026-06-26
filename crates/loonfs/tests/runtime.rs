@@ -1812,7 +1812,6 @@ fn explicit_commit_appears_in_change_feed() {
                     display_name: "docs".to_owned(),
                 }],
                 message: Some("create docs".to_owned()),
-                annotations: None,
             },
         )
         .expect("commit operation");
@@ -2081,7 +2080,6 @@ fn maintenance_tick_counts_segments_not_commits() {
                     display_name: "a".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
             CommitRequest {
                 commit_id: CommitId::parse("create-b").expect("valid commit id"),
@@ -2091,7 +2089,6 @@ fn maintenance_tick_counts_segments_not_commits() {
                     display_name: "b".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
         ],
     );
@@ -2123,7 +2120,6 @@ fn maintenance_tick_counts_segments_not_commits() {
                 display_name: "c".to_owned(),
             }],
             message: None,
-            annotations: None,
         },
     )
     .expect("second segment commit");

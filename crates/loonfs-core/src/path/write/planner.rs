@@ -359,7 +359,6 @@ async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
             },
         ],
         message: None,
-        annotations: None,
     })
 }
 
@@ -447,7 +446,6 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
         ops,
         preconditions,
         message: None,
-        annotations: None,
     })
 }
 
@@ -496,7 +494,6 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
         ops: vec![op],
         preconditions,
         message: None,
-        annotations: None,
     })
 }
 
@@ -550,7 +547,6 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
             },
         ],
         message: None,
-        annotations: None,
     })
 }
 
@@ -616,7 +612,6 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
             },
         ],
         message: None,
-        annotations: None,
     })
 }
 
@@ -662,7 +657,6 @@ async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
             },
         ],
         message: None,
-        annotations: None,
     })
 }
 
@@ -923,7 +917,6 @@ mod tests {
                     display_name: "docs".to_owned(),
                 }],
                 message: None,
-                annotations: None,
             },
         )
         .expect("core fingerprint");

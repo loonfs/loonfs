@@ -103,12 +103,12 @@ pub(super) fn commit_receipt_from_manifest_row(row: MetadataRow) -> Option<Commi
             commit_id,
             semantic_commit_fingerprint,
             committed_seq,
-            results,
+            message,
         } => Some(CommitReceiptRecord {
             commit_id,
             semantic_commit_fingerprint,
             committed_seq,
-            results,
+            message,
         }),
         _ => None,
     }

@@ -423,7 +423,6 @@ mod tests {
                 display_name: display_name.to_owned(),
             }],
             message: None,
-            annotations: None,
         }
     }
 

@@ -2309,7 +2309,7 @@
             }
           }
         ],
-        "description": "Durable metadata fact exposed through the change feed.\n\nMost clients should use semantic operation results. Sync and projection\nclients can apply deltas directly."
+        "description": "Durable metadata fact exposed through the change feed.\n\nSync and projection clients can apply deltas directly."
       },
       "CommitId": {
         "type": "string",
@@ -2499,214 +2499,6 @@
         ],
         "description": "Semantic operation inside a commit request."
       },
-      "CommitOpResult": {
-        "oneOf": [
-          {
-            "type": "object",
-            "title": "CommitOpResultCreateDirectory",
-            "required": [
-              "op_index",
-              "inode_id",
-              "op"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
-                "type": "string",
-                "enum": [
-                  "create_directory"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpResultCreateFile",
-            "required": [
-              "op_index",
-              "inode_id",
-              "revision_no",
-              "content_ref",
-              "op"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
-                "type": "string",
-                "enum": [
-                  "create_file"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpResultReplaceFile",
-            "required": [
-              "op_index",
-              "inode_id",
-              "revision_no",
-              "content_ref",
-              "op"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
-                "type": "string",
-                "enum": [
-                  "replace_file"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpResultRestoreRevision",
-            "required": [
-              "op_index",
-              "inode_id",
-              "source_revision_no",
-              "revision_no",
-              "content_ref",
-              "op"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
-                "type": "string",
-                "enum": [
-                  "restore_revision"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
-              },
-              "source_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpResultDeleteFile",
-            "required": [
-              "op_index",
-              "inode_id",
-              "op"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
-                "type": "string",
-                "enum": [
-                  "delete_file"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpResultRename",
-            "required": [
-              "op_index",
-              "inode_id",
-              "op"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
-                "type": "string",
-                "enum": [
-                  "rename"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpResultDeleteSubtree",
-            "required": [
-              "op_index",
-              "root_inode",
-              "op"
-            ],
-            "properties": {
-              "op": {
-                "type": "string",
-                "enum": [
-                  "delete_subtree"
-                ]
-              },
-              "op_index": {
-                "type": "integer",
-                "format": "int32",
-                "minimum": 0
-              },
-              "root_inode": {
-                "$ref": "#/components/schemas/InodeId"
-              }
-            }
-          }
-        ],
-        "description": "Per-operation result returned after a commit succeeds."
-      },
       "CommitPrecondition": {
         "oneOf": [
           {
@@ -2846,10 +2638,6 @@
           "ops"
         ],
         "properties": {
-          "annotations": {
-            "type": "object",
-            "description": "Optional structured metadata."
-          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Client idempotency key for this logical commit."
@@ -2883,8 +2671,7 @@
         "required": [
           "namespace_id",
           "commit_id",
-          "committed_seq",
-          "results"
+          "committed_seq"
         ],
         "properties": {
           "commit_id": {
@@ -2895,12 +2682,6 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId"
-          },
-          "results": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CommitOpResult"
-            }
           }
         }
       },
@@ -2910,13 +2691,9 @@
         "required": [
           "seq",
           "commit_id",
-          "ops",
           "deltas"
         ],
         "properties": {
-          "annotations": {
-            "type": "object"
-          },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Client idempotency key for this logical commit."
@@ -2933,13 +2710,6 @@
               "string",
               "null"
             ]
-          },
-          "ops": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CommitOpResult"
-            },
-            "description": "Semantic operation results."
           },
           "seq": {
             "$ref": "#/components/schemas/ChangeSeq",

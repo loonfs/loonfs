@@ -4,8 +4,8 @@
 use bytes::Bytes;
 use loonfs_api::{
     v0::{
-        CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
-        CommitRequest as ApiCommitRequest, CompleteUploadRequest, ValidatedContentToken,
+        CommitDelta, CommitOp, CommitRequest as ApiCommitRequest, CompleteUploadRequest,
+        ValidatedContentToken,
     },
     validate_checkpoint_id,
     wire::control::{
@@ -21,7 +21,6 @@ use loonfs_objectstore::keys::{namespace_lease, namespace_manifest};
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::thread;
@@ -634,9 +633,6 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let content_ref = stage_uploaded_content_ref(&harness.client, namespace, file_bytes);
 
-        let mut annotations = CommitAnnotations::new();
-        annotations.insert("source".to_owned(), json!("http-smoke"));
-        annotations.insert("kind".to_owned(), json!("service-proxied"));
         let commit_request = ApiCommitRequest {
             commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
             preconditions: Vec::new(),
@@ -646,7 +642,6 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 content_ref: content_ref.clone(),
             }],
             message: Some("upload over http".to_owned()),
-            annotations: Some(annotations.clone()),
         };
         let commit = harness
             .client
@@ -657,15 +652,6 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             CommitId::parse("req-phase-2a-create-file").expect("valid commit id")
         );
         assert_eq!(commit.committed_seq, ChangeSeq(1));
-        assert_eq!(
-            commit.results,
-            vec![CommitOpResult::CreateFile {
-                op_index: 0,
-                inode_id: InodeId(2),
-                revision_no: loonfs_api::RevisionNo(1),
-                content_ref: content_ref.clone(),
-            }]
-        );
 
         let repeated_commit = harness
             .client
@@ -698,8 +684,6 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         assert_eq!(change.commit_id, commit.commit_id);
         assert_eq!(change.commit_id, commit_request.commit_id);
         assert_eq!(change.message.as_deref(), Some("upload over http"));
-        assert_eq!(change.annotations, Some(annotations));
-        assert_eq!(change.ops, commit.results);
         assert_eq!(change.deltas.len(), 3);
         assert!(matches!(
             &change.deltas[1],
@@ -816,7 +800,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let first_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"first bytes\n");
-        let create = harness
+        harness
             .client
             .commit_operations(
                 namespace,
@@ -829,14 +813,14 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                         content_ref: first_content_ref.clone(),
                     }],
                     message: None,
-                    annotations: None,
                 },
             )
             .expect("create file");
-        let inode_id = match &create.results[0] {
-            CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
-            other => panic!("unexpected create result: {other:?}"),
-        };
+        let inode_id = harness
+            .client
+            .stat_path(&target)
+            .expect("stat created file")
+            .inode_id;
 
         let second_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"second bytes\n");
@@ -853,7 +837,6 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                         content_ref: second_content_ref.clone(),
                     }],
                     message: None,
-                    annotations: None,
                 },
             )
             .expect("replace file");
@@ -872,21 +855,10 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                         base_revision_no: RevisionNo(2),
                     }],
                     message: Some("restore revision".to_owned()),
-                    annotations: None,
                 },
             )
             .expect("restore revision");
         assert_eq!(restore.committed_seq, ChangeSeq(3));
-        assert_eq!(
-            restore.results,
-            vec![CommitOpResult::RestoreRevision {
-                op_index: 0,
-                inode_id,
-                source_revision_no: RevisionNo(1),
-                revision_no: RevisionNo(3),
-                content_ref: first_content_ref.clone(),
-            }]
-        );
 
         let entry = harness
             .client
@@ -909,7 +881,18 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             changes.changes[2].commit_id,
             CommitId::parse("req-restore-restore").expect("valid commit id")
         );
-        assert_eq!(changes.changes[2].ops, restore.results);
+        assert!(matches!(
+            &changes.changes[2].deltas[0],
+            CommitDelta::AppendFileRevision {
+                semantic_op_index: 0,
+                inode_id: delta_inode,
+                revision_no,
+                content_ref,
+                ..
+            } if *delta_inode == inode_id
+                && *revision_no == RevisionNo(3)
+                && content_ref == &first_content_ref
+        ));
 
         let first_page = harness
             .client
@@ -1062,10 +1045,11 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .client
             .create_namespace(namespace)
             .expect("create namespace");
+        let target = NamespacePath::parse("demo:/restore.txt").expect("target");
 
         let first_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"first bytes\n");
-        let create = harness
+        harness
             .client
             .commit_operations(
                 namespace,
@@ -1079,14 +1063,14 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                         content_ref: first_content_ref,
                     }],
                     message: None,
-                    annotations: None,
                 },
             )
             .expect("create file");
-        let inode_id = match &create.results[0] {
-            CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
-            other => panic!("unexpected create result: {other:?}"),
-        };
+        let inode_id = harness
+            .client
+            .stat_path(&target)
+            .expect("stat created file")
+            .inode_id;
 
         match harness.client.commit_operations(
             namespace,
@@ -1100,7 +1084,6 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                     base_revision_no: RevisionNo(1),
                 }],
                 message: None,
-                annotations: None,
             },
         ) {
             Err(ClientError::Api { status, code, .. }) => {
@@ -1145,7 +1128,6 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 content_ref: first_content_ref,
             }],
             message: Some("first commit".to_owned()),
-            annotations: None,
         };
         harness
             .client
@@ -1154,8 +1136,6 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
 
         let second_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"second payload\n");
-        let mut changed_annotations = BTreeMap::new();
-        changed_annotations.insert("source".to_owned(), json!("changed"));
         let conflicting_request = ApiCommitRequest {
             commit_id: first_request.commit_id.clone(),
             preconditions: first_request.preconditions.clone(),
@@ -1165,7 +1145,6 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 content_ref: second_content_ref,
             }],
             message: Some("second commit".to_owned()),
-            annotations: Some(changed_annotations),
         };
 
         match harness

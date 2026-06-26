@@ -82,7 +82,7 @@ pub(super) fn manifest_rows_for_family(
                 commit_id: record.commit_id.clone(),
                 semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.committed_seq,
-                results: record.results.clone(),
+                message: record.message.clone(),
             })
             .collect::<Vec<_>>(),
     };
