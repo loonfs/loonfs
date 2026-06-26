@@ -25,7 +25,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_sst, namespace_manifest};
 use loonfs_objectstore::ObjectStore;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 use tracing::Instrument;
 
@@ -278,6 +278,8 @@ where
     let ordered_tables = ordered_manifest_tables(context.manifest_object_key, tables)?;
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
+    let mut revision_rows = Vec::new();
+    let mut revision_by_inode_desc_rows = Vec::new();
     for table in ordered_tables {
         let mut descriptors = Vec::with_capacity(table.segments.len());
         for descriptor in &table.segments {
@@ -310,6 +312,12 @@ where
                 MetadataTableFamily::DirentryChildBinds => {
                     direntry_child_bind_rows.extend(rows.iter().cloned());
                 }
+                MetadataTableFamily::Revisions => {
+                    revision_rows.extend(rows.iter().cloned());
+                }
+                MetadataTableFamily::RevisionsByInodeDesc => {
+                    revision_by_inode_desc_rows.extend(rows.iter().cloned());
+                }
                 _ => {}
             }
             append_rows_to_metadata(metadata_state, table.family, &descriptor.object_key, &rows)?;
@@ -320,6 +328,11 @@ where
         context.manifest_object_key,
         direntry_bind_rows,
         direntry_child_bind_rows,
+    )?;
+    validate_revision_by_inode_desc_index(
+        context.manifest_object_key,
+        revision_rows,
+        revision_by_inode_desc_rows,
     )
 }
 
@@ -627,4 +640,55 @@ pub(super) fn validate_direntry_child_bind_index(
     }
 
     Ok(())
+}
+
+pub(super) fn validate_revision_by_inode_desc_index(
+    object_key: &str,
+    mut revision_rows: Vec<MetadataRow>,
+    mut revision_by_inode_desc_rows: Vec<MetadataRow>,
+) -> Result<(), ManifestLoadError> {
+    validate_revision_rows_have_unique_keys(
+        object_key,
+        MetadataTableFamily::Revisions,
+        &revision_rows,
+    )?;
+    validate_revision_rows_have_unique_keys(
+        object_key,
+        MetadataTableFamily::RevisionsByInodeDesc,
+        &revision_by_inode_desc_rows,
+    )?;
+
+    revision_rows.sort_by_key(revision_logical_key);
+    revision_by_inode_desc_rows.sort_by_key(revision_logical_key);
+
+    if revision_rows != revision_by_inode_desc_rows {
+        return Err(ManifestLoadError::RevisionIndexMismatch {
+            object_key: object_key.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_revision_rows_have_unique_keys(
+    object_key: &str,
+    family: MetadataTableFamily,
+    rows: &[MetadataRow],
+) -> Result<(), ManifestLoadError> {
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let row_key = revision_logical_key(row);
+        if !seen.insert(row_key.clone()) {
+            return Err(ManifestLoadError::DuplicateRevisionRow {
+                object_key: object_key.to_owned(),
+                family,
+                row_key,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn revision_logical_key(row: &MetadataRow) -> String {
+    row.row_key_for_family(MetadataTableFamily::Revisions)
 }

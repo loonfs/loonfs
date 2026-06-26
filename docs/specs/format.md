@@ -1183,6 +1183,12 @@ The namespace manifest may reference one or more immutable metadata runs. Runs
 are not a second source of truth; they are rebuildable metadata rows used to
 keep normal basis reconstruction from replaying an unbounded WAL tail.
 
+For file revisions, a valid manifest includes the canonical `revisions` table
+and the `revisions_by_inode_desc` index table. The index table must contain
+exactly the same revision rows as the canonical table, keyed for newest-first
+inode revision scans. Readers treat a missing, extra, duplicate, or changed
+revision index row as namespace corruption.
+
 ### 6.2 Compaction
 
 Compaction rewrites metadata runs (and, in the future, content layouts) into
