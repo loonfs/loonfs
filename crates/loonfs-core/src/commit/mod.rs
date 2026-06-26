@@ -23,7 +23,9 @@ pub use self::identity::{
     CoreCommitFingerprint, PathIntentFingerprint, SemanticMutationIdentity,
 };
 pub(crate) use self::identity::{fingerprint_digest, PATH_INTENT_FINGERPRINT_DOMAIN};
-pub use self::materialize::{materialize_commit, MaterializedCommit, MaterializedCommitDelta};
+pub use self::materialize::{
+    materialize_commit, CommitOpResult, MaterializedCommit, MaterializedCommitDelta,
+};
 pub(crate) use self::metadata_preview::PublishMetadataPreview;
 pub use self::operation::CommitOp;
 pub(crate) use self::plan::ValidatedOp;

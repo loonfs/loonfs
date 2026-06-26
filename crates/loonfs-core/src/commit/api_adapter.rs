@@ -25,7 +25,6 @@ pub fn commit_request_from_v0(
             .map(commit_precondition_from_v0)
             .collect(),
         message: request.message,
-        annotations: request.annotations,
     })
 }
 
@@ -191,7 +190,6 @@ mod tests {
                 },
             ],
             message: Some("all ops".to_owned()),
-            annotations: None,
         };
 
         let core = commit_request_from_v0(

@@ -778,7 +778,6 @@ async fn restore_inode_revision(
             base_revision_no: request.base_revision_no,
         }],
         message: None,
-        annotations: None,
     };
     let response = state
         .publisher
@@ -1403,7 +1402,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::MoveBehavior,
         loonfs_api::v0::CommitOp,
         loonfs_api::v0::CommitPrecondition,
-        loonfs_api::v0::CommitOpResult,
         loonfs_api::v0::CommitDelta,
         loonfs_api::v0::CommittedChange,
         ChangesResponse

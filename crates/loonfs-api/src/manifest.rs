@@ -1,6 +1,5 @@
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
-use crate::v0::CommitOpResult;
 use crate::{
     ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, ManifestId, NamePolicy,
     NamespaceId, RevisionNo,
@@ -160,7 +159,8 @@ pub enum MetadataRow {
         commit_id: CommitId,
         semantic_commit_fingerprint: String,
         committed_seq: ChangeSeq,
-        results: Vec<CommitOpResult>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
 }
 

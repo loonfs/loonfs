@@ -597,10 +597,11 @@ visibility rules across all referenced runs. Readers load the referenced runs,
 then replay only the visible WAL chain after the manifest's `head_seq`.
 
 The WAL preserves ordered history even when multiple logical commits are
-stored in one segment. Each logical commit records semantic results plus
-normalized metadata deltas such as inode creation, direntry bind/unbind, file
-revision append, and subtree tombstone rows. Checkpoints keep replay bounded
-as history grows.
+stored in one segment. Each logical commit records the commit identity, optional
+message, and normalized metadata deltas such as inode creation, direntry
+bind/unbind, file revision append, and subtree tombstone rows. Validation
+inputs and operation results are not persisted in the WAL. Checkpoints keep
+replay bounded as history grows.
 
 ## 3. Write and read protocol
 
@@ -859,16 +860,14 @@ exactly the order shown) of:
   "namespace_id": "...",
   "preconditions": [...],
   "ops": [...],
-  "message": "... or null",
-  "annotations": {"... sorted keys ..."}
+  "message": "... or null"
 }
 ```
 
 where `ops` and `preconditions` appear in request order using their v0 wire
-encoding, `message` and `annotations` are `null` when absent, and annotation
-keys sort lexicographically. The preimage deliberately excludes `commit_id`,
-writer identity, and fence tokens: a retry of the same logical commit must
-fingerprint identically no matter who retries it or when.
+encoding, and `message` is `null` when absent. The preimage deliberately
+excludes `commit_id`, writer identity, and fence tokens: a retry of the same
+logical commit must fingerprint identically no matter who retries it or when.
 
 Path-level mutations fingerprint the same way with domain
 `loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind,
@@ -961,13 +960,10 @@ consumers.
 The change feed is ordered by logical commit, not by physical WAL segment. A
 segment containing N logical commits produces N ordered change events.
 
-Each change event exposes both layers of the committed mutation:
-
-- semantic operation results, keyed by `op_index`, describe the client-facing
-  operation outcome; and
-- materialized WAL deltas, keyed by `semantic_op_index` and `delta_index`,
-  describe the authoritative metadata facts that replay/projectors should
-  apply.
+Each change event exposes the commit identity, optional message, and
+materialized WAL deltas keyed by `semantic_op_index` and `delta_index`. These
+deltas are the authoritative metadata facts that replay/projectors should
+apply.
 
 ### 3.8 Retention floor
 
@@ -1260,13 +1256,9 @@ authorization can arrive without a format break:
 
 ## 8. Optional commit metadata, resource properties, and timestamps
 
-A commit may carry optional human or product metadata such as:
+A commit may carry optional human metadata such as:
 
 - a commit message;
-- annotations or tags attached to the commit envelope;
-- actor information; or
-- workflow-correlation fields such as `operation_id`, `operation_kind`, or
-  `operation_part`.
 
 This metadata belongs to the logical commit, not to the resource itself.
 

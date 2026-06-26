@@ -209,19 +209,12 @@ mod tests {
                 let offset = u64::try_from(index).expect("test index");
                 let seq = ChangeSeq(start_seq.0 + offset);
                 WalCommitPayload {
-                    namespace_id: namespace_id.clone(),
                     seq,
-                    apply_after_seq: ChangeSeq(seq.0.saturating_sub(1)),
                     commit_id: CommitId::try_new(format!("publish-record-{index}"))
                         .expect("valid commit id"),
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
-                    writer_id: "writer-a".to_owned(),
-                    writer_fence_token: FenceToken(1),
                     message: None,
-                    annotations: None,
                     deltas: Vec::new(),
-                    preconditions: Vec::new(),
-                    results: Vec::new(),
                 }
             })
             .collect();

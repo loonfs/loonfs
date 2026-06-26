@@ -1216,7 +1216,6 @@ mod tests {
                 display_name: display_name.into(),
             }],
             message: None,
-            annotations: None,
         }
     }
 
@@ -1675,7 +1674,6 @@ mod tests {
                 display_name: "alpha".to_owned(),
             }],
             message: None,
-            annotations: None,
         };
         let request_b = CommitRequest {
             commit_id: CommitId::parse("req-b").expect("valid commit id"),
@@ -1685,7 +1683,6 @@ mod tests {
                 display_name: "beta".to_owned(),
             }],
             message: None,
-            annotations: None,
         };
 
         let (response_a, response_b) = tokio::join!(
@@ -1735,7 +1732,6 @@ mod tests {
                 display_name: "alpha".to_owned(),
             }],
             message: None,
-            annotations: None,
         };
         let path_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),

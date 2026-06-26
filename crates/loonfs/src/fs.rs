@@ -885,7 +885,6 @@ impl Fs {
                 base_revision_no,
             }],
             message: None,
-            annotations: None,
         };
         self.commit_operations(namespace_id, request).await
     }
@@ -1282,7 +1281,6 @@ mod tests {
                 },
             ],
             message: None,
-            annotations: None,
         };
 
         assert_eq!(request.preconditions.len(), 1);

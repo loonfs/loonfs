@@ -3,10 +3,7 @@ use crate::{
     NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
-
-pub type CommitAnnotations = BTreeMap<String, Value>;
 
 /// Move behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,10 +144,6 @@ pub struct CommitRequest {
     /// Optional human-readable note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Optional structured metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
-    pub annotations: Option<CommitAnnotations>,
 }
 
 /// Response for a committed explicit request.
@@ -160,7 +153,6 @@ pub struct CommitResponse {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
     pub committed_seq: ChangeSeq,
-    pub results: Vec<CommitOpResult>,
 }
 
 /// Semantic operation inside a commit request.
@@ -258,47 +250,9 @@ pub enum CommitPrecondition {
     DirectoryEmpty { inode_id: InodeId },
 }
 
-/// Per-operation result returned after a commit succeeds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum CommitOpResult {
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateDirectory"))]
-    CreateDirectory { op_index: u32, inode_id: InodeId },
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultCreateFile"))]
-    CreateFile {
-        op_index: u32,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultReplaceFile"))]
-    ReplaceFile {
-        op_index: u32,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultRestoreRevision"))]
-    RestoreRevision {
-        op_index: u32,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultDeleteFile"))]
-    DeleteFile { op_index: u32, inode_id: InodeId },
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultRename"))]
-    Rename { op_index: u32, inode_id: InodeId },
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpResultDeleteSubtree"))]
-    DeleteSubtree { op_index: u32, root_inode: InodeId },
-}
-
 /// Durable metadata fact exposed through the change feed.
 ///
-/// Most clients should use semantic operation results. Sync and projection
-/// clients can apply deltas directly.
+/// Sync and projection clients can apply deltas directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "delta", rename_all = "snake_case")]
@@ -355,11 +309,6 @@ pub struct CommittedChange {
     pub commit_id: CommitId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
-    pub annotations: Option<CommitAnnotations>,
-    /// Semantic operation results.
-    pub ops: Vec<CommitOpResult>,
     /// Materialized metadata deltas.
     pub deltas: Vec<CommitDelta>,
 }

@@ -1,6 +1,6 @@
 use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
 use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{v0::CommitOpResult, InodeKind, RevisionNo};
+use loonfs_api::{ContentRef, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +15,46 @@ pub struct MaterializedCommit {
     pub prepared: PreparedCommit,
     pub deltas: Vec<MaterializedCommitDelta>,
     pub results: Vec<CommitOpResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum CommitOpResult {
+    CreateDirectory {
+        op_index: u32,
+        inode_id: InodeId,
+    },
+    CreateFile {
+        op_index: u32,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        content_ref: ContentRef,
+    },
+    ReplaceFile {
+        op_index: u32,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        content_ref: ContentRef,
+    },
+    RestoreRevision {
+        op_index: u32,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        revision_no: RevisionNo,
+        content_ref: ContentRef,
+    },
+    DeleteFile {
+        op_index: u32,
+        inode_id: InodeId,
+    },
+    Rename {
+        op_index: u32,
+        inode_id: InodeId,
+    },
+    DeleteSubtree {
+        op_index: u32,
+        root_inode: InodeId,
+    },
 }
 
 pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {

@@ -78,8 +78,7 @@ impl PreparedCommit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{materialize_commit, CommitOp, ValidatedOp};
-    use loonfs_api::v0::CommitOpResult;
+    use crate::commit::{materialize_commit, CommitOp, CommitOpResult, ValidatedOp};
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::{ChangeSeq, CommitId, InodeId};
 
@@ -95,7 +94,6 @@ mod tests {
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         }
     }
 

@@ -1,10 +1,7 @@
 use crate::control::WalSegmentPointer;
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
-use crate::v0::{CommitAnnotations, CommitOpResult};
-use crate::{
-    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
-};
+use crate::{ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -65,32 +62,6 @@ pub enum WalDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WalPrecondition {
-    InodeRevisionIs {
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    },
-    AncestorsNotSubtreeDeleted {
-        inode_id: InodeId,
-    },
-    ChildNameAbsent {
-        parent_inode: InodeId,
-        name_key: String,
-    },
-    BindingIs {
-        parent_inode: InodeId,
-        name_key: String,
-        child_inode: InodeId,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
-    },
-    DirectoryEmpty {
-        inode_id: InodeId,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalCommitDelta {
     pub semantic_op_index: u32,
     pub delta: WalDelta,
@@ -98,21 +69,12 @@ pub struct WalCommitDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalCommitPayload {
-    pub namespace_id: NamespaceId,
     pub seq: ChangeSeq,
-    pub apply_after_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub semantic_commit_fingerprint: String,
-    pub writer_id: String,
-    pub writer_fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<CommitAnnotations>,
     pub deltas: Vec<WalCommitDelta>,
-    pub preconditions: Vec<WalPrecondition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub results: Vec<CommitOpResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

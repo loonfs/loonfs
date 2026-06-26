@@ -43,7 +43,6 @@ mod tests {
             }],
             preconditions: Vec::new(),
             message: Some("create docs".to_owned()),
-            annotations: None,
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
@@ -231,7 +230,6 @@ mod tests {
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
             let mut skipped = envelope.payload.records[0].clone();
             skipped.seq = ChangeSeq(3);
-            skipped.apply_after_seq = ChangeSeq(1);
             envelope.payload.records.push(skipped);
             envelope.payload.end_seq = ChangeSeq(3);
             rewrap_envelope(envelope);
@@ -275,7 +273,6 @@ mod tests {
             }],
             preconditions: Vec::new(),
             message: None,
-            annotations: None,
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),

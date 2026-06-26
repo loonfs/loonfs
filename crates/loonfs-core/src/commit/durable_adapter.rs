@@ -1,6 +1,6 @@
-use super::{MaterializedCommit, Precondition};
+use super::MaterializedCommit;
 use crate::wal::WalBuildError;
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalPrecondition};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload};
 
 pub(crate) fn wal_payload_from_materialized_commit(
     commit: &MaterializedCommit,
@@ -14,15 +14,10 @@ pub(crate) fn wal_payload_from_materialized_commit(
     }
 
     Ok(WalCommitPayload {
-        namespace_id: prepared.plan.namespace_id.clone(),
         seq: prepared.plan.assigned_seq,
-        apply_after_seq: prepared.plan.apply_after_seq,
         commit_id: prepared.plan.commit_id.clone(),
         semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
-        writer_id: prepared.request.writer_id.clone(),
-        writer_fence_token: prepared.request.writer_fence_token,
         message: prepared.request.message.clone(),
-        annotations: prepared.request.annotations.clone(),
         deltas: commit
             .deltas
             .iter()
@@ -31,56 +26,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
                 delta: delta.wal_delta.clone(),
             })
             .collect(),
-        preconditions: prepared
-            .request
-            .preconditions
-            .iter()
-            .map(WalPrecondition::from)
-            .collect(),
-        results: commit.results.clone(),
     })
-}
-
-impl From<&Precondition> for WalPrecondition {
-    fn from(value: &Precondition) -> Self {
-        match value {
-            Precondition::InodeRevisionIs {
-                inode_id,
-                revision_no,
-            } => Self::InodeRevisionIs {
-                inode_id: *inode_id,
-                revision_no: *revision_no,
-            },
-            Precondition::AncestorsNotSubtreeDeleted { inode_id } => {
-                Self::AncestorsNotSubtreeDeleted {
-                    inode_id: *inode_id,
-                }
-            }
-            Precondition::ChildNameAbsent {
-                parent_inode,
-                name_key,
-            } => Self::ChildNameAbsent {
-                parent_inode: *parent_inode,
-                name_key: name_key.clone(),
-            },
-            Precondition::BindingIs {
-                parent_inode,
-                name_key,
-                child_inode,
-                bind_seq,
-                bind_delta_index,
-            } => Self::BindingIs {
-                parent_inode: *parent_inode,
-                name_key: name_key.clone(),
-                child_inode: *child_inode,
-                bind_seq: *bind_seq,
-                bind_delta_index: *bind_delta_index,
-            },
-            Precondition::DirectoryEmpty { inode_id } => Self::DirectoryEmpty {
-                inode_id: *inode_id,
-            },
-        }
-    }
 }
 
 #[cfg(test)]
@@ -105,7 +51,6 @@ mod tests {
             }],
             preconditions: Vec::new(),
             message: Some("create docs".to_owned()),
-            annotations: None,
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
@@ -130,9 +75,7 @@ mod tests {
         let payload =
             wal_payload_from_materialized_commit(&materialized).expect("build wal payload");
 
-        assert_eq!(payload.namespace_id, namespace_id);
         assert_eq!(payload.seq, ChangeSeq(1));
         assert_eq!(payload.deltas.len(), 2);
-        assert_eq!(payload.results.len(), 1);
     }
 }

@@ -122,18 +122,6 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "CommitOpResult",
-            &[
-                "CommitOpResultCreateDirectory",
-                "CommitOpResultCreateFile",
-                "CommitOpResultReplaceFile",
-                "CommitOpResultRestoreRevision",
-                "CommitOpResultDeleteFile",
-                "CommitOpResultRename",
-                "CommitOpResultDeleteSubtree",
-            ][..],
-        ),
-        (
             "CommitDelta",
             &[
                 "CommitDeltaCreateInode",

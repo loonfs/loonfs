@@ -34,14 +34,11 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCodecError,
-    WalCommitDelta, WalCommitPayload, WalDelta, WalPrecondition, WalSegmentEnvelope,
-    WalSegmentPayload,
+    WalCommitDelta, WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest,
-    v0::{CommitOpResult, UploadMode},
-    ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken, InodeId, InodeKind, ManifestId,
-    NamePolicy, NamespaceId, RevisionNo,
+    sha256_digest, v0::UploadMode, ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken,
+    InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -175,35 +172,6 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             },
         },
     ];
-    let preconditions = vec![
-        WalPrecondition::InodeRevisionIs {
-            inode_id: InodeId(5),
-            revision_no: RevisionNo(1),
-        },
-        WalPrecondition::AncestorsNotSubtreeDeleted {
-            inode_id: InodeId(5),
-        },
-        WalPrecondition::ChildNameAbsent {
-            parent_inode: InodeId(1),
-            name_key: "docs".to_owned(),
-        },
-        WalPrecondition::BindingIs {
-            parent_inode: InodeId(1),
-            name_key: "old.txt".to_owned(),
-            child_inode: InodeId(5),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
-        },
-        WalPrecondition::DirectoryEmpty {
-            inode_id: InodeId(9),
-        },
-    ];
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        "source".to_owned(),
-        serde_json::Value::String("golden".to_owned()),
-    );
-
     WalSegmentEnvelope::from_payload(
         WRITER_VERSION,
         WalSegmentPayload {
@@ -214,23 +182,13 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             start_seq: ChangeSeq(2),
             end_seq: ChangeSeq(2),
             records: vec![WalCommitPayload {
-                namespace_id: namespace_id(),
                 seq: ChangeSeq(2),
-                apply_after_seq: ChangeSeq(1),
                 commit_id: commit_id(),
                 semantic_commit_fingerprint:
                     "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
                         .to_owned(),
-                writer_id: "writer-a".to_owned(),
-                writer_fence_token: FenceToken(3),
                 message: Some("golden commit".to_owned()),
-                annotations: Some(annotations),
                 deltas,
-                preconditions,
-                results: vec![CommitOpResult::CreateDirectory {
-                    op_index: 0,
-                    inode_id: InodeId(7),
-                }],
             }],
         },
     )
@@ -279,10 +237,7 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
                 "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
                     .to_owned(),
             committed_seq: ChangeSeq(2),
-            results: vec![CommitOpResult::CreateDirectory {
-                op_index: 0,
-                inode_id: InodeId(7),
-            }],
+            message: Some("golden commit".to_owned()),
         },
     ];
     let row_keys = rows.iter().map(MetadataRow::row_key).collect::<Vec<_>>();
@@ -866,51 +821,5 @@ fn wal_delta_wire_tags_match_spec_names() {
     for (value, expected_tag) in cases {
         let value = value.expect("serialize delta");
         assert_eq!(value["delta"], expected_tag, "in {value}");
-    }
-}
-
-#[test]
-fn wal_precondition_wire_tags_match_spec_names() {
-    let cases = [
-        (
-            serde_json::to_value(WalPrecondition::InodeRevisionIs {
-                inode_id: InodeId(1),
-                revision_no: RevisionNo(1),
-            }),
-            "inode_revision_is",
-        ),
-        (
-            serde_json::to_value(WalPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: InodeId(1),
-            }),
-            "ancestors_not_subtree_deleted",
-        ),
-        (
-            serde_json::to_value(WalPrecondition::ChildNameAbsent {
-                parent_inode: InodeId(1),
-                name_key: "a".to_owned(),
-            }),
-            "child_name_absent",
-        ),
-        (
-            serde_json::to_value(WalPrecondition::BindingIs {
-                parent_inode: InodeId(1),
-                name_key: "a".to_owned(),
-                child_inode: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
-            }),
-            "binding_is",
-        ),
-        (
-            serde_json::to_value(WalPrecondition::DirectoryEmpty {
-                inode_id: InodeId(1),
-            }),
-            "directory_empty",
-        ),
-    ];
-    for (value, expected_tag) in cases {
-        let value = value.expect("serialize precondition");
-        assert_eq!(value["type"], expected_tag, "in {value}");
     }
 }

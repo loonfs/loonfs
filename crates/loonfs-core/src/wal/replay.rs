@@ -117,12 +117,6 @@ pub(super) fn validate_decoded_replayed_wal(
                 actual: record.seq,
             });
         }
-        if &record.namespace_id != expected_namespace {
-            return Err(WalReplayError::NamespaceMismatch {
-                expected: expected_namespace.clone(),
-                actual: record.namespace_id.clone(),
-            });
-        }
     }
 
     Ok(())

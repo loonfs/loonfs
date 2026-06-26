@@ -261,7 +261,6 @@ A commit request carries the following logical fields:
 | `preconditions` | Explicit semantic checks such as `inode_revision_is`, `binding_is`, `child_name_absent`, `directory_empty`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
 | `ops` | Ordered list of mutation operations. Operation order is preserved through validation, logical commit creation, and change-feed output. |
 | `message` | Optional human-readable description of the mutation event. |
-| `annotations` | Optional structured metadata attached to the logical commit request. |
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -727,10 +726,6 @@ Representative request:
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "message": "replace report bytes",
-  "annotations": {
-    "source": "sync",
-    "operation_id": "op_report_refresh_01"
-  },
   "preconditions": [
     {
       "type": "inode_revision_is",
@@ -766,14 +761,7 @@ Representative response:
 {
   "namespace_id": "demo",
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "committed_seq": 419,
-  "results": [
-    {
-      "op_index": 0,
-      "inode_id": 42,
-      "revision_no": 8
-    }
-  ]
+  "committed_seq": 419
 }
 ```
 
@@ -789,19 +777,6 @@ Representative response:
       "seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
       "message": "replace report bytes",
-      "ops": [
-        {
-          "op_index": 0,
-          "op": "replace_file",
-          "inode_id": 42,
-          "revision_no": 8,
-          "content_ref": {
-            "kind": "whole_file_v0",
-            "digest": "sha256:7ab...",
-            "size_bytes": 20591
-          }
-        }
-      ],
       "deltas": [
         {
           "semantic_op_index": 0,
@@ -1086,7 +1061,7 @@ matter.
 | Path resolution | Authoritative | Supplies user intent by path when using the filesystem surface. |
 | Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. A server may issue short-lived content admission tokens after validation to avoid repeating expensive checks. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. Clients may forward admission tokens when provided, but must tolerate slow-path validation. |
 | Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
-| Namespace visibility | Authoritative | Observes committed results. |
+| Namespace visibility | Authoritative | Observes committed sequence receipts and change-feed deltas. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |
 | Capability truthfulness | Advertises only implemented profiles and features. | Gates on the capability document; reconciles via `not_supported`. |
 

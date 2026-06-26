@@ -23,13 +23,13 @@ pub(crate) fn prepare_wal_segment(
 
     let mut payload_records: Vec<WalCommitPayload> = Vec::with_capacity(records.len());
     for record in records {
-        let payload_record = wal_payload_from_materialized_commit(record)?;
-        if payload_record.namespace_id != namespace_id {
+        if record.prepared.plan.namespace_id != namespace_id {
             return Err(WalBuildError::NamespaceMismatch {
-                request: payload_record.namespace_id.clone(),
+                request: record.prepared.plan.namespace_id.clone(),
                 plan: namespace_id.clone(),
             });
         }
+        let payload_record = wal_payload_from_materialized_commit(record)?;
         if let Some(previous) = payload_records.last() {
             let expected = previous
                 .seq
@@ -41,12 +41,6 @@ pub(crate) fn prepare_wal_segment(
                 return Err(WalBuildError::NonContiguousSeq {
                     expected,
                     actual: payload_record.seq,
-                });
-            }
-            if payload_record.apply_after_seq != previous.seq {
-                return Err(WalBuildError::BaseHeadSeqMismatch {
-                    request: payload_record.apply_after_seq,
-                    plan: previous.seq,
                 });
             }
         }
@@ -61,6 +55,11 @@ pub(crate) fn prepare_wal_segment(
         .last()
         .map(|record| record.seq)
         .ok_or(WalBuildError::EmptySegment)?;
+    let base_head_seq = start_seq
+        .0
+        .checked_sub(1)
+        .map(ChangeSeq)
+        .ok_or_else(|| WalBuildError::Codec("start seq underflow".to_owned()))?;
     // WAL segments are proposals: racing writers may both write one for the
     // same position before the head chooses. The id's ordered prefix makes
     // listings and reclamation scans sort by history position; its random
@@ -71,7 +70,7 @@ pub(crate) fn prepare_wal_segment(
         namespace_id,
         segment_id: segment_id.clone(),
         prev_visible_segment,
-        base_head_seq: payload_records[0].apply_after_seq,
+        base_head_seq,
         start_seq,
         end_seq,
         records: payload_records,
