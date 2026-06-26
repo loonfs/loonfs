@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use tracing::Instrument;
 
 #[cfg(test)]
-use super::load::{append_rows_to_metadata, load_verified_manifest_materialization};
+use super::load::{append_rows_to_metadata, load_manifest_materialization_for_inspection};
 #[cfg(test)]
 use crate::metadata::MetadataStateBuilder;
 
@@ -574,7 +574,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let head_seq = head.seq;
     let previous_manifest = match head.current_manifest_id {
         Some(previous_id) => Some(
-            load_verified_manifest_materialization(store, namespace_id, previous_id)
+            load_manifest_materialization_for_inspection(store, namespace_id, previous_id)
                 .await
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))

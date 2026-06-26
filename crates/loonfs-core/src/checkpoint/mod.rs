@@ -10,8 +10,9 @@
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`publish`] writes manifest objects and advances `current_manifest_id`
 //!   on the head by compare-and-swap.
-//! - [`load`] and [`validate`] reconstruct a manifest's metadata state on the
-//!   read side and check every durable artifact against its descriptors.
+//! - [`load`] and [`validate`] provide envelope-only loading, descriptor-only
+//!   table verification, and explicit inspection materialization when callers
+//!   truly need every metadata row.
 //! - [`scan`] answers verified row scans over loaded manifest tables.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above, and
@@ -40,7 +41,7 @@ pub use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::load::{
-    head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_materialization,
+    head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,
     load_verified_manifest_tables_with_cache,
 };
 pub(crate) use self::publish::write_namespace_manifest;

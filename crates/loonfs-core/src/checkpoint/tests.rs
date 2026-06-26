@@ -15,8 +15,8 @@ use super::create::{
 };
 use super::error::ManifestLoadError;
 use super::load::{
-    head_from_manifest, load_manifest_materialization_from_manifest,
-    load_verified_manifest_materialization,
+    head_from_manifest, load_manifest_materialization_for_inspection,
+    load_manifest_metadata_state_for_inspection_from_manifest,
 };
 use super::publish::{
     publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
@@ -71,6 +71,27 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
         head,
         metadata_state,
     })
+}
+
+#[test]
+fn fork_and_retention_do_not_use_inspection_materialization() {
+    let fork_source = include_str!("../namespace/fork.rs");
+    let retention_source = include_str!("retention.rs");
+
+    for source in [fork_source, retention_source] {
+        assert!(
+            !source.contains("load_manifest_materialization_for_inspection"),
+            "fork/retention must use verified manifest tables, not full inspection materialization"
+        );
+        assert!(
+            !source.contains("ManifestMaterializationForInspection"),
+            "fork/retention must not depend on full inspection materialization"
+        );
+        assert!(
+            !source.contains("load_manifest_metadata_state_for_inspection"),
+            "fork/retention must not construct MetadataState from manifest rows"
+        );
+    }
 }
 
 #[tokio::test]
@@ -205,13 +226,14 @@ async fn manifest_round_trip_supports_empty_namespace() {
     );
     assert!(materialization.head.latest_checkpoint_id.is_some());
     let bootstrap_manifest =
-        load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(0))
             .await
             .expect("load bootstrap manifest");
     assert!(bootstrap_manifest.manifest.payload.checkpoints.is_empty());
-    let materialized = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
-        .await
-        .expect("load namespace manifest");
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(1))
+            .await
+            .expect("load namespace manifest");
     assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
     let checkpoint = &materialized.manifest.payload.checkpoints[0];
     assert!(validate_checkpoint_id(&checkpoint.checkpoint_id).is_ok());
@@ -300,17 +322,24 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
 #[tokio::test]
 async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
 
+    store.reset_metadata_sst_gets();
     let unchanged = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(
+        store.metadata_sst_gets(),
+        0,
+        "retention should validate manifest descriptors without loading metadata SST payloads"
+    );
 
     write_file_bytes(
         &store,
@@ -325,10 +354,16 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
+    store.reset_metadata_sst_gets();
     let advanced = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(
+        store.metadata_sst_gets(),
+        0,
+        "retention should advance from manifest descriptors without materializing rows"
+    );
 
     let materialization = load_current_projection(&store, &namespace_id)
         .await
@@ -372,9 +407,10 @@ async fn manifest_materialization_uses_written_segments() {
         .await
         .expect("create checkpoint");
 
-    let materialized = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
-        .await
-        .expect("load materialized manifest");
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(1))
+            .await
+            .expect("load materialized manifest");
     let current = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -422,7 +458,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
         .await
         .expect("first checkpoint");
     let first_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_id)
             .await
             .expect("load first manifest");
 
@@ -443,7 +479,7 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
         .await
         .expect("materialization");
     let second_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_id)
             .await
             .expect("load second manifest");
 
@@ -510,7 +546,7 @@ async fn manifest_l0_run_missing_table_fails_load() {
         .await
         .expect("second checkpoint");
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_id)
             .await
             .expect("load materialized manifest");
     let deleted_key = l0_runs(&materialized.manifest)[0]
@@ -523,7 +559,9 @@ async fn manifest_l0_run_missing_table_fails_load() {
         .clone();
     store.delete(&deleted_key).await.expect("delete l0 segment");
 
-    match load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_id)
+        .await
+    {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
         }
@@ -542,7 +580,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         .expect("bootstrap");
     let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
     let first_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id(first))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id(first))
             .await
             .expect("load first manifest");
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(first));
@@ -565,7 +603,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         expected
     };
 
-    match load_manifest_materialization_from_manifest(
+    match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
         &manifest_key,
@@ -581,7 +619,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
 
     let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2).await;
     let second_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id(second))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id(second))
             .await
             .expect("load second manifest");
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(second));
@@ -604,7 +642,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         expected
     };
 
-    match load_manifest_materialization_from_manifest(
+    match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
         &manifest_key,
@@ -694,7 +732,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     )
     .expect("build malformed manifest");
 
-    match load_manifest_materialization_from_manifest(
+    match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
         &namespace_manifest(namespace_id.as_str(), manifest_id(materialization.head.seq)),
@@ -723,9 +761,10 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    let materialized = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
-        .await
-        .expect("load chained manifest");
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(4))
+            .await
+            .expect("load chained manifest");
     assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(1));
     let l0_runs = l0_runs(&materialized.manifest);
     assert_eq!(l0_runs.len(), 3);
@@ -766,15 +805,16 @@ async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
         write_file_and_checkpoint_with_policy(&store, &namespace_id, &context, index, policy).await;
     }
 
-    let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(3))
+    let capped = load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(3))
         .await
         .expect("load capped manifest");
     assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
     assert_eq!(l0_runs(&capped.manifest).len(), 2);
 
-    let compacted = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
-        .await
-        .expect("load compacted manifest");
+    let compacted =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(4))
+            .await
+            .expect("load compacted manifest");
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -814,7 +854,7 @@ async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
         .await
         .expect("checkpoint");
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
             .await
             .expect("load manifest");
     let mut manifest = materialized.manifest;
@@ -842,7 +882,7 @@ async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
         .await
         .expect("overwrite manifest");
 
-    match load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
         Err(ManifestLoadError::SegmentKeyMismatch { .. }) => {}
         other => panic!("expected segment key mismatch, got {other:?}"),
     }
@@ -875,7 +915,7 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         .await
         .expect("manifest");
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
             .await
             .expect("load manifest");
 
@@ -1056,7 +1096,7 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
     let before = cache.stats();
 
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
             .await
             .expect("load materialized manifest");
     let after = cache.stats();
@@ -1151,7 +1191,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("first checkpoint");
     let first_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_id)
             .await
             .expect("load first manifest");
     let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
@@ -1183,7 +1223,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("compacted checkpoint");
     let compacted_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted.manifest_id)
             .await
             .expect("load compacted manifest");
     let materialization_after = load_current_projection(&store, &namespace_id)
@@ -1239,7 +1279,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         .await
         .expect("first checkpoint");
     let first_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_id)
             .await
             .expect("load first manifest");
     let revision_keys_before = base_segment_object_keys_for_family(
@@ -1275,7 +1315,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         .await
         .expect("compacted checkpoint");
     let compacted_materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted.manifest_id)
             .await
             .expect("load compacted manifest");
     let revision_keys_after = base_segment_object_keys_for_family(
@@ -1325,7 +1365,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .await
         .expect("checkpoint");
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
             .await
             .expect("load manifest");
     let base = base_run(&materialized.manifest);
@@ -1346,7 +1386,8 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .delete(&deleted_key)
         .await
         .expect("delete child index");
-    match load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id).await
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+        .await
     {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
@@ -1389,7 +1430,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         .await
         .expect("checkpoint");
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
             .await
             .expect("load manifest before corruption");
     let mut manifest = materialized.manifest;
@@ -1436,7 +1477,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         .expect("overwrite manifest");
 
     assert_child_index_mismatch(
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
     );
 }
 
@@ -1523,7 +1564,7 @@ async fn manifest_rejects_missing_revision_desc_index() {
         .await
         .expect("checkpoint");
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
             .await
             .expect("load manifest before corruption");
     let mut manifest = materialized.manifest;
@@ -1534,7 +1575,7 @@ async fn manifest_rejects_missing_revision_desc_index() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
     );
 }
 
@@ -1582,7 +1623,7 @@ async fn manifest_rejects_revision_desc_index_missing_row() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
     );
 }
 
@@ -1639,7 +1680,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
     );
 }
 
@@ -1681,7 +1722,7 @@ async fn manifest_rejects_revision_desc_index_changed_content_ref() {
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
-        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await,
     );
 }
 
@@ -1723,7 +1764,7 @@ async fn manifest_rejects_revision_desc_index_duplicate_rows() {
     .await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    match load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
         Err(ManifestLoadError::DuplicateRevisionRow { family, .. }) => {
             assert_eq!(family, ApiMetadataTableFamily::RevisionsByInodeDesc);
         }
@@ -1740,7 +1781,7 @@ async fn revision_index_test_materialization(
         .await
         .expect("checkpoint");
     let materialized =
-        load_verified_manifest_materialization(store, namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(store, namespace_id, manifest.manifest_id)
             .await
             .expect("load manifest before corruption");
     let revision_index_rows = manifest_rows_for_family(
@@ -1880,15 +1921,16 @@ async fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(9))
+    let capped = load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(9))
         .await
         .expect("load capped manifest");
     assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
     assert_eq!(l0_runs(&capped.manifest).len(), MAX_CHECKPOINT_L0_RUNS);
 
-    let collapsed = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(10))
-        .await
-        .expect("load collapsed manifest");
+    let collapsed =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(10))
+            .await
+            .expect("load collapsed manifest");
     assert_eq!(collapsed.manifest.payload.base_seq, ChangeSeq(10));
     assert!(l0_runs(&collapsed.manifest).is_empty());
     assert_eq!(
@@ -2123,7 +2165,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
 
     assert_eq!(checkpoint.manifest_id, ManifestId(2));
     let retried =
-        load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
             .await
             .expect("load retried manifest");
     assert!(checkpoint_record_by_id(&retried.manifest, &checkpoint.checkpoint_id).is_some());
@@ -2198,7 +2240,7 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
 
     assert_eq!(checkpoint.manifest_id, ManifestId(2));
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
             .await
             .expect("load new manifest");
     assert_eq!(materialized.manifest.payload.metadata_files, original_files);
@@ -2260,7 +2302,7 @@ async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
         "L0 checkpoint update should use the WAL tail and copy existing metadata file refs"
     );
     let materialized =
-        load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
             .await
             .expect("load checkpoint manifest");
     assert_eq!(l0_runs(&materialized.manifest).len(), 1);

@@ -1092,11 +1092,13 @@ impl MetadataState {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct MetadataStateBuilder {
     state: MetadataState,
 }
 
+#[cfg(test)]
 impl MetadataStateBuilder {
     pub(crate) fn push_inode(&mut self, record: InodeRecord) {
         self.state.push_inode_record(record);
