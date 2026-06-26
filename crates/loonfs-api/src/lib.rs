@@ -47,10 +47,10 @@ pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use http::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteNamespaceResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior, ForkNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest,
     ListFileRevisionsResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
-    RestoreFileRevisionRequest,
+    PutBehavior, RestoreFileRevisionRequest,
 };
 pub use ids::{
     generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
@@ -70,6 +70,7 @@ pub use pagination::{
 };
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
 pub use server::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
+pub use v0::MoveBehavior;
 
 #[cfg(test)]
 mod tests {

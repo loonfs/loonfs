@@ -167,6 +167,42 @@ fn openapi_names_tagged_one_of_alternatives() {
     }
 }
 
+#[test]
+fn openapi_documents_delete_path_behavior() {
+    let spec: Value = serde_json::from_str(
+        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
+    )
+    .expect("parse openapi json");
+    let schemas = spec
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+        .expect("openapi schemas object");
+    let delete_schema = schemas
+        .get("FilesystemOperation")
+        .and_then(|schema| schema.get("oneOf"))
+        .and_then(Value::as_array)
+        .and_then(|schemas| {
+            schemas.iter().find(|schema| {
+                schema.get("title").and_then(Value::as_str) == Some("FsOpDeletePath")
+            })
+        })
+        .expect("FsOpDeletePath oneOf schema");
+
+    assert!(delete_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .expect("delete required fields")
+        .iter()
+        .any(|field| field.as_str() == Some("behavior")));
+    assert_eq!(
+        delete_schema
+            .pointer("/properties/behavior/$ref")
+            .and_then(Value::as_str),
+        Some("#/components/schemas/DeleteDirectoryBehavior")
+    );
+}
+
 fn assert_path_method(paths: &serde_json::Map<String, Value>, path: &str, method: &str) {
     let path_item = paths
         .get(path)

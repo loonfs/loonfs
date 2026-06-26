@@ -7,19 +7,17 @@
 
 use http::Uri;
 use loonfs_api::{
-    v0::RenameMode,
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
-        UploadMode, ValidatedContentToken,
+        CompleteUploadRequest, CompleteUploadResponse, MoveBehavior, ObjectTransferAccess,
+        UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
-    CreateNamespaceRequest, DeleteNamespaceResponse, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    RestoreFileRevisionRequest, RevisionNo,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MutationResult, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -573,9 +571,9 @@ impl Client {
                     path: spec.absolute_path.clone(),
                     content_ref: staged.content_ref,
                     behavior: if force {
-                        FilesystemPutBehavior::ReplaceExisting
+                        PutBehavior::Replace
                     } else {
-                        FilesystemPutBehavior::CreateOnly
+                        PutBehavior::NoReplace
                     },
                 },
             },
@@ -627,9 +625,41 @@ impl Client {
         self.delete_path_with_commit_id(spec, &generated_commit_id())
     }
 
+    pub fn delete_path_recursive(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_recursive_with_commit_id(spec, &generated_commit_id())
+    }
+
     pub fn delete_path_with_commit_id(
         &self,
         spec: &NamespacePath,
+        commit_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_with_behavior_and_commit_id(
+            spec,
+            DeleteDirectoryBehavior::NonRecursive,
+            commit_id,
+        )
+    }
+
+    pub fn delete_path_recursive_with_commit_id(
+        &self,
+        spec: &NamespacePath,
+        commit_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_with_behavior_and_commit_id(
+            spec,
+            DeleteDirectoryBehavior::Recursive,
+            commit_id,
+        )
+    }
+
+    pub fn delete_path_with_behavior_and_commit_id(
+        &self,
+        spec: &NamespacePath,
+        behavior: DeleteDirectoryBehavior,
         commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
         let commit_id = parse_commit_id(commit_id)?;
@@ -640,6 +670,7 @@ impl Client {
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path.clone(),
+                    behavior,
                 },
             },
         )?;
@@ -675,7 +706,7 @@ impl Client {
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
-                    mode: RenameMode::NoReplace,
+                    behavior: MoveBehavior::NoReplace,
                 },
             },
         )?;

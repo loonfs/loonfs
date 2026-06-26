@@ -1,7 +1,10 @@
 //! Per-operation option and result types for the [`Fs`] surface.
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
-use crate::{ChangeSeq, CommitId, ManifestId, NamespaceId, PutFileBehavior};
+use crate::{
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, ManifestId, MoveBehavior, NamespaceId,
+    PutBehavior,
+};
 
 /// Current maintenance-related namespace status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +84,7 @@ pub struct CreateNamespaceOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
-    pub behavior: PutFileBehavior,
+    pub behavior: PutBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
@@ -89,7 +92,7 @@ pub struct PutFileOptions {
 impl Default for PutFileOptions {
     fn default() -> Self {
         Self {
-            behavior: PutFileBehavior::CreateOnly,
+            behavior: PutBehavior::NoReplace,
             commit_id: None,
         }
     }
@@ -103,19 +106,39 @@ pub struct CreateDirOptions {
 }
 
 /// Options for deleting a path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteOptions {
-    /// Whether directory deletes may remove a subtree.
-    pub recursive: bool,
+    /// Directory delete behavior.
+    pub behavior: DeleteDirectoryBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
+impl Default for DeleteOptions {
+    fn default() -> Self {
+        Self {
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            commit_id: None,
+        }
+    }
+}
+
 /// Options for moving a path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveOptions {
+    /// Destination handling behavior.
+    pub behavior: MoveBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+}
+
+impl Default for MoveOptions {
+    fn default() -> Self {
+        Self {
+            behavior: MoveBehavior::NoReplace,
+            commit_id: None,
+        }
+    }
 }
 
 /// Options for copying a file path.

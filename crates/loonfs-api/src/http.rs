@@ -1,5 +1,5 @@
 use crate::{
-    v0::{RenameMode, ValidatedContentToken},
+    v0::{MoveBehavior, ValidatedContentToken},
     ChangeSeq, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -99,14 +99,25 @@ pub struct MutationResult {
 }
 
 /// Put behavior for path-oriented file writes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum FilesystemPutBehavior {
+pub enum PutBehavior {
     /// Fail if the path already exists.
-    CreateOnly,
+    NoReplace,
     /// Replace the current file if it exists.
-    ReplaceExisting,
+    Replace,
+}
+
+/// Directory delete behavior for path-oriented deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteDirectoryBehavior {
+    /// Fail if the target is a non-empty directory.
+    NonRecursive,
+    /// Delete a directory subtree.
+    Recursive,
 }
 
 /// One path-oriented filesystem operation.
@@ -122,18 +133,20 @@ pub enum FilesystemOperation {
     PutFile {
         path: String,
         content_ref: ContentRef,
-        behavior: FilesystemPutBehavior,
+        behavior: PutBehavior,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
-    DeletePath { path: String },
+    DeletePath {
+        path: String,
+        behavior: DeleteDirectoryBehavior,
+    },
     /// Move one path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
     MovePath {
         from_path: String,
         to_path: String,
-        #[serde(default = "crate::v0::default_rename_mode")]
-        mode: RenameMode,
+        behavior: MoveBehavior,
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
@@ -253,5 +266,66 @@ impl From<FilesystemOperationResponse> for MutationResult {
             namespace_id: value.namespace_id,
             committed_seq: value.committed_seq,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn behavior_enums_use_snake_case_wire_values() {
+        assert_eq!(
+            serde_json::to_value(PutBehavior::NoReplace).expect("put behavior json"),
+            serde_json::json!("no_replace")
+        );
+        assert_eq!(
+            serde_json::to_value(PutBehavior::Replace).expect("put behavior json"),
+            serde_json::json!("replace")
+        );
+        assert_eq!(
+            serde_json::to_value(DeleteDirectoryBehavior::NonRecursive)
+                .expect("delete behavior json"),
+            serde_json::json!("non_recursive")
+        );
+        assert_eq!(
+            serde_json::to_value(DeleteDirectoryBehavior::Recursive).expect("delete behavior json"),
+            serde_json::json!("recursive")
+        );
+        assert_eq!(
+            serde_json::to_value(MoveBehavior::Exchange).expect("move behavior json"),
+            serde_json::json!("exchange")
+        );
+    }
+
+    #[test]
+    fn filesystem_delete_and_move_operations_use_behavior_field() {
+        let delete = FilesystemOperation::DeletePath {
+            path: "/docs".to_owned(),
+            behavior: DeleteDirectoryBehavior::Recursive,
+        };
+        assert_eq!(
+            serde_json::to_value(&delete).expect("delete op json"),
+            serde_json::json!({
+                "op": "delete_path",
+                "path": "/docs",
+                "behavior": "recursive"
+            })
+        );
+
+        let move_path = FilesystemOperation::MovePath {
+            from_path: "/docs/a.txt".to_owned(),
+            to_path: "/docs/b.txt".to_owned(),
+            behavior: MoveBehavior::NoReplace,
+        };
+        assert_eq!(
+            serde_json::to_value(&move_path).expect("move op json"),
+            serde_json::json!({
+                "op": "move_path",
+                "from_path": "/docs/a.txt",
+                "to_path": "/docs/b.txt",
+                "behavior": "no_replace"
+            })
+        );
     }
 }

@@ -1,9 +1,12 @@
 use super::content_write::store_file_bytes_before_metadata_publish;
 use super::executor::{normalized_commit_id, submit_path_intent};
-use super::intent::{PathMutationIntent, PutFileBehavior};
+use super::intent::PathMutationIntent;
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use loonfs_api::{v0::RenameMode, ContentRef, MutationResult, NamespaceId, RevisionNo};
+use loonfs_api::{
+    v0::MoveBehavior, ContentRef, DeleteDirectoryBehavior, MutationResult, NamespaceId,
+    PutBehavior, RevisionNo,
+};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -11,7 +14,7 @@ pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
-    behavior: PutFileBehavior,
+    behavior: PutBehavior,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
@@ -43,7 +46,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         absolute_path,
         bytes,
-        PutFileBehavior::ReplaceExisting,
+        PutBehavior::Replace,
         context,
         commit_id,
     )
@@ -75,7 +78,7 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     content_ref: ContentRef,
-    behavior: PutFileBehavior,
+    behavior: PutBehavior,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
@@ -101,7 +104,15 @@ pub(crate) async fn delete_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    delete_path_with_recursion(store, namespace_id, absolute_path, true, context, commit_id).await
+    delete_path_with_behavior(
+        store,
+        namespace_id,
+        absolute_path,
+        DeleteDirectoryBehavior::Recursive,
+        context,
+        commit_id,
+    )
+    .await
 }
 
 pub(crate) async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
@@ -111,22 +122,22 @@ pub(crate) async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    delete_path_with_recursion(
+    delete_path_with_behavior(
         store,
         namespace_id,
         absolute_path,
-        false,
+        DeleteDirectoryBehavior::NonRecursive,
         context,
         commit_id,
     )
     .await
 }
 
-async fn delete_path_with_recursion<S: ObjectStore + ?Sized>(
+async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-    recursive: bool,
+    behavior: DeleteDirectoryBehavior,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
@@ -137,7 +148,7 @@ async fn delete_path_with_recursion<S: ObjectStore + ?Sized>(
         PathMutationIntent::DeletePath {
             commit_id,
             absolute_path: absolute_path.to_owned(),
-            recursive,
+            behavior,
         },
         context,
     )
@@ -160,7 +171,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
             commit_id,
             from_path: from_path.to_owned(),
             to_path: to_path.to_owned(),
-            mode: RenameMode::NoReplace,
+            behavior: MoveBehavior::NoReplace,
         },
         context,
     )

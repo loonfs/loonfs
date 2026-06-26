@@ -907,7 +907,7 @@ The first standard lower-level mutation set includes:
 - `create_dir(parent_inode_id, display_name)`
 - `create_file(parent_inode_id, display_name, content_ref)`
 - `replace_file(inode_id, base_revision_no, content_ref)`
-- `rename(inode_id, new_parent_inode_id, new_display_name, mode = no_replace)`
+- `rename(inode_id, new_parent_inode_id, new_display_name, behavior = no_replace)`
 - `delete_file(inode_id)`
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
@@ -915,9 +915,9 @@ The first standard lower-level mutation set includes:
 The path-oriented filesystem surface may compile higher-level operations into
 these lower-level mutations.
 
-`rename` accepts the explicit mode shape for forward compatibility, but v0
-implements only `no_replace`. Reserved modes such as `replace_existing` and
-`exchange` must fail with `unsupported_rename_mode`.
+`rename` accepts the explicit move behavior shape for forward compatibility,
+but v0 implements only `no_replace`. Reserved behaviors such as `replace` and
+`exchange` must fail with `unsupported_move_behavior`.
 
 These are semantic commit operations. Durable WAL payloads store normalized
 metadata deltas derived from the semantic operations: `create_inode`,

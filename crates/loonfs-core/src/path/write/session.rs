@@ -63,7 +63,6 @@ impl PublishPlanningSession {
 
 #[cfg(test)]
 mod tests {
-    use super::super::intent::PutFileBehavior;
     use super::*;
     use crate::context::MutationContext;
     use crate::engine::NamespaceEngine;
@@ -72,7 +71,7 @@ mod tests {
     use crate::options::ReadOptions;
     use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
-    use loonfs_api::CommitId;
+    use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
     use loonfs_objectstore::fs::LocalFsStore;
     use tempfile::tempdir;
 
@@ -110,7 +109,7 @@ mod tests {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             absolute_path: absolute_path.to_owned(),
             content_ref,
-            behavior: PutFileBehavior::CreateOnly,
+            behavior: PutBehavior::NoReplace,
         })
     }
 
@@ -163,7 +162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_create_only_put_in_one_batch_is_destination_exists() {
+    async fn duplicate_no_replace_put_in_one_batch_is_destination_exists() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let staged = store_bytes_as_content(&store, &namespace_id, b"hello")
             .await
@@ -205,7 +204,7 @@ mod tests {
                 NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                     commit_id: CommitId::parse("delete-doomed").expect("valid commit id"),
                     absolute_path: "/docs/doomed.txt".to_owned(),
-                    recursive: false,
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
                 }),
             ],
             &context,

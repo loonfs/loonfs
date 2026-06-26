@@ -10,8 +10,7 @@ use loonfs::publish::PathMutationIntent;
 use loonfs::{
     payload_class, BootstrapNamespaceError, ChangeSeq, CoreError, CreateNamespaceOptions,
     DeleteNamespaceOptions, ErrorCode, Fs, JsonlObjectStoreMetricsRecorder,
-    ObjectStoreMetricsRecorder, PutFileBehavior, RuntimeError, SharedObjectStore, TraceMode,
-    TraceStoreKind,
+    ObjectStoreMetricsRecorder, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{
     decode_directory_cursor, decode_file_revisions_cursor,
@@ -23,10 +22,10 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
     CreateNamespaceRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ForkNamespaceRequest, InodeId, LimitError, ListFileRevisionsResponse, NamespaceId,
-    NamespaceIdValidationError, PageCursorError, PageRequest, PaginationPolicy,
-    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, InodeId,
+    LimitError, ListFileRevisionsResponse, NamespaceId, NamespaceIdValidationError,
+    PageCursorError, PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
+    FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_core::content::{
     mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
@@ -852,22 +851,22 @@ async fn filesystem_operation(
             commit_id,
             absolute_path: path,
             content_ref,
-            behavior: map_filesystem_put_behavior(behavior),
+            behavior,
         },
-        FilesystemOperation::DeletePath { path } => PathMutationIntent::DeletePath {
+        FilesystemOperation::DeletePath { path, behavior } => PathMutationIntent::DeletePath {
             commit_id,
             absolute_path: path,
-            recursive: false,
+            behavior,
         },
         FilesystemOperation::MovePath {
             from_path,
             to_path,
-            mode,
+            behavior,
         } => PathMutationIntent::MovePath {
             commit_id,
             from_path,
             to_path,
-            mode,
+            behavior,
         },
         FilesystemOperation::CopyPath { from_path, to_path } => PathMutationIntent::CopyFilePath {
             commit_id,
@@ -1365,7 +1364,9 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::NamespaceSummary,
         loonfs_api::NamespaceStatusResponse,
         loonfs_api::DeleteNamespaceResponse,
-        FilesystemPutBehavior,
+        loonfs_api::PutBehavior,
+        loonfs_api::DeleteDirectoryBehavior,
+        loonfs_api::v0::MoveBehavior,
         FilesystemOperation,
         FilesystemOperationRequest,
         FilesystemOperationResponse,
@@ -1397,7 +1398,9 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         ValidatedContentToken,
         ApiCommitRequest,
         ApiCommitResponse,
-        loonfs_api::v0::RenameMode,
+        loonfs_api::PutBehavior,
+        loonfs_api::DeleteDirectoryBehavior,
+        loonfs_api::v0::MoveBehavior,
         loonfs_api::v0::CommitOp,
         loonfs_api::v0::CommitPrecondition,
         loonfs_api::v0::CommitOpResult,
@@ -1434,13 +1437,6 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
             ErrorCode::Unauthorized,
             "missing or invalid bearer token",
         ))
-    }
-}
-
-fn map_filesystem_put_behavior(value: FilesystemPutBehavior) -> PutFileBehavior {
-    match value {
-        FilesystemPutBehavior::CreateOnly => PutFileBehavior::CreateOnly,
-        FilesystemPutBehavior::ReplaceExisting => PutFileBehavior::ReplaceExisting,
     }
 }
 
@@ -1649,7 +1645,7 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::InvalidRevisionNo
         | ErrorCode::InvalidCursor
         | ErrorCode::InvalidConfig
-        | ErrorCode::UnsupportedRenameMode
+        | ErrorCode::UnsupportedMoveBehavior
         | ErrorCode::InvalidUploadContent => StatusCode::BAD_REQUEST,
         ErrorCode::NamespaceNotFound
         | ErrorCode::PathNotFound
@@ -1766,10 +1762,10 @@ mod tests {
     use axum::body::Bytes;
     use futures::stream::BoxStream;
     use loonfs::{
-        CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions, RuntimeCacheConfig,
-        TraceMode, TraceStoreKind,
+        CreateNamespaceOptions, Fs, FsConfig, PutFileOptions, RuntimeCacheConfig, TraceMode,
+        TraceStoreKind,
     };
-    use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
+    use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
     use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
     use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
     use loonfs_objectstore::fs::LocalFsStore;
@@ -1897,7 +1893,7 @@ mod tests {
             "/notes/hello.txt",
             b"hello from runtime",
             PutFileOptions {
-                behavior: PutFileBehavior::CreateOnly,
+                behavior: PutBehavior::NoReplace,
                 commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
             },
         )
@@ -2330,7 +2326,7 @@ mod tests {
                 WriteOptions {
                     commit_id: commit_id
                         .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                    put_file_behavior: PutFileBehavior::ReplaceExisting,
+                    put_behavior: PutBehavior::Replace,
                     ..WriteOptions::default()
                 },
             )
@@ -2350,7 +2346,7 @@ mod tests {
                 WriteOptions {
                     commit_id: commit_id
                         .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                    recursive_delete: true,
+                    delete_behavior: DeleteDirectoryBehavior::Recursive,
                     ..WriteOptions::default()
                 },
             )

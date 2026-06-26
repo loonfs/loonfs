@@ -195,7 +195,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
 | `lease_conflict` | 409 | Another writer holds the namespace lease. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
-| `unsupported_rename_mode` | 400 | The requested rename mode is not supported. |
+| `unsupported_move_behavior` | 400 | The requested move behavior is not supported. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
@@ -403,7 +403,7 @@ validation.
     "op": "put_file",
     "path": "/docs/report.pdf",
     "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
-    "behavior": "create_only"
+    "behavior": "no_replace"
   }
 }
 ```

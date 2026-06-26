@@ -67,7 +67,7 @@ pub enum ErrorCode {
     TombstoneConflict,
     LeaseConflict,
     WouldCycle,
-    UnsupportedRenameMode,
+    UnsupportedMoveBehavior,
     CommitIdReuseConflict,
     CommitOutcomeUnknown,
     CommitQueueFull,
@@ -111,7 +111,7 @@ impl ErrorCode {
         ErrorCode::TombstoneConflict,
         ErrorCode::LeaseConflict,
         ErrorCode::WouldCycle,
-        ErrorCode::UnsupportedRenameMode,
+        ErrorCode::UnsupportedMoveBehavior,
         ErrorCode::CommitIdReuseConflict,
         ErrorCode::CommitOutcomeUnknown,
         ErrorCode::CommitQueueFull,
@@ -138,7 +138,7 @@ impl ErrorCode {
             | ErrorCode::InvalidRevisionNo
             | ErrorCode::InvalidCursor
             | ErrorCode::InvalidConfig
-            | ErrorCode::UnsupportedRenameMode
+            | ErrorCode::UnsupportedMoveBehavior
             | ErrorCode::InvalidUploadContent => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
             ErrorCode::PermissionDenied => ErrorKind::PermissionDenied,
@@ -197,7 +197,7 @@ impl ErrorCode {
             ErrorCode::TombstoneConflict => "tombstone_conflict",
             ErrorCode::LeaseConflict => "lease_conflict",
             ErrorCode::WouldCycle => "would_cycle",
-            ErrorCode::UnsupportedRenameMode => "unsupported_rename_mode",
+            ErrorCode::UnsupportedMoveBehavior => "unsupported_move_behavior",
             ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
             ErrorCode::CommitOutcomeUnknown => "commit_outcome_unknown",
             ErrorCode::CommitQueueFull => "commit_queue_full",

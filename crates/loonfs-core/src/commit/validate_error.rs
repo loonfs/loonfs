@@ -1,4 +1,4 @@
-use loonfs_api::v0::RenameMode;
+use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{ChangeSeq, FenceToken, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 
@@ -143,8 +143,8 @@ pub enum CommitValidationError {
         root_inode: InodeId,
         tombstone_seq: ChangeSeq,
     },
-    UnsupportedRenameMode {
-        mode: RenameMode,
+    UnsupportedMoveBehavior {
+        behavior: MoveBehavior,
     },
     DeleteSubtreeRootMissing {
         root_inode: InodeId,

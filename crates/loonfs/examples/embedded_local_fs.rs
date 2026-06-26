@@ -1,5 +1,5 @@
 use loonfs::{
-    CreateNamespaceOptions, Fs, NamespaceId, PutFileBehavior, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, Fs, NamespaceId, PutBehavior, PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "/hello.txt",
         b"hello from embedded LoonFS\n",
         PutFileOptions {
-            behavior: PutFileBehavior::ReplaceExisting,
+            behavior: PutBehavior::Replace,
             commit_id: None,
         },
     )

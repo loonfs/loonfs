@@ -1,9 +1,6 @@
-use crate::{
-    checkpoint::{MetadataTableCache, WalTailProjectionCache},
-    path::write::PutFileBehavior,
-};
+use crate::checkpoint::{MetadataTableCache, WalTailProjectionCache};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::CommitId;
+use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
 use std::sync::Arc;
 
 /// Options for namespace bootstrap.
@@ -104,17 +101,17 @@ pub struct WriteOptions {
     /// If omitted, path helpers generate one internally.
     pub commit_id: Option<CommitId>,
     /// Whether a file put may replace an existing file.
-    pub put_file_behavior: PutFileBehavior,
+    pub put_behavior: PutBehavior,
     /// Whether delete may remove a non-empty subtree.
-    pub recursive_delete: bool,
+    pub delete_behavior: DeleteDirectoryBehavior,
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             commit_id: None,
-            put_file_behavior: PutFileBehavior::CreateOnly,
-            recursive_delete: true,
+            put_behavior: PutBehavior::NoReplace,
+            delete_behavior: DeleteDirectoryBehavior::Recursive,
         }
     }
 }

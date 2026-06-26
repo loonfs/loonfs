@@ -454,10 +454,12 @@ fn validate_metadata_preconditions(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                mode,
+                behavior,
             } => {
-                if *mode != loonfs_api::v0::RenameMode::NoReplace {
-                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode });
+                if *behavior != loonfs_api::v0::MoveBehavior::NoReplace {
+                    return Err(CommitValidationError::UnsupportedMoveBehavior {
+                        behavior: *behavior,
+                    });
                 }
                 let source_binding = resolve_current_binding_for_mutation(
                     &ephemeral_metadata_state,
@@ -720,10 +722,13 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                mode,
+                behavior,
             } => {
-                if *mode != loonfs_api::v0::RenameMode::NoReplace {
-                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode }.into());
+                if *behavior != loonfs_api::v0::MoveBehavior::NoReplace {
+                    return Err(CommitValidationError::UnsupportedMoveBehavior {
+                        behavior: *behavior,
+                    }
+                    .into());
                 }
                 let source_binding = resolve_publish_current_binding_for_mutation(
                     &metadata_state,

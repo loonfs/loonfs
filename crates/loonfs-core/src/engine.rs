@@ -14,9 +14,9 @@ use loonfs_api::v0::{
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
-    FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, MutationResult, NamespaceId,
-    NamespaceSummary, Page, PageRequest, RevisionNo, DEFAULT_PAGE_LIMIT,
+    ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DirectoryPageCursor,
+    FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, MutationResult,
+    NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroU32;
@@ -622,7 +622,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             path.as_ref(),
             bytes.as_ref(),
-            options.put_file_behavior,
+            options.put_behavior,
             &self.mutation_context(),
             options
                 .commit_id
@@ -646,7 +646,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             path.as_ref(),
             content_ref,
-            options.put_file_behavior,
+            options.put_behavior,
             &self.mutation_context(),
             options
                 .commit_id
@@ -685,7 +685,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .commit_id
             .as_ref()
             .map(|commit_id| commit_id.as_str());
-        if options.recursive_delete {
+        if options.delete_behavior == DeleteDirectoryBehavior::Recursive {
             crate::path::write::ops::delete_path(
                 &self.store,
                 &self.namespace_id,

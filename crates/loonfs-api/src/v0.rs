@@ -8,21 +8,17 @@ use std::collections::BTreeMap;
 
 pub type CommitAnnotations = BTreeMap<String, Value>;
 
-/// Rename behavior.
+/// Move behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum RenameMode {
+pub enum MoveBehavior {
     /// Move only if the destination name is absent.
     NoReplace,
     /// Reserved for a future version.
-    ReplaceExisting,
+    Replace,
     /// Reserved for a future version.
     Exchange,
-}
-
-pub fn default_rename_mode() -> RenameMode {
-    RenameMode::NoReplace
 }
 
 /// Upload transport mode.
@@ -207,8 +203,7 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
-        #[serde(default = "default_rename_mode")]
-        mode: RenameMode,
+        behavior: MoveBehavior,
     },
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]

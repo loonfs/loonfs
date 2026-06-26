@@ -822,10 +822,9 @@ mod tests {
     };
     use loonfs_api::v0::{CommitOp, CommitRequest};
     use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
-    use loonfs_api::{ChangeSeq, InodeId};
+    use loonfs_api::{ChangeSeq, InodeId, PutBehavior};
     use loonfs_core::content::store_bytes_as_content;
     use loonfs_core::publish::PathMutationIntent;
-    use loonfs_core::PutFileBehavior;
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::namespace_head;
     use loonfs_objectstore::{
@@ -1742,7 +1741,7 @@ mod tests {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),
             absolute_path: "/file.txt".to_owned(),
             content_ref: content.content_ref,
-            behavior: PutFileBehavior::CreateOnly,
+            behavior: PutBehavior::NoReplace,
         };
 
         let (explicit_response, path_response) = tokio::join!(
