@@ -428,7 +428,7 @@ impl Fs {
             "cache_path",
             crate::trace::CachePath::MaterializedTables.as_str(),
         );
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(entry)
     }
 
@@ -517,7 +517,7 @@ impl Fs {
         let page = engine
             .list_path_page_with_runtime_context(listed_path.as_str(), request, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         let head_seq = page
             .items
             .first()
@@ -547,7 +547,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .read_file_with_runtime_context(absolute_path, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)
     }
 
@@ -563,7 +563,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .list_file_revisions_with_runtime_context(absolute_path, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(revisions)
     }
 
@@ -581,7 +581,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .list_file_revisions_page_with_runtime_context(absolute_path, request, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
             head.state.seq,
@@ -603,7 +603,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .list_file_revisions_for_inode_with_runtime_context(inode_id, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(revisions)
     }
 
@@ -624,7 +624,7 @@ impl Fs {
                 &read_context,
             )
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
             head.state.seq,
@@ -646,7 +646,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .read_file_revision_with_runtime_context(absolute_path, revision_no, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)
     }
 
@@ -663,7 +663,7 @@ impl Fs {
             .namespace_engine(namespace_id)
             .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &read_context)
             .await?;
-        self.inner.cache_stats.record_manifest_plus_tail_read();
+        self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)
     }
 

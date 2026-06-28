@@ -94,8 +94,8 @@ pub(crate) struct CachedControl<T> {
 /// understanding read/write warmup behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeCacheStats {
-    /// Metadata reads served from manifest tables plus WAL tail projection.
-    pub read_manifest_plus_tail_hits: usize,
+    /// Latest metadata reads served through the metadata-view path.
+    pub latest_metadata_view_reads: usize,
     /// WAL-tail projection cache hits.
     pub wal_tail_projection_cache_hits: usize,
     /// WAL-tail projection cache misses.
@@ -130,7 +130,7 @@ pub struct RuntimeCacheStats {
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCacheStatsInner {
-    read_manifest_plus_tail_hits: AtomicUsize,
+    latest_metadata_view_reads: AtomicUsize,
 }
 
 impl RuntimeCacheStatsInner {
@@ -140,7 +140,7 @@ impl RuntimeCacheStatsInner {
         wal_tail_projection_cache: WalTailProjectionCacheStats,
     ) -> RuntimeCacheStats {
         RuntimeCacheStats {
-            read_manifest_plus_tail_hits: self.read_manifest_plus_tail_hits.load(Ordering::SeqCst),
+            latest_metadata_view_reads: self.latest_metadata_view_reads.load(Ordering::SeqCst),
             wal_tail_projection_cache_hits: wal_tail_projection_cache.hits,
             wal_tail_projection_cache_misses: wal_tail_projection_cache.misses,
             wal_tail_projection_cache_inserts: wal_tail_projection_cache.inserts,
@@ -163,8 +163,8 @@ impl RuntimeCacheStatsInner {
         }
     }
 
-    pub(crate) fn record_manifest_plus_tail_read(&self) {
-        self.read_manifest_plus_tail_hits
+    pub(crate) fn record_latest_metadata_view_read(&self) {
+        self.latest_metadata_view_reads
             .fetch_add(1, Ordering::SeqCst);
     }
 }

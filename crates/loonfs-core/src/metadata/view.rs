@@ -134,7 +134,7 @@ impl<'a> InMemoryMetadataView<'a> {
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
-    pub(crate) fn manifest_plus_tail(
+    pub(crate) fn from_loaded_head(
         head: &'a HeadState,
         tables: &'a VerifiedMetadataTables<'store, S>,
         wal_tail_rows: &'a MetadataState,

@@ -8,9 +8,7 @@ use crate::path::write::{
     path_intent_fingerprint_for_path_intent, PathMutationIntent, PlannedPathMutation,
     PublishPlanningSession,
 };
-use crate::protocol::{
-    load_publish_manifest_plus_tail_view, PublishTailOptions, PublishTailProjection,
-};
+use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, MutationResult, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -135,7 +133,7 @@ impl NamespaceCommitEngine {
             }
         };
 
-        let (publish_view, projection) = match load_publish_manifest_plus_tail_view(
+        let (publish_view, projection) = match load_publish_metadata_view(
             store,
             &self.namespace_id,
             Some(acquired_writer),
@@ -244,7 +242,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let (view, _projection) = load_publish_manifest_plus_tail_view(
+        let (view, _projection) = load_publish_metadata_view(
             self.store,
             namespace_id,
             None,

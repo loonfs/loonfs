@@ -3287,7 +3287,7 @@
           "wal_tail_segments": {
             "type": "integer",
             "format": "int64",
-            "description": "Number of visible WAL segments after the manifest basis.",
+            "description": "Number of visible WAL segments after the current manifest.",
             "minimum": 0
           }
         }

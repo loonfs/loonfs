@@ -105,7 +105,7 @@ define_invariant_ids! {
     (NamespaceManifestMustBeVerified, "namespace_manifest_must_be_verified"),
     (ManifestReplayRequiresAllManifestSegments, "manifest_replay_requires_all_manifest_segments"),
     (MetadataFileRefMatchesPayload, "manifest_segment_descriptor_matches_payload"),
-    (MetadataSstRowsRestoreBasisMetadata, "manifest_segment_rows_restore_basis_metadata"),
+    (MetadataSstRowsRestoreBasisMetadata, "manifest_segment_rows_restore_manifest_metadata"),
     (CheckpointPlusWalTailReproducesHead, "checkpoint_plus_wal_tail_reproduces_head"),
     (CheckpointPlusWalTailReproducesMetadata, "checkpoint_plus_wal_tail_reproduces_metadata"),
 
@@ -145,7 +145,7 @@ define_invariant_ids! {
     (MetadataSegmentKeyMatchesFamilyAndIndex, "manifest_segment_key_matches_family_and_index"),
     (VerifiedNamespaceManifestRequiresDurableSegments, "verified_namespace_manifest_requires_durable_segments"),
     (NamespaceManifestPreservesHeadSummary, "namespace_manifest_preserves_head_summary"),
-    (NamespaceManifestPreservesBasisMetadata, "namespace_manifest_preserves_basis_metadata"),
+    (NamespaceManifestPreservesBasisMetadata, "namespace_manifest_preserves_metadata_view"),
 
     // Client transfer download invariants.
     (DownloadTransferByteRangeAdvancesMonotonically, "download_transfer_byte_range_advances_monotonically"),

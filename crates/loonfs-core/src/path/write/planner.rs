@@ -750,7 +750,7 @@ mod tests {
     use crate::metadata::{DirentryBindRecord, InodeRecord};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{delete_path, put_file_bytes};
-    use crate::protocol::{load_publish_manifest_plus_tail_view, PublishTailOptions};
+    use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loonfs_api::RevisionNo;
@@ -812,7 +812,7 @@ mod tests {
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let (view, _projection) = load_publish_manifest_plus_tail_view(
+        let (view, _projection) = load_publish_metadata_view(
             store,
             namespace_id,
             None,

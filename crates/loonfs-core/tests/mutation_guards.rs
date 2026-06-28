@@ -1705,7 +1705,7 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_overlay() {
+async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
