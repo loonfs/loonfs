@@ -1764,7 +1764,7 @@ mod tests {
     };
     use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
     use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-    use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
+    use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, Settings, WriteOptions};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::namespace_head;
     use loonfs_objectstore::{
@@ -1773,7 +1773,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
     #[derive(Debug)]
@@ -2294,7 +2294,9 @@ mod tests {
             .writer(context.writer_id.clone())
             .writer_session_id(context.writer_session_id.clone())
             .writer_version(context.writer_version.clone())
-            .lease_duration_ms(context.lease_duration_ms)
+            .settings(Settings {
+                writer_lease_duration: Duration::from_millis(context.lease_duration_ms),
+            })
             .build()
             .expect("test context should build namespace engine")
     }

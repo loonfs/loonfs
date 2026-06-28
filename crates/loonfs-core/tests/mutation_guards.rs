@@ -39,7 +39,7 @@ use loonfs_core::publish::{
 };
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    ForkOptions, MutationContext, NamespaceEngine, WriteOptions,
+    MutationContext, NamespaceEngine, Settings, WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
@@ -54,6 +54,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[derive(Debug, Clone)]
@@ -79,7 +80,9 @@ fn namespace_engine<'a, S: ObjectStore + ?Sized>(
         .writer(context.writer_id.clone())
         .writer_session_id(context.writer_session_id.clone())
         .writer_version(context.writer_version.clone())
-        .lease_duration_ms(context.lease_duration_ms)
+        .settings(Settings {
+            writer_lease_duration: Duration::from_millis(context.lease_duration_ms),
+        })
         .build()
         .expect("test context should build namespace engine")
 }
@@ -102,10 +105,7 @@ fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::NamespaceSummary, CoreError> {
-    block_on(
-        namespace_engine(store, source_namespace_id, context)
-            .fork_namespace(new_namespace_id, ForkOptions::default()),
-    )
+    block_on(namespace_engine(store, source_namespace_id, context).fork_namespace(new_namespace_id))
 }
 
 fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(

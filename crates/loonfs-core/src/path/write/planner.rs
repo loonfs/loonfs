@@ -989,6 +989,7 @@ mod tests {
     #[tokio::test]
     async fn move_path_plan_contains_binding_and_target_absence_preconditions() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let seed_commit_id = CommitId::parse("seed-file").expect("valid commit id");
         put_file_bytes(
             &store,
             &namespace_id,
@@ -996,7 +997,7 @@ mod tests {
             b"hello",
             PutBehavior::NoReplace,
             &context,
-            Some("seed-file"),
+            Some(&seed_commit_id),
         )
         .await
         .expect("seed file");
@@ -1088,6 +1089,7 @@ mod tests {
     #[tokio::test]
     async fn copy_file_plan_validates_source_revision_and_target_absence() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let seed_commit_id = CommitId::parse("seed-copy-source").expect("valid commit id");
         put_file_bytes(
             &store,
             &namespace_id,
@@ -1095,7 +1097,7 @@ mod tests {
             b"hello",
             PutBehavior::NoReplace,
             &context,
-            Some("seed-copy-source"),
+            Some(&seed_commit_id),
         )
         .await
         .expect("seed file");
@@ -1139,6 +1141,7 @@ mod tests {
     #[tokio::test]
     async fn tombstoned_ancestor_blocks_descendant_planning() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let seed_commit_id = CommitId::parse("seed-dead-tree").expect("valid commit id");
         put_file_bytes(
             &store,
             &namespace_id,
@@ -1146,16 +1149,17 @@ mod tests {
             b"hello",
             PutBehavior::NoReplace,
             &context,
-            Some("seed-dead-tree"),
+            Some(&seed_commit_id),
         )
         .await
         .expect("seed file");
+        let delete_commit_id = CommitId::parse("delete-dead-tree").expect("valid commit id");
         delete_path(
             &store,
             &namespace_id,
             "/dead",
             &context,
-            Some("delete-dead-tree"),
+            Some(&delete_commit_id),
         )
         .await
         .expect("delete tree");

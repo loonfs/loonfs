@@ -1550,17 +1550,6 @@ fn fail_outcomes_contingent_on_unpublished_batch(
     }
 }
 
-fn finish_batch_outcomes(
-    outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>>,
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
-    outcomes
-        .into_iter()
-        .map(|outcome| {
-            outcome.unwrap_or_else(|| Err(CoreError::Store("missing batch outcome".to_owned())))
-        })
-        .collect()
-}
-
 fn finish_batch_outcomes_with_aliases(
     mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>>,
     aliases: &[(usize, usize)],
@@ -1572,7 +1561,12 @@ fn finish_batch_outcomes_with_aliases(
             .unwrap_or_else(|| Err(CoreError::Store("missing primary batch outcome".to_owned())));
         outcomes[*alias_index] = Some(primary_outcome);
     }
-    finish_batch_outcomes(outcomes)
+    outcomes
+        .into_iter()
+        .map(|outcome| {
+            outcome.unwrap_or_else(|| Err(CoreError::Store("missing batch outcome".to_owned())))
+        })
+        .collect()
 }
 
 #[cfg(test)]
