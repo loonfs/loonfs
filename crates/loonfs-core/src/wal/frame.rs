@@ -1,9 +1,10 @@
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataApplyError;
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
-use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope};
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
+use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +50,17 @@ pub(crate) struct ValidatedWalSegment {
     envelope: WalSegmentEnvelope,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DecodedWalRecord<'a> {
+    pub(crate) namespace_id: &'a NamespaceId,
+    pub(crate) seq: ChangeSeq,
+    pub(crate) writer_epoch: WriterEpoch,
+    pub(crate) commit_id: &'a CommitId,
+    pub(crate) semantic_commit_fingerprint: &'a str,
+    pub(crate) message: Option<&'a str>,
+    pub(crate) deltas: Cow<'a, [WalCommitDelta]>,
+}
+
 impl ValidatedWalSegment {
     pub(crate) fn new(object_key: String, envelope: WalSegmentEnvelope) -> Self {
         Self {
@@ -71,6 +83,24 @@ impl ValidatedWalSegment {
 
     pub(crate) fn pointer(&self) -> WalSegmentPointer {
         self.envelope.pointer(self.object_key.clone())
+    }
+
+    pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
+        let namespace_id = &self.envelope.payload.namespace_id;
+        let writer_epoch = self.envelope.payload.writer_epoch;
+        self.envelope
+            .payload
+            .records
+            .iter()
+            .map(move |record| DecodedWalRecord {
+                namespace_id,
+                seq: record.seq,
+                writer_epoch,
+                commit_id: &record.commit_id,
+                semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
+                message: record.message.as_deref(),
+                deltas: Cow::Borrowed(&record.deltas),
+            })
     }
 }
 
@@ -100,6 +130,16 @@ impl ValidatedWalChain {
 
     pub(crate) fn segments(&self) -> &[ValidatedWalSegment] {
         &self.segments
+    }
+
+    pub(crate) fn checked_invariants(&self) -> &[InvariantId] {
+        &self.checked_invariants
+    }
+
+    pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
+        self.segments
+            .iter()
+            .flat_map(ValidatedWalSegment::decoded_records)
     }
 }
 
@@ -167,6 +207,10 @@ pub enum WalReplayError {
     NonContiguousSeq {
         expected: ChangeSeq,
         actual: ChangeSeq,
+    },
+    WriterEpochMismatch {
+        expected_max: WriterEpoch,
+        actual: WriterEpoch,
     },
     EmptySegment,
     SegmentSummaryMismatch,

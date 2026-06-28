@@ -1,4 +1,6 @@
-use super::replay::{extend_wal_replay_invariants, validate_decoded_replayed_wal, WalReplayError};
+use super::replay::{
+    extend_wal_replay_invariants, validate_wal_segment_for_replay, WalReplayError,
+};
 use super::{ValidatedWalChain, ValidatedWalSegment, WalChainLoadError, WalChainLoadRequest};
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{decode_wal_segment_envelope_zstd, WalSegmentEnvelope};
@@ -98,7 +100,7 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     }
     let mut checked_invariants = Vec::new();
     for segment in &reversed {
-        validate_decoded_replayed_wal(
+        validate_wal_segment_for_replay(
             request.namespace_id,
             expected_base_seq,
             segment.object_key(),

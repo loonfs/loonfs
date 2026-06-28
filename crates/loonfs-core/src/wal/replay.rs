@@ -1,44 +1,67 @@
 pub(crate) use super::frame::WalReplayError;
-use super::{ReplayedWalTail, ValidatedWalSegment};
+use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
-use loonfs_api::{validate_wal_segment_id, ChangeSeq, InodeId, NamespaceId};
+use loonfs_api::{validate_wal_segment_id, ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 
-pub(crate) fn replay_validated_wal_tail_with_metadata(
+pub(crate) fn project_validated_wal_tail(
     base_head: &HeadState,
     base_metadata_state: &MetadataState,
-    wal_tail: &[ValidatedWalSegment],
+    expected_writer_epoch: Option<WriterEpoch>,
+    wal_tail: &ValidatedWalChain,
 ) -> Result<ReplayedWalTail, WalReplayError> {
+    let mut replayed = replay_wal_records(
+        base_head,
+        base_metadata_state,
+        expected_writer_epoch,
+        wal_tail.decoded_records(),
+    )?;
+    if let Some(last_segment) = wal_tail.segments().last() {
+        replayed.resulting_head.visible_wal_tip = Some(last_segment.pointer());
+    }
+    extend_invariants(
+        &mut replayed.checked_invariants,
+        wal_tail.checked_invariants(),
+    );
+    Ok(replayed)
+}
+
+pub(crate) fn replay_wal_records<'a, I>(
+    base_head: &HeadState,
+    base_metadata_state: &MetadataState,
+    expected_writer_epoch: Option<WriterEpoch>,
+    records: I,
+) -> Result<ReplayedWalTail, WalReplayError>
+where
+    I: IntoIterator<Item = DecodedWalRecord<'a>>,
+{
     let mut current_head = base_head.clone();
     let mut current_metadata_state = base_metadata_state.clone();
     let mut checked_invariants = Vec::new();
 
-    for wal_segment in wal_tail {
-        validate_decoded_replayed_wal(
-            &current_head.namespace_id,
-            current_head.seq,
-            wal_segment.object_key(),
-            wal_segment.envelope(),
-        )?;
-        for record in wal_segment.records() {
-            current_head.seq = record.seq;
-            current_head.head_commit_id = record.commit_id.clone();
-            current_head.next_inode_id =
-                replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-            let apply_invariants = current_metadata_state
-                .apply_committed_wal_record_mut(record)
-                .map_err(WalReplayError::MetadataApply)?;
-            push_invariant(
-                &mut checked_invariants,
-                InvariantId::WalReplayAppliesMetadataRows,
-            );
-            extend_invariants(&mut checked_invariants, &apply_invariants);
-        }
-        current_head.visible_wal_tip = Some(wal_segment.pointer());
-        extend_wal_replay_invariants(&mut checked_invariants);
+    for record in records {
+        validate_replay_record(&current_head, expected_writer_epoch, &record)?;
+        current_head.seq = record.seq;
+        current_head.head_commit_id = record.commit_id.clone();
+        current_head.next_inode_id =
+            replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
+        let apply_invariants = current_metadata_state
+            .apply_committed_wal_record_parts_mut(
+                record.seq,
+                record.commit_id,
+                record.semantic_commit_fingerprint,
+                record.message,
+                &record.deltas,
+            )
+            .map_err(WalReplayError::MetadataApply)?;
+        push_invariant(
+            &mut checked_invariants,
+            InvariantId::WalReplayAppliesMetadataRows,
+        );
+        extend_invariants(&mut checked_invariants, &apply_invariants);
     }
 
     Ok(ReplayedWalTail {
@@ -48,7 +71,43 @@ pub(crate) fn replay_validated_wal_tail_with_metadata(
     })
 }
 
-pub(super) fn validate_decoded_replayed_wal(
+fn validate_replay_record(
+    current_head: &HeadState,
+    expected_writer_epoch: Option<WriterEpoch>,
+    record: &DecodedWalRecord<'_>,
+) -> Result<(), WalReplayError> {
+    if record.namespace_id != &current_head.namespace_id {
+        return Err(WalReplayError::NamespaceMismatch {
+            expected: current_head.namespace_id.clone(),
+            actual: record.namespace_id.clone(),
+        });
+    }
+    let expected_seq = current_head
+        .seq
+        .0
+        .checked_add(1)
+        .map(ChangeSeq)
+        .ok_or(WalReplayError::SeqOverflow)?;
+    if record.seq != expected_seq {
+        return Err(WalReplayError::NonContiguousSeq {
+            expected: expected_seq,
+            actual: record.seq,
+        });
+    }
+    if let Some(expected_max) = expected_writer_epoch {
+        // A visible tail may contain older epochs after writer takeover; it
+        // must never contain records from an epoch beyond the current head.
+        if record.writer_epoch > expected_max {
+            return Err(WalReplayError::WriterEpochMismatch {
+                expected_max,
+                actual: record.writer_epoch,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_wal_segment_for_replay(
     expected_namespace: &NamespaceId,
     expected_base_head_seq: ChangeSeq,
     object_key: &str,

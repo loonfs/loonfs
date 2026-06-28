@@ -27,9 +27,7 @@ use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
-use crate::wal::{
-    load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadRequest,
-};
+use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::manifest::{
@@ -298,10 +296,11 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     })?;
     let replayed = {
         let _span = tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
-        replay_validated_wal_tail_with_metadata(
+        project_validated_wal_tail(
             &manifest_head,
             &MetadataState::default(),
-            wal_chain.segments(),
+            Some(head.writer_epoch),
+            &wal_chain,
         )
         .map_err(MetadataProjectionLoadError::WalReplay)
         .map_err(CoreError::MetadataProjection)?

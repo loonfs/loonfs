@@ -4,11 +4,11 @@ mod replay;
 mod writer;
 
 pub(crate) use self::frame::{
-    PreparedWalSegment, ReplayedWalTail, ValidatedWalChain, ValidatedWalSegment, WalBuildError,
-    WalChainLoadError, WalChainLoadRequest, WalReplayError,
+    DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalChain, ValidatedWalSegment,
+    WalBuildError, WalChainLoadError, WalChainLoadRequest, WalReplayError,
 };
 pub(crate) use self::reader::load_validated_wal_chain;
-pub(crate) use self::replay::replay_validated_wal_tail_with_metadata;
+pub(crate) use self::replay::project_validated_wal_tail;
 pub(crate) use self::writer::prepare_wal_segment;
 
 #[cfg(test)]
@@ -27,6 +27,7 @@ mod tests {
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_segment;
     use loonfs_objectstore::ObjectStore;
+    use std::borrow::Cow;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -143,6 +144,114 @@ mod tests {
 
         assert_eq!(chain.segments().len(), 1);
         assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn canonical_replay_advances_head_and_applies_metadata_rows() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let commit = materialized_create_dir(
+            &namespace_id,
+            "c_wal_replay",
+            "docs",
+            ChangeSeq(0),
+            ChangeSeq(1),
+        );
+        let segment = prepare_wal_segment(
+            namespace_id.clone(),
+            WriterEpoch(1),
+            None,
+            std::slice::from_ref(&commit),
+            "test-writer",
+        )
+        .expect("prepare wal segment");
+        let mut base_head = loonfs_api::wire::control::HeadState::initial(namespace_id.clone());
+        base_head.writer_epoch = WriterEpoch(1);
+        let record = segment
+            .envelope
+            .payload
+            .records
+            .first()
+            .expect("wal record");
+
+        let replayed = replay::replay_wal_records(
+            &base_head,
+            &crate::metadata::MetadataState::default(),
+            Some(WriterEpoch(1)),
+            [DecodedWalRecord {
+                namespace_id: &namespace_id,
+                seq: record.seq,
+                writer_epoch: segment.envelope.payload.writer_epoch,
+                commit_id: &record.commit_id,
+                semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
+                message: record.message.as_deref(),
+                deltas: Cow::Borrowed(&record.deltas),
+            }],
+        )
+        .expect("replay wal records");
+
+        assert_eq!(replayed.resulting_head.seq, ChangeSeq(1));
+        assert_eq!(replayed.resulting_head.head_commit_id, record.commit_id);
+        assert_eq!(replayed.resulting_head.next_inode_id, InodeId(3));
+        assert!(replayed
+            .resulting_metadata_state
+            .inode_at_head(InodeId(2))
+            .is_some());
+        assert!(replayed
+            .resulting_metadata_state
+            .find_commit_receipt(&record.commit_id)
+            .is_some());
+    }
+
+    #[test]
+    fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let commit = materialized_create_dir(
+            &namespace_id,
+            "c_wal_replay_epoch",
+            "docs",
+            ChangeSeq(0),
+            ChangeSeq(1),
+        );
+        let segment = prepare_wal_segment(
+            namespace_id.clone(),
+            WriterEpoch(2),
+            None,
+            std::slice::from_ref(&commit),
+            "test-writer",
+        )
+        .expect("prepare wal segment");
+        let mut base_head = loonfs_api::wire::control::HeadState::initial(namespace_id.clone());
+        base_head.writer_epoch = WriterEpoch(1);
+        let record = segment
+            .envelope
+            .payload
+            .records
+            .first()
+            .expect("wal record");
+
+        let error = replay::replay_wal_records(
+            &base_head,
+            &crate::metadata::MetadataState::default(),
+            Some(WriterEpoch(1)),
+            [DecodedWalRecord {
+                namespace_id: &namespace_id,
+                seq: record.seq,
+                writer_epoch: segment.envelope.payload.writer_epoch,
+                commit_id: &record.commit_id,
+                semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
+                message: record.message.as_deref(),
+                deltas: Cow::Borrowed(&record.deltas),
+            }],
+        )
+        .expect_err("future writer epoch should fail");
+
+        assert_eq!(
+            error,
+            WalReplayError::WriterEpochMismatch {
+                expected_max: WriterEpoch(1),
+                actual: WriterEpoch(2),
+            }
+        );
     }
 
     #[tokio::test]
