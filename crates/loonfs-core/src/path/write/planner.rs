@@ -760,6 +760,7 @@ mod tests {
     fn test_context() -> MutationContext {
         MutationContext {
             writer_id: "writer".to_owned(),
+            writer_session_id: "wrs_test".to_owned(),
             writer_version: "test".to_owned(),
             now_ms: 1,
             lease_duration_ms: 60_000,
@@ -814,6 +815,7 @@ mod tests {
         let (view, _projection) = load_publish_manifest_plus_tail_view(
             store,
             namespace_id,
+            None,
             None,
             &PublishTailOptions::default(),
         )

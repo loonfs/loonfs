@@ -1,16 +1,11 @@
 use loonfs_api::v0::MoveBehavior;
-use loonfs_api::{ChangeSeq, FenceToken, InodeId, InodeKind, RevisionNo};
+use loonfs_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitValidationError {
     EmptyCommit,
     NamespaceMismatch,
-    HeadLeaseNamespaceMismatch,
-    HeadLeaseFenceMismatch {
-        head: FenceToken,
-        lease: FenceToken,
-    },
     NamePreconditionParentMissing {
         parent_inode: InodeId,
     },
@@ -166,15 +161,20 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
     },
-    StaleWriterFenceToken {
-        active: FenceToken,
-        requested: FenceToken,
+    StaleWriterEpoch {
+        active: WriterEpoch,
+        requested: WriterEpoch,
     },
-    LeaseHolderMismatch {
+    MissingWriterLease,
+    WriterLeaseHolderMismatch {
         expected: String,
         actual: String,
     },
-    LeaseExpired {
+    WriterLeaseSessionMismatch {
+        expected: String,
+        actual: String,
+    },
+    WriterLeaseExpired {
         lease_expires_at_ms: u64,
         now_ms: u64,
     },

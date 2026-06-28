@@ -2,7 +2,7 @@ use super::{
     core_commit_fingerprint, CommitFingerprintError, CommitPlan, CommitRequest,
     PathIntentFingerprint, SemanticMutationIdentity,
 };
-use loonfs_api::{FenceToken, NamespaceId};
+use loonfs_api::{NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -10,7 +10,8 @@ use thiserror::Error;
 pub struct CommitExecutionContext {
     pub namespace_id: NamespaceId,
     pub writer_id: String,
-    pub writer_fence_token: FenceToken,
+    pub writer_session_id: String,
+    pub writer_epoch: WriterEpoch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +88,8 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),

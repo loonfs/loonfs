@@ -2277,6 +2277,7 @@ mod tests {
     fn context(writer_id: &str, now_ms: u64) -> MutationContext {
         MutationContext {
             writer_id: writer_id.to_owned(),
+            writer_session_id: format!("wrs_{writer_id}"),
             writer_version: format!("{writer_id}/0.1.0"),
             now_ms,
             lease_duration_ms: 60_000,
@@ -2291,6 +2292,7 @@ mod tests {
         NamespaceEngine::builder(store)
             .namespace(namespace_id.clone())
             .writer(context.writer_id.clone())
+            .writer_session_id(context.writer_session_id.clone())
             .writer_version(context.writer_version.clone())
             .lease_duration_ms(context.lease_duration_ms)
             .build()

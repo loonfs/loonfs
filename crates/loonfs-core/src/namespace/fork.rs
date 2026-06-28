@@ -13,19 +13,19 @@ use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
-    LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
-    NamespaceForkState, NamespaceForkStateEnvelope, NamespaceGcPinState,
-    NamespaceGcPinStateEnvelope, NamespaceState,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkState,
+    NamespaceForkStateEnvelope, NamespaceGcPinState, NamespaceGcPinStateEnvelope, NamespaceState,
+    WriterLease,
 };
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
     NamespaceManifestPayload,
 };
 use loonfs_api::{
-    generate_checkpoint_id, sha256_digest, FenceToken, ManifestId, NamespaceId, NamespaceSummary,
+    generate_checkpoint_id, sha256_digest, ManifestId, NamespaceId, NamespaceSummary, WriterEpoch,
 };
 use loonfs_objectstore::keys::{
-    gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
+    gc_pin, namespace_descriptor, namespace_fork_state, namespace_head,
 };
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -84,7 +84,12 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         namespace_id: new_namespace_id.clone(),
         seq: fork_seq,
         head_commit_id: source_head_commit_id.clone(),
-        active_fence_token: FenceToken(0),
+        writer_epoch: WriterEpoch(0),
+        writer_lease: Some(WriterLease {
+            writer_id: context.writer_id.clone(),
+            writer_session_id: context.writer_session_id.clone(),
+            lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
+        }),
         next_inode_id: source_manifest.payload.next_inode_id,
         name_policy: source_manifest.payload.name_policy,
         current_manifest_id: Some(target_manifest_id),
@@ -92,12 +97,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
         state: NamespaceState::Active,
-    };
-    let initial_lease = LeaseState {
-        namespace_id: new_namespace_id.clone(),
-        holder_id: context.writer_id.clone(),
-        fence_token: initial_head.active_fence_token,
-        lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
     };
     let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
@@ -112,12 +111,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         ControlObjectKind::NamespaceHead,
         &context.writer_version,
         initial_head,
-    )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
-    let lease = LeaseStateEnvelope::from_state(
-        ControlObjectKind::NamespaceLease,
-        &context.writer_version,
-        initial_lease,
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let fork_state = NamespaceForkStateEnvelope::from_state(
@@ -137,7 +130,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 
     let head_key = namespace_head(new_namespace_id.as_str());
     let fork_state_key = namespace_fork_state(new_namespace_id.as_str());
-    let lease_key = namespace_lease(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
     let target_manifest = NamespaceManifestEnvelope::from_payload(
         &context.writer_version,
@@ -147,7 +139,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             head_seq: fork_seq,
             head_commit_id: source_head_commit_id.clone(),
             base_seq: source_manifest.payload.base_seq,
-            active_fence_token: FenceToken(0),
+            writer_epoch: WriterEpoch(0),
             next_inode_id: source_manifest.payload.next_inode_id,
             name_policy: source_manifest.payload.name_policy,
             retention_floor_seq: fork_seq,
@@ -211,13 +203,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         new_namespace_id,
         &fork_state_key,
         &encode_control_object(&fork_state).map_err(|err| CoreError::Store(err.to_string()))?,
-    )
-    .await?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &lease_key,
-        &encode_control_object(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
     put_target_namespace_control_object(
@@ -382,8 +367,8 @@ mod tests {
         NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use loonfs_api::{
-        validate_gc_pin_id, ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamePolicy,
-        NamespaceId,
+        validate_gc_pin_id, ChangeSeq, CommitId, InodeId, ManifestId, NamePolicy, NamespaceId,
+        WriterEpoch,
     };
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::gc_pin;
@@ -528,7 +513,7 @@ mod tests {
                 head_seq,
                 head_commit_id: commit_id.clone(),
                 base_seq: head_seq,
-                active_fence_token: FenceToken(1),
+                writer_epoch: WriterEpoch(1),
                 next_inode_id: InodeId(2),
                 name_policy: NamePolicy::default(),
                 retention_floor_seq: head_seq,

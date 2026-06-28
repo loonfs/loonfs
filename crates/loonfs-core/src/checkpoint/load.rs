@@ -137,9 +137,10 @@ pub(crate) fn head_from_manifest(
         namespace_id: current_head.namespace_id.clone(),
         seq: manifest.payload.head_seq,
         head_commit_id: manifest.payload.head_commit_id.clone(),
-        // The manifest records the manifest-time fence token. That may lag the
-        // live head if lease takeover advanced the fence without any WAL replay.
-        active_fence_token: manifest.payload.active_fence_token,
+        // The manifest records the manifest-time writer epoch. That may lag the
+        // live head if writer takeover advanced the epoch without WAL replay.
+        writer_epoch: manifest.payload.writer_epoch,
+        writer_lease: current_head.writer_lease.clone(),
         next_inode_id: manifest.payload.next_inode_id,
         name_policy: manifest.payload.name_policy,
         current_manifest_id: current_head.current_manifest_id,

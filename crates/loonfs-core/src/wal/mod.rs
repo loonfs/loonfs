@@ -22,7 +22,7 @@ mod tests {
     use loonfs_api::wire::control::WalSegmentPointer;
     use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
     use loonfs_api::{
-        validate_wal_segment_id, ChangeSeq, CommitId, FenceToken, InodeId, NamespaceId,
+        validate_wal_segment_id, ChangeSeq, CommitId, InodeId, NamespaceId, WriterEpoch,
     };
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_segment;
@@ -36,7 +36,8 @@ mod tests {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
@@ -66,6 +67,7 @@ mod tests {
 
         let segment = prepare_wal_segment(
             namespace_id,
+            WriterEpoch(1),
             None,
             std::slice::from_ref(&record),
             "test-writer",
@@ -89,6 +91,7 @@ mod tests {
 
         let first = prepare_wal_segment(
             namespace_id.clone(),
+            WriterEpoch(1),
             None,
             std::slice::from_ref(&record),
             "test-writer",
@@ -96,6 +99,7 @@ mod tests {
         .expect("prepare first wal segment");
         let second = prepare_wal_segment(
             namespace_id,
+            WriterEpoch(1),
             None,
             std::slice::from_ref(&record),
             "test-writer",
@@ -266,7 +270,8 @@ mod tests {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: display_name.to_owned(),
@@ -306,6 +311,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let segment = prepare_wal_segment(
             namespace_id.clone(),
+            WriterEpoch(1),
             None,
             &[materialized_create_dir(
                 &namespace_id,
@@ -355,6 +361,7 @@ mod tests {
     ) -> PreparedWalSegment {
         let segment = prepare_wal_segment(
             namespace_id.clone(),
+            WriterEpoch(1),
             prev_visible_segment,
             &[materialized_create_dir(
                 namespace_id,

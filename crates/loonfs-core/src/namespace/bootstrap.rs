@@ -10,16 +10,14 @@ use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+    ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceDescriptorEnvelope,
+    NamespaceDescriptorState, WriterLease,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, InodeId, InodeKind, ManifestId, NamespaceId,
     NamespaceIdValidationError, NamespaceSummary,
 };
-use loonfs_objectstore::keys::{
-    content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
-};
+use loonfs_objectstore::keys::{content_store_descriptor, namespace_descriptor, namespace_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -48,8 +46,6 @@ pub enum BootstrapNamespaceError {
     Head(ControlObjectLoadError),
     #[error("failed to write head object: {0}")]
     HeadWrite(String),
-    #[error("failed to write lease object: {0}")]
-    LeaseWrite(String),
     #[error("failed to write initial namespace manifest: {0}")]
     ManifestWrite(String),
 }
@@ -64,9 +60,6 @@ impl From<NamespaceInitializationError> for BootstrapNamespaceError {
                 Self::DescriptorWrite(message)
             }
             NamespaceInitializationError::InspectNamespaceHead(message) => Self::HeadWrite(message),
-            NamespaceInitializationError::InspectNamespaceLease(message) => {
-                Self::LeaseWrite(message)
-            }
             NamespaceInitializationError::LoadNamespaceDescriptor(error)
             | NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
                 Self::Descriptor(error)
@@ -119,6 +112,11 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
     let mut initial_head = HeadState::initial(namespace_id.clone());
     initial_head.current_manifest_id = Some(ManifestId(initial_head.seq.0));
+    initial_head.writer_lease = Some(WriterLease {
+        writer_id: context.writer_id.clone(),
+        writer_session_id: context.writer_session_id.clone(),
+        lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
+    });
     let initial_manifest = build_initial_namespace_manifest(
         store,
         namespace_id,
@@ -131,39 +129,20 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
 
-    let initial_lease = LeaseState {
-        namespace_id: namespace_id.clone(),
-        holder_id: context.writer_id.clone(),
-        fence_token: initial_head.active_fence_token,
-        lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
-    };
     let head_envelope = HeadStateEnvelope::from_state(
         ControlObjectKind::NamespaceHead,
         &context.writer_version,
         initial_head,
     )
     .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    let lease_envelope = LeaseStateEnvelope::from_state(
-        ControlObjectKind::NamespaceLease,
-        &context.writer_version,
-        initial_lease,
-    )
-    .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
     let head_bytes = encode_control_object(&head_envelope)
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    let lease_bytes = encode_control_object(&lease_envelope)
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
 
     let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
     store
         .put_if_absent(&head_key, Bytes::from(head_bytes))
         .await
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    store
-        .put_if_absent(&lease_key, Bytes::from(lease_bytes))
-        .await
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
 
     let content_store_id = create_new_content_store(store, context).await?;
     let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(

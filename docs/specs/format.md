@@ -43,8 +43,7 @@ The required durable object families and standard key patterns are:
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
 | **Namespace descriptor** | Immutable | Record namespace identity and its immutable content-store relationship. | `namespaces/{namespace_id}/descriptor.json` |
-| **Namespace head** | Mutable | Record the current visible boundary, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/control/head.json` |
-| **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/control/lease.json` |
+| **Namespace head** | Mutable | Record the current visible boundary, writer epoch, writer lease liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/control/head.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq:020}-{suffix}.wal.zst` |
@@ -226,9 +225,9 @@ store content-store ids or object-store paths.
 
 ### 1.6 Mutable control-object rules
 
-Small mutable objects such as the namespace head or a lease must use
-compare-and-swap semantics. These objects must remain small enough that
-guarded rewrite is practical.
+Small mutable objects such as the namespace head must use compare-and-swap
+semantics. These objects must remain small enough that guarded rewrite is
+practical.
 
 Readers of small mutable control objects must use a full-object read that
 returns bytes and the object identity metadata for those same bytes. This does
@@ -236,13 +235,13 @@ not by itself guarantee freshness; it guarantees self-consistency. A reader
 must not separately load identity metadata and bytes, then use the identity
 from one observation with the payload from another observation.
 
-The live namespace lease object must not be physically deleted to represent
-ordinary expiry. Lease expiry is represented in the payload, and acquisition
-or transfer rewrites the existing `lease.json` object. In v0, the head
-`active_fence_token` and lease `fence_token` are the monotonic lease-epoch
-equivalent: each successful writer takeover advances the fence token, and a
-writer that observes a higher active fence token than its own must stop
-publishing.
+The namespace head is the only durable writer-fencing authority. Its
+`writer_epoch` is monotonic: the same live writer session can renew the
+head-owned `writer_lease` without changing the epoch, but a new writer
+session or expired takeover advances the epoch with a guarded head rewrite.
+`writer_lease` is liveness metadata inside `head.json`, not a second durable
+fence object. A writer may only publish a WAL segment and head update for the
+writer epoch it acquired from the current head.
 
 Large immutable file data may use multipart upload or another
 provider-specific optimization. Small mutable control objects should not
@@ -491,9 +490,8 @@ keeps its head and descriptor forever as the tombstone that retires its
 they do not recognize.
 
 Deleting a namespace is a fenced control-plane transition, not a logical
-commit: the deleting writer acquires the namespace lease (advancing the
-fence token, so no stale writer can publish past it) and compare-and-swaps
-the head into `state: deleted`. The delete linearizes at that swap. Every
+commit: the deleting writer acquires the namespace writer epoch and
+compare-and-swaps the head into `state: deleted`. The delete linearizes at that swap. Every
 commit whose head advance serialized before it remains committed and
 durable — deletion never retroactively falsifies an acknowledgment; it ends
 the namespace's history at that `seq`. Every operation that observes the
@@ -866,8 +864,9 @@ exactly the order shown) of:
 
 where `ops` and `preconditions` appear in request order using their v0 wire
 encoding, and `message` is `null` when absent. The preimage deliberately
-excludes `commit_id`, writer identity, and fence tokens: a retry of the same
-logical commit must fingerprint identically no matter who retries it or when.
+excludes `commit_id`, writer identity, writer epoch, and writer lease state:
+a retry of the same logical commit must fingerprint identically no matter who
+retries it or when.
 
 Path-level mutations fingerprint the same way with domain
 `loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind,
@@ -998,9 +997,9 @@ The fork protocol is:
    rejected as existing, and a partial target is rejected as partially
    initialized.
 2. Resolve and verify the source namespace descriptor, content-store
-   descriptor, head, lease, checkpoint, and WAL basis.
+   descriptor, head, checkpoint, and WAL basis.
 3. Create or reuse a verified source checkpoint at the current source head.
-4. Build the target head, fork record, lease, and descriptor using the source
+4. Build the target head, fork record, and descriptor using the source
    namespace's `content_store_id`.
 5. Write or verify a source-local GC pin for the source checkpoint/manifest
    pair referenced by the target namespace manifest.
@@ -1009,9 +1008,8 @@ The fork protocol is:
 7. Write the target `head.json` to reserve the namespace and point at the
    target manifest.
 8. Write `control/fork.json` with the source namespace id and fork sequence.
-9. Write the target `lease.json`.
-10. Write the target `descriptor.json` last as the publish/list marker.
-11. Start the new namespace WAL independently at `fork_seq + 1`.
+9. Write the target `descriptor.json` last as the publish/list marker.
+10. Start the new namespace WAL independently at `fork_seq + 1`.
 
 The fork does not copy content-store blobs or source metadata SSTs. If
 initialization fails after the target head exists but before the descriptor is

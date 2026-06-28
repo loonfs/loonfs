@@ -3,7 +3,7 @@ use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidat
 use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
-use crate::namespace::lease::LeaseAcquireError;
+use crate::namespace::writer_epoch::WriterEpochAcquireError;
 use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
 use loonfs_api::wire::control::HeadState;
@@ -40,7 +40,7 @@ pub enum CoreError {
     #[error(transparent)]
     DurableContent(#[from] DurableContentValidationError),
     #[error(transparent)]
-    Lease(#[from] LeaseAcquireError),
+    WriterEpoch(#[from] WriterEpochAcquireError),
     #[error("commit validation failed: {0:?}")]
     CommitValidation(CommitValidationError),
     #[error("wal build failed: {0:?}")]
@@ -172,8 +172,6 @@ pub enum MetadataProjectionLoadError {
     LoadContentStoreDescriptor(ControlObjectLoadError),
     #[error(transparent)]
     LoadHead(#[from] ControlObjectLoadError),
-    #[error("failed to load lease object: {0}")]
-    LoadLease(ControlObjectLoadError),
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
     #[error("namespace `{namespace_id}` is deleted")]
@@ -271,7 +269,7 @@ impl CoreError {
             CoreError::MetadataView(error) => classify_metadata_view_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
-            CoreError::Lease(error) => classify_lease_acquire_error(error),
+            CoreError::WriterEpoch(error) => classify_writer_epoch_acquire_error(error),
             CoreError::CommitValidation(error) => classify_commit_validation_error(error),
             CoreError::WalBuild(_)
             | CoreError::MetadataApply(_)
@@ -333,8 +331,7 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
             ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
             _ => ErrorCode::NamespaceCorrupt,
         },
-        MetadataProjectionLoadError::LoadHead(error)
-        | MetadataProjectionLoadError::LoadLease(error) => match error {
+        MetadataProjectionLoadError::LoadHead(error) => match error {
             ControlObjectLoadError::MissingObject { .. }
             | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
             _ => classify_control_object_load_error(error),
@@ -400,21 +397,17 @@ fn classify_durable_content_error(error: &DurableContentValidationError) -> Erro
     }
 }
 
-fn classify_lease_acquire_error(error: &LeaseAcquireError) -> ErrorCode {
+fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> ErrorCode {
     match error {
-        LeaseAcquireError::LoadHead(error) | LeaseAcquireError::LoadLease(error) => {
-            classify_control_object_load_error(error)
-        }
-        LeaseAcquireError::HeldByOtherWriter { .. } => ErrorCode::LeaseConflict,
-        LeaseAcquireError::UnexpectedControlState { .. } => ErrorCode::NamespaceCorrupt,
-        LeaseAcquireError::EmptyWriterId
-        | LeaseAcquireError::ZeroLeaseDuration
-        | LeaseAcquireError::MissingHeadEtag { .. }
-        | LeaseAcquireError::MissingLeaseEtag { .. }
-        | LeaseAcquireError::HeadFenceTakeover(_)
-        | LeaseAcquireError::HeadWrite(_)
-        | LeaseAcquireError::LeaseWrite(_)
-        | LeaseAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
+        WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),
+        WriterEpochAcquireError::HeldByOtherWriter { .. } => ErrorCode::LeaseConflict,
+        WriterEpochAcquireError::EmptyWriterId
+        | WriterEpochAcquireError::EmptyWriterSessionId
+        | WriterEpochAcquireError::ZeroLeaseDuration
+        | WriterEpochAcquireError::MissingHeadEtag { .. }
+        | WriterEpochAcquireError::WriterEpochOverflow { .. }
+        | WriterEpochAcquireError::HeadWrite(_)
+        | WriterEpochAcquireError::RetryExhausted { .. } => ErrorCode::ServerError,
     }
 }
 
@@ -469,13 +462,13 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::UnsupportedMoveBehavior { .. } => ErrorCode::UnsupportedMoveBehavior,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidPath,
-        CommitValidationError::StaleWriterFenceToken { .. }
-        | CommitValidationError::LeaseHolderMismatch { .. }
-        | CommitValidationError::LeaseExpired { .. } => ErrorCode::LeaseConflict,
+        CommitValidationError::StaleWriterEpoch { .. }
+        | CommitValidationError::MissingWriterLease
+        | CommitValidationError::WriterLeaseHolderMismatch { .. }
+        | CommitValidationError::WriterLeaseSessionMismatch { .. }
+        | CommitValidationError::WriterLeaseExpired { .. } => ErrorCode::LeaseConflict,
         CommitValidationError::EmptyCommit
         | CommitValidationError::NamespaceMismatch
-        | CommitValidationError::HeadLeaseNamespaceMismatch
-        | CommitValidationError::HeadLeaseFenceMismatch { .. }
         | CommitValidationError::ValidatedPreviewApplyFailed(_)
         | CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
@@ -494,6 +487,7 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
         | CommitHeadPublishError::EmptyExpectedHeadEtag
         | CommitHeadPublishError::NamespaceMismatch { .. }
         | CommitHeadPublishError::WalSegmentNamespaceMismatch { .. }
+        | CommitHeadPublishError::WalSegmentWriterEpochMismatch { .. }
         | CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch { .. }
         | CommitHeadPublishError::WalSegmentStartSeqMismatch { .. }
         | CommitHeadPublishError::WalSegmentEndSeqMismatch { .. }

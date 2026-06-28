@@ -150,14 +150,15 @@ fn core_commit_fingerprint_from_parts(
 mod tests {
     use super::*;
     use crate::commit::{CommitOp, CommitRequest};
-    use loonfs_api::{CommitId, FenceToken, InodeId, NamespaceId};
+    use loonfs_api::{CommitId, InodeId, NamespaceId, WriterEpoch};
 
-    fn core_request(writer_fence_token: FenceToken) -> CommitRequest {
+    fn core_request(writer_epoch: WriterEpoch) -> CommitRequest {
         CommitRequest {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token,
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch,
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
@@ -169,9 +170,10 @@ mod tests {
 
     #[test]
     fn core_commit_fingerprint_is_stable_for_same_logical_commit() {
-        let left = core_commit_fingerprint(&core_request(FenceToken(1))).expect("left fingerprint");
+        let left =
+            core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("left fingerprint");
         let right =
-            core_commit_fingerprint(&core_request(FenceToken(1))).expect("right fingerprint");
+            core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("right fingerprint");
 
         assert_eq!(left, right);
     }
@@ -186,7 +188,7 @@ mod tests {
     #[test]
     fn core_commit_fingerprint_value_is_pinned() {
         let fingerprint =
-            core_commit_fingerprint(&core_request(FenceToken(1))).expect("fingerprint");
+            core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
@@ -278,28 +280,34 @@ mod tests {
 
     #[test]
     fn core_commit_fingerprint_excludes_writer_context_and_commit_id() {
-        let left = core_commit_fingerprint(&core_request(FenceToken(1))).expect("left fingerprint");
-        let different_fence = core_commit_fingerprint(&core_request(FenceToken(2)))
-            .expect("different fence fingerprint");
-        let mut different_writer = core_request(FenceToken(1));
+        let left =
+            core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("left fingerprint");
+        let different_epoch = core_commit_fingerprint(&core_request(WriterEpoch(2)))
+            .expect("different epoch fingerprint");
+        let mut different_writer = core_request(WriterEpoch(1));
         different_writer.writer_id = "writer-b".to_owned();
         let different_writer =
             core_commit_fingerprint(&different_writer).expect("different writer fingerprint");
-        let mut different_commit_id = core_request(FenceToken(1));
+        let mut different_session = core_request(WriterEpoch(1));
+        different_session.writer_session_id = "wrs_other".to_owned();
+        let different_session =
+            core_commit_fingerprint(&different_session).expect("different session fingerprint");
+        let mut different_commit_id = core_request(WriterEpoch(1));
         different_commit_id.commit_id = CommitId::parse("commit-b").expect("valid commit id");
         let different_commit_id =
             core_commit_fingerprint(&different_commit_id).expect("different commit id fingerprint");
 
-        assert_eq!(left, different_fence);
+        assert_eq!(left, different_epoch);
         assert_eq!(left, different_writer);
+        assert_eq!(left, different_session);
         assert_eq!(left, different_commit_id);
     }
 
     #[test]
     fn core_commit_fingerprint_changes_when_logical_inputs_change() {
         let baseline =
-            core_commit_fingerprint(&core_request(FenceToken(1))).expect("baseline fingerprint");
-        let mut changed = core_request(FenceToken(1));
+            core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("baseline fingerprint");
+        let mut changed = core_request(WriterEpoch(1));
         changed.ops = vec![CommitOp::CreateDirectory {
             parent_inode: InodeId(1),
             display_name: "drafts".to_owned(),
@@ -326,7 +334,8 @@ mod tests {
             super::super::CommitExecutionContext {
                 namespace_id: namespace_id.clone(),
                 writer_id: "writer-a".to_owned(),
-                writer_fence_token: FenceToken(1),
+                writer_session_id: "wrs_test".to_owned(),
+                writer_epoch: WriterEpoch(1),
             },
             api_request.clone(),
         )

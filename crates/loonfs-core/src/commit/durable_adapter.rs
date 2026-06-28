@@ -35,7 +35,7 @@ mod tests {
     use crate::commit::{
         materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit, ValidatedOp,
     };
-    use loonfs_api::{ChangeSeq, CommitId, FenceToken, InodeId, NamespaceId};
+    use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, WriterEpoch};
 
     #[test]
     fn durable_adapter_builds_expected_wal_payload() {
@@ -44,7 +44,8 @@ mod tests {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),

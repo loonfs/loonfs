@@ -50,10 +50,6 @@ pub fn namespace_descriptor(namespace: &str) -> String {
         .into_string()
 }
 
-pub fn namespace_lease(namespace: &str) -> String {
-    ObjectLayout::new().namespace_lease(namespace).into_string()
-}
-
 pub fn namespace_fork_state(namespace: &str) -> String {
     ObjectLayout::new()
         .namespace_fork_state(namespace)
@@ -151,9 +147,8 @@ mod tests {
     use super::{
         conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
         derived_progress, metadata_sst, namespace_descriptor, namespace_fork_state, namespace_head,
-        namespace_lease, namespace_manifest, sha256_hex_from_digest, upload_session,
-        upload_session_prefix, wal_segment, wal_segment_id_from_key, wal_segment_prefix,
-        DerivedWorkClass,
+        namespace_manifest, sha256_hex_from_digest, upload_session, upload_session_prefix,
+        wal_segment, wal_segment_id_from_key, wal_segment_prefix, DerivedWorkClass,
     };
     use loonfs_api::ManifestId;
 
@@ -163,10 +158,6 @@ mod tests {
         assert_eq!(
             namespace_descriptor("ns-1"),
             "namespaces/ns-1/descriptor.json"
-        );
-        assert_eq!(
-            namespace_lease("ns-1"),
-            "namespaces/ns-1/control/lease.json"
         );
         assert_eq!(
             namespace_fork_state("ns-1"),

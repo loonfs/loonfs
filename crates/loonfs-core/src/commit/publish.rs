@@ -44,6 +44,12 @@ pub fn prepare_commit_head_publish(
             wal: wal_payload.namespace_id.clone(),
         });
     }
+    if wal_payload.writer_epoch != current_head.writer_epoch {
+        return Err(CommitHeadPublishError::WalSegmentWriterEpochMismatch {
+            expected: current_head.writer_epoch,
+            actual: wal_payload.writer_epoch,
+        });
+    }
 
     if wal_payload.records.is_empty() {
         return Err(CommitHeadPublishError::EmptyWalSegment);
@@ -81,7 +87,8 @@ pub fn prepare_commit_head_publish(
         namespace_id: current_head.namespace_id.clone(),
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
-        active_fence_token: current_head.active_fence_token,
+        writer_epoch: current_head.writer_epoch,
+        writer_lease: current_head.writer_lease.clone(),
         next_inode_id: plan.resulting_next_inode_id,
         name_policy: current_head.name_policy,
         current_manifest_id: current_head.current_manifest_id,
@@ -165,8 +172,9 @@ mod tests {
             CommitHeadPublishError::Store(_)
         ));
     }
+    use loonfs_api::wire::control::WriterLease;
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
-    use loonfs_api::{CommitId, FenceToken, InodeId, ManifestId, NamespaceId};
+    use loonfs_api::{CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
@@ -174,7 +182,12 @@ mod tests {
             seq,
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
                 .expect("commit id"),
-            active_fence_token: FenceToken(1),
+            writer_epoch: WriterEpoch(1),
+            writer_lease: Some(WriterLease {
+                writer_id: "writer-a".to_owned(),
+                writer_session_id: "wrs_test".to_owned(),
+                lease_expires_at_ms: 60_000,
+            }),
             next_inode_id: InodeId(10),
             name_policy: loonfs_api::NamePolicy::default(),
             current_manifest_id: Some(ManifestId(0)),
@@ -222,6 +235,7 @@ mod tests {
         let payload = WalSegmentPayload {
             namespace_id: namespace_id.clone(),
             segment_id: segment_id.clone(),
+            writer_epoch: WriterEpoch(1),
             prev_visible_segment: None,
             base_head_seq,
             start_seq,

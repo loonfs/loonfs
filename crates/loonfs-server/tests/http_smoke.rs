@@ -9,7 +9,7 @@ use loonfs_api::{
     },
     validate_checkpoint_id,
     wire::control::{
-        decode_control_object, encode_control_object, ControlObjectKind, LeaseStateEnvelope,
+        decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, InodeId,
@@ -17,7 +17,7 @@ use loonfs_api::{
     DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_objectstore::keys::{namespace_lease, namespace_manifest};
+use loonfs_objectstore::keys::{namespace_head, namespace_manifest};
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -1569,7 +1569,7 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "lease_conflict"),
             other => panic!("expected lease_conflict, got {other:?}"),
         }
-        force_expire_namespace_lease(&store_root, store_key_prefix.as_deref(), "demo");
+        force_expire_namespace_writer_lease(&store_root, store_key_prefix.as_deref(), "demo");
 
         let committed_seq = retry_until_lease_handoff(&client_b, &host_a_target, &host_b_target);
         assert!(
@@ -1754,31 +1754,36 @@ fn retry_until_lease_handoff(client: &Client, from: &NamespacePath, to: &Namespa
     panic!("timed out waiting for lease handoff");
 }
 
-fn force_expire_namespace_lease(
+fn force_expire_namespace_writer_lease(
     store_root: &std::path::Path,
     key_prefix: Option<&str>,
     namespace: &str,
 ) {
     let store =
         ConfiguredObjectStore::local_fs(store_root, key_prefix).expect("construct test store");
-    let lease_key = namespace_lease(namespace);
-    let bytes = block_on(store.get(&lease_key, None))
-        .expect("read namespace lease")
-        .expect("namespace lease exists");
-    let mut envelope: LeaseStateEnvelope =
-        decode_control_object(&bytes, ControlObjectKind::NamespaceLease)
-            .expect("decode namespace lease");
-    envelope.state.lease_expires_at_ms = 0;
+    let head_key = namespace_head(namespace);
+    let bytes = block_on(store.get(&head_key, None))
+        .expect("read namespace head")
+        .expect("namespace head exists");
+    let mut envelope: HeadStateEnvelope =
+        decode_control_object(&bytes, ControlObjectKind::NamespaceHead)
+            .expect("decode namespace head");
+    envelope
+        .state
+        .writer_lease
+        .as_mut()
+        .expect("namespace head has writer lease")
+        .lease_expires_at_ms = 0;
     let writer_version = envelope.writer_version;
-    let envelope = LeaseStateEnvelope::from_state(
-        ControlObjectKind::NamespaceLease,
+    let envelope = HeadStateEnvelope::from_state(
+        ControlObjectKind::NamespaceHead,
         writer_version,
         envelope.state,
     )
-    .expect("encode expired namespace lease");
-    let bytes = encode_control_object(&envelope).expect("serialize expired namespace lease");
-    block_on(store.put_overwrite(&lease_key, Bytes::from(bytes)))
-        .expect("write expired namespace lease");
+    .expect("encode expired namespace head");
+    let bytes = encode_control_object(&envelope).expect("serialize expired namespace head");
+    block_on(store.put_overwrite(&head_key, Bytes::from(bytes)))
+        .expect("write expired namespace head");
 }
 
 fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {

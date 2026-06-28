@@ -42,9 +42,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
         }
         summary.namespace_objects += 1;
         match parsed.family() {
-            DurableObjectFamily::NamespaceHead
-            | DurableObjectFamily::NamespaceLease
-            | DurableObjectFamily::NamespaceForkState => {
+            DurableObjectFamily::NamespaceHead | DurableObjectFamily::NamespaceForkState => {
                 summary.control_objects += 1;
             }
             DurableObjectFamily::WalSegment => {

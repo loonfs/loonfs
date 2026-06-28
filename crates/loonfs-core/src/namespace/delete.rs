@@ -3,7 +3,7 @@
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::control::read_head_object;
-use crate::namespace::lease::acquire_or_renew_namespace_lease;
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -17,8 +17,8 @@ const MAX_DELETE_CAS_ATTEMPTS: usize = 8;
 /// Deletes a namespace by compare-and-swapping its head into the terminal
 /// `deleted` state (format spec, "Tombstones and deletion").
 ///
-/// The deleting writer first acquires the namespace lease — advancing the
-/// fence token on takeover, so no stale writer can publish past the delete —
+/// The deleting writer first acquires the namespace writer epoch, so no stale
+/// writer session can publish past the delete,
 /// then swaps the head. The delete linearizes at that swap: commits whose
 /// head advance serialized before it stay committed and durable; everything
 /// that observes the deleted head afterward fails with `namespace_deleted`.
@@ -33,7 +33,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     context: &MutationContext,
 ) -> Result<DeleteNamespaceResponse, CoreError> {
-    acquire_or_renew_namespace_lease(store, namespace_id, context).await?;
+    let _acquired_writer = acquire_writer_epoch(store, namespace_id, context).await?;
 
     let mut attempted_swap = false;
     for _attempt in 0..MAX_DELETE_CAS_ATTEMPTS {

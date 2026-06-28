@@ -13,9 +13,9 @@ use loonfs_api::{
     },
     wire::control::{
         decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
-        ControlObjectKind, HeadState, LeaseState, NamespaceDescriptorEnvelope,
+        ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceDescriptorEnvelope,
         NamespaceDescriptorState, NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
-        UploadSessionEnvelope, UploadSessionState,
+        UploadSessionEnvelope, UploadSessionState, WriterLease,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
@@ -23,8 +23,8 @@ use loonfs_api::{
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, FenceToken, InodeId, InodeKind,
-    ManifestId, NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo,
+    DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
+    NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, WriterEpoch,
 };
 use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitOpResult, CommitRequest,
@@ -44,7 +44,7 @@ use loonfs_core::{
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_fork_state,
-    namespace_head, namespace_lease, namespace_manifest, upload_session, upload_session_prefix,
+    namespace_head, namespace_manifest, upload_session, upload_session_prefix,
 };
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -77,6 +77,7 @@ fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     NamespaceEngine::builder(store)
         .namespace(namespace_id.clone())
         .writer(context.writer_id.clone())
+        .writer_session_id(context.writer_session_id.clone())
         .writer_version(context.writer_version.clone())
         .lease_duration_ms(context.lease_duration_ms)
         .build()
@@ -611,7 +612,8 @@ async fn stale_revision_precondition_is_rejected() {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision_no: RevisionNo(1),
@@ -642,7 +644,8 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::CreateDirectory {
                 parent_inode: InodeId(1),
@@ -697,7 +700,8 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             namespace_id: namespace_id(),
             commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
@@ -723,7 +727,8 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             namespace_id: namespace_id(),
             commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision_no: RevisionNo(1),
@@ -754,7 +759,8 @@ async fn restore_revision_validation_rejects_missing_inode() {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
             source_revision_no: RevisionNo(1),
@@ -784,7 +790,8 @@ async fn restore_revision_validation_rejects_non_file_target() {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision_no: RevisionNo(1),
@@ -826,7 +833,8 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             namespace_id: namespace_id(),
             commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision_no: RevisionNo(1),
@@ -853,7 +861,8 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             namespace_id: namespace_id(),
             commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision_no: RevisionNo(99),
@@ -893,7 +902,8 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
@@ -943,7 +953,8 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -1001,7 +1012,8 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             namespace_id: namespace_id(),
             commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision_no: RevisionNo(1),
@@ -1057,7 +1069,8 @@ async fn restore_revision_overflow_is_rejected() {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
+        writer_session_id: "wrs_test".to_owned(),
+        writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision_no: RevisionNo(u64::MAX),
@@ -2956,13 +2969,17 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
 
     let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
         .expect("writer a commit");
+    let writer_a_lease_expires_at_ms = block_on(load_namespace_head_control(&store, &namespace_id))
+        .expect("load writer a head")
+        .state
+        .writer_lease
+        .expect("writer a lease")
+        .lease_expires_at_ms;
     let writer_b = MutationContext {
         writer_id: "writer-b".to_owned(),
+        writer_session_id: "wrs-writer-b".to_owned(),
         writer_version: "writer-b/0.1.0".to_owned(),
-        now_ms: writer_a
-            .now_ms
-            .saturating_add(writer_a.lease_duration_ms)
-            .saturating_add(1),
+        now_ms: writer_a_lease_expires_at_ms.saturating_add(1),
         lease_duration_ms: writer_a.lease_duration_ms,
     };
 
@@ -3893,22 +3910,22 @@ async fn fork_failure_after_target_manifest_before_fork_state_remains_partial() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fork_failure_after_target_manifest_artifacts_remains_partial() {
+async fn fork_failure_after_target_fork_state_before_descriptor_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(namespace_lease(clone_namespace_id.as_str())),
+        KeyMatcher::Exact(namespace_descriptor(clone_namespace_id.as_str())),
         InjectedCreateFailure::Transport {
-            message: "injected target lease failure",
+            message: "injected target descriptor failure",
         },
     );
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .expect_err("target lease write should fail");
+        .expect_err("target descriptor write should fail");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
@@ -3935,7 +3952,15 @@ async fn fork_failure_after_target_manifest_artifacts_remains_partial() {
         .expect("list target manifests");
     assert!(
         !target_manifest_keys.is_empty(),
-        "target manifest should have been written before lease failure"
+        "target manifest should have been written before descriptor failure"
+    );
+    assert!(
+        store
+            .head(&namespace_fork_state(clone_namespace_id.as_str()))
+            .await
+            .expect("head target fork state")
+            .is_some(),
+        "fork state should have been written before descriptor failure"
     );
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
@@ -3964,17 +3989,11 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
         KeyMatcher::Exact(namespace_head(clone_namespace_id.as_str())),
         InjectedCreateFailure::Conflict {
             write_attempted_object: true,
-            additional_writes: vec![
-                (
-                    namespace_lease(clone_namespace_id.as_str()),
-                    b"lease-present".to_vec(),
-                ),
-                (
-                    namespace_descriptor(clone_namespace_id.as_str()),
-                    loonfs_api::wire::control::encode_control_object(&descriptor)
-                        .expect("descriptor bytes"),
-                ),
-            ],
+            additional_writes: vec![(
+                namespace_descriptor(clone_namespace_id.as_str()),
+                loonfs_api::wire::control::encode_control_object(&descriptor)
+                    .expect("descriptor bytes"),
+            )],
         },
     );
 
@@ -4970,7 +4989,12 @@ fn validation_context(
         namespace_id: namespace_id.clone(),
         seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
-        active_fence_token: FenceToken(1),
+        writer_epoch: WriterEpoch(1),
+        writer_lease: Some(WriterLease {
+            writer_id: "writer-a".to_owned(),
+            writer_session_id: "wrs_test".to_owned(),
+            lease_expires_at_ms: 10_000,
+        }),
         next_inode_id,
         name_policy: loonfs_api::NamePolicy::default(),
         current_manifest_id: Some(ManifestId(0)),
@@ -4979,16 +5003,8 @@ fn validation_context(
         visible_wal_tip: None,
         state: Default::default(),
     };
-    let lease = LeaseState {
-        namespace_id,
-        holder_id: "writer-a".to_owned(),
-        fence_token: head.active_fence_token,
-        lease_expires_at_ms: 10_000,
-    };
-
     CommitValidationContext {
         head,
-        lease,
         now_ms: 1_000,
         metadata_state,
     }
@@ -4997,6 +5013,7 @@ fn validation_context(
 fn mutation_context() -> MutationContext {
     MutationContext {
         writer_id: "writer-a".to_owned(),
+        writer_session_id: "wrs_test".to_owned(),
         writer_version: "writer-a/0.1.0".to_owned(),
         now_ms: 1_000,
         lease_duration_ms: 60_000,
@@ -5524,7 +5541,10 @@ impl ObjectStore for AckLostHeadCasStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+        if key == self.head_key
+            && matches!(mode, PutMode::CompareAndSwap { .. })
+            && head_cas_advances_seq(&self.inner, key, &bytes).await?
+        {
             let should_inject = {
                 let mut injected = self
                     .injected_ack_loss
@@ -5608,7 +5628,10 @@ impl ObjectStore for StaleHeadAfterWalWriteStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+        if key == self.head_key
+            && matches!(mode, PutMode::CompareAndSwap { .. })
+            && head_cas_advances_seq(&self.inner, key, &bytes).await?
+        {
             let should_inject = {
                 let mut injected = self
                     .injected_stale_head
@@ -5641,4 +5664,21 @@ impl ObjectStore for StaleHeadAfterWalWriteStore {
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         self.inner.list_prefix_stream(prefix)
     }
+}
+
+async fn head_cas_advances_seq(
+    store: &LocalFsStore,
+    key: &str,
+    candidate_bytes: &[u8],
+) -> Result<bool, ObjectStoreError> {
+    let candidate: HeadStateEnvelope =
+        decode_control_object(candidate_bytes, ControlObjectKind::NamespaceHead)
+            .map_err(|err| ObjectStoreError::Transport(format!("decode candidate head: {err}")))?;
+    let Some(existing_bytes) = store.get(key, None).await? else {
+        return Ok(true);
+    };
+    let existing: HeadStateEnvelope =
+        decode_control_object(&existing_bytes, ControlObjectKind::NamespaceHead)
+            .map_err(|err| ObjectStoreError::Transport(format!("decode existing head: {err}")))?;
+    Ok(candidate.state.seq > existing.state.seq)
 }

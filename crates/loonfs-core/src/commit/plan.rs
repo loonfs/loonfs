@@ -1,7 +1,7 @@
 use super::ResolvedBinding;
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
-use loonfs_api::wire::control::{HeadState, LeaseState};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +82,6 @@ pub(crate) enum ValidatedOp {
 #[derive(Debug, Clone)]
 pub struct CommitValidationContext<'a> {
     pub head: HeadState,
-    pub lease: LeaseState,
     pub now_ms: u64,
     pub metadata_state: &'a MetadataState,
 }

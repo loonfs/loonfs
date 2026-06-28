@@ -3,7 +3,7 @@ use crate::namespace::control::{
 };
 use loonfs_api::wire::control::NamespaceDescriptorState;
 use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
-use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
+use loonfs_objectstore::keys::{namespace_descriptor, namespace_head};
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
@@ -36,8 +36,6 @@ pub(crate) enum NamespaceInitializationError {
     InspectNamespaceDescriptor(String),
     #[error("failed to inspect namespace head object: {0}")]
     InspectNamespaceHead(String),
-    #[error("failed to inspect namespace lease object: {0}")]
-    InspectNamespaceLease(String),
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
@@ -87,7 +85,6 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
 
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
 
     let descriptor_exists = store
         .head(&descriptor_key)
@@ -99,15 +96,10 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
         .await
         .map_err(|err| NamespaceInitializationError::InspectNamespaceHead(err.to_string()))?
         .is_some();
-    let lease_exists = store
-        .head(&lease_key)
-        .await
-        .map_err(|err| NamespaceInitializationError::InspectNamespaceLease(err.to_string()))?
-        .is_some();
 
-    match (descriptor_exists, head_exists, lease_exists) {
-        (false, false, false) => Ok(NamespaceInitializationState::Absent),
-        (true, true, true) => {
+    match (descriptor_exists, head_exists) {
+        (false, false) => Ok(NamespaceInitializationState::Absent),
+        (true, true) => {
             let descriptor = read_namespace_descriptor_object(store, namespace_id)
                 .await
                 .map_err(NamespaceInitializationError::LoadNamespaceDescriptor)?;

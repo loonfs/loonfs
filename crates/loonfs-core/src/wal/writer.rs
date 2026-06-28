@@ -5,11 +5,12 @@ use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
 };
-use loonfs_api::{generate_wal_segment_id, ChangeSeq, NamespaceId};
+use loonfs_api::{generate_wal_segment_id, ChangeSeq, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn prepare_wal_segment(
     namespace_id: NamespaceId,
+    writer_epoch: WriterEpoch,
     prev_visible_segment: Option<WalSegmentPointer>,
     records: &[MaterializedCommit],
     writer_version: &str,
@@ -69,6 +70,7 @@ pub(crate) fn prepare_wal_segment(
     let payload = WalSegmentPayload {
         namespace_id,
         segment_id: segment_id.clone(),
+        writer_epoch,
         prev_visible_segment,
         base_head_seq,
         start_seq,
