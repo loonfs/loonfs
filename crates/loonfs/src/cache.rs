@@ -13,7 +13,7 @@ use loonfs_core::control::{
     load_namespace_head_control, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
 };
 use loonfs_core::publish::NamespaceCommitEngine;
-use loonfs_core::{MetadataProjectionLoadError, ReadOptions};
+use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
 use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -368,15 +368,15 @@ impl Fs {
             .get_or_insert(namespace_id, cache_config.max_cached_namespaces)
     }
 
-    pub(crate) fn manifest_plus_tail_read_options(
+    pub(crate) fn runtime_read_context(
         &self,
         head: &CachedControl<HeadState>,
-    ) -> ReadOptions {
+    ) -> RuntimeReadContext {
         let cache_config = &self.inner.config.runtime_cache;
         let tail_cache = cache_config
             .wal_tail_projection_cache_enabled
             .then(|| Arc::clone(&self.inner.wal_tail_projection_cache));
-        ReadOptions::manifest_plus_tail_at_head(
+        RuntimeReadContext::pinned_head(
             head.state.clone(),
             head.identity.etag.clone(),
             Some(Arc::clone(&self.inner.metadata_table_cache)),

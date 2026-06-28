@@ -1,5 +1,5 @@
 use crate::error::CoreError;
-use crate::path::read::ManifestPlusTailView;
+use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_api::{AuthoritativePathEntry, InodeKind, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use sha2::{Digest, Sha256};
@@ -9,7 +9,7 @@ pub async fn list_visible_paths<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-    let view = ManifestPlusTailView::load(store, namespace_id).await?;
+    let view = load_metadata_view(store, namespace_id, ReadLoadContext::latest()).await?;
     let mut entries = vec![view.resolve_path("/").await?];
     visit_visible_tree(&view, "/", &mut entries).await?;
     entries.sort_by(|left, right| left.absolute_path.cmp(&right.absolute_path));
@@ -30,7 +30,7 @@ pub async fn visible_tree_hash<S: ObjectStore + ?Sized>(
 }
 
 async fn visit_visible_tree<S: ObjectStore + ?Sized>(
-    view: &ManifestPlusTailView<'_, S>,
+    view: &LoadedMetadataView<'_, S>,
     absolute_path: &str,
     entries: &mut Vec<AuthoritativePathEntry>,
 ) -> Result<(), CoreError> {

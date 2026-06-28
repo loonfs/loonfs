@@ -12,7 +12,7 @@
 //!
 //! ```no_run
 //! use loonfs_api::NamespaceId;
-//! use loonfs_core::{BootstrapOptions, NamespaceEngine, ReadOptions, WriteOptions};
+//! use loonfs_core::{BootstrapOptions, NamespaceEngine, WriteOptions};
 //! use loonfs_objectstore::fs::LocalFsStore;
 //!
 //! let store = LocalFsStore::new(std::env::temp_dir()).expect("store");
@@ -26,7 +26,7 @@
 //!
 //! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
 //! let _ = engine.put_file("/plan.md", b"hello", WriteOptions::default());
-//! let _ = engine.read_file("/plan.md", ReadOptions::default());
+//! let _ = engine.read_file("/plan.md");
 //! ```
 
 mod checkpoint;
@@ -79,6 +79,8 @@ pub mod publish {
 pub mod inspection;
 
 pub use context::MutationContext;
+#[doc(hidden)]
+pub use engine::RuntimeReadContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{
@@ -86,6 +88,5 @@ pub use error::{
 };
 pub use namespace::BootstrapNamespaceError;
 pub use options::{
-    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
-    WriteOptions,
+    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, WriteOptions,
 };

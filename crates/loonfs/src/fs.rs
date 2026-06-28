@@ -418,8 +418,9 @@ impl Fs {
         self.record_trace_context(&span);
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
+        let read_context = self.runtime_read_context(&head);
         let entry = engine
-            .resolve_path(absolute_path, self.manifest_plus_tail_read_options(&head))
+            .resolve_path_with_runtime_context(absolute_path, &read_context)
             .await?;
         tracing::Span::current().record(
             "cache_path",
@@ -510,12 +511,9 @@ impl Fs {
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
+        let read_context = self.runtime_read_context(&head);
         let page = engine
-            .list_path_page(
-                listed_path.as_str(),
-                self.manifest_plus_tail_read_options(&head),
-                request,
-            )
+            .list_path_page_with_runtime_context(listed_path.as_str(), request, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         let head_seq = page
@@ -542,9 +540,10 @@ impl Fs {
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
         let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&head);
         let read = self
             .namespace_engine(namespace_id)
-            .read_file(absolute_path, self.manifest_plus_tail_read_options(&head))
+            .read_file_with_runtime_context(absolute_path, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(read)
@@ -557,9 +556,10 @@ impl Fs {
         absolute_path: &str,
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&head);
         let revisions = self
             .namespace_engine(namespace_id)
-            .list_file_revisions(absolute_path, self.manifest_plus_tail_read_options(&head))
+            .list_file_revisions_with_runtime_context(absolute_path, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(revisions)
@@ -574,13 +574,10 @@ impl Fs {
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
+        let read_context = self.runtime_read_context(&head);
         let page = self
             .namespace_engine(namespace_id)
-            .list_file_revisions_page(
-                absolute_path,
-                self.manifest_plus_tail_read_options(&head),
-                request,
-            )
+            .list_file_revisions_page_with_runtime_context(absolute_path, request, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(file_revisions_page_response(
@@ -599,9 +596,10 @@ impl Fs {
         inode_id: InodeId,
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&head);
         let revisions = self
             .namespace_engine(namespace_id)
-            .list_file_revisions_for_inode(inode_id, self.manifest_plus_tail_read_options(&head))
+            .list_file_revisions_for_inode_with_runtime_context(inode_id, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(revisions)
@@ -615,12 +613,13 @@ impl Fs {
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&head);
         let page = self
             .namespace_engine(namespace_id)
-            .list_file_revisions_for_inode_page(
+            .list_file_revisions_for_inode_page_with_runtime_context(
                 inode_id,
-                self.manifest_plus_tail_read_options(&head),
                 request,
+                &read_context,
             )
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
@@ -640,13 +639,10 @@ impl Fs {
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
         let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&head);
         let read = self
             .namespace_engine(namespace_id)
-            .read_file_revision(
-                absolute_path,
-                revision_no,
-                self.manifest_plus_tail_read_options(&head),
-            )
+            .read_file_revision_with_runtime_context(absolute_path, revision_no, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(read)
@@ -660,13 +656,10 @@ impl Fs {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
         let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&head);
         let read = self
             .namespace_engine(namespace_id)
-            .read_file_revision_for_inode(
-                inode_id,
-                revision_no,
-                self.manifest_plus_tail_read_options(&head),
-            )
+            .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &read_context)
             .await?;
         self.inner.cache_stats.record_manifest_plus_tail_read();
         Ok(read)

@@ -3,14 +3,15 @@ use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{
-    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, ReadOptions, ReadSource,
-    WriteOptions,
+    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, WriteOptions,
 };
+use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -30,15 +31,38 @@ fn default_page_limit() -> EffectiveLimit {
     EffectiveLimit::new(NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap_or(NonZeroU32::MIN))
 }
 
-fn manifest_plus_tail_cache_context<'a>(
-    head_etag: &'a str,
-    table_cache: &'a Option<Arc<MetadataTableCache>>,
-    tail_cache: &'a Option<Arc<WalTailProjectionCache>>,
-) -> crate::path::query::ManifestPlusTailCacheContext<'a> {
-    crate::path::query::ManifestPlusTailCacheContext::new(
-        Some(head_etag),
-        table_cache.as_deref(),
-        tail_cache.as_deref(),
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RuntimeReadContext {
+    head: HeadState,
+    head_etag: String,
+    table_cache: Option<Arc<MetadataTableCache>>,
+    tail_cache: Option<Arc<WalTailProjectionCache>>,
+}
+
+impl RuntimeReadContext {
+    #[doc(hidden)]
+    pub fn pinned_head(
+        head: HeadState,
+        head_etag: String,
+        table_cache: Option<Arc<MetadataTableCache>>,
+        tail_cache: Option<Arc<WalTailProjectionCache>>,
+    ) -> Self {
+        Self {
+            head,
+            head_etag,
+            table_cache,
+            tail_cache,
+        }
+    }
+}
+
+fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_> {
+    ReadLoadContext::pinned_head(
+        &options.head,
+        Some(options.head_etag.as_str()),
+        options.table_cache.as_deref(),
+        options.tail_cache.as_deref(),
     )
 }
 
@@ -69,7 +93,6 @@ pub struct NamespaceEngine<S> {
     writer_id: String,
     writer_version: String,
     lease_duration_ms: u64,
-    read_options: ReadOptions,
     write_options: WriteOptions,
     commit_options: CommitOptions,
 }
@@ -85,7 +108,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             writer_id: None,
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
-            read_options: ReadOptions::default(),
             write_options: WriteOptions::default(),
             commit_options: CommitOptions::default(),
         }
@@ -109,11 +131,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Returns the lease duration used by write operations.
     pub fn lease_duration_ms(&self) -> u64 {
         self.lease_duration_ms
-    }
-
-    /// Returns the default read options configured on the builder.
-    pub fn read_options(&self) -> &ReadOptions {
-        &self.read_options
     }
 
     /// Returns the default write options configured on the builder.
@@ -181,301 +198,177 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Resolves one absolute path to the authoritative entry at the current head.
-    pub async fn resolve_path(
+    pub async fn resolve_path(&self, path: impl AsRef<str>) -> CoreResult<AuthoritativePathEntry> {
+        self.resolve_path_with_context(path.as_ref(), ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn resolve_path_with_runtime_context(
         &self,
         path: impl AsRef<str>,
-        options: ReadOptions,
+        options: &RuntimeReadContext,
     ) -> CoreResult<AuthoritativePathEntry> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::resolve_path_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::resolve_path_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                )
-                .await
-            }
-        }
+        self.resolve_path_with_context(path.as_ref(), runtime_read_load_context(options))
+            .await
     }
 
     /// Lists the children of a directory path.
     pub async fn list_path(
         &self,
         path: impl AsRef<str>,
-        options: ReadOptions,
     ) -> CoreResult<Vec<AuthoritativePathEntry>> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::list_path_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::list_path_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                )
-                .await
-            }
-        }
+        self.list_path_with_context(path.as_ref(), ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_path_with_runtime_context(
+        &self,
+        path: impl AsRef<str>,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
+        self.list_path_with_context(path.as_ref(), runtime_read_load_context(options))
+            .await
     }
 
     /// Lists one page of children for a directory path.
     pub async fn list_path_page(
         &self,
         path: impl AsRef<str>,
-        options: ReadOptions,
         request: PageRequest<DirectoryPageCursor>,
     ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::list_path_page_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                    request,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::list_path_page_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                    request,
-                )
-                .await
-            }
-        }
+        self.list_path_page_with_context(path.as_ref(), request, ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_path_page_with_runtime_context(
+        &self,
+        path: impl AsRef<str>,
+        request: PageRequest<DirectoryPageCursor>,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+        self.list_path_page_with_context(path.as_ref(), request, runtime_read_load_context(options))
+            .await
     }
 
     /// Reads the current bytes for a file path.
     ///
     /// Content bytes are validated against the file's `content_ref` before they
     /// are returned.
-    pub async fn read_file(
+    pub async fn read_file(&self, path: impl AsRef<str>) -> CoreResult<AuthoritativeFileBytes> {
+        self.read_file_with_context(path.as_ref(), ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn read_file_with_runtime_context(
         &self,
         path: impl AsRef<str>,
-        options: ReadOptions,
+        options: &RuntimeReadContext,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::read_file_bytes_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::read_file_bytes_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                )
-                .await
-            }
-        }
+        self.read_file_with_context(path.as_ref(), runtime_read_load_context(options))
+            .await
     }
 
     /// Lists retained revisions for the file currently visible at `path`.
     pub async fn list_file_revisions(
         &self,
         path: impl AsRef<str>,
-        options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::list_file_revisions_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::list_file_revisions_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                )
-                .await
-            }
-        }
+        self.list_file_revisions_with_context(path.as_ref(), ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_file_revisions_with_runtime_context(
+        &self,
+        path: impl AsRef<str>,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<ListFileRevisionsResponse> {
+        self.list_file_revisions_with_context(path.as_ref(), runtime_read_load_context(options))
+            .await
     }
 
     /// Lists one page of retained revisions for the file currently visible at `path`.
     pub async fn list_file_revisions_page(
         &self,
         path: impl AsRef<str>,
-        options: ReadOptions,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::list_file_revisions_page_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                    request,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::list_file_revisions_page_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                    request,
-                )
-                .await
-            }
-        }
+        self.list_file_revisions_page_with_context(
+            path.as_ref(),
+            request,
+            ReadLoadContext::latest(),
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_file_revisions_page_with_runtime_context(
+        &self,
+        path: impl AsRef<str>,
+        request: PageRequest<FileRevisionsPageCursor>,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        self.list_file_revisions_page_with_context(
+            path.as_ref(),
+            request,
+            runtime_read_load_context(options),
+        )
+        .await
     }
 
     /// Lists retained revisions for a file inode, independent of its current path.
     pub async fn list_file_revisions_for_inode(
         &self,
         inode_id: InodeId,
-        options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::list_file_revisions_for_inode_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    inode_id,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::list_file_revisions_for_inode_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    inode_id,
-                )
-                .await
-            }
-        }
+        self.list_file_revisions_for_inode_with_context(inode_id, ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_file_revisions_for_inode_with_runtime_context(
+        &self,
+        inode_id: InodeId,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<ListFileRevisionsResponse> {
+        self.list_file_revisions_for_inode_with_context(
+            inode_id,
+            runtime_read_load_context(options),
+        )
+        .await
     }
 
     /// Lists one page of retained revisions for a file inode.
     pub async fn list_file_revisions_for_inode_page(
         &self,
         inode_id: InodeId,
-        options: ReadOptions,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::list_file_revisions_for_inode_page_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    inode_id,
-                    request,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::list_file_revisions_for_inode_page_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    inode_id,
-                    request,
-                )
-                .await
-            }
-        }
+        self.list_file_revisions_for_inode_page_with_context(
+            inode_id,
+            request,
+            ReadLoadContext::latest(),
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_file_revisions_for_inode_page_with_runtime_context(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        self.list_file_revisions_for_inode_page_with_context(
+            inode_id,
+            request,
+            runtime_read_load_context(options),
+        )
+        .await
     }
 
     /// Reads a retained revision for the file currently visible at `path`.
@@ -483,38 +376,24 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
-        options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        let path = path.as_ref();
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::read_file_revision_bytes_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    path,
-                    revision_no,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::read_file_revision_bytes_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    path,
-                    revision_no,
-                )
-                .await
-            }
-        }
+        self.read_file_revision_with_context(path.as_ref(), revision_no, ReadLoadContext::latest())
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn read_file_revision_with_runtime_context(
+        &self,
+        path: impl AsRef<str>,
+        revision_no: RevisionNo,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<AuthoritativeFileBytes> {
+        self.read_file_revision_with_context(
+            path.as_ref(),
+            revision_no,
+            runtime_read_load_context(options),
+        )
+        .await
     }
 
     /// Reads a retained revision by stable inode id.
@@ -522,37 +401,133 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        options: ReadOptions,
     ) -> CoreResult<Vec<u8>> {
-        match options.source() {
-            ReadSource::ManifestPlusTail => {
-                crate::path::query::read_file_revision_bytes_for_inode_from_manifest_plus_tail(
-                    &self.store,
-                    &self.namespace_id,
-                    inode_id,
-                    revision_no,
-                )
-                .await
-            }
-            ReadSource::ManifestPlusTailAtHead {
-                head,
-                head_etag,
-                table_cache,
-                tail_cache,
-            } => {
-                let cache_context =
-                    manifest_plus_tail_cache_context(head_etag.as_str(), table_cache, tail_cache);
-                crate::path::query::read_file_revision_bytes_for_inode_from_manifest_plus_tail_at_head_with_cache(
-                    &self.store,
-                    &self.namespace_id,
-                    head,
-                    cache_context,
-                    inode_id,
-                    revision_no,
-                )
-                .await
-            }
-        }
+        self.read_file_revision_for_inode_with_context(
+            inode_id,
+            revision_no,
+            ReadLoadContext::latest(),
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn read_file_revision_for_inode_with_runtime_context(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<Vec<u8>> {
+        self.read_file_revision_for_inode_with_context(
+            inode_id,
+            revision_no,
+            runtime_read_load_context(options),
+        )
+        .await
+    }
+
+    async fn load_read_view<'a>(
+        &'a self,
+        context: ReadLoadContext<'a>,
+    ) -> CoreResult<LoadedMetadataView<'a, S>> {
+        load_metadata_view(&self.store, &self.namespace_id, context).await
+    }
+
+    async fn resolve_path_with_context(
+        &self,
+        path: &str,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<AuthoritativePathEntry> {
+        let view = self.load_read_view(context).await?;
+        view.resolve_path(path).await
+    }
+
+    async fn list_path_with_context(
+        &self,
+        path: &str,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
+        let view = self.load_read_view(context).await?;
+        view.list_path(path).await
+    }
+
+    async fn list_path_page_with_context(
+        &self,
+        path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_path_page(path, request).await
+    }
+
+    async fn read_file_with_context(
+        &self,
+        path: &str,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<AuthoritativeFileBytes> {
+        let view = self.load_read_view(context).await?;
+        view.read_file_bytes(&self.store, path).await
+    }
+
+    async fn list_file_revisions_with_context(
+        &self,
+        path: &str,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<ListFileRevisionsResponse> {
+        let view = self.load_read_view(context).await?;
+        view.list_file_revisions(path).await
+    }
+
+    async fn list_file_revisions_page_with_context(
+        &self,
+        path: &str,
+        request: PageRequest<FileRevisionsPageCursor>,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_file_revisions_page(path, request).await
+    }
+
+    async fn list_file_revisions_for_inode_with_context(
+        &self,
+        inode_id: InodeId,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<ListFileRevisionsResponse> {
+        let view = self.load_read_view(context).await?;
+        view.list_file_revisions_for_inode(inode_id).await
+    }
+
+    async fn list_file_revisions_for_inode_page_with_context(
+        &self,
+        inode_id: InodeId,
+        request: PageRequest<FileRevisionsPageCursor>,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_file_revisions_for_inode_page(inode_id, request)
+            .await
+    }
+
+    async fn read_file_revision_with_context(
+        &self,
+        path: &str,
+        revision_no: RevisionNo,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<AuthoritativeFileBytes> {
+        let view = self.load_read_view(context).await?;
+        view.read_file_revision_bytes(&self.store, path, revision_no)
+            .await
+    }
+
+    async fn read_file_revision_for_inode_with_context(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        context: ReadLoadContext<'_>,
+    ) -> CoreResult<Vec<u8>> {
+        let view = self.load_read_view(context).await?;
+        view.read_file_revision_bytes_for_inode(&self.store, inode_id, revision_no)
+            .await
     }
 
     /// Writes file bytes to a path.
@@ -893,7 +868,6 @@ pub struct NamespaceEngineBuilder<S> {
     writer_id: Option<String>,
     writer_version: String,
     lease_duration_ms: u64,
-    read_options: ReadOptions,
     write_options: WriteOptions,
     commit_options: CommitOptions,
 }
@@ -920,12 +894,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
     /// Sets how long this writer's namespace lease should remain valid.
     pub fn lease_duration_ms(mut self, lease_duration_ms: u64) -> Self {
         self.lease_duration_ms = lease_duration_ms;
-        self
-    }
-
-    /// Sets default read options stored on the engine.
-    pub fn read_options(mut self, options: ReadOptions) -> Self {
-        self.read_options = options;
         self
     }
 
@@ -962,7 +930,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
             writer_id,
             writer_version: self.writer_version,
             lease_duration_ms: self.lease_duration_ms,
-            read_options: self.read_options,
             write_options: self.write_options,
             commit_options: self.commit_options,
         })
@@ -1021,10 +988,6 @@ mod tests {
         assert_eq!(engine.writer_id(), "writer-a");
         assert!(!engine.writer_version().is_empty());
         assert_eq!(engine.lease_duration_ms(), DEFAULT_LEASE_DURATION_MS);
-        assert!(matches!(
-            engine.read_options().source(),
-            ReadSource::ManifestPlusTail
-        ));
         assert_eq!(engine.write_options(), &WriteOptions::default());
         assert_eq!(engine.commit_options(), &CommitOptions::default());
     }
