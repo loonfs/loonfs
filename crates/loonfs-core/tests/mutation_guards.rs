@@ -14,8 +14,8 @@ use loonfs_api::{
     wire::control::{
         decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
         ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceDescriptorEnvelope,
-        NamespaceDescriptorState, NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
-        UploadSessionEnvelope, UploadSessionState, WriterLease,
+        NamespaceDescriptorState, NamespaceGcPinStateEnvelope, UploadSessionEnvelope,
+        UploadSessionState, WriterLease,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
@@ -43,8 +43,8 @@ use loonfs_core::{
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_fork_state,
-    namespace_head, namespace_manifest, upload_session, upload_session_prefix,
+    content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_head,
+    namespace_manifest, upload_session, upload_session_prefix,
 };
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -1127,12 +1127,23 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         .await
         .expect("content store descriptor head")
         .is_some());
+    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("head");
+    let manifest_id = head
+        .state
+        .current_manifest_id
+        .expect("created namespace manifest");
+    let manifest_bytes = store
+        .get(
+            &namespace_manifest(namespace_id.as_str(), manifest_id),
+            None,
+        )
+        .await
+        .expect("read manifest")
+        .expect("manifest exists");
+    let manifest =
+        decode_namespace_manifest_json(&manifest_bytes).expect("decode namespace manifest");
     assert!(
-        store
-            .head(&namespace_fork_state(namespace_id.as_str()))
-            .await
-            .expect("head root fork state")
-            .is_none(),
+        manifest.payload.fork.is_none(),
         "root namespace creation must not write fork provenance"
     );
 
@@ -3405,27 +3416,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         "fork should validate manifest descriptors without loading metadata SST payloads"
     );
 
-    let fork_state_key = namespace_fork_state(clone_namespace_id.as_str());
-    let fork_state_bytes = store
-        .get(&fork_state_key, None)
-        .await
-        .expect("read fork state")
-        .expect("fork state exists");
-    let fork_state: NamespaceForkStateEnvelope =
-        decode_control_object(&fork_state_bytes, ControlObjectKind::NamespaceForkState)
-            .expect("decode fork state");
-    assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
-    assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
-    assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
-    assert!(fork_state
-        .state
-        .source_checkpoint_id
-        .as_str()
-        .starts_with("chk_"));
-    assert_eq!(fork_state.state.source_manifest_id, ManifestId(1));
-    assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
-    assert!(fork_state.state.created_at_ms > 0);
-
     let blobs_after = store
         .list_prefix(&format!(
             "content-stores/{}/blobs/",
@@ -3451,7 +3441,19 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("target manifest exists");
     let target_manifest =
         decode_namespace_manifest_json(&target_manifest_bytes).expect("decode target manifest");
-    assert!(target_manifest.payload.fork.is_some());
+    let fork_provenance = target_manifest
+        .payload
+        .fork
+        .as_ref()
+        .expect("fork provenance lives in target manifest");
+    assert_eq!(fork_provenance.source_namespace_id, source_namespace_id);
+    assert_eq!(fork_provenance.fork_seq, ChangeSeq(1));
+    assert!(fork_provenance
+        .source_checkpoint_id
+        .as_str()
+        .starts_with("chk_"));
+    assert_eq!(fork_provenance.source_manifest_id, ManifestId(1));
+    assert_eq!(fork_provenance.source_head_seq, ChangeSeq(1));
     assert_eq!(target_manifest.payload.checkpoints.len(), 1);
     assert_eq!(
         target_manifest.payload.checkpoints[0].head_seq,
@@ -3505,7 +3507,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(pin.state.target_namespace_id, clone_namespace_id);
     assert_eq!(
         pin.state.source_checkpoint_id,
-        fork_state.state.source_checkpoint_id
+        fork_provenance.source_checkpoint_id
     );
     assert_eq!(pin.state.source_manifest_id, ManifestId(1));
     assert_eq!(pin.state.source_head_seq, ChangeSeq(1));
@@ -3537,27 +3539,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .bytes,
         b"base"
     );
-    store
-        .delete(&fork_state_key)
-        .await
-        .expect("delete fork state");
-    assert_eq!(
-        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
-            .expect("read clone without fork state")
-            .bytes,
-        b"base"
-    );
-    store
-        .put_overwrite(&fork_state_key, Bytes::from_static(b"not-json"))
-        .await
-        .expect("corrupt fork state");
-    assert_eq!(
-        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
-            .expect("read clone with corrupt fork state")
-            .bytes,
-        b"base"
-    );
-
     let stale_clone_changes =
         list_changes_after(&store, &clone_namespace_id, ChangeSeq(0)).expect_err("old cursor");
     assert_eq!(stale_clone_changes.code(), ErrorCode::RebootstrapRequired);
@@ -3858,63 +3839,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fork_failure_after_target_manifest_before_fork_state_remains_partial() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(namespace_fork_state(clone_namespace_id.as_str())),
-        InjectedCreateFailure::Transport {
-            message: "injected target fork state failure",
-        },
-    );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
-
-    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .expect_err("target fork-state write should fail");
-    assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(
-        store
-            .head(&namespace_head(clone_namespace_id.as_str()))
-            .await
-            .expect("head target head")
-            .is_some(),
-        "target head should still reserve namespace"
-    );
-    assert!(
-        store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
-            .await
-            .expect("head target descriptor")
-            .is_none(),
-        "descriptor must remain unpublished"
-    );
-    let target_manifest_keys = store
-        .list_prefix(&format!(
-            "namespaces/{}/manifest/",
-            clone_namespace_id.as_str()
-        ))
-        .await
-        .expect("list target manifests");
-    assert!(
-        !target_manifest_keys.is_empty(),
-        "target manifest should have been written before fork-state failure"
-    );
-    assert!(
-        store
-            .head(&namespace_fork_state(clone_namespace_id.as_str()))
-            .await
-            .expect("head target fork state")
-            .is_none(),
-        "fork state should not be durable after injected fork-state failure"
-    );
-    assert_namespace_partial(&store, &clone_namespace_id, &context);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fork_failure_after_target_fork_state_before_descriptor_remains_partial() {
+async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -3957,14 +3882,6 @@ async fn fork_failure_after_target_fork_state_before_descriptor_remains_partial(
     assert!(
         !target_manifest_keys.is_empty(),
         "target manifest should have been written before descriptor failure"
-    );
-    assert!(
-        store
-            .head(&namespace_fork_state(clone_namespace_id.as_str()))
-            .await
-            .expect("head target fork state")
-            .is_some(),
-        "fork state should have been written before descriptor failure"
     );
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }

@@ -27,19 +27,6 @@ impl MetadataTableFamily {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DerivedWorkClass {
-    ManifestBuilder,
-}
-
-impl DerivedWorkClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ManifestBuilder => "manifest-builder",
-        }
-    }
-}
-
 pub fn namespace_head(namespace: &str) -> String {
     ObjectLayout::new().namespace_head(namespace).into_string()
 }
@@ -47,12 +34,6 @@ pub fn namespace_head(namespace: &str) -> String {
 pub fn namespace_descriptor(namespace: &str) -> String {
     ObjectLayout::new()
         .namespace_descriptor(namespace)
-        .into_string()
-}
-
-pub fn namespace_fork_state(namespace: &str) -> String {
-    ObjectLayout::new()
-        .namespace_fork_state(namespace)
         .into_string()
 }
 
@@ -82,16 +63,6 @@ pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectS
         .map(|key| key.into_string())
 }
 
-pub fn conflict_artifact(namespace: &str, conflict_id: &str) -> String {
-    ObjectLayout::new()
-        .conflict_artifact(namespace, conflict_id)
-        .into_string()
-}
-
-pub fn conflict_artifact_prefix(namespace: &str) -> String {
-    ObjectLayout::new().conflict_artifact_prefix(namespace)
-}
-
 pub fn upload_session(namespace: &str, upload_id: &str) -> String {
     ObjectLayout::new()
         .upload_session(namespace, upload_id)
@@ -114,27 +85,9 @@ pub fn metadata_sst(namespace: &str, table_id: &str) -> String {
         .into_string()
 }
 
-pub fn compacted_index_sst(namespace: &str, family: &str, table_id: &str) -> String {
-    ObjectLayout::new()
-        .compacted_index_sst(namespace, family, "default", table_id)
-        .into_string()
-}
-
-pub fn index_manifest(namespace: &str, family: &str, manifest_id: ManifestId) -> String {
-    ObjectLayout::new()
-        .index_manifest(namespace, family, "default", manifest_id)
-        .into_string()
-}
-
 pub fn gc_pin(source_namespace: &str, pin_id: &str) -> String {
     ObjectLayout::new()
         .gc_pin(source_namespace, pin_id)
-        .into_string()
-}
-
-pub fn derived_progress(namespace: &str, work_class: DerivedWorkClass) -> String {
-    ObjectLayout::new()
-        .derived_progress(namespace, work_class)
         .into_string()
 }
 
@@ -145,10 +98,9 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
-        derived_progress, metadata_sst, namespace_descriptor, namespace_fork_state, namespace_head,
+        content_blob, content_store_descriptor, metadata_sst, namespace_descriptor, namespace_head,
         namespace_manifest, sha256_hex_from_digest, upload_session, upload_session_prefix,
-        wal_segment, wal_segment_id_from_key, wal_segment_prefix, DerivedWorkClass,
+        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::ManifestId;
 
@@ -158,10 +110,6 @@ mod tests {
         assert_eq!(
             namespace_descriptor("ns-1"),
             "namespaces/ns-1/descriptor.json"
-        );
-        assert_eq!(
-            namespace_fork_state("ns-1"),
-            "namespaces/ns-1/control/fork.json"
         );
         assert_eq!(
             content_store_descriptor("cs_00000000000000000000000000000001"),
@@ -194,24 +142,12 @@ mod tests {
             "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst"
         );
         assert_eq!(
-            derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
-            "namespaces/ns-1/derived/manifest-builder/progress.json"
-        );
-        assert_eq!(
             content_blob(
                 "cs_00000000000000000000000000000001",
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             )
             .expect("content key"),
             "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        );
-        assert_eq!(
-            conflict_artifact("ns-1", "conflict-deadbeef"),
-            "namespaces/ns-1/conflicts/conflict-deadbeef.json"
-        );
-        assert_eq!(
-            conflict_artifact_prefix("ns-1"),
-            "namespaces/ns-1/conflicts/"
         );
         assert_eq!(
             upload_session("ns-1", "upl_00000000000000000000000000000001"),

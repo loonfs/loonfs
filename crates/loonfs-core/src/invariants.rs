@@ -132,7 +132,6 @@ define_invariant_ids! {
     (CurrentManifestIdAdvancesMonotonically, "current_manifest_id_advances_monotonically"),
     (RetentionFloorSeqAdvancesMonotonically, "retention_floor_seq_advances_monotonically"),
     (RetentionFloorSeqRequiresCheckpointCoverage, "retention_floor_seq_requires_checkpoint_coverage"),
-    (RetentionFloorSeqRequiresDerivedProgress, "retention_floor_seq_requires_derived_progress"),
     (RetentionFloorSeqRespectsPolicyGate, "retention_floor_seq_respects_policy_gate"),
 
     // Content object file invariants.
@@ -186,12 +185,8 @@ define_invariant_ids! {
     (SubtreeRenameConflictRevertsBoundDescendantsToWinnerState, "subtree_rename_conflict_reverts_bound_descendants_to_winner_state"),
     (SubtreeRenameConflictKeepsWinnerCanonicalPath, "subtree_rename_conflict_keeps_winner_canonical_path"),
     (SubtreeRenameConflictClearsPreservedTempRows, "subtree_rename_conflict_clears_preserved_temp_rows"),
-    (SubtreeConflictArtifactKeyMatchesNamespaceAndId, "subtree_conflict_artifact_key_matches_namespace_and_id"),
-    (SubtreeConflictArtifactEntriesAreDurable, "subtree_conflict_artifact_entries_are_durable"),
     (StablePathsDefaultDoesNotMaterializeVisibleSibling, "stable_paths_default_does_not_materialize_visible_sibling"),
     (StablePathsDefaultDoesNotMaterializeVisibleSiblingTree, "stable_paths_default_does_not_materialize_visible_sibling_tree"),
-    (ConflictArtifactKeyMatchesNamespaceAndId, "conflict_artifact_key_matches_namespace_and_id"),
-    (ConflictArtifactLoserContentIsDurable, "conflict_artifact_loser_content_is_durable"),
     (RemoteObservationConvergenceClearsDirtyAndPlannedAction, "remote_observation_convergence_clears_dirty_and_planned_action"),
     (RemoteObservationConvergenceClearsPendingInodeMutation, "remote_observation_convergence_clears_pending_inode_mutation"),
     (RemoteObservationConvergenceAdvancesSyncAnchor, "remote_observation_convergence_advances_sync_anchor"),
@@ -231,18 +226,6 @@ define_invariant_ids! {
     (ApplyRemoteRenameUpdatesLocalStateAndSyncAnchor, "apply_remote_rename_updates_local_state_and_sync_anchor"),
     (ApplyRemoteRenameClearsPlannedAction, "apply_remote_rename_clears_planned_action"),
     (ApplyRemoteRenameFailureRecordsDurableIssue, "apply_remote_rename_failure_records_durable_issue"),
-
-    // Client conflict artifact recovery invariants.
-    (ConflictArtifactDiscoveryCachesNamespaceArtifacts, "conflict_artifact_discovery_caches_namespace_artifacts"),
-    (ConflictArtifactShowReportsImplicitActiveState, "conflict_artifact_show_reports_implicit_active_state"),
-    (ConflictArtifactUnarchiveRestoresActiveVisibility, "conflict_artifact_unarchive_restores_active_visibility"),
-    (ConflictArtifactRestoreDoesNotChangeArchiveState, "conflict_artifact_restore_does_not_change_archive_state"),
-    (FileConflictArtifactRestoreReproducesLoserContent, "file_conflict_artifact_restore_reproduces_loser_content"),
-    (FileConflictArtifactRestoreKeepsCanonicalPathUntouched, "file_conflict_artifact_restore_keeps_canonical_path_untouched"),
-    (SubtreeConflictArtifactRestoreReproducesFullLoserTree, "subtree_conflict_artifact_restore_reproduces_full_loser_tree"),
-    (SubtreeConflictArtifactRestoreUsesDeterministicEntryOrder, "subtree_conflict_artifact_restore_uses_deterministic_entry_order"),
-    (SubtreeConflictArtifactRestoreKeepsCanonicalTreeUntouched, "subtree_conflict_artifact_restore_keeps_canonical_tree_untouched"),
-    (ConflictArtifactRestoreRequiresExplicitAbsentDestination, "conflict_artifact_restore_requires_explicit_absent_destination"),
 
     // Simulation interleaving invariants.
     (ClientRetryReusesPendingRequestAfterDelayedResponse, "client_retry_reuses_pending_request_after_delayed_response"),

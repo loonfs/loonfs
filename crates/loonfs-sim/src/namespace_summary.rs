@@ -42,7 +42,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
         }
         summary.namespace_objects += 1;
         match parsed.family() {
-            DurableObjectFamily::NamespaceHead | DurableObjectFamily::NamespaceForkState => {
+            DurableObjectFamily::NamespaceHead => {
                 summary.control_objects += 1;
             }
             DurableObjectFamily::WalSegment => {
@@ -59,13 +59,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
             }
             DurableObjectFamily::NamespaceDescriptor
             | DurableObjectFamily::UploadSession
-            | DurableObjectFamily::ConflictArtifact
-            | DurableObjectFamily::NamespaceCompactions
-            | DurableObjectFamily::CompactedIndexSst
-            | DurableObjectFamily::IndexManifest
-            | DurableObjectFamily::IndexGcBoundary
             | DurableObjectFamily::NamespaceGcBoundary
-            | DurableObjectFamily::DerivedProgress
             | DurableObjectFamily::ContentStoreDescriptor
             | DurableObjectFamily::ContentBlob => {}
         }

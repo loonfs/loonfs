@@ -64,12 +64,8 @@ pub enum KeyClass {
     NamespaceHead,
     WalSegment,
     NamespaceManifest,
-    NamespaceCompactions,
     MetadataSst,
-    CompactedIndex,
-    IndexManifest,
     GcControl,
-    DerivedProgress,
     Unknown,
 }
 
@@ -484,18 +480,12 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::NamespaceHead => KeyClass::NamespaceHead,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
         DurableObjectFamily::NamespaceManifest => KeyClass::NamespaceManifest,
-        DurableObjectFamily::NamespaceCompactions => KeyClass::NamespaceCompactions,
         DurableObjectFamily::CompactedMetadataSst => KeyClass::MetadataSst,
-        DurableObjectFamily::CompactedIndexSst => KeyClass::CompactedIndex,
-        DurableObjectFamily::IndexManifest => KeyClass::IndexManifest,
-        DurableObjectFamily::IndexGcBoundary
-        | DurableObjectFamily::NamespaceGcBoundary
-        | DurableObjectFamily::GcPin => KeyClass::GcControl,
-        DurableObjectFamily::DerivedProgress => KeyClass::DerivedProgress,
+        DurableObjectFamily::NamespaceGcBoundary | DurableObjectFamily::GcPin => {
+            KeyClass::GcControl
+        }
         DurableObjectFamily::NamespaceDescriptor
-        | DurableObjectFamily::NamespaceForkState
         | DurableObjectFamily::UploadSession
-        | DurableObjectFamily::ConflictArtifact
         | DurableObjectFamily::ContentStoreDescriptor => KeyClass::Metadata,
     }
 }

@@ -4,7 +4,7 @@ use futures::stream::{self, BoxStream};
 use loonfs_api::ManifestId;
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
-    metadata_sst, namespace_fork_state, namespace_head, namespace_manifest, wal_segment,
+    metadata_sst, namespace_descriptor, namespace_head, namespace_manifest, wal_segment,
 };
 use loonfs_objectstore::layout::{NamespaceGcBoundaryKind, ObjectLayout};
 use loonfs_objectstore::metrics::{
@@ -120,21 +120,19 @@ async fn records_head_and_head_with_checksum_as_distinct_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
+    let object_key = namespace_descriptor("ns-1");
 
     store
-        .put_overwrite(&namespace_fork_state("ns-1"), bytes(b"fork"))
+        .put_overwrite(&object_key, bytes(b"descriptor"))
         .await
         .expect("put object");
+    store.head(&object_key).await.expect("head");
     store
-        .head(&namespace_fork_state("ns-1"))
-        .await
-        .expect("head");
-    store
-        .head_with_checksum(&namespace_fork_state("ns-1"))
+        .head_with_checksum(&object_key)
         .await
         .expect("head with checksum");
     store
-        .get_with_metadata(&namespace_fork_state("ns-1"))
+        .get_with_metadata(&object_key)
         .await
         .expect("get with metadata");
 
@@ -250,7 +248,7 @@ async fn classifies_wal_and_manifest_key_families() {
 }
 
 #[tokio::test]
-async fn classifies_reserved_namespace_layout_families() {
+async fn classifies_gc_namespace_layout_family() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
@@ -267,13 +265,6 @@ async fn classifies_reserved_namespace_layout_families() {
         .expect("put namespace manifest");
     store
         .put_overwrite(
-            &layout.namespace_compactions("ns-1", 1).into_string(),
-            bytes(b"compactions"),
-        )
-        .await
-        .expect("put compactions");
-    store
-        .put_overwrite(
             &layout
                 .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
                 .into_string(),
@@ -281,29 +272,6 @@ async fn classifies_reserved_namespace_layout_families() {
         )
         .await
         .expect("put metadata sst");
-    store
-        .put_overwrite(
-            &layout
-                .compacted_index_sst(
-                    "ns-1",
-                    "grep",
-                    "default",
-                    "tbl_00000000000000000000000000000002",
-                )
-                .into_string(),
-            bytes(b"index"),
-        )
-        .await
-        .expect("put index sst");
-    store
-        .put_overwrite(
-            &layout
-                .index_manifest("ns-1", "grep", "default", ManifestId(1))
-                .into_string(),
-            bytes(b"index manifest"),
-        )
-        .await
-        .expect("put index manifest");
     store
         .put_overwrite(
             &layout
@@ -316,11 +284,8 @@ async fn classifies_reserved_namespace_layout_families() {
 
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::NamespaceManifest);
-    assert_eq!(samples[1].key_class, KeyClass::NamespaceCompactions);
-    assert_eq!(samples[2].key_class, KeyClass::MetadataSst);
-    assert_eq!(samples[3].key_class, KeyClass::CompactedIndex);
-    assert_eq!(samples[4].key_class, KeyClass::IndexManifest);
-    assert_eq!(samples[5].key_class, KeyClass::GcControl);
+    assert_eq!(samples[1].key_class, KeyClass::MetadataSst);
+    assert_eq!(samples[2].key_class, KeyClass::GcControl);
 }
 
 #[tokio::test]

@@ -50,8 +50,6 @@ The required durable object families and standard key patterns are:
 | **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
 | **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/tables/metadata/{table_id}.sst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
-| **Conflict artifacts** | Immutable | Preserve rejected-write context for later inspection. | `namespaces/{namespace_id}/conflicts/{conflict_id}.json` |
-| **Derived progress** | Mutable | Record how far one background work class has processed namespace history. | `namespaces/{namespace_id}/derived/{work_class}/progress.json` |
 
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
@@ -73,21 +71,15 @@ envelopes. Listing order is an inspection and reclamation convenience, never
 recovery authority.
 
 The object layout also reserves these namespace-root file families for
-fork-aware materialization, derived indexes, compaction control, and garbage
-collection:
+garbage collection:
 
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
-| **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compaction/{compactions_id}.plan` |
-| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
-| **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/compacted/{table_id}.sst` |
-| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
-| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest\|compaction}.boundary` |
+| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest}.boundary` |
 | **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
 
-GC boundary files are sequenced cleanup cursors for manifest and compaction
-streams. WAL and metadata SST deletion is reachability-driven from the live
+GC boundary files are sequenced cleanup cursors for WAL and manifest streams.
+WAL and metadata SST deletion is reachability-driven from the live
 manifest, checkpoint records, fork GC pins, and the retention floor.
 
 ### 1.3 Durable naming conventions
@@ -95,18 +87,18 @@ manifest, checkpoint records, fork GC pins, and the retention floor.
 The namespace tree's lifecycle can be read off its grammar:
 
 - **Singular directories are ordered history streams** (`wal/`,
-  `manifest/`, `compaction/`). Object names sort by history position, a
+  `manifest/`). Object names sort by history position, a
   boundary cursor in `gc/` records reclamation progress, and reclaiming a
   stream is one algorithm: range-scan below the cursor, check the bounded
   window for chain, checkpoint, and pin references, sweep what nothing
   protects, advance the cursor.
 - **Plural directories are unordered collections** (`tables/`, `uploads/`,
-  `conflicts/`, `gc/pins/`, `indexes/`, `content-stores/`, `blobs/`).
-  Object names are opaque, and references — manifests, chains, pins — are
+  `gc/pins/`, `content-stores/`, `blobs/`). Object names are opaque, and
+  references — manifests, chains, pins — are
   the only truth about liveness; collections reclaim by reachability or
   session expiry, never by name order.
-- **`control/` is the mutable plane**: compare-and-swap singletons (head,
-  lease, fork record) that are never swept.
+- **`control/` is the mutable plane**: compare-and-swap singletons such as
+  the namespace head that are never swept.
 - **The root `descriptor.json` is the existence marker**: written last at
   creation as the publish marker, kept forever after deletion as half of
   the tombstone pair that retires the namespace id.
@@ -132,16 +124,15 @@ surfaces:
   uniqueness suffix. WAL segment ids carry the suffix
   (`00000000000000000412-9f2a6c0e4b7d4a90`) because segments are *proposals*:
   racing writers may both write one for the same position before the head
-  chooses, so names at the same position must never collide. Manifest and
-  compaction-plan ids are bare positions (`00000000000000000412`) because
-  those objects are *derivations* of already-committed history: any two
-  writers at the same position produce semantically equivalent objects, so a
-  deterministic name gives one canonical object per position and idempotent
-  retry. A derived-stream writer uses create-if-absent and, on `exists`,
-  verifies and adopts the existing object or reloads — it never overwrites.
+  chooses, so names at the same position must never collide. Manifest ids are
+  bare positions (`00000000000000000412`) because manifests are *derivations*
+  of already-committed history: any two writers at the same position produce
+  semantically equivalent objects, so a deterministic name gives one canonical
+  object per position and idempotent retry. A manifest writer uses
+  create-if-absent and, on `exists`, verifies and adopts the existing object or
+  reloads — it never overwrites.
   In every case the ordered name is an inspection and reclamation hint;
   recovery authority is the head and its references, never a listing.
-- Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs. They use the durable slug grammar:
   1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first
@@ -515,12 +506,10 @@ source checkpoint/manifest pair, then initializes the target namespace with a
 manifest that references immutable metadata files owned by the source
 namespace. The target descriptor is written last as the publish/list marker.
 
-The `control/fork.json` object is informational. It records the source
-namespace and fork sequence so operators can see where the namespace came
-from. Normal reads and recovery do not load it in v0. After fork, the clone
-must remain readable even if the source namespace metadata is deleted or
-corrupted. Source writes after the fork do not affect the clone, and clone
-writes do not affect the source.
+Fork provenance is stored in the target namespace manifest. Normal reads and
+recovery use the target descriptor, head, manifest, and WAL only. After fork, the clone must remain readable even
+if the source namespace metadata is deleted or corrupted. Source writes after
+the fork do not affect the clone, and clone writes do not affect the source.
 
 ### 2.7 Mounts
 
@@ -999,7 +988,7 @@ The fork protocol is:
 2. Resolve and verify the source namespace descriptor, content-store
    descriptor, head, checkpoint, and WAL basis.
 3. Create or reuse a verified source checkpoint at the current source head.
-4. Build the target head, fork record, and descriptor using the source
+4. Build the target head, target manifest, and descriptor using the source
    namespace's `content_store_id`.
 5. Write or verify a source-local GC pin for the source checkpoint/manifest
    pair referenced by the target namespace manifest.
@@ -1007,17 +996,15 @@ The fork protocol is:
    immutable metadata files for the source checkpoint.
 7. Write the target `head.json` to reserve the namespace and point at the
    target manifest.
-8. Write `control/fork.json` with the source namespace id and fork sequence.
-9. Write the target `descriptor.json` last as the publish/list marker.
-10. Start the new namespace WAL independently at `fork_seq + 1`.
+8. Write the target `descriptor.json` last as the publish/list marker.
+9. Start the new namespace WAL independently at `fork_seq + 1`.
 
 The fork does not copy content-store blobs or source metadata SSTs. If
 initialization fails after the target head exists but before the descriptor is
 published, the target is partial. A successful fork has independent namespace
 history from the fork point. Future target WAL, checkpoints, and metadata SSTs
-are written under the target namespace root. The target's `control/fork.json`
-records where the namespace came from; recovery authority comes from the
-target head and the target namespace manifest.
+are written under the target namespace root. The target manifest records where
+the namespace came from.
 
 ### 3.10 Long-running operations
 
@@ -1092,7 +1079,7 @@ Two rules make these envelopes evolvable:
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata SST | `metadata_sst` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
-| Control objects (head, lease, descriptors, fork state, GC pin, derived progress, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
+| Control objects (head, descriptors, GC pin, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -1216,7 +1203,7 @@ eventually reclaims content or metadata that is no longer reachable and no
 longer protected by retention policy.
 
 Reclamation follows the tree's grammar (section 1.3). Ordered streams
-(`wal/`, `manifest/`, `compaction/`) reclaim by advancing their boundary
+(`wal/`, `manifest/`) reclaim by advancing their boundary
 cursor in `gc/`: range-scan below the cursor, verify the bounded window
 against the reference rules below, sweep, advance. Collections reclaim by
 reachability or expiry. Either way:
@@ -1234,8 +1221,8 @@ when:
 
 ### 6.5 Control-object cleanup
 
-Implementations may clean up expired sessions, uploads, intents, leases, or
-other control-plane objects. This is control-plane maintenance, not namespace
+Implementations may clean up expired sessions, uploads, intents, or other
+control-plane objects. This is control-plane maintenance, not namespace
 history.
 
 ### 6.6 Derived work
