@@ -12,7 +12,7 @@ use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
 };
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{ManifestId, NamespaceId};
+use loonfs_api::{CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::namespace_manifest;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -102,7 +102,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
-    checkpoint_id: &str,
+    checkpoint_id: &CheckpointId,
     writer_version: &str,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
     for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
@@ -148,7 +148,7 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             next_inode_id: current_head.next_inode_id,
             name_policy: current_head.name_policy,
             current_manifest_id: Some(manifest_id),
-            latest_checkpoint_id: Some(checkpoint_id.to_owned()),
+            latest_checkpoint_id: Some(checkpoint_id.clone()),
             retention_floor_seq: current_head.retention_floor_seq,
             visible_wal_tip: current_head.visible_wal_tip.clone(),
             state: current_head.state,

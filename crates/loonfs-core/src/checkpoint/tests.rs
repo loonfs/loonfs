@@ -44,7 +44,8 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loonfs_api::{
-    validate_checkpoint_id, ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, PutBehavior,
+    validate_checkpoint_id, ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId,
+    PutBehavior,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
@@ -2223,7 +2224,7 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
         &store,
         &namespace_id,
         ManifestId(1),
-        "chk_00000000000000000000000000000099",
+        &CheckpointId::parse("chk_00000000000000000000000000000099").expect("checkpoint id"),
         &context.writer_version,
     )
     .await
@@ -2433,12 +2434,13 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         .expect("later checkpoint");
     assert!(later_checkpoint.manifest_id > ManifestId(materialization_before.head.seq.0));
 
-    let checkpoint_id = "chk_00000000000000000000000000000099";
+    let checkpoint_id =
+        CheckpointId::parse("chk_00000000000000000000000000000099").expect("checkpoint id");
     let outcome = publish_current_manifest_id(
         &store,
         &namespace_id,
         ManifestId(materialization_before.head.seq.0),
-        checkpoint_id,
+        &checkpoint_id,
         &context.writer_version,
     )
     .await
@@ -2470,7 +2472,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &store,
         &namespace_id,
         ManifestId(1),
-        "chk_00000000000000000000000000000000",
+        &CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
         &context.writer_version,
     )
     .await

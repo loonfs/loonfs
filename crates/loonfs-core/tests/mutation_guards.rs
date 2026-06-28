@@ -22,7 +22,7 @@ use loonfs_api::{
         NamespaceManifestEnvelope,
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
     NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, WriterEpoch,
 };
@@ -3417,7 +3417,11 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
     assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
     assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
-    assert!(fork_state.state.source_checkpoint_id.starts_with("chk_"));
+    assert!(fork_state
+        .state
+        .source_checkpoint_id
+        .as_str()
+        .starts_with("chk_"));
     assert_eq!(fork_state.state.source_manifest_id, ManifestId(1));
     assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
     assert!(fork_state.state.created_at_ms > 0);
@@ -4998,7 +5002,9 @@ fn validation_context(
         next_inode_id,
         name_policy: loonfs_api::NamePolicy::default(),
         current_manifest_id: Some(ManifestId(0)),
-        latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
+        latest_checkpoint_id: Some(
+            CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
+        ),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
         state: Default::default(),

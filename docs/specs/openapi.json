@@ -2109,6 +2109,10 @@
           }
         }
       },
+      "CheckpointId": {
+        "type": "string",
+        "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version."
+      },
       "CommitDelta": {
         "oneOf": [
           {
@@ -2795,7 +2799,7 @@
         ],
         "properties": {
           "checkpoint_id": {
-            "type": "string",
+            "$ref": "#/components/schemas/CheckpointId",
             "description": "Durable checkpoint id."
           },
           "checkpoint_seq": {
@@ -2814,11 +2818,15 @@
             ]
           },
           "latest_checkpoint_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Latest checkpoint id recorded on the head after the operation."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CheckpointId",
+                "description": "Latest checkpoint id recorded on the head after the operation."
+              }
+            ]
           },
           "manifest_id": {
             "$ref": "#/components/schemas/ManifestId",
@@ -3258,11 +3266,15 @@
             "description": "Current visible namespace sequence."
           },
           "latest_checkpoint_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Latest checkpoint recorded by the head."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CheckpointId",
+                "description": "Latest checkpoint recorded by the head."
+              }
+            ]
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",

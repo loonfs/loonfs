@@ -6,7 +6,7 @@ use crate::namespace::catalog::{
 };
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::{
     keys::{namespace_descriptor, namespace_head, wal_segment_id_from_key, wal_segment_prefix},
     ObjectStore,
@@ -19,7 +19,7 @@ pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
     pub current_manifest_id: Option<ManifestId>,
-    pub latest_checkpoint_id: Option<String>,
+    pub latest_checkpoint_id: Option<CheckpointId>,
     /// WAL segment objects positioned past the loaded manifest.
     ///
     /// Derived from position-ordered object names, not from walking the

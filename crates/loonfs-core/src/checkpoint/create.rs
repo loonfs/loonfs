@@ -693,11 +693,11 @@ pub(super) fn checkpoint_record_for_manifest(
 
 pub(super) fn checkpoint_record_by_id<'a>(
     manifest: &'a NamespaceManifestEnvelope,
-    checkpoint_id: &str,
+    checkpoint_id: &loonfs_api::CheckpointId,
 ) -> Option<&'a NamespaceCheckpointRecord> {
     manifest
         .payload
         .checkpoints
         .iter()
-        .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+        .find(|checkpoint| &checkpoint.checkpoint_id == checkpoint_id)
 }
