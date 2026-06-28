@@ -476,6 +476,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::NamespaceMismatch
         | CommitValidationError::HeadLeaseNamespaceMismatch
         | CommitValidationError::HeadLeaseFenceMismatch { .. }
+        | CommitValidationError::ValidatedPreviewApplyFailed(_)
         | CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
         | CommitValidationError::SeqOverflow

@@ -667,7 +667,9 @@ async fn stale_revision_precondition_is_rejected() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context).expect_err("stale revision");
+    let error = build_commit_plan(&request, &context)
+        .await
+        .expect_err("stale revision");
     assert!(matches!(
         error,
         CommitValidationError::ReplaceFileBaseRevisionMismatch {
@@ -707,7 +709,9 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context).expect_err("late op fails");
+    let error = build_commit_plan(&request, &context)
+        .await
+        .expect_err("late op fails");
     assert!(matches!(
         error,
         CommitValidationError::ReplaceFileInodeMissing {
@@ -750,6 +754,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
         },
         &context,
     )
+    .await
     .expect_err("create under tombstone");
     assert!(matches!(
         create_error,
@@ -775,6 +780,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
         },
         &context,
     )
+    .await
     .expect_err("replace under tombstone");
     assert!(matches!(
         replace_error,
@@ -804,7 +810,9 @@ async fn restore_revision_validation_rejects_missing_inode() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context).expect_err("restore missing inode");
+    let error = build_commit_plan(&request, &context)
+        .await
+        .expect_err("restore missing inode");
     assert!(matches!(
         error,
         CommitValidationError::RestoreRevisionInodeMissing {
@@ -832,7 +840,9 @@ async fn restore_revision_validation_rejects_non_file_target() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context).expect_err("restore non-file");
+    let error = build_commit_plan(&request, &context)
+        .await
+        .expect_err("restore non-file");
     assert!(matches!(
         error,
         CommitValidationError::RestoreRevisionInodeNotFile {
@@ -873,6 +883,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         },
         &context,
     )
+    .await
     .expect_err("restore stale base");
     assert!(matches!(
         stale_base,
@@ -899,6 +910,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         },
         &context,
     )
+    .await
     .expect_err("restore missing source");
     assert!(matches!(
         missing_source,
@@ -944,6 +956,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
         message: None,
     };
     let plan = build_commit_plan(&request, &context)
+        .await
         .expect("replace then restore in same request should validate");
     let materialized =
         materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"));
@@ -993,6 +1006,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         message: None,
     };
     let plan = build_commit_plan(&request, &context)
+        .await
         .expect("restore then restore in same request should validate");
     let materialized =
         materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"));
@@ -1044,6 +1058,7 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
         },
         &context,
     )
+    .await
     .expect_err("restore tombstone conflict");
     assert!(matches!(
         error,
@@ -1098,7 +1113,9 @@ async fn restore_revision_overflow_is_rejected() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context).expect_err("restore overflow");
+    let error = build_commit_plan(&request, &context)
+        .await
+        .expect_err("restore overflow");
     assert!(matches!(
         error,
         CommitValidationError::RestoreRevisionOverflow {

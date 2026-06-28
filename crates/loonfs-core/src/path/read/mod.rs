@@ -1,11 +1,6 @@
-mod current_view;
 mod listing;
-#[path = "checkpoint_index.rs"]
-mod manifest_index;
 mod materialized_view;
-mod row_decode;
 
-pub(crate) use current_view::{CurrentManifestTailView, MetadataReadSession, VisibleChildEntry};
 #[cfg(any(test, feature = "inspection"))]
 pub(crate) use materialized_view::ManifestPlusTailView;
 pub(crate) use materialized_view::{

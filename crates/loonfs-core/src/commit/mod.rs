@@ -3,7 +3,7 @@ mod durable_adapter;
 mod frame;
 mod identity;
 mod materialize;
-mod metadata_preview;
+mod metadata_overlay;
 mod operation;
 mod plan;
 mod precondition;
@@ -26,7 +26,6 @@ pub(crate) use self::identity::{fingerprint_digest, PATH_INTENT_FINGERPRINT_DOMA
 pub use self::materialize::{
     materialize_commit, CommitOpResult, MaterializedCommit, MaterializedCommitDelta,
 };
-pub(crate) use self::metadata_preview::PublishMetadataPreview;
 pub use self::operation::CommitOp;
 pub(crate) use self::plan::ValidatedOp;
 pub use self::plan::{CommitPlan, CommitValidationContext};

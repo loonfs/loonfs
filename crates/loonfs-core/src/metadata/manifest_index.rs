@@ -140,6 +140,20 @@ pub(crate) struct RevisionPagePosition {
     pub(super) revision_delta_index: u32,
 }
 
+impl RevisionPagePosition {
+    pub(crate) fn after(
+        revision_no: RevisionNo,
+        committed_seq: ChangeSeq,
+        revision_delta_index: u32,
+    ) -> Self {
+        Self {
+            revision_no,
+            committed_seq,
+            revision_delta_index,
+        }
+    }
+}
+
 pub(super) async fn latest_revision_for_inode<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     inode_id: InodeId,

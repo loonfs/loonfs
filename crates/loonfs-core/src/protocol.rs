@@ -13,7 +13,7 @@ use crate::context::MutationContext;
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
-use crate::metadata::{CommitReceiptRecord, MetadataState};
+use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::catalog::{
     load_namespace_catalog_entry, load_namespace_content_store_id, namespace_initialization_state,
     NamespaceInitializationError, NamespaceInitializationState,
@@ -24,7 +24,6 @@ use crate::namespace::control::{
 };
 use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
-use crate::path::read::CurrentManifestTailView;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
@@ -118,8 +117,8 @@ impl<S: ObjectStore + ?Sized> PublishManifestPlusTailView<'_, S> {
         &self.head
     }
 
-    pub(crate) fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
-        CurrentManifestTailView::new(&self.head, &self.manifest_tables, &self.tail_state)
+    pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
+        MetadataView::manifest_plus_tail(&self.head, &self.manifest_tables, &self.tail_state)
     }
 
     async fn find_commit_receipt(

@@ -178,6 +178,7 @@ pub enum CommitValidationError {
         lease_expires_at_ms: u64,
         now_ms: u64,
     },
+    ValidatedPreviewApplyFailed(String),
     SeqOverflow,
     NextInodeOverflow,
     OpIndexOverflow,

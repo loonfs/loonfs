@@ -5,45 +5,200 @@ use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, VisiblePathError,
 };
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::{AbsolutePath, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
-use loonfs_objectstore::ObjectStore;
+use loonfs_api::{
+    AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo,
+};
+use loonfs_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
-pub(crate) struct CurrentManifestTailView<'a, S: ObjectStore + ?Sized> {
+#[derive(Clone, Copy)]
+pub(crate) struct MetadataSnapshot<'a> {
     head: &'a HeadState,
-    tables: &'a VerifiedMetadataTables<'a, S>,
-    wal_tail_rows: &'a MetadataState,
+    visible_seq: ChangeSeq,
+    name_policy: NamePolicy,
 }
 
-impl<S: ObjectStore + ?Sized> Copy for CurrentManifestTailView<'_, S> {}
+pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
+    overlay: Option<&'a MetadataState>,
+    wal_tail: Option<&'a MetadataState>,
+    manifest: Option<&'a VerifiedMetadataTables<'store, S>>,
+    in_memory_base: Option<&'a MetadataState>,
+}
 
-impl<S: ObjectStore + ?Sized> Clone for CurrentManifestTailView<'_, S> {
+pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
+    snapshot: MetadataSnapshot<'a>,
+    sources: MetadataSourceStack<'a, 'store, S>,
+}
+
+#[derive(Debug)]
+pub(crate) struct InMemoryMetadataViewStore;
+
+pub(crate) type InMemoryMetadataView<'a> = MetadataView<'a, 'a, InMemoryMetadataViewStore>;
+
+impl<S: ObjectStore + ?Sized> Copy for MetadataSourceStack<'_, '_, S> {}
+
+impl<S: ObjectStore + ?Sized> Clone for MetadataSourceStack<'_, '_, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
-    pub(crate) fn new(
+impl<S: ObjectStore + ?Sized> Copy for MetadataView<'_, '_, S> {}
+
+impl<S: ObjectStore + ?Sized> Clone for MetadataView<'_, '_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[async_trait]
+impl ObjectStore for InMemoryMetadataViewStore {
+    async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        Err(ObjectStoreError::Unsupported(
+            "in-memory metadata view store",
+        ))
+    }
+
+    async fn get_with_metadata(&self, _key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        Err(ObjectStoreError::Unsupported(
+            "in-memory metadata view store",
+        ))
+    }
+
+    async fn get(
+        &self,
+        _key: &str,
+        _range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        Err(ObjectStoreError::Unsupported(
+            "in-memory metadata view store",
+        ))
+    }
+
+    async fn put(
+        &self,
+        _key: &str,
+        _bytes: Bytes,
+        _mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        Err(ObjectStoreError::Unsupported(
+            "in-memory metadata view store",
+        ))
+    }
+
+    async fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
+        Err(ObjectStoreError::Unsupported(
+            "in-memory metadata view store",
+        ))
+    }
+
+    fn list_prefix_stream(
+        &self,
+        _prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        Box::pin(stream::empty())
+    }
+}
+
+impl<'a> InMemoryMetadataView<'a> {
+    pub(crate) fn in_memory(
         head: &'a HeadState,
-        tables: &'a VerifiedMetadataTables<'a, S>,
+        base: &'a MetadataState,
+        overlay: Option<&'a MetadataState>,
+        visible_seq: ChangeSeq,
+        name_policy: NamePolicy,
+    ) -> Self {
+        Self {
+            snapshot: MetadataSnapshot {
+                head,
+                visible_seq,
+                name_policy,
+            },
+            sources: MetadataSourceStack {
+                overlay,
+                wal_tail: None,
+                manifest: None,
+                in_memory_base: Some(base),
+            },
+        }
+    }
+}
+
+impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
+    pub(crate) fn manifest_plus_tail(
+        head: &'a HeadState,
+        tables: &'a VerifiedMetadataTables<'store, S>,
         wal_tail_rows: &'a MetadataState,
     ) -> Self {
         Self {
-            head,
-            tables,
-            wal_tail_rows,
+            snapshot: MetadataSnapshot {
+                head,
+                visible_seq: head.seq,
+                name_policy: head.name_policy,
+            },
+            sources: MetadataSourceStack {
+                overlay: None,
+                wal_tail: Some(wal_tail_rows),
+                manifest: Some(tables),
+                in_memory_base: None,
+            },
         }
     }
 
-    pub(crate) fn session(self) -> MetadataReadSession<'a, S> {
-        MetadataReadSession::new(self)
+    pub(crate) fn with_overlay<'view>(
+        &'view self,
+        overlay: &'view MetadataState,
+        visible_seq: ChangeSeq,
+        name_policy: NamePolicy,
+    ) -> MetadataView<'view, 'store, S> {
+        MetadataView {
+            snapshot: MetadataSnapshot {
+                head: self.snapshot.head,
+                visible_seq,
+                name_policy,
+            },
+            sources: MetadataSourceStack {
+                overlay: Some(overlay),
+                wal_tail: self.sources.wal_tail,
+                manifest: self.sources.manifest,
+                in_memory_base: self.sources.in_memory_base,
+            },
+        }
     }
 
+    fn visible_seq(&self) -> ChangeSeq {
+        self.snapshot.visible_seq
+    }
+
+    fn row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
+        [
+            self.sources.overlay,
+            self.sources.wal_tail,
+            self.sources.in_memory_base,
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    fn manifest_tables(&self) -> Option<&'a VerifiedMetadataTables<'store, S>> {
+        self.sources.manifest
+    }
+
+    pub(crate) fn session(self) -> MetadataViewSession<'a, 'store, S> {
+        MetadataViewSession::new(self)
+    }
+}
+
+impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
     pub(crate) async fn visible_children(
         &self,
         parent_inode_id: InodeId,
@@ -55,14 +210,7 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
             return Ok(Vec::new());
         }
 
-        let mut candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
-        candidates.extend(
-            self.wal_tail_rows
-                .direntry_binds()
-                .iter()
-                .filter(|direntry| direntry.parent_inode_id == parent_inode_id)
-                .cloned(),
-        );
+        let candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
         let mut children = Vec::new();
         for direntry in candidates {
             let active = self
@@ -134,7 +282,7 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
                 format!("{}/{}", current_absolute_path, component.as_str())
             };
             let display_name = component.to_display_name();
-            let name_key = NameKey::for_display_name(self.head.name_policy, &display_name);
+            let name_key = NameKey::for_display_name(self.snapshot.name_policy, &display_name);
             let direntry = self
                 .visible_child(current_inode_id, name_key.as_str())
                 .await?
@@ -217,15 +365,16 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, CoreError> {
         if let Some(inode) = self
-            .wal_tail_rows
-            .inodes()
-            .iter()
-            .find(|inode| inode.inode_id == inode_id && inode.created_seq <= self.head.seq)
-            .cloned()
+            .row_states()
+            .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()))
         {
             return Ok(Some(inode));
         }
-        manifest_index::inode_at_seq(self.tables, inode_id).await
+        if let Some(tables) = self.manifest_tables() {
+            manifest_index::inode_at_seq(tables, inode_id).await
+        } else {
+            Ok(None)
+        }
     }
 
     pub(crate) async fn latest_revision_head(
@@ -235,10 +384,20 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         if self.visible_inode(inode_id).await?.is_none() {
             return Ok(None);
         }
-        let tail_revision = self.tail_latest_revision_for_inode(inode_id);
-        let manifest_revision =
-            manifest_index::latest_revision_for_inode(self.tables, inode_id).await?;
-        Ok(tail_revision
+        self.latest_revision_record(inode_id).await
+    }
+
+    pub(crate) async fn latest_revision_record(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<RevisionRecord>, CoreError> {
+        let row_revision = self.row_latest_revision_for_inode(inode_id);
+        let manifest_revision = if let Some(tables) = self.manifest_tables() {
+            manifest_index::latest_revision_for_inode(tables, inode_id).await?
+        } else {
+            None
+        };
+        Ok(row_revision
             .into_iter()
             .chain(manifest_revision)
             .max_by_key(revision_order_key))
@@ -272,10 +431,13 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Option<RevisionRecord>, CoreError> {
-        let tail_revision = self.tail_revision_for_inode_no(inode_id, revision_no);
-        let manifest_revision =
-            manifest_index::revision_for_inode_no(self.tables, inode_id, revision_no).await?;
-        Ok(tail_revision
+        let row_revision = self.row_revision_for_inode_no(inode_id, revision_no);
+        let manifest_revision = if let Some(tables) = self.manifest_tables() {
+            manifest_index::revision_for_inode_no(tables, inode_id, revision_no).await?
+        } else {
+            None
+        };
+        Ok(row_revision
             .into_iter()
             .chain(manifest_revision)
             .max_by_key(revision_order_key))
@@ -290,15 +452,14 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut revisions = manifest_index::revisions_for_inode_page_desc(
-            self.tables,
-            inode_id,
-            start_after,
-            limit,
-        )
-        .await?;
-        revisions.extend(self.tail_revisions_for_inode_page_desc(inode_id, start_after));
-        revisions.retain(|revision| revision.committed_seq <= self.head.seq);
+        let mut revisions = if let Some(tables) = self.manifest_tables() {
+            manifest_index::revisions_for_inode_page_desc(tables, inode_id, start_after, limit)
+                .await?
+        } else {
+            Vec::new()
+        };
+        revisions.extend(self.row_revisions_for_inode_page_desc(inode_id, start_after));
+        revisions.retain(|revision| revision.committed_seq <= self.visible_seq());
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions.truncate(limit);
         Ok(revisions)
@@ -308,15 +469,19 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         &self,
         commit_id: &CommitId,
     ) -> Result<Option<CommitReceiptRecord>, CoreError> {
-        let tail_receipt = self
-            .wal_tail_rows
-            .commit_receipts()
-            .iter()
+        let row_receipt = self
+            .row_states()
+            .flat_map(|state| state.commit_receipts())
             .filter(|receipt| receipt.commit_id == *commit_id)
+            .filter(|receipt| receipt.committed_seq <= self.visible_seq())
             .max_by_key(|receipt| receipt.committed_seq)
             .cloned();
-        let manifest_receipt = manifest_index::commit_receipt(self.tables, commit_id).await?;
-        Ok(tail_receipt
+        let manifest_receipt = if let Some(tables) = self.manifest_tables() {
+            manifest_index::commit_receipt(tables, commit_id).await?
+        } else {
+            None
+        };
+        Ok(row_receipt
             .into_iter()
             .chain(manifest_receipt)
             .max_by_key(|receipt| receipt.committed_seq))
@@ -326,17 +491,10 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         &self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
-        let mut bindings = self.direntry_binds_for_child(child_inode_id).await?;
-        bindings.extend(
-            self.wal_tail_rows
-                .direntry_binds()
-                .iter()
-                .filter(|direntry| direntry.child_inode_id == child_inode_id)
-                .cloned(),
-        );
+        let bindings = self.direntry_binds_for_child(child_inode_id).await?;
         let Some(binding) = bindings
             .into_iter()
-            .filter(|direntry| direntry.bind_seq <= self.head.seq)
+            .filter(|direntry| direntry.bind_seq <= self.visible_seq())
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
         else {
             return Ok(None);
@@ -368,26 +526,41 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         Ok(None)
     }
 
+    pub(crate) async fn would_create_directory_cycle(
+        &self,
+        inode_id: InodeId,
+        new_parent_inode: InodeId,
+    ) -> Result<bool, CoreError> {
+        let mut current = Some(new_parent_inode);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if candidate_inode_id == inode_id {
+                return Ok(true);
+            }
+            current = self
+                .current_parent_binding_for_child(candidate_inode_id)
+                .await?
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        Ok(false)
+    }
+
     pub(crate) async fn bound_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
-        let mut bindings = self
+        let bindings = self
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
-        bindings.extend(
-            self.wal_tail_rows
-                .direntry_binds()
-                .iter()
-                .filter(|direntry| {
-                    direntry.parent_inode_id == parent_inode_id && direntry.name_key == name_key
-                })
-                .cloned(),
-        );
         Ok(bindings
             .into_iter()
-            .filter(|direntry| direntry.bind_seq <= self.head.seq)
+            .filter(|direntry| direntry.bind_seq <= self.visible_seq())
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
     }
 
@@ -395,34 +568,20 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<bool, CoreError> {
-        let mut unbinds = self.direntry_unbinds_for_binding(direntry).await?;
-        unbinds.extend(
-            self.wal_tail_rows
-                .direntry_unbinds()
-                .iter()
-                .filter(|unbind| unbind_matches_binding(unbind, direntry))
-                .cloned(),
-        );
+        let unbinds = self.direntry_unbinds_for_binding(direntry).await?;
         Ok(unbinds
             .into_iter()
-            .any(|unbind| unbind.unbind_seq <= self.head.seq))
+            .any(|unbind| unbind.unbind_seq <= self.visible_seq()))
     }
 
     pub(crate) async fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
-        let mut tombstones = self.tombstones_for_root(root_inode_id).await?;
-        tombstones.extend(
-            self.wal_tail_rows
-                .subtree_tombstones()
-                .iter()
-                .filter(|tombstone| tombstone.root_inode_id == root_inode_id)
-                .cloned(),
-        );
+        let tombstones = self.tombstones_for_root(root_inode_id).await?;
         Ok(tombstones
             .into_iter()
-            .filter(|tombstone| tombstone.tombstone_seq <= self.head.seq)
+            .filter(|tombstone| tombstone.tombstone_seq <= self.visible_seq())
             .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index)))
     }
 
@@ -430,7 +589,19 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         &self,
         parent_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        manifest_index::direntry_binds_for_parent(self.tables, parent_inode_id).await
+        let mut bindings = if let Some(tables) = self.manifest_tables() {
+            manifest_index::direntry_binds_for_parent(tables, parent_inode_id).await?
+        } else {
+            Vec::new()
+        };
+        bindings.extend(self.row_states().flat_map(|state| {
+            state
+                .direntry_binds()
+                .iter()
+                .filter(move |direntry| direntry.parent_inode_id == parent_inode_id)
+                .cloned()
+        }));
+        Ok(bindings)
     }
 
     async fn direntry_binds_for_parent_name(
@@ -438,63 +609,99 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        manifest_index::direntry_binds_for_parent_name(self.tables, parent_inode_id, name_key).await
+        let mut bindings = if let Some(tables) = self.manifest_tables() {
+            manifest_index::direntry_binds_for_parent_name(tables, parent_inode_id, name_key)
+                .await?
+        } else {
+            Vec::new()
+        };
+        bindings.extend(self.row_states().flat_map(|state| {
+            state
+                .direntry_binds()
+                .iter()
+                .filter(move |direntry| {
+                    direntry.parent_inode_id == parent_inode_id && direntry.name_key == name_key
+                })
+                .cloned()
+        }));
+        Ok(bindings)
     }
 
     async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        manifest_index::direntry_binds_for_child(self.tables, child_inode_id).await
+        let mut bindings = if let Some(tables) = self.manifest_tables() {
+            manifest_index::direntry_binds_for_child(tables, child_inode_id).await?
+        } else {
+            Vec::new()
+        };
+        bindings.extend(self.row_states().flat_map(|state| {
+            state
+                .direntry_binds()
+                .iter()
+                .filter(move |direntry| direntry.child_inode_id == child_inode_id)
+                .cloned()
+        }));
+        Ok(bindings)
     }
 
     async fn direntry_unbinds_for_binding(
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
-        manifest_index::direntry_unbinds_for_binding(self.tables, direntry).await
+        let mut unbinds = if let Some(tables) = self.manifest_tables() {
+            manifest_index::direntry_unbinds_for_binding(tables, direntry).await?
+        } else {
+            Vec::new()
+        };
+        unbinds.extend(self.row_states().flat_map(|state| {
+            state
+                .direntry_unbinds()
+                .iter()
+                .filter(move |unbind| unbind_matches_binding(unbind, direntry))
+                .cloned()
+        }));
+        Ok(unbinds)
     }
 
-    fn tail_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
-        self.wal_tail_rows
-            .revisions()
-            .iter()
+    fn row_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+        self.row_states()
+            .flat_map(|state| state.revisions())
             .filter(|revision| {
-                revision.inode_id == inode_id && revision.committed_seq <= self.head.seq
+                revision.inode_id == inode_id && revision.committed_seq <= self.visible_seq()
             })
             .max_by_key(|revision| revision_order_key(revision))
             .cloned()
     }
 
-    fn tail_revision_for_inode_no(
+    fn row_revision_for_inode_no(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Option<RevisionRecord> {
-        self.wal_tail_rows
-            .revisions()
-            .iter()
+        self.row_states()
+            .flat_map(|state| state.revisions())
             .filter(|revision| {
                 revision.inode_id == inode_id
                     && revision.revision_no == revision_no
-                    && revision.committed_seq <= self.head.seq
+                    && revision.committed_seq <= self.visible_seq()
             })
             .max_by_key(|revision| revision_order_key(revision))
             .cloned()
     }
 
-    fn tail_revisions_for_inode_page_desc(
+    fn row_revisions_for_inode_page_desc(
         &self,
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,
     ) -> Vec<RevisionRecord> {
         let mut revisions = self
-            .wal_tail_rows
-            .revisions()
-            .iter()
+            .row_states()
+            .flat_map(|state| state.revisions())
             .filter(|revision| {
                 revision.inode_id == inode_id
-                    && revision.committed_seq <= self.head.seq
+                    && revision.committed_seq <= self.visible_seq()
                     && start_after
                         .map(|position| revision_is_after_position_desc(revision, position))
                         .unwrap_or(true)
@@ -509,7 +716,19 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         &self,
         root_inode_id: InodeId,
     ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
-        manifest_index::tombstones_for_root(self.tables, root_inode_id).await
+        let mut tombstones = if let Some(tables) = self.manifest_tables() {
+            manifest_index::tombstones_for_root(tables, root_inode_id).await?
+        } else {
+            Vec::new()
+        };
+        tombstones.extend(self.row_states().flat_map(|state| {
+            state
+                .subtree_tombstones()
+                .iter()
+                .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
+                .cloned()
+        }));
+        Ok(tombstones)
     }
 
     fn tail_direntry_bind_page_candidates(
@@ -518,9 +737,8 @@ impl<'a, S: ObjectStore + ?Sized> CurrentManifestTailView<'a, S> {
         start_after_name_key: Option<&str>,
     ) -> Vec<DirentryBindPageCandidate> {
         let mut candidates = self
-            .wal_tail_rows
-            .direntry_binds()
-            .iter()
+            .row_states()
+            .flat_map(|state| state.direntry_binds())
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
                     && start_after_name_key
@@ -544,7 +762,7 @@ pub(crate) struct VisibleChildEntry {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct MetadataReadSessionCounters {
+pub(crate) struct MetadataViewSessionCounters {
     pub(crate) visible_child_calls: u64,
     pub(crate) visible_inode_calls: u64,
     pub(crate) current_parent_binding_calls: u64,
@@ -555,8 +773,8 @@ pub(crate) struct MetadataReadSessionCounters {
     pub(crate) scan_range_page_calls: u64,
 }
 
-pub(crate) struct MetadataReadSession<'a, S: ObjectStore + ?Sized> {
-    base: CurrentManifestTailView<'a, S>,
+pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
+    base: MetadataView<'a, 'store, S>,
     inode_at_seq_cache: HashMap<InodeId, Option<InodeRecord>>,
     visible_inode_cache: HashMap<InodeId, Option<InodeRecord>>,
     bound_child_cache: HashMap<ParentNameCacheKey, Option<DirentryBindRecord>>,
@@ -565,11 +783,11 @@ pub(crate) struct MetadataReadSession<'a, S: ObjectStore + ?Sized> {
     active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     unbind_cache: HashMap<BindingCacheKey, bool>,
-    counters: MetadataReadSessionCounters,
+    counters: MetadataViewSessionCounters,
 }
 
-impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
-    fn new(base: CurrentManifestTailView<'a, S>) -> Self {
+impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
+    fn new(base: MetadataView<'a, 'store, S>) -> Self {
         Self {
             base,
             inode_at_seq_cache: HashMap::new(),
@@ -580,11 +798,11 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
             active_tombstone_cache: HashMap::new(),
             covering_tombstone_cache: HashMap::new(),
             unbind_cache: HashMap::new(),
-            counters: MetadataReadSessionCounters::default(),
+            counters: MetadataViewSessionCounters::default(),
         }
     }
 
-    pub(crate) fn counters(&self) -> MetadataReadSessionCounters {
+    pub(crate) fn counters(&self) -> MetadataViewSessionCounters {
         self.counters
     }
 
@@ -606,7 +824,7 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
 
         let raw_scan_limit = limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT);
         let mut manifest_after_row_key = None;
-        let mut manifest_exhausted = false;
+        let mut manifest_exhausted = self.base.manifest_tables().is_none();
         let mut manifest_candidates = VecDeque::<DirentryBindPageCandidate>::new();
         let tail_candidates = self
             .base
@@ -618,14 +836,18 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
             if manifest_candidates.is_empty() && !manifest_exhausted {
                 self.counters.scan_range_page_calls =
                     self.counters.scan_range_page_calls.saturating_add(1);
-                let page = manifest_index::direntry_binds_for_parent_name_key_page(
-                    self.base.tables,
-                    parent_inode_id,
-                    start_after_name_key,
-                    manifest_after_row_key.as_deref(),
-                    raw_scan_limit,
-                )
-                .await?;
+                let page = if let Some(tables) = self.base.manifest_tables() {
+                    manifest_index::direntry_binds_for_parent_name_key_page(
+                        tables,
+                        parent_inode_id,
+                        start_after_name_key,
+                        manifest_after_row_key.as_deref(),
+                        raw_scan_limit,
+                    )
+                    .await?
+                } else {
+                    Vec::new()
+                };
                 if page.is_empty() {
                     manifest_exhausted = true;
                 } else {
@@ -792,18 +1014,10 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
         self.counters.direntry_child_scan_calls =
             self.counters.direntry_child_scan_calls.saturating_add(1);
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let mut bindings = self.base.direntry_binds_for_child(child_inode_id).await?;
-        bindings.extend(
-            self.base
-                .wal_tail_rows
-                .direntry_binds()
-                .iter()
-                .filter(|direntry| direntry.child_inode_id == child_inode_id)
-                .cloned(),
-        );
+        let bindings = self.base.direntry_binds_for_child(child_inode_id).await?;
         let binding = bindings
             .into_iter()
-            .filter(|direntry| direntry.bind_seq <= self.base.head.seq)
+            .filter(|direntry| direntry.bind_seq <= self.base.visible_seq())
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
         let binding = if let Some(binding) = binding {
             if self.is_direntry_unbound(&binding).await? {
@@ -858,18 +1072,10 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
             return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let mut tombstones = self.base.tombstones_for_root(root_inode_id).await?;
-        tombstones.extend(
-            self.base
-                .wal_tail_rows
-                .subtree_tombstones()
-                .iter()
-                .filter(|tombstone| tombstone.root_inode_id == root_inode_id)
-                .cloned(),
-        );
+        let tombstones = self.base.tombstones_for_root(root_inode_id).await?;
         let tombstone = tombstones
             .into_iter()
-            .filter(|tombstone| tombstone.tombstone_seq <= self.base.head.seq)
+            .filter(|tombstone| tombstone.tombstone_seq <= self.base.visible_seq())
             .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index));
         self.active_tombstone_cache
             .insert(root_inode_id, tombstone.clone());
@@ -889,23 +1095,13 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
             return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let mut bindings = self
+        let bindings = self
             .base
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
-        bindings.extend(
-            self.base
-                .wal_tail_rows
-                .direntry_binds()
-                .iter()
-                .filter(|direntry| {
-                    direntry.parent_inode_id == parent_inode_id && direntry.name_key == name_key
-                })
-                .cloned(),
-        );
         let binding = bindings
             .into_iter()
-            .filter(|direntry| direntry.bind_seq <= self.base.head.seq)
+            .filter(|direntry| direntry.bind_seq <= self.base.visible_seq())
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
         self.bound_child_cache.insert(cache_key, binding.clone());
         Ok(binding)
@@ -920,18 +1116,10 @@ impl<'a, S: ObjectStore + ?Sized> MetadataReadSession<'a, S> {
             return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let mut unbinds = self.base.direntry_unbinds_for_binding(direntry).await?;
-        unbinds.extend(
-            self.base
-                .wal_tail_rows
-                .direntry_unbinds()
-                .iter()
-                .filter(|unbind| unbind_matches_binding(unbind, direntry))
-                .cloned(),
-        );
+        let unbinds = self.base.direntry_unbinds_for_binding(direntry).await?;
         let unbound = unbinds
             .into_iter()
-            .any(|unbind| unbind.unbind_seq <= self.base.head.seq);
+            .any(|unbind| unbind.unbind_seq <= self.base.visible_seq());
         self.unbind_cache.insert(cache_key, unbound);
         Ok(unbound)
     }

@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 loonfs-api = { path = "../loonfs-api" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
+async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -24,7 +25,6 @@ default = []
 inspection = []
 
 [dev-dependencies]
-async-trait.workspace = true
 loonfs-model = { path = "../loonfs-model" }
 tempfile.workspace = true
 tokio.workspace = true

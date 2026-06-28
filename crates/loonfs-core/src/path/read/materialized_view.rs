@@ -1,7 +1,4 @@
-use super::{
-    listing::{invalid_cursor, page_head_seq, validate_directory_cursor},
-    CurrentManifestTailView, MetadataReadSession, VisibleChildEntry,
-};
+use super::listing::{invalid_cursor, page_head_seq, validate_directory_cursor};
 use crate::checkpoint::{
     head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
     VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
@@ -9,7 +6,8 @@ use crate::checkpoint::{
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{
-    DirentryBindRecord, InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord,
+    DirentryBindRecord, InodeRecord, MetadataState, MetadataView, MetadataViewSession,
+    ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
 };
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
@@ -723,15 +721,13 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             validate_file_revisions_cursor(cursor, self.head.seq, inode_id)?;
         }
 
-        let start_after =
-            request
-                .cursor
-                .as_ref()
-                .map(|cursor| super::manifest_index::RevisionPagePosition {
-                    revision_no: cursor.last_revision_no,
-                    committed_seq: cursor.last_committed_seq,
-                    revision_delta_index: cursor.last_revision_delta_index,
-                });
+        let start_after = request.cursor.as_ref().map(|cursor| {
+            crate::metadata::manifest_index::RevisionPagePosition::after(
+                cursor.last_revision_no,
+                cursor.last_committed_seq,
+                cursor.last_revision_delta_index,
+            )
+        });
         let mut revision_records = self
             .metadata_view()
             .session()
@@ -988,7 +984,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
 
     async fn build_authoritative_path_entry_with_session(
         &self,
-        session: &mut MetadataReadSession<'_, S>,
+        session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
     ) -> Result<AuthoritativePathEntry, CoreError> {
         let revision = if resolved.inode_kind == InodeKind::File {
@@ -1019,7 +1015,7 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
 
     async fn build_authoritative_path_entry_from_visible_child(
         &self,
-        session: &mut MetadataReadSession<'_, S>,
+        session: &mut MetadataViewSession<'_, '_, S>,
         resolved_dir: &ResolvedVisiblePath,
         child: VisibleChildEntry,
     ) -> Result<AuthoritativePathEntry, CoreError> {
@@ -1062,8 +1058,8 @@ impl<'a, S: ObjectStore + ?Sized> ManifestPlusTailView<'a, S> {
             .await
     }
 
-    fn metadata_view(&self) -> CurrentManifestTailView<'_, S> {
-        CurrentManifestTailView::new(&self.head, &self.tables, self.wal_tail_rows.as_ref())
+    fn metadata_view(&self) -> MetadataView<'_, '_, S> {
+        MetadataView::manifest_plus_tail(&self.head, &self.tables, self.wal_tail_rows.as_ref())
     }
 }
 

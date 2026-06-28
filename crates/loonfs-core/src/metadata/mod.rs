@@ -1,4 +1,7 @@
 mod indexes;
+pub(crate) mod manifest_index;
+mod row_decode;
+mod view;
 
 use crate::invariants::InvariantId;
 use indexes::MetadataIndexes;
@@ -11,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::mem::{size_of, size_of_val};
 use thiserror::Error;
+
+pub(crate) use view::{InMemoryMetadataView, MetadataView, MetadataViewSession, VisibleChildEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetadataState {

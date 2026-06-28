@@ -1,6 +1,4 @@
-use crate::commit::{
-    core_commit_fingerprint_for_v0_request, PublishMetadataPreview, SemanticMutationIdentity,
-};
+use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
@@ -252,9 +250,19 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         )
         .await?;
         let session = PublishPlanningSession::new(view.head());
-        let preview = PublishMetadataPreview::new(view.metadata_view(), session.accepted_rows());
-        plan_path_mutation_against_publish_view(namespace_id, intent, session.head(), &preview)
-            .await
+        let base_view = view.metadata_view();
+        let metadata_view = base_view.with_overlay(
+            session.accepted_rows(),
+            session.head().seq,
+            session.head().name_policy,
+        );
+        plan_path_mutation_against_publish_view(
+            namespace_id,
+            intent,
+            session.head(),
+            &metadata_view,
+        )
+        .await
     }
 
     pub async fn submit_path_intent(
