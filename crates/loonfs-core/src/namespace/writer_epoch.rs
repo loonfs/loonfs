@@ -1,12 +1,9 @@
 use crate::context::MutationContext;
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
-use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_object, AcquiredWriter, ControlObjectKind, HeadState, HeadStateEnvelope,
-    WriterLease,
-};
+use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
+use crate::namespace::control::ControlObjectLoadError;
+use loonfs_api::wire::control::{AcquiredWriter, HeadState, WriterLease};
 use loonfs_api::{NamespaceId, WriterEpoch};
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -54,74 +51,47 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         return Err(WriterEpochAcquireError::ZeroLeaseDuration);
     }
 
-    for _attempt in 0..MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS {
-        let loaded_head = read_head_object(store, namespace_id)
-            .await
-            .map_err(WriterEpochAcquireError::LoadHead)?;
-        let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
-            WriterEpochAcquireError::MissingHeadEtag {
-                object_key: loaded_head.object_key.clone(),
-            }
-        })?;
-        let head = loaded_head.envelope.state;
-
-        if let Some(active_lease) = head
-            .writer_lease
-            .as_ref()
-            .filter(|lease| lease.is_valid_at(params.now_ms))
-        {
-            if active_lease.writer_id != params.writer_id {
-                return Err(WriterEpochAcquireError::HeldByOtherWriter {
-                    writer_id: active_lease.writer_id.clone(),
-                    lease_expires_at_ms: active_lease.lease_expires_at_ms,
-                });
-            }
-
-            if active_lease.writer_session_id == params.writer_session_id {
-                if !lease_needs_renewal(active_lease.lease_expires_at_ms, params) {
-                    return Ok(acquired_writer_from_lease(head.writer_epoch, active_lease));
+    update_head(
+        store,
+        namespace_id,
+        &params.writer_version,
+        MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
+        |loaded_head| {
+            let head = &loaded_head.envelope.state;
+            if let Some(active_lease) = head
+                .writer_lease
+                .as_ref()
+                .filter(|lease| lease.is_valid_at(params.now_ms))
+            {
+                if active_lease.writer_id != params.writer_id {
+                    return Err(WriterEpochAcquireError::HeldByOtherWriter {
+                        writer_id: active_lease.writer_id.clone(),
+                        lease_expires_at_ms: active_lease.lease_expires_at_ms,
+                    });
                 }
-                let next_head = head_with_writer_lease(&head, head.writer_epoch, params);
-                match compare_and_swap_head(
-                    store,
-                    &loaded_head.object_key,
-                    &head_etag,
-                    &params.writer_version,
-                    next_head,
-                )
-                .await
-                {
-                    Ok(()) => return Ok(acquired_writer(head.writer_epoch, params)),
-                    Err(CasOutcome::Retryable) => continue,
-                    Err(CasOutcome::Fatal(message)) => {
-                        return Err(WriterEpochAcquireError::HeadWrite(message));
+
+                if active_lease.writer_session_id == params.writer_session_id {
+                    if !lease_needs_renewal(active_lease.lease_expires_at_ms, params) {
+                        return Ok(HeadUpdate::Noop(acquired_writer_from_lease(
+                            head.writer_epoch,
+                            active_lease,
+                        )));
                     }
+                    return Ok(HeadUpdate::Replace {
+                        next: Box::new(head_with_writer_lease(head, head.writer_epoch, params)),
+                        outcome: acquired_writer(head.writer_epoch, params),
+                    });
                 }
             }
-        }
 
-        let next_epoch = next_writer_epoch(head.writer_epoch)?;
-        let next_head = head_with_writer_lease(&head, next_epoch, params);
-        match compare_and_swap_head(
-            store,
-            &loaded_head.object_key,
-            &head_etag,
-            &params.writer_version,
-            next_head,
-        )
-        .await
-        {
-            Ok(()) => return Ok(acquired_writer(next_epoch, params)),
-            Err(CasOutcome::Retryable) => continue,
-            Err(CasOutcome::Fatal(message)) => {
-                return Err(WriterEpochAcquireError::HeadWrite(message));
-            }
-        }
-    }
-
-    Err(WriterEpochAcquireError::RetryExhausted {
-        attempts: MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
-    })
+            let next_epoch = next_writer_epoch(head.writer_epoch)?;
+            Ok(HeadUpdate::Replace {
+                next: Box::new(head_with_writer_lease(head, next_epoch, params)),
+                outcome: acquired_writer(next_epoch, params),
+            })
+        },
+    )
+    .await
 }
 
 fn next_writer_epoch(active: WriterEpoch) -> Result<WriterEpoch, WriterEpochAcquireError> {
@@ -180,35 +150,16 @@ fn lease_needs_renewal(lease_expires_at_ms: u64, params: &MutationContext) -> bo
     lease_expires_at_ms <= params.now_ms.saturating_add(renew_after_ms)
 }
 
-async fn compare_and_swap_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected_etag: &str,
-    writer_version: &str,
-    next_head: HeadState,
-) -> Result<(), CasOutcome> {
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, writer_version, next_head)
-            .map_err(|err| CasOutcome::Fatal(err.to_string()))?;
-    let bytes =
-        encode_control_object(&envelope).map_err(|err| CasOutcome::Fatal(err.to_string()))?;
-    store
-        .compare_and_swap(object_key, expected_etag, Bytes::from(bytes))
-        .await
-        .map(|_| ())
-        .map_err(map_cas_error)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CasOutcome {
-    Retryable,
-    Fatal(String),
-}
-
-fn map_cas_error(err: ObjectStoreError) -> CasOutcome {
-    match err {
-        ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict => CasOutcome::Retryable,
-        other => CasOutcome::Fatal(other.to_string()),
+impl From<ControlUpdateError> for WriterEpochAcquireError {
+    fn from(value: ControlUpdateError) -> Self {
+        match value {
+            ControlUpdateError::LoadHead(error) => Self::LoadHead(error),
+            ControlUpdateError::MissingEtag { object_key } => Self::MissingHeadEtag { object_key },
+            ControlUpdateError::Codec(message) | ControlUpdateError::Store(message) => {
+                Self::HeadWrite(message)
+            }
+            ControlUpdateError::RetryExhausted { attempts } => Self::RetryExhausted { attempts },
+        }
     }
 }
 
@@ -222,13 +173,19 @@ mod tests {
     use crate::options::DeleteNamespaceOptions;
     use crate::protocol::commit_operations;
     use async_trait::async_trait;
+    use bytes::Bytes;
     use futures::stream::BoxStream;
     use loonfs_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
-    use loonfs_api::wire::control::{decode_control_object, NamespaceState};
+    use loonfs_api::wire::control::{
+        decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
+        NamespaceState,
+    };
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::namespace_head;
-    use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
+    use loonfs_objectstore::{
+        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 

@@ -33,6 +33,7 @@ mod checkpoint;
 pub mod commit;
 pub mod content;
 mod context;
+mod control_update;
 mod engine;
 mod error;
 mod invariants;
