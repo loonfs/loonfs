@@ -154,7 +154,27 @@ within the relevant namespace incarnation.
 Underscores are reserved for generated opaque ID prefixes and JSON snake_case
 values. Fixed object-store path-family names should not use underscores.
 
-### 1.4 WAL segment rules
+### 1.4 Head update authority
+
+The namespace head is updated by different classes of work, and each class has
+its own authority boundary.
+
+Semantic namespace mutations — file writes, restores, renames, deletes, and
+explicit commits — are fenced by `writer_epoch` and then linearized by the head
+compare-and-swap that makes their WAL visible.
+
+Checkpoint and retention maintenance updates are CAS-linearized metadata
+updates. They preserve `writer_epoch` and `writer_lease`, and must not make
+uncommitted WAL visible. Maintenance may race with semantic writers; on head
+CAS conflict it must reload the latest head and rebase or retry the metadata
+update. It must not bump `writer_epoch` unless its purpose is to intentionally
+fence writers.
+
+Destructive namespace-admin updates that intentionally stop writers, such as
+namespace deletion, must fence writers first or publish an equivalent terminal
+state that prevents stale writers from succeeding.
+
+### 1.5 WAL segment rules
 
 The metadata log has six rules.
 

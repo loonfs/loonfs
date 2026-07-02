@@ -139,6 +139,13 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             );
         }
 
+        // Maintenance head update, not semantic writer publication.
+        //
+        // This operation does not acquire writer_epoch. It only moves the
+        // manifest/checkpoint pointer forward and is linearized by the head
+        // CAS. If the head changes concurrently, the caller reloads and
+        // retries/rebases. Operations that publish user mutations or
+        // intentionally stop writers must acquire writer_epoch first.
         let next_head = HeadState {
             namespace_id: current_head.namespace_id.clone(),
             seq: current_head.seq,

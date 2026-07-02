@@ -31,7 +31,9 @@ use super::runs::{
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
+use crate::protocol::list_changes_after;
 use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -44,15 +46,16 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loonfs_api::{
-    validate_checkpoint_id, ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId,
-    PutBehavior,
+    validate_checkpoint_id, ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId,
+    NamespaceId, PutBehavior,
 };
 use loonfs_objectstore::fs::LocalFsStore;
-use loonfs_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
+use loonfs_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest, wal_segment};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::sync::Mutex;
 use tempfile::tempdir;
 
@@ -383,6 +386,134 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .await
         .expect("manifest head")
         .is_some());
+}
+
+#[tokio::test]
+async fn checkpoint_publication_preserves_writer_identity() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    acquire_writer_epoch(&store, &namespace_id, &context)
+        .await
+        .expect("acquire writer");
+    let before = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("load before checkpoint")
+        .head;
+
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("load after checkpoint")
+        .head;
+
+    assert_eq!(after.writer_epoch, before.writer_epoch);
+    assert_eq!(after.writer_lease, before.writer_lease);
+}
+
+#[tokio::test]
+async fn retention_floor_advancement_preserves_writer_identity() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let before = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("load before retention")
+        .head;
+
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance retention");
+    let after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("load after retention")
+        .head;
+
+    assert_eq!(after.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(after.writer_epoch, before.writer_epoch);
+    assert_eq!(after.writer_lease, before.writer_lease);
+}
+
+#[tokio::test]
+async fn maintenance_does_not_make_orphan_wal_visible() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/first.txt",
+        b"first\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write first");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/second.txt",
+        b"second\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write second");
+
+    let orphan_key = wal_segment(
+        namespace_id.as_str(),
+        "00000000000000000002-deadbeefdeadbeef",
+    );
+    store
+        .put_overwrite(&orphan_key, Bytes::from_static(b"not a wal envelope"))
+        .await
+        .expect("write orphan wal");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance retention");
+
+    let changes = list_changes_after(
+        &store,
+        &namespace_id,
+        ChangeSeq(1),
+        EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
+    )
+    .await
+    .expect("list changes");
+
+    assert_eq!(changes.through_seq, ChangeSeq(2));
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].seq, ChangeSeq(2));
 }
 
 #[tokio::test]
