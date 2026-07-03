@@ -31,8 +31,7 @@ use crate::storage::content::{
     validate_durable_content_reference, write_immutable_object, ContentValidationTracker,
 };
 use crate::wal::{
-    load_validated_wal_chain, prepare_wal_segment, replay_validated_wal_tail_with_metadata,
-    WalChainLoadRequest,
+    load_validated_wal_chain, prepare_wal_segment, project_validated_wal_tail, WalChainLoadRequest,
 };
 use bytes::Bytes;
 use loonfs_api::v0::{
@@ -736,10 +735,11 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
     let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
-    let replayed = replay_validated_wal_tail_with_metadata(
+    let replayed = project_validated_wal_tail(
         manifest_head,
         &MetadataState::default(),
-        wal_chain.segments(),
+        Some(head.writer_epoch),
+        &wal_chain,
     )
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))

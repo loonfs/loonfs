@@ -5,7 +5,7 @@ mod view;
 
 use crate::invariants::InvariantId;
 use indexes::MetadataIndexes;
-use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
+use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamePolicy,
     RevisionNo,
@@ -341,100 +341,106 @@ impl MetadataState {
         let mut checked_invariants = Vec::new();
 
         for delta in deltas {
-            match delta {
-                WalDelta::CreateInode {
-                    delta_index: _,
-                    inode_id,
-                    inode_kind,
-                } => {
-                    self.push_inode_record(InodeRecord {
-                        inode_id: *inode_id,
-                        inode_kind: inode_kind.clone(),
-                        created_seq: committed_seq,
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        InvariantId::CreateInodeWritesInodeRow,
-                    );
-                }
-                WalDelta::BindDirentry {
-                    delta_index,
-                    parent_inode,
-                    name_key,
-                    display_name,
-                    child_inode,
-                } => {
-                    self.push_direntry_bind_record(DirentryBindRecord {
-                        parent_inode_id: *parent_inode,
-                        name_key: name_key.clone(),
-                        display_name: display_name.clone(),
-                        child_inode_id: *child_inode,
-                        bind_seq: committed_seq,
-                        bind_delta_index: *delta_index,
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        InvariantId::BindDirentryWritesDirentryBindRow,
-                    );
-                }
-                WalDelta::UnbindDirentry {
-                    delta_index,
-                    parent_inode,
-                    name_key,
-                    child_inode,
-                    bind_seq,
-                    bind_delta_index,
-                } => {
-                    self.push_direntry_unbind_record(DirentryUnbindRecord {
-                        parent_inode_id: *parent_inode,
-                        name_key: name_key.clone(),
-                        child_inode_id: *child_inode,
-                        bind_seq: *bind_seq,
-                        bind_delta_index: *bind_delta_index,
-                        unbind_seq: committed_seq,
-                        unbind_delta_index: *delta_index,
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        InvariantId::UnbindDirentryWritesUnbindRow,
-                    );
-                }
-                WalDelta::AppendFileRevision {
-                    delta_index,
-                    inode_id,
-                    revision_no,
-                    content_ref,
-                } => {
-                    self.push_revision_record(RevisionRecord {
-                        inode_id: *inode_id,
-                        revision_no: *revision_no,
-                        committed_seq,
-                        revision_delta_index: *delta_index,
-                        content_ref: content_ref.clone(),
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        InvariantId::AppendFileRevisionWritesRevisionRow,
-                    );
-                }
-                WalDelta::TombstoneSubtree {
-                    delta_index,
-                    root_inode,
-                } => {
-                    self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
-                        root_inode_id: *root_inode,
-                        tombstone_seq: committed_seq,
-                        tombstone_delta_index: *delta_index,
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        InvariantId::TombstoneSubtreeWritesTombstoneRow,
-                    );
-                }
-            }
+            self.apply_committed_wal_delta_mut(committed_seq, delta, &mut checked_invariants);
         }
 
         Ok(checked_invariants)
+    }
+
+    fn apply_committed_wal_delta_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        delta: &WalDelta,
+        checked_invariants: &mut Vec<InvariantId>,
+    ) {
+        match delta {
+            WalDelta::CreateInode {
+                delta_index: _,
+                inode_id,
+                inode_kind,
+            } => {
+                self.push_inode_record(InodeRecord {
+                    inode_id: *inode_id,
+                    inode_kind: inode_kind.clone(),
+                    created_seq: committed_seq,
+                });
+                push_unique_invariant(checked_invariants, InvariantId::CreateInodeWritesInodeRow);
+            }
+            WalDelta::BindDirentry {
+                delta_index,
+                parent_inode,
+                name_key,
+                display_name,
+                child_inode,
+            } => {
+                self.push_direntry_bind_record(DirentryBindRecord {
+                    parent_inode_id: *parent_inode,
+                    name_key: name_key.clone(),
+                    display_name: display_name.clone(),
+                    child_inode_id: *child_inode,
+                    bind_seq: committed_seq,
+                    bind_delta_index: *delta_index,
+                });
+                push_unique_invariant(
+                    checked_invariants,
+                    InvariantId::BindDirentryWritesDirentryBindRow,
+                );
+            }
+            WalDelta::UnbindDirentry {
+                delta_index,
+                parent_inode,
+                name_key,
+                child_inode,
+                bind_seq,
+                bind_delta_index,
+            } => {
+                self.push_direntry_unbind_record(DirentryUnbindRecord {
+                    parent_inode_id: *parent_inode,
+                    name_key: name_key.clone(),
+                    child_inode_id: *child_inode,
+                    bind_seq: *bind_seq,
+                    bind_delta_index: *bind_delta_index,
+                    unbind_seq: committed_seq,
+                    unbind_delta_index: *delta_index,
+                });
+                push_unique_invariant(
+                    checked_invariants,
+                    InvariantId::UnbindDirentryWritesUnbindRow,
+                );
+            }
+            WalDelta::AppendFileRevision {
+                delta_index,
+                inode_id,
+                revision_no,
+                content_ref,
+            } => {
+                self.push_revision_record(RevisionRecord {
+                    inode_id: *inode_id,
+                    revision_no: *revision_no,
+                    committed_seq,
+                    revision_delta_index: *delta_index,
+                    content_ref: content_ref.clone(),
+                });
+                push_unique_invariant(
+                    checked_invariants,
+                    InvariantId::AppendFileRevisionWritesRevisionRow,
+                );
+            }
+            WalDelta::TombstoneSubtree {
+                delta_index,
+                root_inode,
+            } => {
+                self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
+                    root_inode_id: *root_inode,
+                    tombstone_seq: committed_seq,
+                    tombstone_delta_index: *delta_index,
+                });
+                push_unique_invariant(
+                    checked_invariants,
+                    InvariantId::TombstoneSubtreeWritesTombstoneRow,
+                );
+            }
+        }
     }
 
     pub fn apply_committed_wal_record(
@@ -454,17 +460,32 @@ impl MetadataState {
         &mut self,
         record: &WalCommitPayload,
     ) -> Result<Vec<InvariantId>, MetadataApplyError> {
-        let deltas = record
-            .deltas
-            .iter()
-            .map(|delta| delta.delta.clone())
-            .collect::<Vec<_>>();
-        let mut checked_invariants = self.apply_committed_wal_deltas_mut(record.seq, &deltas)?;
+        self.apply_committed_wal_record_parts_mut(
+            record.seq,
+            &record.commit_id,
+            &record.semantic_commit_fingerprint,
+            record.message.as_deref(),
+            &record.deltas,
+        )
+    }
+
+    pub(crate) fn apply_committed_wal_record_parts_mut(
+        &mut self,
+        seq: ChangeSeq,
+        commit_id: &CommitId,
+        semantic_commit_fingerprint: &str,
+        message: Option<&str>,
+        deltas: &[WalCommitDelta],
+    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
+        let mut checked_invariants = Vec::new();
+        for delta in deltas {
+            self.apply_committed_wal_delta_mut(seq, &delta.delta, &mut checked_invariants);
+        }
         self.push_commit_receipt_record(CommitReceiptRecord {
-            commit_id: record.commit_id.clone(),
-            semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
-            committed_seq: record.seq,
-            message: record.message.clone(),
+            commit_id: commit_id.clone(),
+            semantic_commit_fingerprint: semantic_commit_fingerprint.to_owned(),
+            committed_seq: seq,
+            message: message.map(str::to_owned),
         });
         push_unique_invariant(
             &mut checked_invariants,

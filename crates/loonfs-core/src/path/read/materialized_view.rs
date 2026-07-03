@@ -13,9 +13,7 @@ use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::read_head_object;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
-use crate::wal::{
-    load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadRequest,
-};
+use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ContentStoreId,
@@ -175,10 +173,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let replayed = {
             let _span =
                 tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
-            replay_validated_wal_tail_with_metadata(
+            project_validated_wal_tail(
                 &manifest_head,
                 &MetadataState::default(),
-                wal_chain.segments(),
+                Some(head.writer_epoch),
+                &wal_chain,
             )
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
