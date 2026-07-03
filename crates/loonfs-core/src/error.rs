@@ -130,17 +130,6 @@ pub enum CoreError {
 pub enum MetadataViewError {
     #[error("namespace `{namespace_id}` head has no current manifest")]
     MissingManifest { namespace_id: NamespaceId },
-    #[error(
-        "metadata WAL tail after manifest `{manifest_id:?}` is too long: {wal_tail_segments} segments exceeds max {max_wal_tail_segments}"
-    )]
-    TailTooLong {
-        namespace_id: NamespaceId,
-        manifest_id: ManifestId,
-        manifest_head_seq: ChangeSeq,
-        head_seq: ChangeSeq,
-        wal_tail_segments: u64,
-        max_wal_tail_segments: u64,
-    },
     #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
     MaintenanceRequired {
         namespace_id: NamespaceId,
@@ -325,7 +314,6 @@ impl CoreError {
 fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
     match error {
         MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
-        MetadataViewError::TailTooLong { .. } => ErrorCode::MetadataTailTooLong,
         MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
         MetadataViewError::SnapshotUnavailable { .. }
         | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidCursor,
@@ -568,17 +556,6 @@ mod tests {
                     namespace_id: namespace_id.clone(),
                 },
                 ErrorCode::NamespaceCorrupt,
-            ),
-            (
-                MetadataViewError::TailTooLong {
-                    namespace_id: namespace_id.clone(),
-                    manifest_id,
-                    manifest_head_seq: ChangeSeq(1),
-                    head_seq,
-                    wal_tail_segments: 33,
-                    max_wal_tail_segments: 32,
-                },
-                ErrorCode::MetadataTailTooLong,
             ),
             (
                 MetadataViewError::MaintenanceRequired {

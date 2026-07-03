@@ -48,7 +48,6 @@ impl ReadOptions {
         head_etag: String,
         table_cache: Option<Arc<MetadataTableCache>>,
         tail_cache: Option<Arc<WalTailProjectionCache>>,
-        max_wal_tail_segments: u64,
     ) -> Self {
         Self {
             source: ReadSource::ManifestPlusTailAtHead {
@@ -56,7 +55,6 @@ impl ReadOptions {
                 head_etag,
                 table_cache,
                 tail_cache,
-                max_wal_tail_segments,
             },
         }
     }
@@ -76,7 +74,7 @@ impl Default for ReadOptions {
 /// Source used by [`ReadOptions`].
 #[derive(Debug, Clone)]
 pub enum ReadSource {
-    /// Use the current manifest and bounded WAL tail.
+    /// Use the current manifest and visible WAL tail.
     ManifestPlusTail,
     /// Use manifest-plus-tail for a specific already-loaded head.
     ManifestPlusTailAtHead {
@@ -88,8 +86,6 @@ pub enum ReadSource {
         table_cache: Option<Arc<MetadataTableCache>>,
         /// Optional WAL-tail projection cache.
         tail_cache: Option<Arc<WalTailProjectionCache>>,
-        /// Maximum visible WAL tail segments this read may project.
-        max_wal_tail_segments: u64,
     },
 }
 

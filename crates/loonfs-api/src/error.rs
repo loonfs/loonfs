@@ -78,7 +78,6 @@ pub enum ErrorCode {
     UploadContentConflict,
     InvalidUploadContent,
     RebootstrapRequired,
-    MetadataTailTooLong,
     BootstrapFailed,
     NamespaceCorrupt,
     ServerError,
@@ -86,7 +85,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 39] = [
+    pub const ALL: [ErrorCode; 38] = [
         ErrorCode::InvalidPath,
         ErrorCode::InvalidNamespaceId,
         ErrorCode::InvalidCommitId,
@@ -122,7 +121,6 @@ impl ErrorCode {
         ErrorCode::UploadContentConflict,
         ErrorCode::InvalidUploadContent,
         ErrorCode::RebootstrapRequired,
-        ErrorCode::MetadataTailTooLong,
         ErrorCode::BootstrapFailed,
         ErrorCode::NamespaceCorrupt,
         ErrorCode::ServerError,
@@ -152,8 +150,7 @@ impl ErrorCode {
             ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
             ErrorCode::CommitQueueFull
             | ErrorCode::CheckpointUnavailable
-            | ErrorCode::MaintenanceRequired
-            | ErrorCode::MetadataTailTooLong => ErrorKind::Unavailable,
+            | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError | ErrorCode::BootstrapFailed => ErrorKind::Internal,
@@ -208,7 +205,6 @@ impl ErrorCode {
             ErrorCode::UploadContentConflict => "upload_content_conflict",
             ErrorCode::InvalidUploadContent => "invalid_upload_content",
             ErrorCode::RebootstrapRequired => "rebootstrap_required",
-            ErrorCode::MetadataTailTooLong => "metadata_tail_too_long",
             ErrorCode::BootstrapFailed => "bootstrap_failed",
             ErrorCode::NamespaceCorrupt => "namespace_corrupt",
             ErrorCode::ServerError => "server_error",

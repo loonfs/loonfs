@@ -60,8 +60,6 @@ pub struct RuntimeCacheConfig {
     pub max_cached_wal_tail_projection_rows: usize,
     /// Approximate decoded-byte budget for cached WAL-tail projections.
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
-    /// Maximum WAL tail segments a foreground read may project.
-    pub max_read_wal_tail_segments: u64,
     /// Cache settings for decoded metadata tables.
     pub metadata_table_cache: MetadataTableCacheConfig,
 }
@@ -75,7 +73,6 @@ impl RuntimeCacheConfig {
             max_cached_namespaces: 0,
             max_cached_wal_tail_projection_rows: 0,
             max_cached_wal_tail_projection_decoded_bytes: Some(0),
-            max_read_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
             metadata_table_cache: MetadataTableCacheConfig {
                 enabled: false,
                 max_blocks: 0,
@@ -95,7 +92,6 @@ impl Default for RuntimeCacheConfig {
             max_cached_wal_tail_projection_decoded_bytes: Some(
                 DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
             ),
-            max_read_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
             metadata_table_cache: MetadataTableCacheConfig::default(),
         }
     }

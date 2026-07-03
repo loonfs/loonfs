@@ -649,7 +649,7 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 }
 
 #[test]
-fn runtime_publish_rejects_wal_tail_over_configured_bound() {
+fn runtime_publish_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -658,15 +658,11 @@ fn runtime_publish_rejects_wal_tail_over_configured_bound() {
     ));
     let object_store: SharedObjectStore = raw_store.clone();
     let setup = Fs::builder(object_store.clone())
-        .writer_id("publish-tail-limit")
+        .writer_id("publish-tail")
         .build()
         .expect("build setup runtime");
     let measured = Fs::builder(object_store)
-        .writer_id("publish-tail-limit")
-        .runtime_cache(RuntimeCacheConfig {
-            max_read_wal_tail_segments: 1,
-            ..RuntimeCacheConfig::default()
-        })
+        .writer_id("publish-tail")
         .build()
         .expect("build measured runtime");
 
@@ -680,10 +676,13 @@ fn runtime_publish_rejects_wal_tail_over_configured_bound() {
         .create_dir_blocking(&namespace_id, "/seed-b", CreateDirOptions::default())
         .expect("seed second WAL segment");
 
-    assert_core_error_kind(
-        measured.create_dir_blocking(&namespace_id, "/should-fail", CreateDirOptions::default()),
-        ErrorCode::MetadataTailTooLong,
-    );
+    measured
+        .create_dir_blocking(
+            &namespace_id,
+            "/should-succeed",
+            CreateDirOptions::default(),
+        )
+        .expect("publish projects the visible WAL tail without a segment limit");
 }
 
 #[test]
@@ -854,15 +853,11 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 }
 
 #[test]
-fn runtime_read_rejects_wal_tail_over_configured_bound() {
+fn runtime_read_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let fs = Fs::builder(store(temp_dir.path()))
-        .writer_id("tail-too-long-test")
-        .runtime_cache(RuntimeCacheConfig {
-            max_read_wal_tail_segments: 0,
-            ..RuntimeCacheConfig::default()
-        })
+        .writer_id("tail-read-test")
         .build()
         .expect("build runtime");
 
@@ -870,11 +865,11 @@ fn runtime_read_rejects_wal_tail_over_configured_bound() {
         .expect("create namespace");
     fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
         .expect("create docs");
+    fs.create_dir_blocking(&namespace_id, "/more", CreateDirOptions::default())
+        .expect("create another WAL segment");
 
-    assert_core_error_kind(
-        fs.stat_path_blocking(&namespace_id, "/docs"),
-        ErrorCode::MetadataTailTooLong,
-    );
+    fs.stat_path_blocking(&namespace_id, "/docs")
+        .expect("read projects the visible WAL tail without a segment limit");
 }
 
 #[test]

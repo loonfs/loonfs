@@ -534,7 +534,7 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     Ok(MetadataRead {
         value: block_on(engine.resolve_path(
             absolute_path,
-            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None, 32),
+            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None),
         ))?,
         source: MetadataReadSource::ManifestPlusTail,
     })
@@ -552,7 +552,7 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     Ok(MetadataRead {
         value: block_on(engine.list_path(
             absolute_path,
-            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None, 32),
+            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None),
         ))?,
         source: MetadataReadSource::ManifestPlusTail,
     })
