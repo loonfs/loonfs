@@ -199,7 +199,7 @@ The metadata log has six rules.
 6. Orphan WAL segments are permitted and harmless when a writer loses the head
    compare-and-swap.
 
-### 1.5 Immutable content rules
+### 1.6 Immutable content rules
 
 The content model has five rules.
 
@@ -234,7 +234,7 @@ A reader or writer resolves content through the namespace descriptor:
 File revisions and change-feed payloads store only `content_ref`; they do not
 store content-store ids or object-store paths.
 
-### 1.6 Mutable control-object rules
+### 1.7 Mutable control-object rules
 
 Small mutable objects such as the namespace head must use compare-and-swap
 semantics. These objects must remain small enough that guarded rewrite is
@@ -258,7 +258,7 @@ Large immutable file data may use multipart upload or another
 provider-specific optimization. Small mutable control objects should not
 depend on those mechanisms.
 
-### 1.7 Provider conformance
+### 1.8 Provider conformance
 
 The format standardizes the required behaviors, not a brand name such as "S3
 compatible." A provider is conforming only when those behaviors are verified

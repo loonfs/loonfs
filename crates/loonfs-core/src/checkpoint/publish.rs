@@ -4,13 +4,11 @@
 use super::create::checkpoint_record_by_id;
 use super::error::ManifestLoadError;
 use super::load::{load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present};
+use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
-use crate::namespace::control::read_head_object;
 use bytes::Bytes;
-use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
-};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
 use loonfs_api::{CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::namespace_manifest;
@@ -105,14 +103,69 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     writer_version: &str,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
-    for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
-        let loaded_head = read_head_object(store, namespace_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            })?;
-        let current_head = loaded_head.envelope.state;
-        if current_head.current_manifest_id >= Some(manifest_id) {
+    enum HeadAdvance {
+        AlreadyCurrent(Box<HeadState>),
+        Published(Box<HeadState>),
+    }
+
+    let advance = update_head(
+        store,
+        namespace_id,
+        writer_version,
+        HEAD_CAS_RETRY_LIMIT,
+        |loaded| {
+            let current_head = &loaded.envelope.state;
+            if current_head.current_manifest_id >= Some(manifest_id) {
+                return Ok(HeadUpdate::Noop(HeadAdvance::AlreadyCurrent(Box::new(
+                    current_head.clone(),
+                ))));
+            }
+
+            // Maintenance head update, not semantic writer publication.
+            //
+            // This operation does not acquire writer_epoch. It only moves the
+            // manifest/checkpoint pointer forward and is linearized by the head
+            // CAS. If the head changes concurrently, the caller reloads and
+            // retries/rebases. Operations that publish user mutations or
+            // intentionally stop writers must acquire writer_epoch first.
+            let next_head = HeadState {
+                namespace_id: current_head.namespace_id.clone(),
+                seq: current_head.seq,
+                head_commit_id: current_head.head_commit_id.clone(),
+                writer_epoch: current_head.writer_epoch,
+                writer_lease: current_head.writer_lease.clone(),
+                next_inode_id: current_head.next_inode_id,
+                name_policy: current_head.name_policy,
+                current_manifest_id: Some(manifest_id),
+                latest_checkpoint_id: Some(checkpoint_id.clone()),
+                retention_floor_seq: current_head.retention_floor_seq,
+                visible_wal_tip: current_head.visible_wal_tip.clone(),
+                state: current_head.state,
+            };
+            Ok(HeadUpdate::Replace {
+                next: Box::new(next_head.clone()),
+                outcome: HeadAdvance::Published(Box::new(next_head)),
+            })
+        },
+    )
+    .await;
+
+    let advance = match advance {
+        Ok(advance) => advance,
+        Err(ControlUpdateError::RetryExhausted { .. }) => {
+            return Ok(ManifestPublicationOutcome::HeadCasRaceLost);
+        }
+        Err(ControlUpdateError::LoadHead(error)) => {
+            return Err(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::LoadHead(error),
+            ));
+        }
+        Err(other) => return Err(CoreError::Store(other.to_string())),
+    };
+
+    match advance {
+        HeadAdvance::Published(next_head) => Ok(ManifestPublicationOutcome::Published(next_head)),
+        HeadAdvance::AlreadyCurrent(current_head) => {
             let current_manifest_id = current_head.current_manifest_id.ok_or_else(|| {
                 CoreError::CheckpointUnavailable(format!(
                     "namespace `{}` has no published manifest",
@@ -128,76 +181,13 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                         ))
                     })?;
             if checkpoint_record_by_id(&current_manifest, checkpoint_id).is_some() {
-                return Ok(ManifestPublicationOutcome::Published(Box::new(
-                    current_head,
-                )));
+                return Ok(ManifestPublicationOutcome::Published(current_head));
             }
-            return Ok(
+            Ok(
                 ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
                     current_manifest_id,
                 },
-            );
-        }
-
-        // Maintenance head update, not semantic writer publication.
-        //
-        // This operation does not acquire writer_epoch. It only moves the
-        // manifest/checkpoint pointer forward and is linearized by the head
-        // CAS. If the head changes concurrently, the caller reloads and
-        // retries/rebases. Operations that publish user mutations or
-        // intentionally stop writers must acquire writer_epoch first.
-        let next_head = HeadState {
-            namespace_id: current_head.namespace_id.clone(),
-            seq: current_head.seq,
-            head_commit_id: current_head.head_commit_id.clone(),
-            writer_epoch: current_head.writer_epoch,
-            writer_lease: current_head.writer_lease.clone(),
-            next_inode_id: current_head.next_inode_id,
-            name_policy: current_head.name_policy,
-            current_manifest_id: Some(manifest_id),
-            latest_checkpoint_id: Some(checkpoint_id.clone()),
-            retention_floor_seq: current_head.retention_floor_seq,
-            visible_wal_tip: current_head.visible_wal_tip.clone(),
-            state: current_head.state,
-        };
-        match compare_and_swap_head(
-            store,
-            &loaded_head.object_key,
-            loaded_head.metadata.etag.as_deref(),
-            writer_version,
-            &next_head,
-        )
-        .await
-        {
-            Ok(()) => return Ok(ManifestPublicationOutcome::Published(Box::new(next_head))),
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-            Err(error) => return Err(CoreError::Store(error.to_string())),
+            )
         }
     }
-
-    Ok(ManifestPublicationOutcome::HeadCasRaceLost)
-}
-
-pub(super) async fn compare_and_swap_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected_head_etag: Option<&str>,
-    writer_version: &str,
-    next_head: &HeadState,
-) -> Result<(), ObjectStoreError> {
-    let expected_head_etag = expected_head_etag.ok_or_else(|| {
-        ObjectStoreError::Transport(format!("missing head etag for `{object_key}`"))
-    })?;
-    let envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
-        writer_version,
-        next_head.clone(),
-    )
-    .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
-    let encoded = encode_control_object(&envelope)
-        .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
-    store
-        .compare_and_swap(object_key, expected_head_etag, Bytes::from(encoded))
-        .await
-        .map(|_| ())
 }

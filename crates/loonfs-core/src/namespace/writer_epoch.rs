@@ -575,4 +575,143 @@ mod tests {
             self.inner.list_prefix_stream(prefix)
         }
     }
+
+    #[tokio::test]
+    async fn cas_conflict_then_fenced_yields_held_by_other_writer() {
+        // writer-a's lease has expired and writer-c starts a takeover. Its
+        // CAS loses to writer-b, whose fresh lease must fence writer-c out on
+        // the conflict re-read instead of being clobbered by another bump.
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+        write_head(
+            &inner,
+            &namespace_id,
+            leased_head(
+                &namespace_id,
+                "writer-a",
+                "session-a",
+                WriterEpoch(7),
+                1_000,
+            ),
+        )
+        .await;
+        let store = TakeoverOnCasConflictStore {
+            inner,
+            namespace_id: namespace_id.clone(),
+            remaining_conflicts: AtomicUsize::new(1),
+        };
+
+        let error = acquire_writer_epoch(
+            &store,
+            &namespace_id,
+            &context("writer-c", "session-c", 2_000),
+        )
+        .await
+        .expect_err("conflicting takeover must observe the winner's lease");
+
+        assert!(matches!(
+            error,
+            WriterEpochAcquireError::HeldByOtherWriter { ref writer_id, .. }
+                if writer_id == "writer-b"
+        ));
+        let head = read_head_object(&store.inner, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state;
+        assert_eq!(head.writer_epoch, WriterEpoch(8));
+        let lease = head.writer_lease.expect("active lease");
+        assert_eq!(lease.writer_id, "writer-b");
+    }
+
+    #[derive(Debug)]
+    struct TakeoverOnCasConflictStore {
+        inner: LocalFsStore,
+        namespace_id: NamespaceId,
+        remaining_conflicts: AtomicUsize,
+    }
+
+    impl TakeoverOnCasConflictStore {
+        async fn inject_winner(&self) {
+            let winner = leased_head(
+                &self.namespace_id,
+                "writer-b",
+                "session-b",
+                WriterEpoch(8),
+                99_000,
+            );
+            let envelope = HeadStateEnvelope::from_state(
+                ControlObjectKind::NamespaceHead,
+                WRITER_VERSION,
+                winner,
+            )
+            .expect("head envelope");
+            let bytes = encode_control_object(&envelope).expect("head bytes");
+            self.inner
+                .put(
+                    &namespace_head(self.namespace_id.as_str()),
+                    Bytes::from(bytes),
+                    PutMode::Overwrite,
+                )
+                .await
+                .expect("write winner head");
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for TakeoverOnCasConflictStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn compare_and_swap(
+            &self,
+            key: &str,
+            expected_etag: &str,
+            bytes: Bytes,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
+                self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
+                self.inject_winner().await;
+                return Err(ObjectStoreError::PreconditionFailed);
+            }
+            self.inner.compare_and_swap(key, expected_etag, bytes).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
 }
