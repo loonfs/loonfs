@@ -10,6 +10,7 @@ use crate::commit::{
 };
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
+use crate::control_update::{update_upload_session, UploadSessionUpdate};
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
@@ -40,18 +41,18 @@ use loonfs_api::v0::{
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, AcquiredWriter, CompletedUpload,
-    ControlObjectKind, HeadState, NamespaceState, UploadSessionEnvelope, UploadSessionState,
+    encode_control_object, AcquiredWriter, CompletedUpload, ControlObjectKind, HeadState,
+    NamespaceState, UploadSessionEnvelope, UploadSessionState,
 };
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{
-    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    ContentStoreId, EffectiveLimit, ManifestId, NameKey, NamespaceId,
+    generate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreId,
+    EffectiveLimit, ManifestId, NameKey, NamespaceId,
 };
 use loonfs_objectstore::keys::{
     content_blob, namespace_descriptor, namespace_head, upload_session,
 };
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 use tracing::Instrument;
 
@@ -127,13 +128,6 @@ impl<S: ObjectStore + ?Sized> PublishManifestPlusTailView<'_, S> {
     ) -> Result<Option<CommitReceiptRecord>, CoreError> {
         self.metadata_view().find_commit_receipt(commit_id).await
     }
-}
-
-#[derive(Debug, Clone)]
-struct LoadedUploadSessionObject {
-    object_key: String,
-    metadata: ObjectMetadata,
-    envelope: UploadSessionEnvelope,
 }
 
 #[derive(Debug, Clone)]
@@ -378,70 +372,54 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
 
-    for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
-        let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
-        if loaded.envelope.state.completed.is_some() {
-            return Err(CoreError::UploadAlreadyCompleted {
-                upload_id: upload_id.to_owned(),
-            });
-        }
-        if loaded.envelope.state.mode == UploadMode::DirectPut {
-            return Err(CoreError::InvalidUploadContent(
-                "direct_put sessions must be completed after using the presigned URL".to_owned(),
-            ));
-        }
+    update_upload_session(
+        store,
+        namespace_id,
+        upload_id,
+        &context.writer_version,
+        UPLOAD_SESSION_RETRY_LIMIT,
+        |mut state| {
+            let content_ref = content_ref.clone();
+            let object_key = object_key.clone();
+            let namespace_id = namespace_id.clone();
+            let upload_id = upload_id.to_owned();
+            async move {
+                if state.completed.is_some() {
+                    return Err(CoreError::UploadAlreadyCompleted { upload_id });
+                }
+                if state.mode == UploadMode::DirectPut {
+                    return Err(CoreError::InvalidUploadContent(
+                        "direct_put sessions must be completed after using the presigned URL"
+                            .to_owned(),
+                    ));
+                }
 
-        if let Some(existing) = &loaded.envelope.state.staged_content_ref {
-            if existing == &content_ref {
-                return Ok(UploadContentResponse {
-                    namespace_id: namespace_id.clone(),
-                    upload_id: upload_id.to_owned(),
-                    content_ref,
-                });
+                if let Some(existing) = &state.staged_content_ref {
+                    if existing == &content_ref {
+                        return Ok(UploadSessionUpdate::Noop(UploadContentResponse {
+                            namespace_id,
+                            upload_id,
+                            content_ref,
+                        }));
+                    }
+                    return Err(CoreError::UploadContentConflict { upload_id });
+                }
+
+                write_immutable_object(store, &object_key, bytes).await?;
+                state.staged_content_ref = Some(content_ref.clone());
+
+                Ok(UploadSessionUpdate::Replace {
+                    next: Box::new(state),
+                    outcome: UploadContentResponse {
+                        namespace_id,
+                        upload_id,
+                        content_ref,
+                    },
+                })
             }
-            return Err(CoreError::UploadContentConflict {
-                upload_id: upload_id.to_owned(),
-            });
-        }
-
-        write_immutable_object(store, &object_key, bytes).await?;
-
-        let mut next_state = loaded.envelope.state.clone();
-        next_state.staged_content_ref = Some(content_ref.clone());
-
-        let envelope = UploadSessionEnvelope::from_state(
-            ControlObjectKind::UploadSession,
-            &context.writer_version,
-            next_state,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded =
-            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
-        let expected_etag = loaded
-            .metadata
-            .etag
-            .as_deref()
-            .ok_or_else(|| CoreError::Store("missing upload session etag".to_owned()))?;
-
-        match store
-            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
-            .await
-        {
-            Ok(_) => {
-                return Ok(UploadContentResponse {
-                    namespace_id: namespace_id.clone(),
-                    upload_id: upload_id.to_owned(),
-                    content_ref,
-                });
-            }
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-            Err(err) => return Err(CoreError::Store(err.to_string())),
-        }
-    }
-
-    Err(CoreError::Store(
-        "upload session compare-and-swap retry exhausted".to_owned(),
-    ))
+        },
+    )
+    .await
 }
 
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
@@ -451,88 +429,76 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     request: &CompleteUploadRequest,
     context: &MutationContext,
 ) -> Result<CompleteUploadResponse, CoreError> {
-    for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
-        let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
-        if let Some(completed) = &loaded.envelope.state.completed {
-            if completed.content_ref == request.content_ref {
-                return Ok(CompleteUploadResponse {
-                    namespace_id: namespace_id.clone(),
-                    upload_id: upload_id.to_owned(),
-                    content_ref: completed.content_ref.clone(),
-                    validated_content_token: None,
-                });
-            }
-            return Err(CoreError::UploadAlreadyCompleted {
-                upload_id: upload_id.to_owned(),
-            });
-        }
+    update_upload_session(
+        store,
+        namespace_id,
+        upload_id,
+        &context.writer_version,
+        UPLOAD_SESSION_RETRY_LIMIT,
+        |mut state| {
+            let namespace_id = namespace_id.clone();
+            let upload_id = upload_id.to_owned();
+            let request = request.clone();
+            async move {
+                if let Some(completed) = &state.completed {
+                    if completed.content_ref == request.content_ref {
+                        return Ok(UploadSessionUpdate::Noop(CompleteUploadResponse {
+                            namespace_id,
+                            upload_id,
+                            content_ref: completed.content_ref.clone(),
+                            validated_content_token: None,
+                        }));
+                    }
+                    return Err(CoreError::UploadAlreadyCompleted { upload_id });
+                }
 
-        let staged_content_ref = match loaded.envelope.state.staged_content_ref.clone() {
-            Some(content_ref) => content_ref,
-            None => stage_direct_put_content_ref(store, namespace_id, &loaded, request).await?,
-        };
-        if staged_content_ref != request.content_ref {
-            return Err(CoreError::InvalidUploadContent(
-                "completed content ref does not match staged content".to_owned(),
-            ));
-        }
+                let staged_content_ref = match state.staged_content_ref.clone() {
+                    Some(content_ref) => content_ref,
+                    None => {
+                        stage_direct_put_content_ref(store, &namespace_id, &state, &request).await?
+                    }
+                };
+                if staged_content_ref != request.content_ref {
+                    return Err(CoreError::InvalidUploadContent(
+                        "completed content ref does not match staged content".to_owned(),
+                    ));
+                }
 
-        let mut next_state = loaded.envelope.state.clone();
-        if next_state.staged_content_ref.is_none() {
-            next_state.staged_content_ref = Some(staged_content_ref);
-        }
-        next_state.completed = Some(CompletedUpload {
-            content_ref: request.content_ref.clone(),
-        });
-        let envelope = UploadSessionEnvelope::from_state(
-            ControlObjectKind::UploadSession,
-            &context.writer_version,
-            next_state,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded =
-            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
-        let expected_etag = loaded
-            .metadata
-            .etag
-            .as_deref()
-            .ok_or_else(|| CoreError::Store("missing upload session etag".to_owned()))?;
-
-        match store
-            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
-            .await
-        {
-            Ok(_) => {
-                return Ok(CompleteUploadResponse {
-                    namespace_id: namespace_id.clone(),
-                    upload_id: upload_id.to_owned(),
+                if state.staged_content_ref.is_none() {
+                    state.staged_content_ref = Some(staged_content_ref);
+                }
+                state.completed = Some(CompletedUpload {
                     content_ref: request.content_ref.clone(),
-                    validated_content_token: None,
                 });
-            }
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-            Err(err) => return Err(CoreError::Store(err.to_string())),
-        }
-    }
 
-    Err(CoreError::Store(
-        "upload session compare-and-swap retry exhausted".to_owned(),
-    ))
+                Ok(UploadSessionUpdate::Replace {
+                    next: Box::new(state),
+                    outcome: CompleteUploadResponse {
+                        namespace_id,
+                        upload_id,
+                        content_ref: request.content_ref.clone(),
+                        validated_content_token: None,
+                    },
+                })
+            }
+        },
+    )
+    .await
 }
 
 async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    loaded: &LoadedUploadSessionObject,
+    state: &UploadSessionState,
     request: &CompleteUploadRequest,
 ) -> Result<ContentRef, CoreError> {
-    if loaded.envelope.state.mode != UploadMode::DirectPut {
+    if state.mode != UploadMode::DirectPut {
         return Err(CoreError::InvalidUploadContent(
             "upload content has not been staged".to_owned(),
         ));
     }
 
-    let Some(expected) = &loaded.envelope.state.direct_put_content_ref else {
+    let Some(expected) = &state.direct_put_content_ref else {
         return Err(CoreError::InvalidUploadContent(
             "direct_put session is missing its target content ref".to_owned(),
         ));
@@ -1539,50 +1505,6 @@ fn candidate_content_admissions(candidate: &NamespaceMutationCandidate) -> &[Con
         NamespaceMutationCandidate::PathWithContentAdmission { admissions, .. } => admissions,
         NamespaceMutationCandidate::Commit(_) | NamespaceMutationCandidate::Path(_) => &[],
     }
-}
-
-async fn read_upload_session_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &str,
-) -> Result<LoadedUploadSessionObject, CoreError> {
-    NamespaceId::parse(namespace_id.as_str()).map_err(CoreError::from)?;
-    validate_upload_id(upload_id).map_err(CoreError::InvalidUploadId)?;
-    let object_key = upload_session(namespace_id.as_str(), upload_id);
-    let metadata = store
-        .head(&object_key)
-        .await
-        .map_err(|err| CoreError::Store(err.to_string()))?
-        .ok_or_else(|| CoreError::UploadNotFound {
-            upload_id: upload_id.to_owned(),
-        })?;
-    let encoded = store
-        .get(&object_key, None)
-        .await
-        .map_err(|err| CoreError::Store(err.to_string()))?
-        .ok_or_else(|| CoreError::UploadNotFound {
-            upload_id: upload_id.to_owned(),
-        })?;
-    let envelope: UploadSessionEnvelope =
-        decode_control_object(&encoded, ControlObjectKind::UploadSession).map_err(|err| {
-            CoreError::Store(format!("invalid upload session `{object_key}`: {err}"))
-        })?;
-    if envelope.state.namespace_id != *namespace_id {
-        return Err(CoreError::Store(format!(
-            "upload session namespace mismatch for `{object_key}`"
-        )));
-    }
-    if envelope.state.upload_id != upload_id {
-        return Err(CoreError::Store(format!(
-            "upload session id mismatch for `{object_key}`"
-        )));
-    }
-
-    Ok(LoadedUploadSessionObject {
-        object_key,
-        metadata,
-        envelope,
-    })
 }
 
 fn commit_response_from_commit_receipt(
