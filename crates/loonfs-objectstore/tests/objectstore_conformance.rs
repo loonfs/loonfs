@@ -6,8 +6,8 @@ use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
-    namespace_fork_state, namespace_head, namespace_manifest, wal_segment, DerivedWorkClass,
+    content_blob, content_store_descriptor, metadata_sst, namespace_descriptor, namespace_head,
+    namespace_manifest, upload_session, wal_segment,
 };
 use loonfs_objectstore::probes::run_contract_probes;
 use loonfs_objectstore::provider::{
@@ -234,10 +234,6 @@ fn key_builders_cover_locked_object_families() {
     assert_eq!(
         metadata_sst("ns-1", "tbl_ffffffffffffffffffffffffffffffff"),
         "namespaces/ns-1/tables/metadata/tbl_ffffffffffffffffffffffffffffffff.sst.zst"
-    );
-    assert_eq!(
-        derived_progress("ns-1", DerivedWorkClass::ManifestBuilder),
-        "namespaces/ns-1/derived/manifest-builder/progress.json"
     );
 }
 
@@ -576,24 +572,24 @@ async fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
 }
 
 async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
-    let key = derived_progress("ns-1", DerivedWorkClass::ManifestBuilder);
+    let key = upload_session("ns-1", "upl_00000000000000000000000000000001");
     let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, Bytes::from_static(br#"{"built_through_seq":420}"#))
+        .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
         .await
-        .expect("create progress object");
+        .expect("create upload object");
     assert_eq!(
         store
-            .list_prefix("namespaces/ns-1/derived/")
+            .list_prefix("namespaces/ns-1/uploads/")
             .await
             .expect("list after write"),
         vec![key.clone()]
     );
 
-    store.delete(&key).await.expect("delete progress object");
+    store.delete(&key).await.expect("delete upload object");
     assert!(store
-        .list_prefix("namespaces/ns-1/derived/")
+        .list_prefix("namespaces/ns-1/uploads/")
         .await
         .expect("list after delete")
         .is_empty());
@@ -601,9 +597,9 @@ async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: 
 
 async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
-        derived_progress("ns-sort", DerivedWorkClass::ManifestBuilder),
         namespace_head("ns-sort"),
-        namespace_fork_state("ns-sort"),
+        namespace_manifest("ns-sort", ManifestId(1)),
+        upload_session("ns-sort", "upl_00000000000000000000000000000001"),
     ];
     for key in &keys {
         let _ = store.delete(key).await;

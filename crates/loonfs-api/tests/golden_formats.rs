@@ -21,8 +21,8 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState,
-    NamespaceDescriptorState, NamespaceForkState, NamespaceGcPinState, NamespaceState,
-    ProgressState, UploadSessionState, WalSegmentPointer, WriterLease,
+    NamespaceDescriptorState, NamespaceGcPinState, NamespaceState, UploadSessionState,
+    WalSegmentPointer, WriterLease,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -467,19 +467,6 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_namespace_fork_state.v1.json",
-        ControlObjectKind::NamespaceForkState,
-        NamespaceForkState {
-            namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
-            source_namespace_id: namespace_id(),
-            fork_seq: ChangeSeq(2),
-            source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
-            source_manifest_id: ManifestId(2),
-            source_head_seq: ChangeSeq(2),
-            created_at_ms: 1_000,
-        },
-    );
-    check_control_golden(
         "control_namespace_gc_pin_state.v1.json",
         ControlObjectKind::NamespaceGcPinState,
         NamespaceGcPinState {
@@ -490,15 +477,6 @@ fn control_objects_match_golden_bytes() {
             source_manifest_id: ManifestId(2),
             source_head_seq: ChangeSeq(2),
             created_at_ms: 1_000,
-        },
-    );
-    check_control_golden(
-        "control_namespace_progress.v1.json",
-        ControlObjectKind::NamespaceProgress,
-        ProgressState {
-            namespace_id: namespace_id(),
-            work_class: "checkpoint".to_owned(),
-            through_seq: ChangeSeq(2),
         },
     );
     check_control_golden(

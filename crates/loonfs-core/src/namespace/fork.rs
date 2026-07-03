@@ -13,9 +13,8 @@ use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkState,
-    NamespaceForkStateEnvelope, NamespaceGcPinState, NamespaceGcPinStateEnvelope, NamespaceState,
-    WriterLease,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceGcPinState,
+    NamespaceGcPinStateEnvelope, NamespaceState, WriterLease,
 };
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
@@ -25,9 +24,7 @@ use loonfs_api::{
     generate_checkpoint_id, sha256_digest, CheckpointId, ManifestId, NamespaceId, NamespaceSummary,
     WriterEpoch,
 };
-use loonfs_objectstore::keys::{
-    gc_pin, namespace_descriptor, namespace_fork_state, namespace_head,
-};
+use loonfs_objectstore::keys::{gc_pin, namespace_descriptor, namespace_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -114,23 +111,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         initial_head,
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let fork_state = NamespaceForkStateEnvelope::from_state(
-        ControlObjectKind::NamespaceForkState,
-        &context.writer_version,
-        NamespaceForkState {
-            namespace_id: new_namespace_id.clone(),
-            source_namespace_id: source_namespace_id.clone(),
-            fork_seq,
-            source_checkpoint_id: source_checkpoint_id.clone(),
-            source_manifest_id,
-            source_head_seq,
-            created_at_ms: context.now_ms,
-        },
-    )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
-
     let head_key = namespace_head(new_namespace_id.as_str());
-    let fork_state_key = namespace_fork_state(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
     let target_manifest = NamespaceManifestEnvelope::from_payload(
         &context.writer_version,
@@ -197,13 +178,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         new_namespace_id,
         &head_key,
         &encode_control_object(&head).map_err(|err| CoreError::Store(err.to_string()))?,
-    )
-    .await?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &fork_state_key,
-        &encode_control_object(&fork_state).map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
     put_target_namespace_control_object(

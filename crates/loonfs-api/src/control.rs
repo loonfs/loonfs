@@ -17,20 +17,16 @@ pub enum ControlObjectKind {
     NamespaceDescriptor,
     ContentStoreDescriptor,
     NamespaceHead,
-    NamespaceForkState,
     NamespaceGcPinState,
-    NamespaceProgress,
     UploadSession,
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 5] = [
         Self::NamespaceDescriptor,
         Self::ContentStoreDescriptor,
         Self::NamespaceHead,
-        Self::NamespaceForkState,
         Self::NamespaceGcPinState,
-        Self::NamespaceProgress,
         Self::UploadSession,
     ];
 
@@ -45,9 +41,7 @@ impl ControlObjectKind {
             Self::NamespaceDescriptor => 1,
             Self::ContentStoreDescriptor => 1,
             Self::NamespaceHead => 1,
-            Self::NamespaceForkState => 1,
             Self::NamespaceGcPinState => 1,
-            Self::NamespaceProgress => 1,
             Self::UploadSession => 1,
         }
     }
@@ -57,9 +51,7 @@ impl ControlObjectKind {
             Self::NamespaceDescriptor => "namespace_descriptor",
             Self::ContentStoreDescriptor => "content_store_descriptor",
             Self::NamespaceHead => "namespace_head",
-            Self::NamespaceForkState => "namespace_fork_state",
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
-            Self::NamespaceProgress => "namespace_progress",
             Self::UploadSession => "upload_session",
         }
     }
@@ -78,17 +70,6 @@ pub struct NamespaceDescriptorState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentStoreDescriptorState {
     pub content_store_id: ContentStoreId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceForkState {
-    pub namespace_id: NamespaceId,
-    pub source_namespace_id: NamespaceId,
-    pub fork_seq: ChangeSeq,
-    pub source_checkpoint_id: CheckpointId,
-    pub source_manifest_id: ManifestId,
-    pub source_head_seq: ChangeSeq,
-    pub created_at_ms: u64,
 }
 
 /// Pin that prevents the source namespace's GC from collecting the metadata
@@ -217,13 +198,6 @@ impl HeadState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProgressState {
-    pub namespace_id: NamespaceId,
-    pub work_class: String,
-    pub through_seq: ChangeSeq,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedUpload {
     pub content_ref: ContentRef,
 }
@@ -280,11 +254,9 @@ where
 }
 
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
-pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type NamespaceDescriptorEnvelope = ControlObjectEnvelope<NamespaceDescriptorState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
-pub type NamespaceForkStateEnvelope = ControlObjectEnvelope<NamespaceForkState>;
 pub type NamespaceGcPinStateEnvelope = ControlObjectEnvelope<NamespaceGcPinState>;
 
 /// Durable layout of a control object: the envelope fields plus the payload

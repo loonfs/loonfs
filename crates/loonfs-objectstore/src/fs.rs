@@ -556,7 +556,7 @@ mod tests {
 
     use super::LocalFsStore;
     use super::{ObjectStore, ObjectStoreError, PutMode};
-    use crate::keys::{namespace_fork_state, namespace_head};
+    use crate::keys::{namespace_head, upload_session};
     use bytes::Bytes;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -603,12 +603,12 @@ mod tests {
     async fn delete_is_idempotent_and_head_reflects_removal() {
         let temp_dir = TestDir::new("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = namespace_fork_state("ns-1");
+        let key = upload_session("ns-1", "upl_00000000000000000000000000000001");
 
         store
-            .put_if_absent(&key, Bytes::from_static(br#"{"source":"ns-0"}"#))
+            .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
             .await
-            .expect("seed lease object");
+            .expect("seed upload object");
         assert!(store
             .head(&key)
             .await

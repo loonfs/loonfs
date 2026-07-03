@@ -1,4 +1,4 @@
-//! Retention floor advancement, gated on verified derived progress.
+//! Retention floor advancement against the current verified manifest.
 
 use super::load::load_verified_manifest_tables;
 use super::publish::{compare_and_swap_head, HEAD_CAS_RETRY_LIMIT};
@@ -6,17 +6,9 @@ use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::namespace::control::read_head_object;
-use loonfs_api::wire::control::{
-    decode_control_object, ControlObjectKind, HeadState, ProgressStateEnvelope,
-};
-use loonfs_api::{AdvanceRetentionResponse, ChangeSeq, NamespaceId};
-use loonfs_objectstore::keys::{derived_progress, DerivedWorkClass};
+use loonfs_api::wire::control::HeadState;
+use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-
-// V1 does not require any derived work classes to be caught up before the
-// retention floor advances. This hook stays in place so future retention gates
-// can add progress requirements without restructuring the flow.
-pub(super) const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
@@ -42,7 +34,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
                 })?;
         let target_floor = manifest_tables.manifest().payload.head_seq;
-        ensure_required_retention_progress(store, namespace_id, target_floor).await?;
 
         if head.retention_floor_seq >= target_floor {
             return Ok(AdvanceRetentionResponse {
@@ -88,41 +79,4 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     Err(CoreError::Store(
         "retention floor compare-and-swap retry exhausted".to_owned(),
     ))
-}
-
-pub(super) async fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    target_floor: ChangeSeq,
-) -> Result<(), CoreError> {
-    for work_class in REQUIRED_RETENTION_PROGRESS_CLASSES {
-        let object_key = derived_progress(namespace_id.as_str(), *work_class);
-        let work_class_name = work_class.as_str();
-        let Some(bytes) = store
-            .get(&object_key, None)
-            .await
-            .map_err(|err| CoreError::Store(err.to_string()))?
-        else {
-            return Err(MetadataViewError::MaintenanceRequired {
-                namespace_id: namespace_id.clone(),
-                reason: format!("required derived progress `{work_class_name}` is missing"),
-            }
-            .into());
-        };
-        let progress: ProgressStateEnvelope =
-            decode_control_object(&bytes, ControlObjectKind::NamespaceProgress).map_err(|err| {
-                CoreError::Store(format!("invalid derived progress `{object_key}`: {err}"))
-            })?;
-        if progress.state.through_seq < target_floor {
-            return Err(MetadataViewError::MaintenanceRequired {
-                namespace_id: namespace_id.clone(),
-                reason: format!(
-                    "required derived progress `{work_class_name}` only covers {:?}",
-                    progress.state.through_seq
-                ),
-            }
-            .into());
-        }
-    }
-    Ok(())
 }

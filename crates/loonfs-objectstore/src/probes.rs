@@ -1,6 +1,7 @@
-use crate::keys::{derived_progress, namespace_fork_state, namespace_head, DerivedWorkClass};
+use crate::keys::{namespace_head, namespace_manifest, upload_session};
 use crate::{ObjectStore, ObjectStoreError};
 use bytes::Bytes;
+use loonfs_api::ManifestId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -198,21 +199,16 @@ async fn probe_visibility_after_write<S: ObjectStore + ?Sized>(
     store: &S,
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
-    let key = derived_progress(
-        &probe_namespace(run_id, "visibility"),
-        DerivedWorkClass::ManifestBuilder,
-    );
+    let namespace = probe_namespace(run_id, "visibility");
+    let key = upload_session(&namespace, "upl_00000000000000000000000000000001");
     let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, Bytes::from_static(br#"{"built_through_seq":420}"#))
+        .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
         .await
         .map_err(|err| probe_error("visibility_after_write", err))?;
     let listed = store
-        .list_prefix(&format!(
-            "namespaces/{}/derived/",
-            probe_namespace(run_id, "visibility")
-        ))
+        .list_prefix(&format!("namespaces/{namespace}/uploads/"))
         .await
         .map_err(|err| probe_error("visibility_after_write", err))?;
     if listed != vec![key.clone()] {
@@ -231,11 +227,11 @@ async fn probe_visibility_after_delete<S: ObjectStore + ?Sized>(
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "delete");
-    let key = derived_progress(&namespace, DerivedWorkClass::ManifestBuilder);
+    let key = upload_session(&namespace, "upl_00000000000000000000000000000001");
     let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, Bytes::from_static(br#"{"built_through_seq":420}"#))
+        .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
         .await
         .map_err(|err| probe_error("visibility_after_delete", err))?;
     store
@@ -243,7 +239,7 @@ async fn probe_visibility_after_delete<S: ObjectStore + ?Sized>(
         .await
         .map_err(|err| probe_error("visibility_after_delete", err))?;
     let listed = store
-        .list_prefix(&format!("namespaces/{namespace}/derived/"))
+        .list_prefix(&format!("namespaces/{namespace}/uploads/"))
         .await
         .map_err(|err| probe_error("visibility_after_delete", err))?;
     if !listed.is_empty() {
@@ -262,9 +258,9 @@ async fn probe_sorted_listing<S: ObjectStore + ?Sized>(
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "sorted");
     let keys = vec![
-        derived_progress(&namespace, DerivedWorkClass::ManifestBuilder),
         namespace_head(&namespace),
-        namespace_fork_state(&namespace),
+        namespace_manifest(&namespace, ManifestId(1)),
+        upload_session(&namespace, "upl_00000000000000000000000000000001"),
     ];
     for key in &keys {
         let _ = store.delete(key).await;
