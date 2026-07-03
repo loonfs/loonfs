@@ -17,9 +17,7 @@ use loonfs::{
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::fs::LocalFsStore;
-use loonfs_objectstore::keys::{
-    namespace_descriptor, namespace_head, namespace_lease, namespace_manifest,
-};
+use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_manifest};
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -1770,19 +1768,6 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     .expect("corrupt head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&head_bad),
-        ErrorCode::NamespaceCorrupt,
-    );
-
-    let lease_bad = NamespaceId::parse("lease-bad").expect("valid namespace id");
-    fs.create_namespace_blocking(&lease_bad, CreateNamespaceOptions::default())
-        .expect("create lease-bad namespace");
-    block_on(raw_store.put_overwrite(
-        &namespace_lease(lease_bad.as_str()),
-        Bytes::from_static(br#"{"not":"a lease"}"#),
-    ))
-    .expect("corrupt lease");
-    assert_core_error_kind(
-        fs.begin_upload_blocking(&lease_bad),
         ErrorCode::NamespaceCorrupt,
     );
 }

@@ -177,8 +177,7 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
             ))
         }
         NamespaceInitializationError::InspectNamespaceDescriptor(_)
-        | NamespaceInitializationError::InspectNamespaceHead(_)
-        | NamespaceInitializationError::InspectNamespaceLease(_) => {
+        | NamespaceInitializationError::InspectNamespaceHead(_) => {
             CoreError::Store(error.to_string())
         }
     }

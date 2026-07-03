@@ -1,8 +1,9 @@
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
+use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, ManifestId, NamePolicy,
-    NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId,
+    RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -329,7 +330,7 @@ pub struct NamespaceManifestPayload {
     pub head_seq: ChangeSeq,
     pub head_commit_id: CommitId,
     pub base_seq: ChangeSeq,
-    pub active_fence_token: FenceToken,
+    pub writer_epoch: WriterEpoch,
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
@@ -637,7 +638,7 @@ mod tests {
         MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
         NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
-    use crate::{ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamePolicy, NamespaceId};
+    use crate::{ChangeSeq, CommitId, InodeId, ManifestId, NamePolicy, NamespaceId, WriterEpoch};
     use std::collections::BTreeMap;
 
     #[test]
@@ -651,7 +652,7 @@ mod tests {
                 head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                     .expect("commit id"),
                 base_seq: ChangeSeq(10),
-                active_fence_token: FenceToken(2),
+                writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 name_policy: NamePolicy::default(),
                 retention_floor_seq: ChangeSeq(0),
@@ -705,7 +706,7 @@ mod tests {
                 head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
                     .expect("commit id"),
                 base_seq: ChangeSeq(10),
-                active_fence_token: FenceToken(2),
+                writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 name_policy: NamePolicy::default(),
                 retention_floor_seq: ChangeSeq(0),

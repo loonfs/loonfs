@@ -7,6 +7,7 @@ use crate::options::{
 };
 use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::publisher::NamespaceMutationCandidate;
+use loonfs_api::generated_id;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
@@ -91,6 +92,7 @@ pub struct NamespaceEngine<S> {
     store: S,
     namespace_id: NamespaceId,
     writer_id: String,
+    writer_session_id: String,
     writer_version: String,
     lease_duration_ms: u64,
     write_options: WriteOptions,
@@ -106,6 +108,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             store,
             namespace_id: None,
             writer_id: None,
+            writer_session_id: None,
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             write_options: WriteOptions::default(),
@@ -121,6 +124,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Returns the writer id used for leases and commit publication.
     pub fn writer_id(&self) -> &str {
         &self.writer_id
+    }
+
+    /// Returns the unique writer session id for this engine instance.
+    pub fn writer_session_id(&self) -> &str {
+        &self.writer_session_id
     }
 
     /// Returns the writer version reported in mutation context.
@@ -850,6 +858,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     fn mutation_context(&self) -> MutationContext {
         MutationContext {
             writer_id: self.writer_id.clone(),
+            writer_session_id: self.writer_session_id.clone(),
             writer_version: self.writer_version.clone(),
             now_ms: current_time_ms(),
             lease_duration_ms: self.lease_duration_ms,
@@ -866,6 +875,7 @@ pub struct NamespaceEngineBuilder<S> {
     store: S,
     namespace_id: Option<NamespaceId>,
     writer_id: Option<String>,
+    writer_session_id: Option<String>,
     writer_version: String,
     lease_duration_ms: u64,
     write_options: WriteOptions,
@@ -882,6 +892,12 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
     /// Sets the writer identity used for leases and commits.
     pub fn writer(mut self, writer_id: impl Into<String>) -> Self {
         self.writer_id = Some(writer_id.into());
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn writer_session_id(mut self, writer_session_id: impl Into<String>) -> Self {
+        self.writer_session_id = Some(writer_session_id.into());
         self
     }
 
@@ -928,6 +944,9 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
             store: self.store,
             namespace_id,
             writer_id,
+            writer_session_id: self
+                .writer_session_id
+                .unwrap_or_else(|| generated_id("wrs")),
             writer_version: self.writer_version,
             lease_duration_ms: self.lease_duration_ms,
             write_options: self.write_options,

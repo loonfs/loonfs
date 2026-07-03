@@ -7,7 +7,7 @@ use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
-    namespace_head, namespace_lease, namespace_manifest, wal_segment, DerivedWorkClass,
+    namespace_fork_state, namespace_head, namespace_manifest, wal_segment, DerivedWorkClass,
 };
 use loonfs_objectstore::probes::run_contract_probes;
 use loonfs_objectstore::provider::{
@@ -203,10 +203,6 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/descriptor.json"
     );
     assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/control/head.json");
-    assert_eq!(
-        namespace_lease("ns-1"),
-        "namespaces/ns-1/control/lease.json"
-    );
     assert_eq!(
         content_store_descriptor("cs_00000000000000000000000000000001"),
         "content-stores/cs_00000000000000000000000000000001/descriptor.json"
@@ -481,7 +477,7 @@ async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S)
     let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41,"fence_token":8}"#))
+        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41,"writer_epoch":8}"#))
         .await
         .expect("seed initial head");
     let first_read = store
@@ -496,7 +492,7 @@ async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S)
         .compare_and_swap(
             &key,
             &first_read,
-            Bytes::from_static(br#"{"seq":42,"fence_token":8}"#),
+            Bytes::from_static(br#"{"seq":42,"writer_epoch":8}"#),
         )
         .await
         .expect("first CAS should succeed");
@@ -505,7 +501,7 @@ async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S)
         .compare_and_swap(
             &key,
             &first_read,
-            Bytes::from_static(br#"{"seq":42,"fence_token":9}"#),
+            Bytes::from_static(br#"{"seq":42,"writer_epoch":9}"#),
         )
         .await;
     assert_precondition_failed(stale);
@@ -516,7 +512,7 @@ async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S)
             .await
             .expect("read body")
             .expect("body exists"),
-        Bytes::from_static(br#"{"seq":42,"fence_token":8}"#)
+        Bytes::from_static(br#"{"seq":42,"writer_epoch":8}"#)
     );
 
     store.delete(&key).await.expect("cleanup CAS object");
@@ -607,7 +603,7 @@ async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
         derived_progress("ns-sort", DerivedWorkClass::ManifestBuilder),
         namespace_head("ns-sort"),
-        namespace_lease("ns-sort"),
+        namespace_fork_state("ns-sort"),
     ];
     for key in &keys {
         let _ = store.delete(key).await;

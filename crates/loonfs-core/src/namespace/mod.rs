@@ -9,46 +9,8 @@ pub(crate) mod catalog;
 pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
-pub(crate) mod lease;
 pub(crate) mod status;
+pub(crate) mod writer_epoch;
 
 pub use bootstrap::BootstrapNamespaceError;
-pub use loonfs_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
-use loonfs_api::FenceToken;
-use thiserror::Error;
-
-/// Returns true when the head and lease agree on the active writer fence.
-pub fn head_and_lease_fence_tokens_agree(head: &HeadState, lease: &LeaseState) -> bool {
-    head.namespace_id == lease.namespace_id && head.active_fence_token == lease.fence_token
-}
-
-/// Error while preparing a head for writer takeover.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum HeadFenceTakeoverError {
-    /// The fence token cannot be advanced.
-    #[error("head fence token overflow from `{active:?}`")]
-    FenceTokenOverflow { active: FenceToken },
-}
-
-/// Builds the head state a new writer should publish during takeover.
-pub fn next_takeover_head(current_head: &HeadState) -> Result<HeadState, HeadFenceTakeoverError> {
-    let next_fence = current_head.active_fence_token.0.checked_add(1).ok_or(
-        HeadFenceTakeoverError::FenceTokenOverflow {
-            active: current_head.active_fence_token,
-        },
-    )?;
-
-    Ok(HeadState {
-        namespace_id: current_head.namespace_id.clone(),
-        seq: current_head.seq,
-        head_commit_id: current_head.head_commit_id.clone(),
-        active_fence_token: FenceToken(next_fence),
-        next_inode_id: current_head.next_inode_id,
-        name_policy: current_head.name_policy,
-        current_manifest_id: current_head.current_manifest_id,
-        latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
-        retention_floor_seq: current_head.retention_floor_seq,
-        visible_wal_tip: current_head.visible_wal_tip.clone(),
-        state: current_head.state,
-    })
-}
+pub use loonfs_api::wire::control::{HeadState, HeadStateEnvelope};

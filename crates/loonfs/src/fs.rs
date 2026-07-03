@@ -23,9 +23,9 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    encode_directory_cursor, encode_file_revisions_cursor, AbsolutePath, CapabilityDocument,
-    DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page, PageRequest,
-    PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    encode_directory_cursor, encode_file_revisions_cursor, generated_id, AbsolutePath,
+    CapabilityDocument, DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
+    Page, PageRequest, PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
     FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
 };
@@ -49,6 +49,7 @@ pub struct Fs {
 pub(crate) struct FsInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: FsConfig,
+    pub(crate) writer_session_id: String,
     pub(crate) commit_engines: Mutex<CommitEngineCache>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
@@ -194,6 +195,7 @@ impl Fs {
             inner: Arc::new(FsInner {
                 store,
                 config,
+                writer_session_id: generated_id("wrs"),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
@@ -1170,6 +1172,7 @@ impl Fs {
         NamespaceEngine::builder(store)
             .namespace(namespace_id.clone())
             .writer(self.inner.config.writer_id.clone())
+            .writer_session_id(self.inner.writer_session_id.clone())
             .writer_version(self.inner.config.writer_version.clone())
             .lease_duration_ms(self.inner.config.lease_duration_ms)
             .build()
@@ -1179,6 +1182,7 @@ impl Fs {
     pub(crate) fn mutation_context(&self) -> MutationContext {
         MutationContext {
             writer_id: self.inner.config.writer_id.clone(),
+            writer_session_id: self.inner.writer_session_id.clone(),
             writer_version: self.inner.config.writer_version.clone(),
             now_ms: current_time_ms(),
             lease_duration_ms: self.inner.config.lease_duration_ms,

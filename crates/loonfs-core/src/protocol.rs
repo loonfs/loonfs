@@ -20,10 +20,10 @@ use crate::namespace::catalog::{
 };
 use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
-    load_namespace_head_control, load_namespace_lease_control,
+    load_namespace_head_control,
 };
-use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
-use crate::namespace::lease::acquire_or_renew_namespace_lease;
+use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
@@ -40,8 +40,8 @@ use loonfs_api::v0::{
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CompletedUpload, ControlObjectKind, HeadState,
-    NamespaceState, UploadSessionEnvelope, UploadSessionState,
+    decode_control_object, encode_control_object, AcquiredWriter, CompletedUpload,
+    ControlObjectKind, HeadState, NamespaceState, UploadSessionEnvelope, UploadSessionState,
 };
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{
@@ -107,7 +107,7 @@ pub(crate) struct PublishManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
     head: HeadState,
     head_etag: String,
-    lease: loonfs_api::wire::control::LeaseState,
+    acquired_writer: Option<AcquiredWriter>,
     manifest_tables: VerifiedMetadataTables<'a, S>,
     tail_state: MetadataState,
 }
@@ -326,11 +326,6 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
                 })?;
-            load_namespace_lease_control(store, namespace_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadLease(error))
-                })?;
             Ok(())
         }
         Ok(NamespaceInitializationState::Absent) => Err(CoreError::MetadataProjection(
@@ -365,8 +360,7 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
             ))
         }
         NamespaceInitializationError::InspectNamespaceDescriptor(_)
-        | NamespaceInitializationError::InspectNamespaceHead(_)
-        | NamespaceInitializationError::InspectNamespaceLease(_) => {
+        | NamespaceInitializationError::InspectNamespaceHead(_) => {
             CoreError::Store(error.to_string())
         }
     }
@@ -611,15 +605,19 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     if candidates.is_empty() {
         return Vec::new();
     }
-    if let Err(error) = acquire_or_renew_namespace_lease(store, namespace_id, context).await {
-        return (0..candidates.len())
-            .map(|_| Err(CoreError::Lease(error.clone())))
-            .collect();
-    }
+    let acquired_writer = match acquire_writer_epoch(store, namespace_id, context).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (0..candidates.len())
+                .map(|_| Err(CoreError::WriterEpoch(error.clone())))
+                .collect();
+        }
+    };
     let publish_tail_options = PublishTailOptions::default();
     let publish_view = match load_publish_manifest_plus_tail_view(
         store,
         namespace_id,
+        Some(acquired_writer),
         None,
         &publish_tail_options,
     )
@@ -646,6 +644,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
+    acquired_writer: Option<AcquiredWriter>,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishManifestPlusTailView<'a, S>, PublishTailProjection), CoreError> {
@@ -670,13 +669,9 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
             },
         ));
     }
-    let lease = read_lease_object(store, namespace_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadLease(error))
-        })?
-        .envelope
-        .state;
+    if let Some(acquired_writer) = &acquired_writer {
+        ensure_publish_head_matches_acquired_writer(&head, acquired_writer)?;
+    }
     let manifest_id =
         head.current_manifest_id
             .ok_or_else(|| MetadataViewError::MissingManifest {
@@ -722,12 +717,32 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
             content_store_id: catalog_entry.content_store_id,
             head,
             head_etag,
-            lease,
+            acquired_writer,
             manifest_tables,
             tail_state,
         },
         projection,
     ))
+}
+
+fn ensure_publish_head_matches_acquired_writer(
+    head: &HeadState,
+    acquired_writer: &AcquiredWriter,
+) -> Result<(), CoreError> {
+    let Some(lease) = &head.writer_lease else {
+        return Err(CoreError::NamespaceCorrupt(
+            "namespace head is missing active writer lease after epoch acquisition".to_owned(),
+        ));
+    };
+    if head.writer_epoch != acquired_writer.writer_epoch
+        || lease.writer_id != acquired_writer.writer_id
+        || lease.writer_session_id != acquired_writer.writer_session_id
+    {
+        return Err(CoreError::Store(
+            "loaded namespace head does not match acquired writer epoch".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -885,7 +900,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 view,
                 &session,
                 candidate,
-                context,
                 index,
                 &mut outcomes,
                 &mut in_batch_requests,
@@ -898,7 +912,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             };
             let validation = PublishCommitValidationContext {
                 head: session.head(),
-                lease: &view.lease,
                 now_ms: context.now_ms,
                 metadata_view: view.metadata_view(),
                 accepted_rows: session.accepted_rows(),
@@ -1021,6 +1034,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         let _span = wal_span.enter();
         match prepare_wal_segment(
             namespace_id.clone(),
+            view.acquired_writer
+                .as_ref()
+                .expect("publish view should carry acquired writer")
+                .writer_epoch,
             view.head.visible_wal_tip.clone(),
             &records,
             &context.writer_version,
@@ -1118,7 +1135,6 @@ async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     view: &PublishManifestPlusTailView<'_, S>,
     session: &PublishPlanningSession,
     candidate: &NamespaceMutationCandidate,
-    context: &MutationContext,
     index: usize,
     outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
@@ -1126,8 +1142,23 @@ async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
 ) -> Option<CandidateCoreRequest> {
     let conversion_context = CommitExecutionContext {
         namespace_id: namespace_id.clone(),
-        writer_id: context.writer_id.clone(),
-        writer_fence_token: view.head.active_fence_token,
+        writer_id: view
+            .acquired_writer
+            .as_ref()
+            .expect("publish view should carry acquired writer")
+            .writer_id
+            .clone(),
+        writer_session_id: view
+            .acquired_writer
+            .as_ref()
+            .expect("publish view should carry acquired writer")
+            .writer_session_id
+            .clone(),
+        writer_epoch: view
+            .acquired_writer
+            .as_ref()
+            .expect("publish view should carry acquired writer")
+            .writer_epoch,
     };
     match candidate {
         NamespaceMutationCandidate::Commit(request) => {

@@ -14,7 +14,7 @@ use loonfs_core::control::{
 };
 use loonfs_core::publish::NamespaceCommitEngine;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
-use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
+use loonfs_objectstore::keys::{namespace_descriptor, namespace_head};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -300,31 +300,24 @@ impl Fs {
         head_key: String,
     ) -> RuntimeError {
         let descriptor_key = namespace_descriptor(namespace_id.as_str());
-        let lease_key = namespace_lease(namespace_id.as_str());
         let descriptor_exists = match self.store().head(&descriptor_key).await {
             Ok(value) => value.is_some(),
             Err(error) => return RuntimeError::Core(CoreError::Store(error.to_string())),
         };
-        let lease_exists = match self.store().head(&lease_key).await {
-            Ok(value) => value.is_some(),
-            Err(error) => return RuntimeError::Core(CoreError::Store(error.to_string())),
-        };
-        match (descriptor_exists, lease_exists) {
-            (false, false) => RuntimeError::Core(CoreError::MetadataProjection(
+        if descriptor_exists {
+            RuntimeError::Core(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::LoadHead(ControlObjectLoadError::MissingObject {
+                    object_key: head_key,
+                }),
+            ))
+        } else {
+            RuntimeError::Core(CoreError::MetadataProjection(
                 MetadataProjectionLoadError::LoadNamespaceDescriptor(
                     ControlObjectLoadError::MissingObject {
                         object_key: descriptor_key,
                     },
                 ),
-            )),
-            (true, true) => RuntimeError::Core(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::LoadHead(ControlObjectLoadError::MissingObject {
-                    object_key: head_key,
-                }),
-            )),
-            _ => RuntimeError::Core(CoreError::NamespacePartiallyInitialized {
-                namespace_id: namespace_id.clone(),
-            }),
+            ))
         }
     }
 

@@ -1,12 +1,10 @@
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState,
-    LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState,
 };
 use loonfs_api::{ContentStoreId, NamespaceId};
-use loonfs_objectstore::keys::{
-    content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
-};
+use loonfs_objectstore::keys::{content_store_descriptor, namespace_descriptor, namespace_head};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -34,13 +32,6 @@ pub(crate) struct LoadedContentStoreDescriptorObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LoadedLeaseObject {
-    pub(crate) object_key: String,
-    pub(crate) metadata: ObjectMetadata,
-    pub(crate) envelope: LeaseStateEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectIdentity {
     pub etag: String,
 }
@@ -64,13 +55,6 @@ pub struct LoadedHeadControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: HeadState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedLeaseControl {
-    pub object_key: String,
-    pub identity: ControlObjectIdentity,
-    pub state: LeaseState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -184,29 +168,6 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(crate) async fn read_lease_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-) -> Result<LoadedLeaseObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = namespace_lease(expected_namespace.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
-    let envelope: LeaseStateEnvelope =
-        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceLease)
-            .map_err(|err| map_control_codec_error(&object_key, err))?;
-    validate_expected_namespace(
-        &object_key,
-        expected_namespace,
-        &envelope.state.namespace_id,
-    )?;
-
-    Ok(LoadedLeaseObject {
-        object_key,
-        metadata,
-        envelope,
-    })
-}
-
 pub async fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
@@ -240,19 +201,6 @@ pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     let loaded = read_head_object(store, expected_namespace).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedHeadControl {
-        object_key: loaded.object_key,
-        identity,
-        state: loaded.envelope.state,
-    })
-}
-
-pub async fn load_namespace_lease_control<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-) -> Result<LoadedLeaseControl, ControlObjectLoadError> {
-    let loaded = read_lease_object(store, expected_namespace).await?;
-    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
-    Ok(LoadedLeaseControl {
         object_key: loaded.object_key,
         identity,
         state: loaded.envelope.state,

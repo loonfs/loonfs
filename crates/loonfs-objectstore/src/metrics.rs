@@ -62,7 +62,6 @@ pub enum KeyClass {
     Content,
     Metadata,
     NamespaceHead,
-    Lease,
     WalSegment,
     NamespaceManifest,
     NamespaceCompactions,
@@ -483,7 +482,6 @@ fn classify_key(key: &str) -> KeyClass {
     match parsed.family() {
         DurableObjectFamily::ContentBlob => KeyClass::Content,
         DurableObjectFamily::NamespaceHead => KeyClass::NamespaceHead,
-        DurableObjectFamily::NamespaceLease => KeyClass::Lease,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
         DurableObjectFamily::NamespaceManifest => KeyClass::NamespaceManifest,
         DurableObjectFamily::NamespaceCompactions => KeyClass::NamespaceCompactions,

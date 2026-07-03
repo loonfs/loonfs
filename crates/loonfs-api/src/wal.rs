@@ -1,7 +1,9 @@
 use crate::control::WalSegmentPointer;
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
-use crate::{ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
+use crate::{
+    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo, WriterEpoch,
+};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -81,6 +83,7 @@ pub struct WalCommitPayload {
 pub struct WalSegmentPayload {
     pub namespace_id: NamespaceId,
     pub segment_id: String,
+    pub writer_epoch: WriterEpoch,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_visible_segment: Option<WalSegmentPointer>,
     pub base_head_seq: ChangeSeq,

@@ -9,7 +9,6 @@ pub struct ObjectLayout;
 pub enum DurableObjectFamily {
     NamespaceDescriptor,
     NamespaceHead,
-    NamespaceLease,
     NamespaceForkState,
     UploadSession,
     ConflictArtifact,
@@ -61,7 +60,6 @@ macro_rules! typed_key {
 
 typed_key!(NamespaceDescriptorKey);
 typed_key!(NamespaceHeadKey);
-typed_key!(NamespaceLeaseKey);
 typed_key!(NamespaceForkStateKey);
 typed_key!(WalSegmentKey);
 typed_key!(ContentStoreDescriptorKey);
@@ -137,12 +135,6 @@ impl ObjectLayout {
     pub fn namespace_head(&self, namespace: &str) -> NamespaceHeadKey {
         NamespaceHeadKey(ObjectKey::new(format!(
             "namespaces/{namespace}/control/head.json"
-        )))
-    }
-
-    pub fn namespace_lease(&self, namespace: &str) -> NamespaceLeaseKey {
-        NamespaceLeaseKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/control/lease.json"
         )))
     }
 
@@ -332,9 +324,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "control", "head.json"] => {
             parsed(DurableObjectFamily::NamespaceHead, Some(namespace))
         }
-        ["namespaces", namespace, "control", "lease.json"] => {
-            parsed(DurableObjectFamily::NamespaceLease, Some(namespace))
-        }
         ["namespaces", namespace, "control", "fork.json"] => {
             parsed(DurableObjectFamily::NamespaceForkState, Some(namespace))
         }
@@ -436,10 +425,6 @@ mod tests {
         assert_eq!(
             layout.namespace_head("ns-1").as_str(),
             "namespaces/ns-1/control/head.json"
-        );
-        assert_eq!(
-            layout.namespace_lease("ns-1").as_str(),
-            "namespaces/ns-1/control/lease.json"
         );
         assert_eq!(
             layout.namespace_fork_state("ns-1").as_str(),
@@ -549,10 +534,6 @@ mod tests {
             (
                 layout.namespace_head("ns-1").into_string(),
                 DurableObjectFamily::NamespaceHead,
-            ),
-            (
-                layout.namespace_lease("ns-1").into_string(),
-                DurableObjectFamily::NamespaceLease,
             ),
             (
                 layout.namespace_fork_state("ns-1").into_string(),

@@ -1,4 +1,4 @@
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::{ChangeSeq, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +13,10 @@ pub enum CommitHeadPublishError {
     WalSegmentNamespaceMismatch {
         head: NamespaceId,
         wal: NamespaceId,
+    },
+    WalSegmentWriterEpochMismatch {
+        expected: WriterEpoch,
+        actual: WriterEpoch,
     },
     WalSegmentBaseHeadSeqMismatch {
         expected: ChangeSeq,

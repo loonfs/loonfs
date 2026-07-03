@@ -4,7 +4,7 @@ use futures::stream::{self, BoxStream};
 use loonfs_api::ManifestId;
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
-    metadata_sst, namespace_head, namespace_lease, namespace_manifest, wal_segment,
+    metadata_sst, namespace_fork_state, namespace_head, namespace_manifest, wal_segment,
 };
 use loonfs_objectstore::layout::{NamespaceGcBoundaryKind, ObjectLayout};
 use loonfs_objectstore::metrics::{
@@ -122,16 +122,19 @@ async fn records_head_and_head_with_checksum_as_distinct_operations() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite(&namespace_lease("ns-1"), bytes(b"lease"))
+        .put_overwrite(&namespace_fork_state("ns-1"), bytes(b"fork"))
         .await
         .expect("put object");
-    store.head(&namespace_lease("ns-1")).await.expect("head");
     store
-        .head_with_checksum(&namespace_lease("ns-1"))
+        .head(&namespace_fork_state("ns-1"))
+        .await
+        .expect("head");
+    store
+        .head_with_checksum(&namespace_fork_state("ns-1"))
         .await
         .expect("head with checksum");
     store
-        .get_with_metadata(&namespace_lease("ns-1"))
+        .get_with_metadata(&namespace_fork_state("ns-1"))
         .await
         .expect("get with metadata");
 
@@ -139,9 +142,9 @@ async fn records_head_and_head_with_checksum_as_distinct_operations() {
     assert_eq!(samples[1].operation, ObjectStoreOperation::Head);
     assert_eq!(samples[2].operation, ObjectStoreOperation::HeadWithChecksum);
     assert_eq!(samples[3].operation, ObjectStoreOperation::GetWithMetadata);
-    assert_eq!(samples[1].key_class, KeyClass::Lease);
-    assert_eq!(samples[2].key_class, KeyClass::Lease);
-    assert_eq!(samples[3].key_class, KeyClass::Lease);
+    assert_eq!(samples[1].key_class, KeyClass::Metadata);
+    assert_eq!(samples[2].key_class, KeyClass::Metadata);
+    assert_eq!(samples[3].key_class, KeyClass::Metadata);
 }
 
 #[tokio::test]

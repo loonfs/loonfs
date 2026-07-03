@@ -2,7 +2,7 @@ use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIden
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
-use crate::namespace::lease::acquire_or_renew_namespace_lease;
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::planner::plan_path_mutation_against_publish_view;
 use crate::path::write::{
     path_intent_fingerprint_for_path_intent, PathMutationIntent, PlannedPathMutation,
@@ -126,17 +126,19 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        if let Err(error) =
-            acquire_or_renew_namespace_lease(store, &self.namespace_id, context).await
-        {
-            return NamespaceCommitEnginePublishResult {
-                results: repeated_error(candidate_count, CoreError::Lease(error)),
-            };
-        }
+        let acquired_writer = match acquire_writer_epoch(store, &self.namespace_id, context).await {
+            Ok(value) => value,
+            Err(error) => {
+                return NamespaceCommitEnginePublishResult {
+                    results: repeated_error(candidate_count, CoreError::WriterEpoch(error)),
+                };
+            }
+        };
 
         let (publish_view, projection) = match load_publish_manifest_plus_tail_view(
             store,
             &self.namespace_id,
+            Some(acquired_writer),
             self.publish_tail_projection.as_ref(),
             tail_options,
         )
@@ -245,6 +247,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         let (view, _projection) = load_publish_manifest_plus_tail_view(
             self.store,
             namespace_id,
+            None,
             None,
             &PublishTailOptions::default(),
         )

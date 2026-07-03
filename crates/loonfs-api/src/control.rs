@@ -1,9 +1,9 @@
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::v0::UploadMode;
+use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken, InodeId, ManifestId, NamePolicy,
-    NamespaceId,
+    ChangeSeq, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId, NamePolicy, NamespaceId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,6 @@ pub enum ControlObjectKind {
     NamespaceDescriptor,
     ContentStoreDescriptor,
     NamespaceHead,
-    NamespaceLease,
     NamespaceForkState,
     NamespaceGcPinState,
     NamespaceProgress,
@@ -24,11 +23,10 @@ pub enum ControlObjectKind {
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::NamespaceDescriptor,
         Self::ContentStoreDescriptor,
         Self::NamespaceHead,
-        Self::NamespaceLease,
         Self::NamespaceForkState,
         Self::NamespaceGcPinState,
         Self::NamespaceProgress,
@@ -46,7 +44,6 @@ impl ControlObjectKind {
             Self::NamespaceDescriptor => 1,
             Self::ContentStoreDescriptor => 1,
             Self::NamespaceHead => 1,
-            Self::NamespaceLease => 1,
             Self::NamespaceForkState => 1,
             Self::NamespaceGcPinState => 1,
             Self::NamespaceProgress => 1,
@@ -59,7 +56,6 @@ impl ControlObjectKind {
             Self::NamespaceDescriptor => "namespace_descriptor",
             Self::ContentStoreDescriptor => "content_store_descriptor",
             Self::NamespaceHead => "namespace_head",
-            Self::NamespaceLease => "namespace_lease",
             Self::NamespaceForkState => "namespace_fork_state",
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::NamespaceProgress => "namespace_progress",
@@ -119,6 +115,27 @@ pub struct WalSegmentPointer {
     pub payload_checksum: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterLease {
+    pub writer_id: String,
+    pub writer_session_id: String,
+    pub lease_expires_at_ms: u64,
+}
+
+impl WriterLease {
+    pub fn is_valid_at(&self, now_ms: u64) -> bool {
+        self.lease_expires_at_ms > now_ms
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcquiredWriter {
+    pub writer_id: String,
+    pub writer_session_id: String,
+    pub writer_epoch: WriterEpoch,
+    pub lease_expires_at_ms: u64,
+}
+
 /// Lifecycle state recorded in the namespace head.
 ///
 /// Initialization progress is not recorded here: it stays derived from
@@ -154,7 +171,9 @@ pub struct HeadState {
     pub namespace_id: NamespaceId,
     pub seq: ChangeSeq,
     pub head_commit_id: CommitId,
-    pub active_fence_token: FenceToken,
+    pub writer_epoch: WriterEpoch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_lease: Option<WriterLease>,
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
@@ -183,7 +202,8 @@ impl HeadState {
             seq: ChangeSeq(0),
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
                 .expect("genesis commit id is valid"),
-            active_fence_token: FenceToken(0),
+            writer_epoch: WriterEpoch(0),
+            writer_lease: None,
             next_inode_id: InodeId(2),
             name_policy: NamePolicy::default(),
             current_manifest_id: None,
@@ -192,20 +212,6 @@ impl HeadState {
             visible_wal_tip: None,
             state: NamespaceState::Active,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LeaseState {
-    pub namespace_id: NamespaceId,
-    pub holder_id: String,
-    pub fence_token: FenceToken,
-    pub lease_expires_at_ms: u64,
-}
-
-impl LeaseState {
-    pub fn is_valid_at(&self, now_ms: u64) -> bool {
-        self.lease_expires_at_ms > now_ms
     }
 }
 
@@ -273,7 +279,6 @@ where
 }
 
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
-pub type LeaseStateEnvelope = ControlObjectEnvelope<LeaseState>;
 pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type NamespaceDescriptorEnvelope = ControlObjectEnvelope<NamespaceDescriptorState>;
@@ -445,9 +450,11 @@ mod tests {
             decode_control_object(&encoded, ControlObjectKind::NamespaceHead).expect("decode");
         assert_eq!(decoded, envelope);
 
-        let mismatch =
-            decode_control_object::<LeaseState>(&encoded, ControlObjectKind::NamespaceLease)
-                .expect_err("kind mismatch");
+        let mismatch = decode_control_object::<NamespaceDescriptorState>(
+            &encoded,
+            ControlObjectKind::NamespaceDescriptor,
+        )
+        .expect_err("kind mismatch");
         assert!(matches!(mismatch, ControlCodecError::KindMismatch { .. }));
     }
 

@@ -20,9 +20,9 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, LeaseState,
+    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState,
     NamespaceDescriptorState, NamespaceForkState, NamespaceGcPinState, NamespaceState,
-    ProgressState, UploadSessionState, WalSegmentPointer,
+    ProgressState, UploadSessionState, WalSegmentPointer, WriterLease,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -37,8 +37,8 @@ use loonfs_api::wire::wal::{
     WalCommitDelta, WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, v0::UploadMode, ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken,
-    InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo,
+    sha256_digest, v0::UploadMode, ChangeSeq, CommitId, ContentRef, ContentStoreId, InodeId,
+    InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -177,6 +177,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
         WalSegmentPayload {
             namespace_id: namespace_id(),
             segment_id: "00000000000000000001-0123456789abcdef".to_owned(),
+            writer_epoch: WriterEpoch(3),
             prev_visible_segment: Some(sample_wal_pointer()),
             base_head_seq: ChangeSeq(1),
             start_seq: ChangeSeq(2),
@@ -277,7 +278,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             head_seq: ChangeSeq(2),
             head_commit_id: commit_id(),
             base_seq: ChangeSeq(2),
-            active_fence_token: FenceToken(3),
+            writer_epoch: WriterEpoch(3),
             next_inode_id: InodeId(10),
             name_policy: NamePolicy::default(),
             retention_floor_seq: ChangeSeq(0),
@@ -329,7 +330,12 @@ fn sample_head_state() -> HeadState {
         namespace_id: namespace_id(),
         seq: ChangeSeq(2),
         head_commit_id: commit_id(),
-        active_fence_token: FenceToken(3),
+        writer_epoch: WriterEpoch(3),
+        writer_lease: Some(WriterLease {
+            writer_id: "writer-a".to_owned(),
+            writer_session_id: "wrs_00000000000000000000000000000001".to_owned(),
+            lease_expires_at_ms: 2_000,
+        }),
         next_inode_id: InodeId(10),
         name_policy: NamePolicy::default(),
         current_manifest_id: Some(ManifestId(2)),
@@ -440,16 +446,6 @@ fn control_objects_match_golden_bytes() {
         "control_namespace_head.deleted.v1.json",
         ControlObjectKind::NamespaceHead,
         sample_deleted_head_state(),
-    );
-    check_control_golden(
-        "control_namespace_lease.v1.json",
-        ControlObjectKind::NamespaceLease,
-        LeaseState {
-            namespace_id: namespace_id(),
-            holder_id: "writer-a".to_owned(),
-            fence_token: FenceToken(3),
-            lease_expires_at_ms: 2_000,
-        },
     );
     check_control_golden(
         "control_namespace_descriptor.v1.json",

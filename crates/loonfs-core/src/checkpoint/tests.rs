@@ -718,7 +718,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             head_seq: materialization.head.seq,
             head_commit_id: materialization.head.head_commit_id.clone(),
             base_seq: first,
-            active_fence_token: materialization.head.active_fence_token,
+            writer_epoch: materialization.head.writer_epoch,
             next_inode_id: materialization.head.next_inode_id,
             name_policy: materialization.head.name_policy,
             retention_floor_seq: materialization.head.retention_floor_seq,
@@ -2401,7 +2401,7 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
             head_seq: materialization_before.head.seq,
             head_commit_id: materialization_before.head.head_commit_id.clone(),
             base_seq: materialization_before.head.seq,
-            active_fence_token: materialization_before.head.active_fence_token,
+            writer_epoch: materialization_before.head.writer_epoch,
             next_inode_id: materialization_before.head.next_inode_id,
             name_policy: materialization_before.head.name_policy,
             retention_floor_seq: materialization_before.head.retention_floor_seq,
@@ -2482,6 +2482,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
 fn test_context() -> MutationContext {
     MutationContext {
         writer_id: "test-writer".to_owned(),
+        writer_session_id: "wrs_test".to_owned(),
         writer_version: "test-writer/0.1.0".to_owned(),
         now_ms: 1_000,
         lease_duration_ms: 60_000,

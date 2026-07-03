@@ -619,11 +619,11 @@ pub struct ChangeSeq(pub u64);
 #[cfg_attr(feature = "openapi", schema(value_type = u64))]
 pub struct ManifestId(pub u64);
 
-/// Fencing token for write-lease concurrency control.
+/// Monotonically increasing writer epoch for namespace write fencing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(value_type = u64))]
-pub struct FenceToken(pub u64);
+pub struct WriterEpoch(pub u64);
 
 /// Name-policy-derived directory entry key.
 ///

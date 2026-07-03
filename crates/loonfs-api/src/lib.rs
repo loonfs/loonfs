@@ -57,8 +57,8 @@ pub use ids::{
     generate_wal_segment_id, generated_id, validate_checkpoint_id, validate_gc_pin_id,
     validate_generated_id, validate_metadata_table_id, validate_upload_id, validate_wal_segment_id,
     wal_segment_id_start_seq, ChangeSeq, CommitId, CommitIdValidationError, ContentStoreId,
-    FenceToken, GeneratedIdValidationError, InodeId, InodeKind, ManifestId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo,
+    GeneratedIdValidationError, InodeId, InodeKind, ManifestId, NameKey, NameKeyValidationError,
+    NamespaceId, NamespaceIdValidationError, RevisionNo, WriterEpoch,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{

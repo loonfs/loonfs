@@ -1,4 +1,4 @@
-use crate::keys::{derived_progress, namespace_head, namespace_lease, DerivedWorkClass};
+use crate::keys::{derived_progress, namespace_fork_state, namespace_head, DerivedWorkClass};
 use crate::{ObjectStore, ObjectStoreError};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,7 @@ async fn probe_compare_and_swap<S: ObjectStore + ?Sized>(
     let _ = store.delete(&key).await;
 
     store
-        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41,"fence_token":8}"#))
+        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41,"writer_epoch":8}"#))
         .await
         .map_err(|err| probe_error("compare_and_swap", err))?;
     let first_read = store
@@ -161,7 +161,7 @@ async fn probe_compare_and_swap<S: ObjectStore + ?Sized>(
         .compare_and_swap(
             &key,
             &first_read,
-            Bytes::from_static(br#"{"seq":42,"fence_token":8}"#),
+            Bytes::from_static(br#"{"seq":42,"writer_epoch":8}"#),
         )
         .await
         .map_err(|err| probe_error("compare_and_swap", err))?;
@@ -170,7 +170,7 @@ async fn probe_compare_and_swap<S: ObjectStore + ?Sized>(
         .compare_and_swap(
             &key,
             &first_read,
-            Bytes::from_static(br#"{"seq":43,"fence_token":9}"#),
+            Bytes::from_static(br#"{"seq":43,"writer_epoch":9}"#),
         )
         .await;
     assert_precondition_failed("compare_and_swap", stale)?;
@@ -183,7 +183,7 @@ async fn probe_compare_and_swap<S: ObjectStore + ?Sized>(
             probe: "compare_and_swap",
             message: "expected compare-and-swap body to exist".to_owned(),
         })?;
-    if body.as_ref() != br#"{"seq":42,"fence_token":8}"# {
+    if body.as_ref() != br#"{"seq":42,"writer_epoch":8}"# {
         return Err(ContractProbeError::Probe {
             probe: "compare_and_swap",
             message: "compare-and-swap stale write changed stored bytes".to_owned(),
@@ -264,7 +264,7 @@ async fn probe_sorted_listing<S: ObjectStore + ?Sized>(
     let keys = vec![
         derived_progress(&namespace, DerivedWorkClass::ManifestBuilder),
         namespace_head(&namespace),
-        namespace_lease(&namespace),
+        namespace_fork_state(&namespace),
     ];
     for key in &keys {
         let _ = store.delete(key).await;

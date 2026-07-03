@@ -17,7 +17,8 @@ pub fn commit_request_from_v0(
         namespace_id: ctx.namespace_id,
         commit_id: request.commit_id,
         writer_id: ctx.writer_id,
-        writer_fence_token: ctx.writer_fence_token,
+        writer_session_id: ctx.writer_session_id,
+        writer_epoch: ctx.writer_epoch,
         ops: request.ops.into_iter().map(commit_op_from_v0).collect(),
         preconditions: request
             .preconditions
@@ -125,7 +126,7 @@ mod tests {
     use super::*;
     use loonfs_api::{
         v0::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition},
-        CommitId, ContentRef, FenceToken, InodeId, NameKey, NamespaceId, RevisionNo,
+        CommitId, ContentRef, InodeId, NameKey, NamespaceId, RevisionNo, WriterEpoch,
     };
 
     #[test]
@@ -196,7 +197,8 @@ mod tests {
             CommitExecutionContext {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 writer_id: "writer-a".to_owned(),
-                writer_fence_token: FenceToken(9),
+                writer_session_id: "wrs_test".to_owned(),
+                writer_epoch: WriterEpoch(9),
             },
             request,
         )
@@ -204,6 +206,7 @@ mod tests {
 
         assert_eq!(core.ops.len(), 7);
         assert_eq!(core.preconditions.len(), 5);
-        assert_eq!(core.writer_fence_token, FenceToken(9));
+        assert_eq!(core.writer_epoch, WriterEpoch(9));
+        assert_eq!(core.writer_session_id, "wrs_test");
     }
 }
