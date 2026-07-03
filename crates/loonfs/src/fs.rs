@@ -55,6 +55,7 @@ pub(crate) struct FsInner {
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
+    pub(crate) maintenance_inflight: std::sync::atomic::AtomicBool,
 }
 
 /// Lock accessors for the runtime caches.
@@ -201,6 +202,7 @@ impl Fs {
                 metadata_table_cache,
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::default(),
+                maintenance_inflight: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -1046,11 +1048,15 @@ impl Fs {
                     .collect::<Vec<_>>();
                 self.invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
             }
-            return publish
+            let wal_tail_segments = publish.wal_tail_segments;
+            let results = publish
                 .results
                 .into_iter()
                 .map(|result| result.map_err(RuntimeError::Core))
                 .collect();
+            self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments)
+                .await;
+            return results;
         }
 
         let results: Vec<_> = self
@@ -1072,6 +1078,40 @@ impl Fs {
             self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         }
         results
+    }
+
+    /// Runs a maintenance tick inline after a publish that observed the WAL
+    /// tail at or past the checkpoint threshold. One publish pays for the
+    /// checkpoint instead of every reader paying for an unbounded tail; the
+    /// in-flight flag keeps concurrent publishers from stacking ticks. The
+    /// cache-disabled diagnostic mode skips this, as it tracks no tail
+    /// projection to observe.
+    async fn maybe_auto_tick_after_publish(
+        &self,
+        namespace_id: &NamespaceId,
+        wal_tail_segments: u64,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        let options = MaintenanceTickOptions::default();
+        if wal_tail_segments < options.max_wal_tail_segments {
+            return;
+        }
+        if self.inner.maintenance_inflight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let outcome = self.maintenance_tick_namespace(namespace_id, options).await;
+        self.inner
+            .maintenance_inflight
+            .store(false, Ordering::SeqCst);
+        if let Err(error) = outcome {
+            tracing::info!(
+                phase = "auto_maintenance_tick",
+                result = "error",
+                error = %error,
+                "post-publish maintenance tick failed"
+            );
+        }
     }
 
     /// Snapshots the runtime cache counters.

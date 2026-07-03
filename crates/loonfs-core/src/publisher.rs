@@ -1,7 +1,7 @@
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
-use crate::error::{CoreError, ErrorCode};
+use crate::error::{CoreError, ErrorCode, MetadataViewError};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::planner::plan_path_mutation_against_publish_view;
 use crate::path::write::{
@@ -72,9 +72,18 @@ impl Default for PublishOptions {
     }
 }
 
+/// Publishes stop being accepted once the WAL tail is far past the default
+/// maintenance checkpoint threshold (4x at defaults). Reads never gate; this
+/// only asks writers to wait for the maintenance a deployment failed to run
+/// (format spec, "Maintenance operations").
+pub(crate) const WAL_TAIL_BACKPRESSURE_SEGMENTS: u64 = 128;
+
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<ApiCommitResponse, CoreError>>,
+    /// WAL tail length observed by this publish, for opportunistic
+    /// maintenance scheduling. Zero when no projection was loaded.
+    pub wal_tail_segments: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +129,7 @@ impl NamespaceCommitEngine {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
+                wal_tail_segments: 0,
             };
         }
 
@@ -129,6 +139,7 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, CoreError::WriterEpoch(error)),
+                    wal_tail_segments: 0,
                 };
             }
         };
@@ -147,9 +158,25 @@ impl NamespaceCommitEngine {
                 self.invalidate();
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
+                    wal_tail_segments: 0,
                 };
             }
         };
+
+        if projection.wal_tail_segments > WAL_TAIL_BACKPRESSURE_SEGMENTS {
+            let wal_tail_segments = projection.wal_tail_segments;
+            self.publish_tail_projection = Some(projection);
+            let error = MetadataViewError::MaintenanceRequired {
+                namespace_id: self.namespace_id.clone(),
+                reason: format!(
+                    "wal tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {WAL_TAIL_BACKPRESSURE_SEGMENTS}"
+                ),
+            };
+            return NamespaceCommitEnginePublishResult {
+                results: repeated_error(candidate_count, CoreError::from(error)),
+                wal_tail_segments,
+            };
+        }
 
         let published = crate::protocol::publish_namespace_mutations_batch_against_publish_view(
             store,
@@ -159,9 +186,11 @@ impl NamespaceCommitEngine {
             &publish_view,
         )
         .await;
-        self.update_publish_tail_projection(projection, &published, tail_options);
+        let wal_tail_segments =
+            self.update_publish_tail_projection(projection, &published, tail_options);
         NamespaceCommitEnginePublishResult {
             results: published.results,
+            wal_tail_segments,
         }
     }
 
@@ -186,22 +215,26 @@ impl NamespaceCommitEngine {
         mut projection: PublishTailProjection,
         published: &crate::protocol::PublishBatchAgainstViewResult,
         tail_options: &PublishTailOptions,
-    ) {
+    ) -> u64 {
+        if !published.published_records.is_empty() {
+            projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
+        }
+        let wal_tail_segments = projection.wal_tail_segments;
         let Some(resulting_head) = published.resulting_head.clone() else {
             if published.can_reuse_loaded_projection {
                 self.publish_tail_projection = Some(projection);
             } else {
                 self.invalidate();
             }
-            return;
+            return wal_tail_segments;
         };
         let Some(resulting_head_etag) = published.resulting_head_etag.clone() else {
             self.invalidate();
-            return;
+            return wal_tail_segments;
         };
         if resulting_head.current_manifest_id != Some(projection.manifest_id) {
             self.invalidate();
-            return;
+            return wal_tail_segments;
         }
         for record in &published.published_records {
             if projection
@@ -210,7 +243,7 @@ impl NamespaceCommitEngine {
                 .is_err()
             {
                 self.invalidate();
-                return;
+                return wal_tail_segments;
             }
         }
         projection.head_seq = resulting_head.seq;
@@ -220,6 +253,7 @@ impl NamespaceCommitEngine {
         } else {
             self.invalidate();
         }
+        wal_tail_segments
     }
 }
 
