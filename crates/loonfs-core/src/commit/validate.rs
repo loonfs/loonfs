@@ -105,7 +105,6 @@ pub async fn build_commit_plan(
     let shape = compute_commit_shape(request, context)?;
     let validated_metadata = validate_metadata_preconditions(
         request,
-        &context.head,
         context.metadata_state,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
@@ -289,7 +288,6 @@ fn compute_commit_shape_from_head(
 
 async fn validate_metadata_preconditions(
     request: &CommitRequest,
-    head: &HeadState,
     metadata_state: &MetadataState,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
@@ -302,7 +300,6 @@ async fn validate_metadata_preconditions(
     let mut next_delta_index = 0u32;
 
     let metadata_view = InMemoryMetadataView::in_memory(
-        head,
         metadata_state,
         Some(overlay_rows.rows()),
         committed_seq,
@@ -311,7 +308,6 @@ async fn validate_metadata_preconditions(
     validate_publish_explicit_preconditions(
         &request.preconditions,
         &metadata_view,
-        committed_seq,
         checked_invariants,
     )
     .await
@@ -321,7 +317,6 @@ async fn validate_metadata_preconditions(
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
         let metadata_view = InMemoryMetadataView::in_memory(
-            head,
             metadata_state,
             Some(overlay_rows.rows()),
             committed_seq,
@@ -336,7 +331,6 @@ async fn validate_metadata_preconditions(
                     &metadata_view,
                     *parent_inode,
                     display_name,
-                    committed_seq,
                     name_policy,
                 )
                 .await
@@ -344,7 +338,6 @@ async fn validate_metadata_preconditions(
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_view,
                     *parent_inode,
-                    committed_seq,
                     checked_invariants,
                     true,
                 )
@@ -372,7 +365,6 @@ async fn validate_metadata_preconditions(
                     &metadata_view,
                     *parent_inode,
                     display_name,
-                    committed_seq,
                     name_policy,
                 )
                 .await
@@ -380,7 +372,6 @@ async fn validate_metadata_preconditions(
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_view,
                     *parent_inode,
-                    committed_seq,
                     checked_invariants,
                     true,
                 )
@@ -406,19 +397,13 @@ async fn validate_metadata_preconditions(
                 base_revision_no,
                 content_ref,
             } => {
-                validate_publish_inode_revision_is(
-                    &metadata_view,
-                    *inode_id,
-                    *base_revision_no,
-                    committed_seq,
-                )
-                .await
-                .map_err(commit_validation_from_core)?;
+                validate_publish_inode_revision_is(&metadata_view, *inode_id, *base_revision_no)
+                    .await
+                    .map_err(commit_validation_from_core)?;
                 let revision_no = next_revision_no(*inode_id, *base_revision_no, true)?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_view,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                     false,
                 )
@@ -437,31 +422,20 @@ async fn validate_metadata_preconditions(
                 source_revision_no,
                 base_revision_no,
             } => {
-                validate_publish_restore_target(
-                    &metadata_view,
-                    *inode_id,
-                    *base_revision_no,
-                    committed_seq,
-                )
-                .await
-                .map_err(commit_validation_from_core)?;
+                validate_publish_restore_target(&metadata_view, *inode_id, *base_revision_no)
+                    .await
+                    .map_err(commit_validation_from_core)?;
                 let source_revision = validate_publish_restore_source_revision(
                     &metadata_view,
                     *inode_id,
                     *source_revision_no,
-                    committed_seq,
                 )
                 .await
                 .map_err(commit_validation_from_core)?;
                 let revision_no = next_revision_no(*inode_id, *base_revision_no, false)?;
-                validate_publish_restore_not_covered(
-                    &metadata_view,
-                    *inode_id,
-                    committed_seq,
-                    checked_invariants,
-                )
-                .await
-                .map_err(commit_validation_from_core)?;
+                validate_publish_restore_not_covered(&metadata_view, *inode_id, checked_invariants)
+                    .await
+                    .map_err(commit_validation_from_core)?;
                 ValidatedOp::RestoreRevision {
                     op_index,
                     inode_id: *inode_id,
@@ -472,20 +446,16 @@ async fn validate_metadata_preconditions(
                 }
             }
             CommitOp::DeleteFile { inode_id } => {
-                let source_binding = resolve_publish_current_binding_for_mutation(
-                    &metadata_view,
-                    *inode_id,
-                    committed_seq,
-                )
-                .await
-                .map_err(commit_validation_from_core)?;
-                validate_publish_delete_file_target(&metadata_view, *inode_id, committed_seq)
+                let source_binding =
+                    resolve_publish_current_binding_for_mutation(&metadata_view, *inode_id)
+                        .await
+                        .map_err(commit_validation_from_core)?;
+                validate_publish_delete_file_target(&metadata_view, *inode_id)
                     .await
                     .map_err(commit_validation_from_core)?;
                 validate_publish_delete_file_not_covered(
                     &metadata_view,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await
@@ -509,21 +479,17 @@ async fn validate_metadata_preconditions(
                         behavior: *behavior,
                     });
                 }
-                let source_binding = resolve_publish_current_binding_for_mutation(
-                    &metadata_view,
-                    *inode_id,
-                    committed_seq,
-                )
-                .await
-                .map_err(commit_validation_from_core)?;
-                validate_publish_rename_source(&metadata_view, *inode_id, committed_seq)
+                let source_binding =
+                    resolve_publish_current_binding_for_mutation(&metadata_view, *inode_id)
+                        .await
+                        .map_err(commit_validation_from_core)?;
+                validate_publish_rename_source(&metadata_view, *inode_id)
                     .await
                     .map_err(commit_validation_from_core)?;
                 let new_name_key = validate_publish_rename_target_name_absent(
                     &metadata_view,
                     *new_parent_inode,
                     new_display_name,
-                    committed_seq,
                     name_policy,
                 )
                 .await
@@ -532,14 +498,12 @@ async fn validate_metadata_preconditions(
                     &metadata_view,
                     *inode_id,
                     *new_parent_inode,
-                    committed_seq,
                 )
                 .await
                 .map_err(commit_validation_from_core)?;
                 validate_publish_rename_inode_not_covered(
                     &metadata_view,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await
@@ -547,7 +511,6 @@ async fn validate_metadata_preconditions(
                 validate_publish_rename_target_parent_not_covered(
                     &metadata_view,
                     *new_parent_inode,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await
@@ -564,20 +527,16 @@ async fn validate_metadata_preconditions(
                 }
             }
             CommitOp::DeleteSubtree { root_inode } => {
-                let source_binding = resolve_publish_current_binding_for_mutation(
-                    &metadata_view,
-                    *root_inode,
-                    committed_seq,
-                )
-                .await
-                .map_err(commit_validation_from_core)?;
-                validate_publish_delete_subtree_root(&metadata_view, *root_inode, committed_seq)
+                let source_binding =
+                    resolve_publish_current_binding_for_mutation(&metadata_view, *root_inode)
+                        .await
+                        .map_err(commit_validation_from_core)?;
+                validate_publish_delete_subtree_root(&metadata_view, *root_inode)
                     .await
                     .map_err(commit_validation_from_core)?;
                 validate_publish_delete_subtree_not_covered(
                     &metadata_view,
                     *root_inode,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await
@@ -616,7 +575,6 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
     validate_publish_explicit_preconditions(
         &request.preconditions,
         &metadata_state,
-        committed_seq,
         checked_invariants,
     )
     .await?;
@@ -635,14 +593,12 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                     &metadata_state,
                     *parent_inode,
                     display_name,
-                    committed_seq,
                     name_policy,
                 )
                 .await?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_state,
                     *parent_inode,
-                    committed_seq,
                     checked_invariants,
                     true,
                 )
@@ -669,14 +625,12 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                     &metadata_state,
                     *parent_inode,
                     display_name,
-                    committed_seq,
                     name_policy,
                 )
                 .await?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_state,
                     *parent_inode,
-                    committed_seq,
                     checked_invariants,
                     true,
                 )
@@ -701,18 +655,12 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 base_revision_no,
                 content_ref,
             } => {
-                validate_publish_inode_revision_is(
-                    &metadata_state,
-                    *inode_id,
-                    *base_revision_no,
-                    committed_seq,
-                )
-                .await?;
+                validate_publish_inode_revision_is(&metadata_state, *inode_id, *base_revision_no)
+                    .await?;
                 let revision_no = next_revision_no(*inode_id, *base_revision_no, true)?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                     false,
                 )
@@ -730,25 +678,18 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 source_revision_no,
                 base_revision_no,
             } => {
-                validate_publish_restore_target(
-                    &metadata_state,
-                    *inode_id,
-                    *base_revision_no,
-                    committed_seq,
-                )
-                .await?;
+                validate_publish_restore_target(&metadata_state, *inode_id, *base_revision_no)
+                    .await?;
                 let source_revision = validate_publish_restore_source_revision(
                     &metadata_state,
                     *inode_id,
                     *source_revision_no,
-                    committed_seq,
                 )
                 .await?;
                 let revision_no = next_revision_no(*inode_id, *base_revision_no, false)?;
                 validate_publish_restore_not_covered(
                     &metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await?;
@@ -762,18 +703,13 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 }
             }
             CommitOp::DeleteFile { inode_id } => {
-                let source_binding = resolve_publish_current_binding_for_mutation(
-                    &metadata_state,
-                    *inode_id,
-                    committed_seq,
-                )
-                .await?;
-                validate_publish_delete_file_target(&metadata_state, *inode_id, committed_seq)
-                    .await?;
+                let source_binding =
+                    resolve_publish_current_binding_for_mutation(&metadata_state, *inode_id)
+                        .await?;
+                validate_publish_delete_file_target(&metadata_state, *inode_id).await?;
                 validate_publish_delete_file_not_covered(
                     &metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await?;
@@ -797,18 +733,14 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                     }
                     .into());
                 }
-                let source_binding = resolve_publish_current_binding_for_mutation(
-                    &metadata_state,
-                    *inode_id,
-                    committed_seq,
-                )
-                .await?;
-                validate_publish_rename_source(&metadata_state, *inode_id, committed_seq).await?;
+                let source_binding =
+                    resolve_publish_current_binding_for_mutation(&metadata_state, *inode_id)
+                        .await?;
+                validate_publish_rename_source(&metadata_state, *inode_id).await?;
                 let new_name_key = validate_publish_rename_target_name_absent(
                     &metadata_state,
                     *new_parent_inode,
                     new_display_name,
-                    committed_seq,
                     name_policy,
                 )
                 .await?;
@@ -816,20 +748,17 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                     &metadata_state,
                     *inode_id,
                     *new_parent_inode,
-                    committed_seq,
                 )
                 .await?;
                 validate_publish_rename_inode_not_covered(
                     &metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await?;
                 validate_publish_rename_target_parent_not_covered(
                     &metadata_state,
                     *new_parent_inode,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await?;
@@ -845,18 +774,13 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 }
             }
             CommitOp::DeleteSubtree { root_inode } => {
-                let source_binding = resolve_publish_current_binding_for_mutation(
-                    &metadata_state,
-                    *root_inode,
-                    committed_seq,
-                )
-                .await?;
-                validate_publish_delete_subtree_root(&metadata_state, *root_inode, committed_seq)
-                    .await?;
+                let source_binding =
+                    resolve_publish_current_binding_for_mutation(&metadata_state, *root_inode)
+                        .await?;
+                validate_publish_delete_subtree_root(&metadata_state, *root_inode).await?;
                 validate_publish_delete_subtree_not_covered(
                     &metadata_state,
                     *root_inode,
-                    committed_seq,
                     checked_invariants,
                 )
                 .await?;
@@ -921,7 +845,6 @@ fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
 async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
     preconditions: &[Precondition],
     metadata_state: &MetadataView<'_, '_, S>,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     for precondition in preconditions {
@@ -930,19 +853,12 @@ async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 revision_no,
             } => {
-                validate_publish_inode_revision_is(
-                    metadata_state,
-                    *inode_id,
-                    *revision_no,
-                    base_seq,
-                )
-                .await?;
+                validate_publish_inode_revision_is(metadata_state, *inode_id, *revision_no).await?;
             }
             Precondition::AncestorsNotSubtreeDeleted { inode_id } => {
                 validate_publish_ancestors_not_subtree_deleted(
                     metadata_state,
                     *inode_id,
-                    base_seq,
                     checked_invariants,
                     false,
                 )
@@ -956,7 +872,6 @@ async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
                     metadata_state,
                     *parent_inode,
                     name_key,
-                    base_seq,
                 )
                 .await?;
             }
@@ -974,13 +889,11 @@ async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
                     *child_inode,
                     *bind_seq,
                     *bind_delta_index,
-                    base_seq,
                 )
                 .await?;
             }
             Precondition::DirectoryEmpty { inode_id } => {
-                validate_publish_directory_empty_precondition(metadata_state, *inode_id, base_seq)
-                    .await?;
+                validate_publish_directory_empty_precondition(metadata_state, *inode_id).await?;
             }
         }
     }
@@ -992,7 +905,6 @@ async fn validate_publish_child_name_absent_precondition<S: ObjectStore + ?Sized
     metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     name_key: &str,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let parent = metadata_state
         .inode_at_seq(parent_inode)
@@ -1021,7 +933,6 @@ async fn validate_publish_child_name_absent_precondition<S: ObjectStore + ?Sized
 async fn resolve_publish_current_binding_for_mutation<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
 ) -> Result<ResolvedBinding, CoreError> {
     let binding = metadata_state
         .current_parent_binding_for_child(inode_id)
@@ -1045,7 +956,6 @@ async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     child_inode: InodeId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let parent = metadata_state
         .inode_at_seq(parent_inode)
@@ -1085,7 +995,6 @@ async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
 async fn validate_publish_directory_empty_precondition<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .visible_inode(inode_id)
@@ -1112,7 +1021,6 @@ async fn validate_publish_child_name_absent<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     display_name: &str,
-    _base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<String, CoreError> {
     validate_display_name(display_name)?;
@@ -1148,7 +1056,6 @@ async fn validate_publish_inode_revision_is<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .inode_at_seq(inode_id)
@@ -1182,7 +1089,6 @@ async fn validate_publish_restore_target<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .inode_at_seq(inode_id)
@@ -1216,7 +1122,6 @@ async fn validate_publish_restore_source_revision<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
-    _base_seq: ChangeSeq,
 ) -> Result<RevisionRecord, CoreError> {
     metadata_state
         .revision_at_head(inode_id, source_revision_no)
@@ -1233,7 +1138,6 @@ async fn validate_publish_restore_source_revision<S: ObjectStore + ?Sized>(
 async fn validate_publish_ancestors_not_subtree_deleted<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
     is_create: bool,
 ) -> Result<(), CoreError> {
@@ -1265,7 +1169,6 @@ async fn validate_publish_ancestors_not_subtree_deleted<S: ObjectStore + ?Sized>
 async fn validate_publish_restore_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
@@ -1289,7 +1192,6 @@ async fn validate_publish_restore_not_covered<S: ObjectStore + ?Sized>(
 async fn validate_publish_delete_subtree_root<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     root_inode: InodeId,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .inode_at_seq(root_inode)
@@ -1309,7 +1211,6 @@ async fn validate_publish_delete_subtree_root<S: ObjectStore + ?Sized>(
 async fn validate_publish_delete_file_target<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .inode_at_seq(inode_id)
@@ -1329,7 +1230,6 @@ async fn validate_publish_delete_file_target<S: ObjectStore + ?Sized>(
 async fn validate_publish_delete_file_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
@@ -1351,7 +1251,6 @@ async fn validate_publish_delete_file_not_covered<S: ObjectStore + ?Sized>(
 async fn validate_publish_delete_subtree_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     root_inode: InodeId,
-    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state
@@ -1376,7 +1275,6 @@ async fn validate_publish_delete_subtree_not_covered<S: ObjectStore + ?Sized>(
 async fn validate_publish_rename_source<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     metadata_state
         .inode_at_seq(inode_id)
@@ -1397,7 +1295,6 @@ async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     display_name: &str,
-    _base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<String, CoreError> {
     validate_display_name(display_name)?;
@@ -1433,7 +1330,6 @@ async fn validate_publish_rename_does_not_cycle<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     new_parent_inode: InodeId,
-    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .inode_at_seq(inode_id)
@@ -1459,7 +1355,6 @@ async fn validate_publish_rename_does_not_cycle<S: ObjectStore + ?Sized>(
 async fn validate_publish_rename_inode_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
@@ -1481,7 +1376,6 @@ async fn validate_publish_rename_inode_not_covered<S: ObjectStore + ?Sized>(
 async fn validate_publish_rename_target_parent_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
-    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state

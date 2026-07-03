@@ -7,9 +7,7 @@ use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataPage, MetadataRow, MetadataSstEnvelope, MetadataTableFamily,
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{
-    validate_checkpoint_id, validate_metadata_table_id, ChangeSeq, ManifestId, NamespaceId,
-};
+use loonfs_api::{validate_metadata_table_id, ChangeSeq, ManifestId, NamespaceId};
 
 pub(super) fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
@@ -52,12 +50,6 @@ pub(super) fn validate_manifest_checkpoint_records(
 ) -> Result<(), ManifestLoadError> {
     let mut seen_checkpoint_ids = Vec::new();
     for checkpoint in &payload.checkpoints {
-        validate_checkpoint_id(&checkpoint.checkpoint_id).map_err(|error| {
-            ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: error.to_string(),
-            }
-        })?;
         if seen_checkpoint_ids.contains(&checkpoint.checkpoint_id.as_str()) {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),

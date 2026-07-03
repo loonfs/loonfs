@@ -215,7 +215,6 @@ impl NamespaceCommitEngine {
         }
         projection.head_seq = resulting_head.seq;
         projection.head_etag = resulting_head_etag;
-        projection.wal_tail_segments = projection.wal_tail_segments.saturating_add(1);
         if projection.within_limits(tail_options) {
             self.publish_tail_projection = Some(projection);
         } else {

@@ -21,8 +21,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
 #[derive(Clone, Copy)]
-pub(crate) struct MetadataSnapshot<'a> {
-    head: &'a HeadState,
+pub(crate) struct MetadataSnapshot {
     visible_seq: ChangeSeq,
     name_policy: NamePolicy,
 }
@@ -35,7 +34,7 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
 }
 
 pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
-    snapshot: MetadataSnapshot<'a>,
+    snapshot: MetadataSnapshot,
     sources: MetadataSourceStack<'a, 'store, S>,
 }
 
@@ -111,7 +110,6 @@ impl ObjectStore for InMemoryMetadataViewStore {
 
 impl<'a> InMemoryMetadataView<'a> {
     pub(crate) fn in_memory(
-        head: &'a HeadState,
         base: &'a MetadataState,
         overlay: Option<&'a MetadataState>,
         visible_seq: ChangeSeq,
@@ -119,7 +117,6 @@ impl<'a> InMemoryMetadataView<'a> {
     ) -> Self {
         Self {
             snapshot: MetadataSnapshot {
-                head,
                 visible_seq,
                 name_policy,
             },
@@ -141,7 +138,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> Self {
         Self {
             snapshot: MetadataSnapshot {
-                head,
                 visible_seq: head.seq,
                 name_policy: head.name_policy,
             },
@@ -162,7 +158,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
             snapshot: MetadataSnapshot {
-                head: self.snapshot.head,
                 visible_seq,
                 name_policy,
             },
