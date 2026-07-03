@@ -3,7 +3,7 @@
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::control::read_head_object;
-use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::namespace::writer_epoch::{acquire_writer_epoch, WriterEpochAcquireError};
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -18,8 +18,11 @@ const MAX_DELETE_CAS_ATTEMPTS: usize = 8;
 /// `deleted` state (format spec, "Tombstones and deletion").
 ///
 /// The deleting writer first acquires the namespace writer epoch, so no stale
-/// writer session can publish past the delete,
-/// then swaps the head. The delete linearizes at that swap: commits whose
+/// writer session can publish past the delete, then swaps the head. Every
+/// retry re-checks the acquired epoch against the reloaded head, so a writer
+/// takeover between acquisition and the swap aborts the delete instead of
+/// deleting a namespace another writer now owns.
+/// The delete linearizes at that swap: commits whose
 /// head advance serialized before it stay committed and durable; everything
 /// that observes the deleted head afterward fails with `namespace_deleted`.
 ///
@@ -33,7 +36,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     context: &MutationContext,
 ) -> Result<DeleteNamespaceResponse, CoreError> {
-    let _acquired_writer = acquire_writer_epoch(store, namespace_id, context).await?;
+    let acquired_writer = acquire_writer_epoch(store, namespace_id, context).await?;
 
     let mut attempted_swap = false;
     for _attempt in 0..MAX_DELETE_CAS_ATTEMPTS {
@@ -54,6 +57,20 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
+            });
+        }
+
+        // The epoch is the fence: any takeover bumps it, so a mismatch means
+        // another writer owns the namespace and this delete must not land.
+        if head.writer_epoch != acquired_writer.writer_epoch {
+            return Err(match &head.writer_lease {
+                Some(lease) => CoreError::WriterEpoch(WriterEpochAcquireError::HeldByOtherWriter {
+                    writer_id: lease.writer_id.clone(),
+                    lease_expires_at_ms: lease.lease_expires_at_ms,
+                }),
+                None => CoreError::NamespaceCorrupt(
+                    "namespace head advanced its writer epoch without an active lease".to_owned(),
+                ),
             });
         }
 

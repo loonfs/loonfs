@@ -215,9 +215,21 @@ fn map_cas_error(err: ObjectStoreError) -> CasOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::NamespaceId;
+    use crate::error::ErrorCode;
+    use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::control::read_head_object;
+    use crate::namespace::delete::delete_namespace;
+    use crate::options::DeleteNamespaceOptions;
+    use crate::protocol::commit_operations;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use loonfs_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
+    use loonfs_api::wire::control::{decode_control_object, NamespaceState};
+    use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::namespace_head;
+    use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
     const WRITER_VERSION: &str = "writer/0.1.0";
@@ -416,5 +428,194 @@ mod tests {
 
         assert_eq!(acquired.writer_epoch, WriterEpoch(8));
         assert_eq!(acquired.writer_id, "writer-b");
+    }
+
+    fn create_dir_request(commit_id: &str, display_name: &str) -> ApiCommitRequest {
+        ApiCommitRequest {
+            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::CreateDirectory {
+                parent_inode: InodeId(1),
+                display_name: display_name.to_owned(),
+            }],
+            message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn previous_writer_cannot_publish_after_writer_takeover() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer_a = context("writer-a", "session-a", 1_000);
+        bootstrap_namespace(&store, &namespace_id, &writer_a, false)
+            .await
+            .expect("bootstrap");
+        let epoch_at_bootstrap = read_head_object(&store, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state
+            .writer_epoch;
+
+        // Writer A's lease has expired; writer B takes over and commits.
+        let writer_b = context("writer-b", "session-b", 12_001);
+        commit_operations(
+            &store,
+            &namespace_id,
+            create_dir_request("writer-b-create", "from-b"),
+            &writer_b,
+        )
+        .await
+        .expect("writer b commit after takeover");
+
+        let writer_a_retry = context("writer-a", "session-a", 12_002);
+        let error = commit_operations(
+            &store,
+            &namespace_id,
+            create_dir_request("writer-a-stale", "from-a"),
+            &writer_a_retry,
+        )
+        .await
+        .expect_err("previous writer should be fenced out");
+        assert_eq!(error.code(), ErrorCode::LeaseConflict);
+
+        let head = read_head_object(&store, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state;
+        assert_eq!(head.seq, ChangeSeq(1));
+        assert!(head.writer_epoch > epoch_at_bootstrap);
+        let lease = head.writer_lease.expect("active lease");
+        assert_eq!(lease.writer_id, "writer-b");
+    }
+
+    #[tokio::test]
+    async fn stale_writer_epoch_cannot_delete_namespace_after_takeover() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer_a = context("writer-a", "session-a", 1_000);
+        bootstrap_namespace(
+            &LocalFsStore::new(temp_dir.path()).expect("store"),
+            &namespace_id,
+            &writer_a,
+            false,
+        )
+        .await
+        .expect("bootstrap");
+
+        // Rewrites the head with a writer-b takeover just before the delete
+        // loop's reload (head read #2), i.e. after writer A already acquired
+        // its epoch (head read #1) — the stalled-deleter interleaving.
+        let store = TakeoverBetweenHeadReadsStore {
+            inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+            head_key: namespace_head(namespace_id.as_str()),
+            head_reads: AtomicUsize::new(0),
+        };
+
+        let delete_attempt = context("writer-a", "session-a", 2_000);
+        let error = delete_namespace(
+            &store,
+            &namespace_id,
+            DeleteNamespaceOptions::default(),
+            &delete_attempt,
+        )
+        .await
+        .expect_err("stale-epoch delete must be fenced");
+        assert_eq!(error.code(), ErrorCode::LeaseConflict);
+
+        let head = read_head_object(&store.inner, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state;
+        assert_eq!(head.state, NamespaceState::Active);
+        let lease = head.writer_lease.expect("active lease");
+        assert_eq!(lease.writer_id, "writer-b");
+    }
+
+    #[derive(Debug)]
+    struct TakeoverBetweenHeadReadsStore {
+        inner: LocalFsStore,
+        head_key: String,
+        head_reads: AtomicUsize,
+    }
+
+    impl TakeoverBetweenHeadReadsStore {
+        async fn inject_takeover(&self) {
+            let body = self
+                .inner
+                .get_with_metadata(&self.head_key)
+                .await
+                .expect("read head for takeover")
+                .expect("head exists");
+            let envelope: HeadStateEnvelope =
+                decode_control_object(&body.bytes, ControlObjectKind::NamespaceHead)
+                    .expect("decode head");
+            let mut head = envelope.state;
+            head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
+            head.writer_lease = Some(WriterLease {
+                writer_id: "writer-b".to_owned(),
+                writer_session_id: "session-b".to_owned(),
+                lease_expires_at_ms: 100_000,
+            });
+            let next = HeadStateEnvelope::from_state(
+                ControlObjectKind::NamespaceHead,
+                WRITER_VERSION,
+                head,
+            )
+            .expect("head envelope");
+            let bytes = encode_control_object(&next).expect("head bytes");
+            self.inner
+                .put(&self.head_key, Bytes::from(bytes), PutMode::Overwrite)
+                .await
+                .expect("write takeover head");
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for TakeoverBetweenHeadReadsStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            if key == self.head_key && self.head_reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.inject_takeover().await;
+            }
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
     }
 }
