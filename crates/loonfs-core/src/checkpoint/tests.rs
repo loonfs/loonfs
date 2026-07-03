@@ -1499,6 +1499,316 @@ fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
     }
 }
 
+#[tokio::test]
+async fn manifest_rejects_missing_revision_desc_index() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let manifest = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    let materialized =
+        load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
+            .await
+            .expect("load manifest before corruption");
+    let mut manifest = materialized.manifest;
+    let manifest_id = manifest.payload.manifest_id;
+    manifest.payload.metadata_files.retain(|metadata_file| {
+        metadata_file.family != ApiMetadataTableFamily::RevisionsByInodeDesc
+    });
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    assert_revision_index_mismatch(
+        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+    );
+}
+
+#[tokio::test]
+async fn manifest_rejects_revision_desc_index_missing_row() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/other.txt",
+        b"other\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write other");
+
+    let (manifest_id, mut manifest, mut revision_index_rows) =
+        revision_index_test_materialization(&store, &namespace_id, &context).await;
+    revision_index_rows.pop().expect("revision index row");
+    rewrite_revision_index_segment(
+        &store,
+        &namespace_id,
+        &mut manifest,
+        revision_index_rows,
+        &context.writer_version,
+    )
+    .await;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    assert_revision_index_mismatch(
+        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+    );
+}
+
+#[tokio::test]
+async fn manifest_rejects_revision_desc_index_extra_row() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let (manifest_id, mut manifest, mut revision_index_rows) =
+        revision_index_test_materialization(&store, &namespace_id, &context).await;
+    let extra_row = revision_index_rows
+        .first()
+        .expect("revision index row")
+        .clone();
+    revision_index_rows.push(match extra_row {
+        MetadataRow::Revision {
+            inode_id,
+            revision_no,
+            committed_seq,
+            revision_delta_index,
+            content_ref,
+        } => MetadataRow::Revision {
+            inode_id,
+            revision_no: loonfs_api::RevisionNo(revision_no.0 + 100),
+            committed_seq,
+            revision_delta_index,
+            content_ref,
+        },
+        other => other,
+    });
+    rewrite_revision_index_segment(
+        &store,
+        &namespace_id,
+        &mut manifest,
+        revision_index_rows,
+        &context.writer_version,
+    )
+    .await;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    assert_revision_index_mismatch(
+        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+    );
+}
+
+#[tokio::test]
+async fn manifest_rejects_revision_desc_index_changed_content_ref() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let (manifest_id, mut manifest, mut revision_index_rows) =
+        revision_index_test_materialization(&store, &namespace_id, &context).await;
+    let first = revision_index_rows.first_mut().expect("revision index row");
+    if let MetadataRow::Revision { content_ref, .. } = first {
+        content_ref.digest =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+    }
+    rewrite_revision_index_segment(
+        &store,
+        &namespace_id,
+        &mut manifest,
+        revision_index_rows,
+        &context.writer_version,
+    )
+    .await;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    assert_revision_index_mismatch(
+        load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await,
+    );
+}
+
+#[tokio::test]
+async fn manifest_rejects_revision_desc_index_duplicate_rows() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let (manifest_id, mut manifest, mut revision_index_rows) =
+        revision_index_test_materialization(&store, &namespace_id, &context).await;
+    revision_index_rows.push(
+        revision_index_rows
+            .first()
+            .expect("revision index row")
+            .clone(),
+    );
+    rewrite_revision_index_segment(
+        &store,
+        &namespace_id,
+        &mut manifest,
+        revision_index_rows,
+        &context.writer_version,
+    )
+    .await;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    match load_verified_manifest_materialization(&store, &namespace_id, manifest_id).await {
+        Err(ManifestLoadError::DuplicateRevisionRow { family, .. }) => {
+            assert_eq!(family, ApiMetadataTableFamily::RevisionsByInodeDesc);
+        }
+        other => panic!("expected duplicate revision row, got {other:?}"),
+    }
+}
+
+async fn revision_index_test_materialization(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> (ManifestId, NamespaceManifestEnvelope, Vec<MetadataRow>) {
+    let manifest = create_checkpoint(store, namespace_id, context)
+        .await
+        .expect("checkpoint");
+    let materialized =
+        load_verified_manifest_materialization(store, namespace_id, manifest.manifest_id)
+            .await
+            .expect("load manifest before corruption");
+    let revision_index_rows = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataTableFamily::RevisionsByInodeDesc,
+    );
+    assert!(!revision_index_rows.is_empty());
+    (
+        materialized.manifest.payload.manifest_id,
+        materialized.manifest,
+        revision_index_rows,
+    )
+}
+
+async fn rewrite_revision_index_segment(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    manifest: &mut NamespaceManifestEnvelope,
+    mut rows: Vec<MetadataRow>,
+    writer_version: &str,
+) {
+    rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataTableFamily::RevisionsByInodeDesc));
+    let descriptor = manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|metadata_file| {
+            metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                && metadata_file.family == ApiMetadataTableFamily::RevisionsByInodeDesc
+        })
+        .expect("revision index metadata file");
+    rewrite_manifest_segment(
+        store,
+        namespace_id,
+        manifest.payload.head_seq,
+        ApiMetadataTableFamily::RevisionsByInodeDesc,
+        descriptor,
+        rows,
+        writer_version,
+    )
+    .await;
+}
+
+async fn overwrite_manifest(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    manifest: NamespaceManifestEnvelope,
+) {
+    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
+    let updated_manifest =
+        NamespaceManifestEnvelope::from_payload(manifest.writer_version, manifest.payload)
+            .expect("updated manifest");
+    let manifest_bytes =
+        encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
+    store
+        .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
+        .await
+        .expect("overwrite manifest");
+}
+
+fn assert_revision_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
+    match result {
+        Err(ManifestLoadError::RevisionIndexMismatch { .. }) => {}
+        Err(other) => panic!("expected revision index mismatch, got {other:?}"),
+        Ok(_) => panic!("expected revision index mismatch"),
+    }
+}
+
 fn base_run(manifest: &NamespaceManifestEnvelope) -> MetadataRunManifest {
     runs_from_metadata_files(&manifest.payload)
         .into_iter()

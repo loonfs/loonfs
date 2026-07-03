@@ -135,6 +135,16 @@ pub enum ManifestLoadError {
         family: MetadataTableFamily,
         row_kind: String,
     },
+    #[error(
+        "namespace manifest `{object_key}` has duplicate revision rows in `{family:?}` for key `{row_key}`"
+    )]
+    DuplicateRevisionRow {
+        object_key: String,
+        family: MetadataTableFamily,
+        row_key: String,
+    },
+    #[error("namespace manifest `{object_key}` revision index does not match canonical revisions")]
+    RevisionIndexMismatch { object_key: String },
     #[error("metadata rows do not reproduce authoritative metadata")]
     MetadataMismatch,
 }
