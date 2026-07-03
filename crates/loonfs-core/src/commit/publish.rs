@@ -174,7 +174,7 @@ mod tests {
     }
     use loonfs_api::wire::control::WriterLease;
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
-    use loonfs_api::{CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
+    use loonfs_api::{CheckpointId, CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
@@ -191,7 +191,9 @@ mod tests {
             next_inode_id: InodeId(10),
             name_policy: loonfs_api::NamePolicy::default(),
             current_manifest_id: Some(ManifestId(0)),
-            latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
+            latest_checkpoint_id: Some(
+                CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
+            ),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
             state: Default::default(),

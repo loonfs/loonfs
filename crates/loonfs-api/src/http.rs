@@ -1,6 +1,7 @@
 use crate::{
     v0::{MoveBehavior, ValidatedContentToken},
-    ChangeSeq, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId, RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +71,7 @@ pub struct NamespaceStatusResponse {
     pub current_manifest_id: Option<ManifestId>,
     /// Latest checkpoint recorded by the head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_checkpoint_id: Option<String>,
+    pub latest_checkpoint_id: Option<CheckpointId>,
     /// Number of visible WAL segments after the manifest basis.
     pub wal_tail_segments: u64,
     /// Oldest sequence still promised for incremental replay.
@@ -235,7 +236,7 @@ pub struct CreateCheckpointResponse {
     /// Namespace that was checkpointed.
     pub namespace_id: NamespaceId,
     /// Durable checkpoint id.
-    pub checkpoint_id: String,
+    pub checkpoint_id: CheckpointId,
     /// Sequence covered by the checkpoint.
     pub checkpoint_seq: ChangeSeq,
     /// Manifest pinned by the checkpoint.
@@ -243,7 +244,7 @@ pub struct CreateCheckpointResponse {
     /// Head's current manifest pointer after the operation.
     pub current_manifest_id: Option<ManifestId>,
     /// Latest checkpoint id recorded on the head after the operation.
-    pub latest_checkpoint_id: Option<String>,
+    pub latest_checkpoint_id: Option<CheckpointId>,
 }
 
 /// Result of advancing the retention floor.

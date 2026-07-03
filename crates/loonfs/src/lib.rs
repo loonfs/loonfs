@@ -24,7 +24,7 @@ pub use loonfs_api::v0::{
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
-    ChangeSeq, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DirectoryPageCursor, DisplayName,
     EffectiveLimit, FileRevision, FileRevisionsPageCursor, FilesystemOperationResponse, InodeId,
     InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult,

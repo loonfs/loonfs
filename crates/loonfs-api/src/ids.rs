@@ -31,6 +31,14 @@ pub struct ContentStoreId(String);
 #[cfg_attr(feature = "openapi", schema(value_type = String))]
 pub struct CommitId(String);
 
+/// Durable checkpoint identifier.
+///
+/// A checkpoint is a durable bookmark to a namespace manifest version.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "openapi", schema(value_type = String))]
+pub struct CheckpointId(String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid namespace_id {value:?}: {reason}")]
 pub struct NamespaceIdValidationError {
@@ -179,8 +187,8 @@ pub fn generate_gc_pin_id() -> String {
     generated_id("pin")
 }
 
-pub fn generate_checkpoint_id() -> String {
-    generated_id("chk")
+pub fn generate_checkpoint_id() -> CheckpointId {
+    CheckpointId::generate()
 }
 
 pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
@@ -385,6 +393,32 @@ impl ContentStoreId {
     }
 }
 
+impl CheckpointId {
+    /// Generates a valid random checkpoint id.
+    pub fn generate() -> Self {
+        Self(generated_id("chk"))
+    }
+
+    /// Parses and validates a checkpoint id.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, GeneratedIdValidationError> {
+        let value = value.as_ref();
+        validate_checkpoint_id(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Builds a checkpoint id from an owned string after validation.
+    pub fn try_new(value: impl Into<String>) -> Result<Self, GeneratedIdValidationError> {
+        let value = value.into();
+        validate_checkpoint_id(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the serialized checkpoint id.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl NameKey {
     /// Parses and validates a stored name key.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, NameKeyValidationError> {
@@ -462,6 +496,22 @@ impl TryFrom<String> for CommitId {
     }
 }
 
+impl TryFrom<&str> for CheckpointId {
+    type Error = GeneratedIdValidationError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for CheckpointId {
+    type Error = GeneratedIdValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
 impl AsRef<str> for NamespaceId {
     fn as_ref(&self) -> &str {
         self.as_str()
@@ -475,6 +525,12 @@ impl AsRef<str> for ContentStoreId {
 }
 
 impl AsRef<str> for CommitId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for CheckpointId {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
@@ -499,6 +555,12 @@ impl Borrow<str> for ContentStoreId {
 }
 
 impl Borrow<str> for CommitId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for CheckpointId {
     fn borrow(&self) -> &str {
         self.as_str()
     }
@@ -529,6 +591,15 @@ impl Serialize for ContentStoreId {
 }
 
 impl Serialize for CommitId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl Serialize for CheckpointId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -573,6 +644,16 @@ impl<'de> Deserialize<'de> for ContentStoreId {
     {
         let value = String::deserialize(deserializer)?;
         ContentStoreId::try_new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckpointId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        CheckpointId::try_new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -663,6 +744,12 @@ impl fmt::Display for CommitId {
     }
 }
 
+impl fmt::Display for CheckpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl fmt::Display for NameKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -693,7 +780,7 @@ mod tests {
         generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
         generate_wal_segment_id, validate_checkpoint_id, validate_gc_pin_id,
         validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, ChangeSeq,
-        CommitId, ContentStoreId, NameKey, NamespaceId,
+        CheckpointId, CommitId, ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
 
@@ -764,10 +851,17 @@ mod tests {
                 .as_str(),
             "cs_00000000000000000000000000000001"
         );
+        assert_eq!(
+            CheckpointId::try_from("chk_00000000000000000000000000000001")
+                .expect("valid checkpoint id")
+                .as_str(),
+            "chk_00000000000000000000000000000001"
+        );
 
         assert!(NamespaceId::try_from("invalid/name").is_err());
         assert!(CommitId::try_from("invalid/name").is_err());
         assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
+        assert!(CheckpointId::try_from("chk_0000000000000000000000000000000g").is_err());
     }
 
     #[test]
@@ -785,6 +879,13 @@ mod tests {
             content_store_id.as_str(),
             "cs_00000000000000000000000000000001"
         );
+        let checkpoint_id: CheckpointId =
+            serde_json::from_str(r#""chk_00000000000000000000000000000001""#)
+                .expect("valid checkpoint id json");
+        assert_eq!(
+            checkpoint_id.as_str(),
+            "chk_00000000000000000000000000000001"
+        );
 
         let namespace_error = serde_json::from_str::<NamespaceId>(r#""invalid/name""#)
             .expect_err("invalid namespace id json");
@@ -796,6 +897,10 @@ mod tests {
             serde_json::from_str::<ContentStoreId>(r#""cs_0000000000000000000000000000000g""#)
                 .expect_err("invalid content store id json");
         assert!(content_store_error.to_string().contains("generated id"));
+        let checkpoint_error =
+            serde_json::from_str::<CheckpointId>(r#""chk_0000000000000000000000000000000g""#)
+                .expect_err("invalid checkpoint id json");
+        assert!(checkpoint_error.to_string().contains("generated id"));
     }
 
     #[test]
@@ -853,12 +958,12 @@ mod tests {
         assert!(wal_segment_id.starts_with("00000000000000000412-"));
         assert_generated_id_shape(&metadata_table_id, "tbl");
         assert_generated_id_shape(&gc_pin_id, "pin");
-        assert_generated_id_shape(&checkpoint_id, "chk");
+        assert_generated_id_shape(checkpoint_id.as_str(), "chk");
         assert!(validate_upload_id(&upload_id).is_ok());
         assert!(validate_wal_segment_id(&wal_segment_id).is_ok());
         assert!(validate_metadata_table_id(&metadata_table_id).is_ok());
         assert!(validate_gc_pin_id(&gc_pin_id).is_ok());
-        assert!(validate_checkpoint_id(&checkpoint_id).is_ok());
+        assert!(validate_checkpoint_id(checkpoint_id.as_str()).is_ok());
     }
 
     #[test]

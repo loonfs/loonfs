@@ -22,7 +22,8 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loonfs_api::{
-    generate_checkpoint_id, sha256_digest, ManifestId, NamespaceId, NamespaceSummary, WriterEpoch,
+    generate_checkpoint_id, sha256_digest, CheckpointId, ManifestId, NamespaceId, NamespaceSummary,
+    WriterEpoch,
 };
 use loonfs_objectstore::keys::{
     gc_pin, namespace_descriptor, namespace_fork_state, namespace_head,
@@ -236,13 +237,13 @@ async fn write_source_gc_pin<S: ObjectStore + ?Sized>(
 
 fn checkpoint_record_by_id<'a>(
     manifest: &'a NamespaceManifestEnvelope,
-    checkpoint_id: &str,
+    checkpoint_id: &CheckpointId,
 ) -> Result<&'a NamespaceCheckpointRecord, CoreError> {
     manifest
         .payload
         .checkpoints
         .iter()
-        .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+        .find(|checkpoint| &checkpoint.checkpoint_id == checkpoint_id)
         .ok_or_else(|| {
             CoreError::NamespaceCorrupt(format!(
                 "manifest {:?} does not contain checkpoint `{checkpoint_id}`",
@@ -254,7 +255,7 @@ fn checkpoint_record_by_id<'a>(
 fn deterministic_gc_pin_id(
     source_namespace_id: &NamespaceId,
     target_namespace_id: &NamespaceId,
-    source_checkpoint_id: &str,
+    source_checkpoint_id: &CheckpointId,
     source_manifest_id: ManifestId,
     source_head_seq: loonfs_api::ChangeSeq,
 ) -> String {
@@ -367,8 +368,8 @@ mod tests {
         NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use loonfs_api::{
-        validate_gc_pin_id, ChangeSeq, CommitId, InodeId, ManifestId, NamePolicy, NamespaceId,
-        WriterEpoch,
+        validate_gc_pin_id, ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamePolicy,
+        NamespaceId, WriterEpoch,
     };
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::gc_pin;
@@ -380,17 +381,19 @@ mod tests {
     async fn gc_pin_id_is_deterministic_for_same_source_target_checkpoint_manifest() {
         let source = NamespaceId::parse("source").expect("source namespace");
         let target = NamespaceId::parse("target").expect("target namespace");
+        let checkpoint_id =
+            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
         let first = deterministic_gc_pin_id(
             &source,
             &target,
-            "chk_00000000000000000000000000000001",
+            &checkpoint_id,
             ManifestId(42),
             ChangeSeq(7),
         );
         let second = deterministic_gc_pin_id(
             &source,
             &target,
-            "chk_00000000000000000000000000000001",
+            &checkpoint_id,
             ManifestId(42),
             ChangeSeq(7),
         );
@@ -407,9 +410,11 @@ mod tests {
             ChangeSeq(7),
             "c_00000000000000000000000000000007",
         );
+        let checkpoint_id =
+            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
 
-        let checkpoint = checkpoint_record_by_id(&manifest, "chk_00000000000000000000000000000001")
-            .expect("checkpoint record");
+        let checkpoint =
+            checkpoint_record_by_id(&manifest, &checkpoint_id).expect("checkpoint record");
 
         assert_eq!(checkpoint.manifest_id, ManifestId(42));
         assert_eq!(checkpoint.head_seq, ChangeSeq(7));
@@ -472,7 +477,8 @@ mod tests {
     ) -> NamespaceGcPinStateEnvelope {
         let source = NamespaceId::parse(source_namespace_id).expect("source namespace");
         let target = NamespaceId::parse(target_namespace_id).expect("target namespace");
-        let checkpoint_id = "chk_00000000000000000000000000000001";
+        let checkpoint_id =
+            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
         let source_manifest_id = ManifestId(42);
         let source_head_seq = ChangeSeq(7);
         NamespaceGcPinStateEnvelope::from_state(
@@ -482,13 +488,13 @@ mod tests {
                 pin_id: deterministic_gc_pin_id(
                     &source,
                     &target,
-                    checkpoint_id,
+                    &checkpoint_id,
                     source_manifest_id,
                     source_head_seq,
                 ),
                 source_namespace_id: source,
                 target_namespace_id: target,
-                source_checkpoint_id: checkpoint_id.to_owned(),
+                source_checkpoint_id: checkpoint_id,
                 source_manifest_id,
                 source_head_seq,
                 created_at_ms,
@@ -505,6 +511,7 @@ mod tests {
     ) -> NamespaceManifestEnvelope {
         let namespace_id = NamespaceId::parse("source").expect("source namespace");
         let commit_id = CommitId::parse(head_commit_id).expect("commit id");
+        let checkpoint_id = CheckpointId::parse(checkpoint_id).expect("checkpoint id");
         NamespaceManifestEnvelope::from_payload(
             "test-writer/0.1.0",
             NamespaceManifestPayload {
@@ -521,7 +528,7 @@ mod tests {
                 verified: true,
                 fork: None,
                 checkpoints: vec![NamespaceCheckpointRecord {
-                    checkpoint_id: checkpoint_id.to_owned(),
+                    checkpoint_id,
                     manifest_id,
                     head_seq,
                     head_commit_id: commit_id,

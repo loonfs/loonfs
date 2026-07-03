@@ -3,7 +3,8 @@ use crate::envelope::EnvelopeProbe;
 use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId, NamePolicy, NamespaceId,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId, NamePolicy,
+    NamespaceId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -84,7 +85,7 @@ pub struct NamespaceForkState {
     pub namespace_id: NamespaceId,
     pub source_namespace_id: NamespaceId,
     pub fork_seq: ChangeSeq,
-    pub source_checkpoint_id: String,
+    pub source_checkpoint_id: CheckpointId,
     pub source_manifest_id: ManifestId,
     pub source_head_seq: ChangeSeq,
     pub created_at_ms: u64,
@@ -98,7 +99,7 @@ pub struct NamespaceGcPinState {
     pub pin_id: String,
     pub source_namespace_id: NamespaceId,
     pub target_namespace_id: NamespaceId,
-    pub source_checkpoint_id: String,
+    pub source_checkpoint_id: CheckpointId,
     pub source_manifest_id: ManifestId,
     pub source_head_seq: ChangeSeq,
     pub created_at_ms: u64,
@@ -185,7 +186,7 @@ pub struct HeadState {
     /// Reads do not use this as authority; checkpoints pin manifests for
     /// retention, forks, stable reads, and restore workflows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_checkpoint_id: Option<String>,
+    pub latest_checkpoint_id: Option<CheckpointId>,
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,

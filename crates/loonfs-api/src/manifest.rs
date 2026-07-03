@@ -2,8 +2,8 @@ use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId, NamePolicy,
+    NamespaceId, RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -90,14 +90,14 @@ pub struct MetadataFileRef {
 pub struct NamespaceManifestFork {
     pub source_namespace_id: NamespaceId,
     pub fork_seq: ChangeSeq,
-    pub source_checkpoint_id: String,
+    pub source_checkpoint_id: CheckpointId,
     pub source_manifest_id: ManifestId,
     pub source_head_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceCheckpointRecord {
-    pub checkpoint_id: String,
+    pub checkpoint_id: CheckpointId,
     pub manifest_id: ManifestId,
     pub head_seq: ChangeSeq,
     pub head_commit_id: CommitId,
@@ -638,7 +638,10 @@ mod tests {
         MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
         NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
-    use crate::{ChangeSeq, CommitId, InodeId, ManifestId, NamePolicy, NamespaceId, WriterEpoch};
+    use crate::{
+        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamePolicy, NamespaceId,
+        WriterEpoch,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -660,7 +663,8 @@ mod tests {
                 verified: true,
                 fork: None,
                 checkpoints: vec![NamespaceCheckpointRecord {
-                    checkpoint_id: "chk_00000000000000000000000000000001".to_owned(),
+                    checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
+                        .expect("checkpoint id"),
                     manifest_id: ManifestId(10),
                     head_seq: ChangeSeq(10),
                     head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
@@ -689,7 +693,7 @@ mod tests {
         assert_eq!(decoded.payload.checkpoints.len(), 1);
         assert_eq!(
             decoded.payload.checkpoints[0].checkpoint_id,
-            "chk_00000000000000000000000000000001"
+            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id")
         );
         assert_eq!(decoded.payload.metadata_files.len(), 1);
         assert_eq!(decoded.payload.metadata_files[0].run_seq, ChangeSeq(10));
@@ -715,7 +719,10 @@ mod tests {
                 fork: Some(NamespaceManifestFork {
                     source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                     fork_seq: ChangeSeq(12),
-                    source_checkpoint_id: "chk_00000000000000000000000000000002".to_owned(),
+                    source_checkpoint_id: CheckpointId::parse(
+                        "chk_00000000000000000000000000000002",
+                    )
+                    .expect("checkpoint id"),
                     source_manifest_id: ManifestId(10),
                     source_head_seq: ChangeSeq(12),
                 }),

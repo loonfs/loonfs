@@ -37,8 +37,8 @@ use loonfs_api::wire::wal::{
     WalCommitDelta, WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, v0::UploadMode, ChangeSeq, CommitId, ContentRef, ContentStoreId, InodeId,
-    InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo, WriterEpoch,
+    sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
+    InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -108,6 +108,10 @@ fn namespace_id() -> NamespaceId {
 
 fn commit_id() -> CommitId {
     CommitId::parse("c_00000000000000000000000000000042").expect("valid commit id")
+}
+
+fn checkpoint_id(value: &str) -> CheckpointId {
+    CheckpointId::parse(value).expect("valid checkpoint id")
 }
 
 fn sample_content_ref() -> ContentRef {
@@ -287,12 +291,12 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             fork: Some(NamespaceManifestFork {
                 source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 fork_seq: ChangeSeq(2),
-                source_checkpoint_id: "chk_00000000000000000000000000000001".to_owned(),
+                source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000001"),
                 source_manifest_id: ManifestId(1),
                 source_head_seq: ChangeSeq(2),
             }),
             checkpoints: vec![NamespaceCheckpointRecord {
-                checkpoint_id: "chk_00000000000000000000000000000002".to_owned(),
+                checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
                 manifest_id: ManifestId(2),
                 head_seq: ChangeSeq(2),
                 head_commit_id: commit_id(),
@@ -339,7 +343,7 @@ fn sample_head_state() -> HeadState {
         next_inode_id: InodeId(10),
         name_policy: NamePolicy::default(),
         current_manifest_id: Some(ManifestId(2)),
-        latest_checkpoint_id: Some("chk_00000000000000000000000000000002".to_owned()),
+        latest_checkpoint_id: Some(checkpoint_id("chk_00000000000000000000000000000002")),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: Some(sample_wal_pointer()),
         state: NamespaceState::Active,
@@ -469,7 +473,7 @@ fn control_objects_match_golden_bytes() {
             namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             source_namespace_id: namespace_id(),
             fork_seq: ChangeSeq(2),
-            source_checkpoint_id: "chk_00000000000000000000000000000002".to_owned(),
+            source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
             source_manifest_id: ManifestId(2),
             source_head_seq: ChangeSeq(2),
             created_at_ms: 1_000,
@@ -482,7 +486,7 @@ fn control_objects_match_golden_bytes() {
             pin_id: "pin_0123456789abcdef0123456789abcdef".to_owned(),
             source_namespace_id: namespace_id(),
             target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
-            source_checkpoint_id: "chk_00000000000000000000000000000002".to_owned(),
+            source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
             source_manifest_id: ManifestId(2),
             source_head_seq: ChangeSeq(2),
             created_at_ms: 1_000,
