@@ -39,7 +39,6 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_sst, namespace_manifest};
 use loonfs_objectstore::ObjectStore;
-#[cfg(test)]
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -734,7 +733,6 @@ pub(super) fn append_rows_to_metadata(
     Ok(())
 }
 
-#[cfg(test)]
 pub(super) fn validate_direntry_child_bind_index(
     object_key: &str,
     mut direntry_bind_rows: Vec<MetadataRow>,
@@ -756,7 +754,6 @@ pub(super) fn validate_direntry_child_bind_index(
     Ok(())
 }
 
-#[cfg(test)]
 pub(super) fn validate_revision_by_inode_desc_index(
     object_key: &str,
     mut revision_rows: Vec<MetadataRow>,
@@ -785,7 +782,6 @@ pub(super) fn validate_revision_by_inode_desc_index(
     Ok(())
 }
 
-#[cfg(test)]
 fn validate_revision_rows_have_unique_keys(
     object_key: &str,
     family: MetadataTableFamily,
@@ -805,7 +801,6 @@ fn validate_revision_rows_have_unique_keys(
     Ok(())
 }
 
-#[cfg(test)]
 fn revision_logical_key(row: &MetadataRow) -> String {
     row.row_key_for_family(MetadataTableFamily::Revisions)
 }

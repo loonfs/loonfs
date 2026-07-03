@@ -525,6 +525,126 @@ async fn maintenance_does_not_make_orphan_wal_visible() {
 }
 
 #[tokio::test]
+async fn retention_floor_does_not_advance_past_missing_metadata_segment() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+            .await
+            .expect("load manifest");
+    let missing_key = materialized
+        .manifest
+        .payload
+        .metadata_files
+        .first()
+        .expect("metadata file")
+        .object_key
+        .clone();
+    store.delete(&missing_key).await.expect("delete segment");
+
+    let error = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect_err("floor must not advance past missing segment");
+    assert!(
+        matches!(error, CoreError::CheckpointUnavailable(_)),
+        "unexpected error: {error:?}"
+    );
+    let head = read_head_object(&store, &namespace_id)
+        .await
+        .expect("read head")
+        .envelope
+        .state;
+    assert_eq!(head.retention_floor_seq, ChangeSeq(0));
+}
+
+#[tokio::test]
+async fn base_rebuild_rejects_divergent_revision_index() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    // Count-neutral divergence: same row count, different content, so only
+    // row-level index equality can catch it.
+    let (_, mut manifest, mut revision_index_rows) =
+        revision_index_test_materialization(&store, &namespace_id, &context).await;
+    let first = revision_index_rows.first_mut().expect("revision index row");
+    if let MetadataRow::Revision { content_ref, .. } = first {
+        content_ref.digest =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned();
+    }
+    rewrite_revision_index_segment(
+        &store,
+        &namespace_id,
+        &mut manifest,
+        revision_index_rows,
+        &context.writer_version,
+    )
+    .await;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    // L0 appends never re-read the base run; the base rebuild that folds
+    // every run back together is the production point that must reject it.
+    let mut rebuild_error = None;
+    for round in 0..12u32 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        match create_checkpoint(&store, &namespace_id, &context).await {
+            Ok(_) => {}
+            Err(error) => {
+                rebuild_error = Some(error);
+                break;
+            }
+        }
+    }
+    match rebuild_error.expect("base rebuild should reject the divergent index") {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::RevisionIndexMismatch { .. },
+        )) => {}
+        other => panic!("expected revision index mismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn manifest_load_rejects_unequal_index_descriptor_counts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

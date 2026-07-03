@@ -981,7 +981,11 @@ Clients older than the retention floor must re-bootstrap from a fresh
 checkpoint instead of replaying from an obsolete cursor.
 
 The retention floor may advance only after the system has enough verified
-material to keep replay safe at or after that point.
+material to keep replay safe at or after that point: advancement verifies
+that every metadata segment referenced by the target manifest still exists
+before the floor moves. Corruption discovered after advancement is caught by
+read-path checksum validation; a segment that disappeared must block the
+floor while replay can still rebuild the lost state.
 
 Creating a checkpoint pins the current durable namespace file-set version. If
 there is no manifest for the current head, the implementation first writes one
@@ -1190,7 +1194,10 @@ For file revisions, a valid manifest includes the canonical `revisions` table
 and the `revisions_by_inode_desc` index table. The index table must contain
 exactly the same revision rows as the canonical table, keyed for newest-first
 inode revision scans. Readers treat a missing, extra, duplicate, or changed
-revision index row as namespace corruption.
+revision index row as namespace corruption. Segment reads enforce per-segment
+checksums, key ranges, and per-run row-count equality between canonical and
+index families; full row-level index equality is enforced at every base
+rebuild, the production point that materializes all rows.
 
 ### 6.2 Compaction
 

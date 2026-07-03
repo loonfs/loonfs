@@ -8,7 +8,8 @@ use super::build::{
 use super::error::ManifestLoadError;
 use super::load::{
     head_from_manifest, load_namespace_manifest_envelope_if_present,
-    load_verified_manifest_tables_with_cache,
+    load_verified_manifest_tables_with_cache, validate_direntry_child_bind_index,
+    validate_revision_by_inode_desc_index,
 };
 use super::publish::{
     publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
@@ -530,6 +531,41 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
         rows.sort_by_key(|row| row.row_key_for_family(family));
         rows_by_family.insert(family, rows);
     }
+
+    // The base rebuild is the one production point that holds every row of
+    // every family, so cross-check the index families against their
+    // canonical tables before compacting them forward (format spec,
+    // "Manifest publication and checkpoint verification").
+    let source_manifest_key = namespace_manifest(
+        namespace_id.as_str(),
+        projection.manifest_tables.manifest().payload.manifest_id,
+    );
+    let index_error =
+        |error| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error));
+    validate_direntry_child_bind_index(
+        &source_manifest_key,
+        rows_by_family
+            .get(&MetadataTableFamily::DirentryBinds)
+            .cloned()
+            .unwrap_or_default(),
+        rows_by_family
+            .get(&MetadataTableFamily::DirentryChildBinds)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(index_error)?;
+    validate_revision_by_inode_desc_index(
+        &source_manifest_key,
+        rows_by_family
+            .get(&MetadataTableFamily::Revisions)
+            .cloned()
+            .unwrap_or_default(),
+        rows_by_family
+            .get(&MetadataTableFamily::RevisionsByInodeDesc)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(index_error)?;
 
     build_manifest_tables_from_rows(
         store,
