@@ -8,12 +8,14 @@ use super::load::{
     MetadataTableCacheMode, MetadataTableLoadContext,
 };
 use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
+#[cfg(test)]
 use crate::metadata::MetadataState;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
 };
 use loonfs_objectstore::ObjectStore;
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -21,8 +23,9 @@ use std::sync::Mutex;
 pub(super) const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
 pub(super) const MAX_MATERIALIZED_TABLE_FETCHES: usize = 8;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LoadedManifestMaterialization {
+pub(crate) struct ManifestMaterializationForInspection {
     pub(crate) manifest: NamespaceManifestEnvelope,
     pub(crate) metadata_state: MetadataState,
 }

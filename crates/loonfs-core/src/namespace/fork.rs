@@ -1,6 +1,6 @@
 use super::bootstrap::BootstrapNamespaceError;
 use crate::checkpoint::{
-    create_checkpoint, load_verified_manifest_materialization, write_namespace_manifest,
+    create_checkpoint, load_verified_manifest_tables, write_namespace_manifest,
 };
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -28,7 +28,6 @@ use loonfs_objectstore::keys::{
     gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
 };
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use std::collections::BTreeMap;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -62,14 +61,14 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     }
 
     let checkpoint = create_checkpoint(store, source_namespace_id, context).await?;
-    let source_manifest =
-        load_verified_manifest_materialization(store, source_namespace_id, checkpoint.manifest_id)
+    let source_tables =
+        load_verified_manifest_tables(store, source_namespace_id, checkpoint.manifest_id)
             .await
             .map_err(|err| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err))
             })?;
-    let source_checkpoint =
-        checkpoint_record_by_id(&source_manifest.manifest, &checkpoint.checkpoint_id)?;
+    let source_manifest = source_tables.manifest();
+    let source_checkpoint = checkpoint_record_by_id(source_manifest, &checkpoint.checkpoint_id)?;
     let fork_seq = source_checkpoint.head_seq;
     let source_head_seq = source_checkpoint.head_seq;
     let source_head_commit_id = source_checkpoint.head_commit_id.clone();
@@ -86,8 +85,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         seq: fork_seq,
         head_commit_id: source_head_commit_id.clone(),
         active_fence_token: FenceToken(0),
-        next_inode_id: source_manifest.manifest.payload.next_inode_id,
-        name_policy: source_manifest.manifest.payload.name_policy,
+        next_inode_id: source_manifest.payload.next_inode_id,
+        name_policy: source_manifest.payload.name_policy,
         current_manifest_id: Some(target_manifest_id),
         latest_checkpoint_id: Some(target_checkpoint_id.clone()),
         retention_floor_seq: fork_seq,
@@ -147,10 +146,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             manifest_id: target_manifest_id,
             head_seq: fork_seq,
             head_commit_id: source_head_commit_id.clone(),
-            base_seq: source_manifest.manifest.payload.base_seq,
+            base_seq: source_manifest.payload.base_seq,
             active_fence_token: FenceToken(0),
-            next_inode_id: source_manifest.manifest.payload.next_inode_id,
-            name_policy: source_manifest.manifest.payload.name_policy,
+            next_inode_id: source_manifest.payload.next_inode_id,
+            name_policy: source_manifest.payload.name_policy,
             retention_floor_seq: fork_seq,
             initialized: true,
             verified: true,
@@ -170,8 +169,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                 expires_at_ms: None,
                 name: None,
             }],
-            features: BTreeMap::new(),
-            metadata_files: source_manifest.manifest.payload.metadata_files.clone(),
+            features: source_manifest.payload.features.clone(),
+            metadata_files: source_manifest.payload.metadata_files.clone(),
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;

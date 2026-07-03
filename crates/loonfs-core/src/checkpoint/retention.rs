@@ -1,6 +1,6 @@
 //! Retention floor advancement, gated on verified derived progress.
 
-use super::load::load_verified_manifest_materialization;
+use super::load::load_verified_manifest_tables;
 use super::publish::{compare_and_swap_head, HEAD_CAS_RETRY_LIMIT};
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
@@ -35,13 +35,13 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                 .ok_or_else(|| MetadataViewError::MissingManifest {
                     namespace_id: namespace_id.clone(),
                 })?;
-        let manifest =
-            load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+        let manifest_tables =
+            load_verified_manifest_tables(store, namespace_id, current_manifest_id)
                 .await
                 .map_err(|error| {
                     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
                 })?;
-        let target_floor = manifest.manifest.payload.head_seq;
+        let target_floor = manifest_tables.manifest().payload.head_seq;
         ensure_required_retention_progress(store, namespace_id, target_floor).await?;
 
         if head.retention_floor_seq >= target_floor {

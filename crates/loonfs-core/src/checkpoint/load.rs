@@ -1,21 +1,35 @@
-//! Read-side manifest loading: fetch and decode manifests and their SST
-//! segments, then assemble verified metadata state from their rows.
+//! Read-side manifest loading.
+//!
+//! There are three intentionally separate levels here:
+//!
+//! 1. `load_namespace_manifest_envelope` validates only the manifest envelope.
+//! 2. `load_verified_manifest_tables` validates the manifest and table
+//!    descriptors without fetching SST row payloads.
+//! 3. `load_manifest_materialization_for_inspection` is the expensive
+//!    inspection/debug path that loads every referenced row into `MetadataState`.
 
 use super::cache::{
     DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
 };
 use super::error::ManifestLoadError;
+#[cfg(test)]
 use super::row::manifest_row_kind;
-use super::runs::{runs_in_materialization_order, MetadataTableManifest, MAX_MAINTENANCE_TABLE_IO};
-use super::scan::{ordered_manifest_tables, LoadedManifestMaterialization, VerifiedMetadataTables};
+use super::runs::runs_in_materialization_order;
+#[cfg(test)]
+use super::runs::{MetadataTableManifest, MAX_MAINTENANCE_TABLE_IO};
+#[cfg(test)]
+use super::scan::ManifestMaterializationForInspection;
+use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{
     validate_manifest_materialization_ranges, validate_manifest_row_seq_range,
     validate_manifest_segment, validate_namespace_manifest,
 };
+#[cfg(test)]
 use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     MetadataStateBuilder, RevisionRecord, SubtreeTombstoneRecord,
 };
+#[cfg(test)]
 use futures::future::try_join_all;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
@@ -25,16 +39,19 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_sst, namespace_manifest};
 use loonfs_objectstore::ObjectStore;
-use std::collections::{BTreeSet, HashMap};
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tracing::Instrument;
 
-pub(crate) async fn load_verified_manifest_materialization<S: ObjectStore + ?Sized>(
+#[cfg(test)]
+pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
-) -> Result<LoadedManifestMaterialization, ManifestLoadError> {
-    load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id)
+) -> Result<ManifestMaterializationForInspection, ManifestLoadError> {
+    load_manifest_materialization_for_inspection_if_present(store, namespace_id, manifest_id)
         .await?
         .ok_or_else(|| ManifestLoadError::MissingManifest {
             object_key: namespace_manifest(namespace_id.as_str(), manifest_id),
@@ -42,8 +59,8 @@ pub(crate) async fn load_verified_manifest_materialization<S: ObjectStore + ?Siz
 }
 
 /// Loads and validates only the manifest envelope, without fetching its
-/// metadata tables. Enough for callers that need manifest framing such as
-/// the materialized materialization seq, not the rows.
+/// metadata tables. This is enough for callers that need manifest framing,
+/// not table descriptors or rows.
 pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -55,6 +72,16 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
         .ok_or(ManifestLoadError::MissingManifest {
             object_key: manifest_key,
         })
+}
+
+/// Loads the current manifest's verified table descriptors without fetching
+/// metadata SST row payloads or constructing `MetadataState`.
+pub(crate) async fn load_verified_manifest_tables<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+    manifest_id: ManifestId,
+) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
+    load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id).await
 }
 
 pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Sized>(
@@ -91,6 +118,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     }?;
     validate_namespace_manifest(namespace_id, manifest_id, &manifest_key, &manifest)?;
     validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
+    validate_manifest_table_descriptors(&manifest_key, &manifest)?;
     let tables = VerifiedMetadataTables {
         store,
         table_cache,
@@ -122,11 +150,14 @@ pub(crate) fn head_from_manifest(
     }
 }
 
-pub(super) async fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
+#[cfg(test)]
+pub(super) async fn load_manifest_materialization_for_inspection_if_present<
+    S: ObjectStore + ?Sized,
+>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
-) -> Result<Option<LoadedManifestMaterialization>, ManifestLoadError> {
+) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = load_namespace_manifest_envelope_if_present(
         store,
@@ -138,10 +169,14 @@ pub(super) async fn load_verified_manifest_materialization_if_present<S: ObjectS
     let Some(manifest) = manifest else {
         return Ok(None);
     };
-    let metadata_state =
-        load_manifest_materialization_from_manifest(store, namespace_id, &manifest_key, &manifest)
-            .await?;
-    Ok(Some(LoadedManifestMaterialization {
+    let metadata_state = load_manifest_metadata_state_for_inspection_from_manifest(
+        store,
+        namespace_id,
+        &manifest_key,
+        &manifest,
+    )
+    .await?;
+    Ok(Some(ManifestMaterializationForInspection {
         manifest,
         metadata_state,
     }))
@@ -185,7 +220,10 @@ pub(super) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
     skip_all,
     fields(phase = "load_manifest_tables", key_class = "manifest_table")
 )]
-pub(super) async fn load_manifest_materialization_from_manifest<S: ObjectStore + ?Sized>(
+#[cfg(test)]
+pub(super) async fn load_manifest_metadata_state_for_inspection_from_manifest<
+    S: ObjectStore + ?Sized,
+>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_object_key: &str,
@@ -210,6 +248,77 @@ pub(super) async fn load_manifest_materialization_from_manifest<S: ObjectStore +
     }
 
     Ok(metadata_state.finish())
+}
+
+fn validate_manifest_table_descriptors(
+    manifest_object_key: &str,
+    manifest: &NamespaceManifestEnvelope,
+) -> Result<(), ManifestLoadError> {
+    for run in runs_in_materialization_order(&manifest.payload) {
+        let ordered_tables = ordered_manifest_tables(manifest_object_key, &run.tables)?;
+        let mut direntry_bind_rows = 0u64;
+        let mut direntry_child_bind_rows = 0u64;
+        let mut revision_rows = 0u64;
+        let mut revision_by_inode_desc_rows = 0u64;
+        let context = MetadataTableLoadContext {
+            manifest_object_key,
+            segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
+            row_seq_min: None,
+            row_seq_max: run.run_seq,
+        };
+
+        for table in ordered_tables {
+            for descriptor in &table.segments {
+                context.expected_segment_seq(descriptor)?;
+                let expected_key = metadata_file_object_key(descriptor);
+                if descriptor.object_key != expected_key {
+                    return Err(ManifestLoadError::SegmentObjectKeyMismatch {
+                        object_key: descriptor.object_key.clone(),
+                        expected: expected_key,
+                    });
+                }
+                match table.family {
+                    MetadataTableFamily::DirentryBinds => {
+                        direntry_bind_rows =
+                            direntry_bind_rows.saturating_add(descriptor.row_count);
+                    }
+                    MetadataTableFamily::DirentryChildBinds => {
+                        direntry_child_bind_rows =
+                            direntry_child_bind_rows.saturating_add(descriptor.row_count);
+                    }
+                    MetadataTableFamily::Revisions => {
+                        revision_rows = revision_rows.saturating_add(descriptor.row_count);
+                    }
+                    MetadataTableFamily::RevisionsByInodeDesc => {
+                        revision_by_inode_desc_rows =
+                            revision_by_inode_desc_rows.saturating_add(descriptor.row_count);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if direntry_bind_rows > 0 && direntry_child_bind_rows == 0 {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: manifest_object_key.to_owned(),
+                message: format!(
+                    "metadata run {:?} has direntry binds without direntry child-bind index descriptors",
+                    run.run_seq
+                ),
+            });
+        }
+        if revision_rows > 0 && revision_by_inode_desc_rows == 0 {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: manifest_object_key.to_owned(),
+                message: format!(
+                    "metadata run {:?} has revisions without revision-by-inode index descriptors",
+                    run.run_seq
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -265,6 +374,7 @@ pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
     )
 }
 
+#[cfg(test)]
 pub(super) async fn append_manifest_tables_to_metadata<S>(
     store: &S,
     _namespace_id: &NamespaceId,
@@ -336,6 +446,7 @@ where
     )
 }
 
+#[cfg(test)]
 pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
     context: MetadataTableLoadContext<'_>,
@@ -507,6 +618,7 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
     }
 }
 
+#[cfg(test)]
 pub(super) fn append_rows_to_metadata(
     metadata_state: &mut MetadataStateBuilder,
     family: MetadataTableFamily,
@@ -621,6 +733,7 @@ pub(super) fn append_rows_to_metadata(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_direntry_child_bind_index(
     object_key: &str,
     mut direntry_bind_rows: Vec<MetadataRow>,
@@ -642,6 +755,7 @@ pub(super) fn validate_direntry_child_bind_index(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_revision_by_inode_desc_index(
     object_key: &str,
     mut revision_rows: Vec<MetadataRow>,
@@ -670,6 +784,7 @@ pub(super) fn validate_revision_by_inode_desc_index(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_revision_rows_have_unique_keys(
     object_key: &str,
     family: MetadataTableFamily,
@@ -689,6 +804,7 @@ fn validate_revision_rows_have_unique_keys(
     Ok(())
 }
 
+#[cfg(test)]
 fn revision_logical_key(row: &MetadataRow) -> String {
     row.row_key_for_family(MetadataTableFamily::Revisions)
 }

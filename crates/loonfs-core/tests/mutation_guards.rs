@@ -17,7 +17,10 @@ use loonfs_api::{
         NamespaceDescriptorState, NamespaceForkStateEnvelope, NamespaceGcPinStateEnvelope,
         UploadSessionEnvelope, UploadSessionState,
     },
-    wire::manifest::decode_namespace_manifest_json,
+    wire::manifest::{
+        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
+        NamespaceManifestEnvelope,
+    },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, FenceToken, InodeId, InodeKind,
@@ -3389,7 +3392,7 @@ async fn namespace_descriptor_checksum_is_validated() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let store = MetadataSstGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -3405,6 +3408,8 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         Some("seed-shared"),
     )
     .expect("seed shared file");
+    block_on(namespace_engine(&store, &source_namespace_id, &context).create_checkpoint())
+        .expect("create source checkpoint before fork");
 
     let source_head =
         block_on(load_namespace_head_control(&store, &source_namespace_id)).expect("source head");
@@ -3419,8 +3424,14 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .await
         .expect("list blobs before fork");
 
+    store.reset_metadata_sst_get_count();
     fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect("fork namespace");
+    assert_eq!(
+        store.metadata_sst_get_count(),
+        0,
+        "fork should validate manifest descriptors without loading metadata SST payloads"
+    );
 
     let fork_state_key = namespace_fork_state(clone_namespace_id.as_str());
     let fork_state_bytes = store
@@ -3653,6 +3664,64 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let corrupt_target = read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
         .expect_err("target should fail when referenced source SST is missing");
     assert_eq!(corrupt_target.code(), ErrorCode::NamespaceCorrupt);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
+
+    bootstrap_namespace(&store, &source_namespace_id, &context, false)
+        .expect("bootstrap source namespace");
+    write_file_bytes(
+        &store,
+        &source_namespace_id,
+        "/docs/shared.txt",
+        b"base",
+        &context,
+        Some("seed-shared"),
+    )
+    .expect("seed shared file");
+    let checkpoint =
+        block_on(namespace_engine(&store, &source_namespace_id, &context).create_checkpoint())
+            .expect("create source checkpoint");
+
+    let manifest_key = namespace_manifest(source_namespace_id.as_str(), checkpoint.manifest_id);
+    let manifest_bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read source manifest")
+        .expect("source manifest exists");
+    let mut manifest =
+        decode_namespace_manifest_json(&manifest_bytes).expect("decode source manifest");
+    manifest
+        .payload
+        .metadata_files
+        .retain(|metadata_file| metadata_file.family != MetadataTableFamily::RevisionsByInodeDesc);
+    let manifest =
+        NamespaceManifestEnvelope::from_payload(manifest.writer_version, manifest.payload)
+            .expect("rebuild manifest checksum");
+    let corrupted = encode_namespace_manifest_json(&manifest).expect("encode corrupt manifest");
+    store
+        .put_overwrite(&manifest_key, Bytes::from(corrupted))
+        .await
+        .expect("overwrite source manifest");
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("corrupt source manifest should block fork");
+
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .await
+            .expect("head clone descriptor")
+            .is_none(),
+        "failed fork must not publish target descriptor"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5138,6 +5207,83 @@ impl ObjectStore for ContentBlobGetCountingStore {
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.record_content_blob_get(key);
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct MetadataSstGetCountingStore {
+    inner: LocalFsStore,
+    metadata_sst_gets: AtomicUsize,
+}
+
+impl MetadataSstGetCountingStore {
+    fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            metadata_sst_gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn metadata_sst_get_count(&self) -> usize {
+        self.metadata_sst_gets.load(Ordering::SeqCst)
+    }
+
+    fn reset_metadata_sst_get_count(&self) {
+        self.metadata_sst_gets.store(0, Ordering::SeqCst);
+    }
+
+    fn record_metadata_sst_get(&self, key: &str) {
+        if key.contains("/tables/metadata/") && key.ends_with(".sst.zst") {
+            self.metadata_sst_gets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for MetadataSstGetCountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.record_metadata_sst_get(key);
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_metadata_sst_get(key);
         self.inner.get_with_metadata(key).await
     }
 
