@@ -249,7 +249,7 @@ impl Fs {
     ) -> Result<NamespaceSummary> {
         let result = self
             .namespace_engine(source)
-            .fork_namespace(target, loonfs_core::ForkOptions::default())
+            .fork_namespace(target)
             .await
             .map_err(RuntimeError::from);
         if should_invalidate_after_result(&result) {
@@ -1174,7 +1174,11 @@ impl Fs {
             .writer(self.inner.config.writer_id.clone())
             .writer_session_id(self.inner.writer_session_id.clone())
             .writer_version(self.inner.config.writer_version.clone())
-            .lease_duration_ms(self.inner.config.lease_duration_ms)
+            .settings(loonfs_core::Settings {
+                writer_lease_duration: std::time::Duration::from_millis(
+                    self.inner.config.lease_duration_ms,
+                ),
+            })
             .build()
             .expect("validated runtime config should build namespace engine")
     }

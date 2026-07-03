@@ -87,6 +87,4 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
 };
 pub use namespace::BootstrapNamespaceError;
-pub use options::{
-    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, WriteOptions,
-};
+pub use options::{BootstrapOptions, DeleteNamespaceOptions, Settings, WriteOptions};

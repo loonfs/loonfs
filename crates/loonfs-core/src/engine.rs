@@ -2,9 +2,7 @@ use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
-use crate::options::{
-    BootstrapOptions, CommitOptions, DeleteNamespaceOptions, ForkOptions, WriteOptions,
-};
+use crate::options::{BootstrapOptions, DeleteNamespaceOptions, Settings, WriteOptions};
 use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::generated_id;
@@ -25,8 +23,6 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-
-const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 fn default_page_limit() -> EffectiveLimit {
     EffectiveLimit::new(NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap_or(NonZeroU32::MIN))
@@ -94,9 +90,7 @@ pub struct NamespaceEngine<S> {
     writer_id: String,
     writer_session_id: String,
     writer_version: String,
-    lease_duration_ms: u64,
-    write_options: WriteOptions,
-    commit_options: CommitOptions,
+    settings: Settings,
 }
 
 impl<S: ObjectStore> NamespaceEngine<S> {
@@ -110,9 +104,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             writer_id: None,
             writer_session_id: None,
             writer_version: default_writer_version(),
-            lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
-            write_options: WriteOptions::default(),
-            commit_options: CommitOptions::default(),
+            settings: Settings::default(),
         }
     }
 
@@ -136,19 +128,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self.writer_version
     }
 
-    /// Returns the lease duration used by write operations.
-    pub fn lease_duration_ms(&self) -> u64 {
-        self.lease_duration_ms
-    }
-
-    /// Returns the default write options configured on the builder.
-    pub fn write_options(&self) -> &WriteOptions {
-        &self.write_options
-    }
-
-    /// Returns the default explicit-commit options configured on the builder.
-    pub fn commit_options(&self) -> &CommitOptions {
-        &self.commit_options
+    /// Returns the user-tweakable settings configured on the builder.
+    pub fn settings(&self) -> Settings {
+        self.settings
     }
 
     /// Consumes the engine and returns the underlying object store.
@@ -175,11 +157,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Creates a new namespace at the current head of this namespace.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    pub async fn fork_namespace(
-        &self,
-        target: &NamespaceId,
-        _options: ForkOptions,
-    ) -> CoreResult<NamespaceSummary> {
+    pub async fn fork_namespace(&self, target: &NamespaceId) -> CoreResult<NamespaceSummary> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,
@@ -555,10 +533,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             bytes.as_ref(),
             options.put_behavior,
             &self.mutation_context(),
-            options
-                .commit_id
-                .as_ref()
-                .map(|commit_id| commit_id.as_str()),
+            options.commit_id.as_ref(),
         )
         .await
     }
@@ -579,10 +554,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             content_ref,
             options.put_behavior,
             &self.mutation_context(),
-            options
-                .commit_id
-                .as_ref()
-                .map(|commit_id| commit_id.as_str()),
+            options.commit_id.as_ref(),
         )
         .await
     }
@@ -598,10 +570,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             path.as_ref(),
             &self.mutation_context(),
-            options
-                .commit_id
-                .as_ref()
-                .map(|commit_id| commit_id.as_str()),
+            options.commit_id.as_ref(),
         )
         .await
     }
@@ -612,10 +581,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        let commit_id = options
-            .commit_id
-            .as_ref()
-            .map(|commit_id| commit_id.as_str());
+        let commit_id = options.commit_id.as_ref();
         if options.delete_behavior == DeleteDirectoryBehavior::Recursive {
             crate::path::write::ops::delete_path(
                 &self.store,
@@ -650,10 +616,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             source.as_ref(),
             dest.as_ref(),
             &self.mutation_context(),
-            options
-                .commit_id
-                .as_ref()
-                .map(|commit_id| commit_id.as_str()),
+            options.commit_id.as_ref(),
         )
         .await
     }
@@ -671,10 +634,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             source.as_ref(),
             dest.as_ref(),
             &self.mutation_context(),
-            options
-                .commit_id
-                .as_ref()
-                .map(|commit_id| commit_id.as_str()),
+            options.commit_id.as_ref(),
         )
         .await
     }
@@ -692,10 +652,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             path.as_ref(),
             source_revision_no,
             &self.mutation_context(),
-            options
-                .commit_id
-                .as_ref()
-                .map(|commit_id| commit_id.as_str()),
+            options.commit_id.as_ref(),
         )
         .await
     }
@@ -704,11 +661,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ///
     /// This is the lower-level surface used by clients that need their own
     /// commit ids, preconditions, and operation lists.
-    pub async fn commit_operations(
-        &self,
-        request: CommitRequest,
-        _options: CommitOptions,
-    ) -> CoreResult<CommitResponse> {
+    pub async fn commit_operations(&self, request: CommitRequest) -> CoreResult<CommitResponse> {
         crate::protocol::commit_operations(
             &self.store,
             &self.namespace_id,
@@ -722,7 +675,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn commit_operations_batch(
         &self,
         requests: Vec<CommitRequest>,
-        _options: CommitOptions,
     ) -> Vec<CoreResult<CommitResponse>> {
         crate::protocol::commit_operations_batch(
             &self.store,
@@ -861,7 +813,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             writer_session_id: self.writer_session_id.clone(),
             writer_version: self.writer_version.clone(),
             now_ms: current_time_ms(),
-            lease_duration_ms: self.lease_duration_ms,
+            lease_duration_ms: self.settings.writer_lease_duration_ms(),
         }
     }
 }
@@ -877,9 +829,7 @@ pub struct NamespaceEngineBuilder<S> {
     writer_id: Option<String>,
     writer_session_id: Option<String>,
     writer_version: String,
-    lease_duration_ms: u64,
-    write_options: WriteOptions,
-    commit_options: CommitOptions,
+    settings: Settings,
 }
 
 impl<S: ObjectStore> NamespaceEngineBuilder<S> {
@@ -907,21 +857,9 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         self
     }
 
-    /// Sets how long this writer's namespace lease should remain valid.
-    pub fn lease_duration_ms(mut self, lease_duration_ms: u64) -> Self {
-        self.lease_duration_ms = lease_duration_ms;
-        self
-    }
-
-    /// Sets default write options stored on the engine.
-    pub fn write_options(mut self, options: WriteOptions) -> Self {
-        self.write_options = options;
-        self
-    }
-
-    /// Sets default explicit-commit options stored on the engine.
-    pub fn commit_options(mut self, options: CommitOptions) -> Self {
-        self.commit_options = options;
+    /// Sets user-tweakable engine settings.
+    pub fn settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
         self
     }
 
@@ -948,9 +886,7 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
                 .writer_session_id
                 .unwrap_or_else(|| generated_id("wrs")),
             writer_version: self.writer_version,
-            lease_duration_ms: self.lease_duration_ms,
-            write_options: self.write_options,
-            commit_options: self.commit_options,
+            settings: self.settings,
         })
     }
 }
@@ -989,6 +925,7 @@ fn current_time_ms() -> u64 {
 mod tests {
     use super::*;
     use loonfs_objectstore::fs::LocalFsStore;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[test]
@@ -1006,9 +943,27 @@ mod tests {
         assert_eq!(engine.namespace_id(), &namespace_id);
         assert_eq!(engine.writer_id(), "writer-a");
         assert!(!engine.writer_version().is_empty());
-        assert_eq!(engine.lease_duration_ms(), DEFAULT_LEASE_DURATION_MS);
-        assert_eq!(engine.write_options(), &WriteOptions::default());
-        assert_eq!(engine.commit_options(), &CommitOptions::default());
+        assert_eq!(engine.settings(), Settings::default());
+    }
+
+    #[test]
+    fn namespace_engine_builder_accepts_settings() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let settings = Settings {
+            writer_lease_duration: Duration::from_secs(30),
+        };
+
+        let engine = NamespaceEngine::builder(store)
+            .namespace(namespace_id)
+            .writer("writer-a")
+            .settings(settings)
+            .build()
+            .expect("engine builds");
+
+        assert_eq!(engine.settings(), settings);
+        assert_eq!(engine.mutation_context().lease_duration_ms, 30_000);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use super::intent::PathMutationIntent;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use loonfs_api::{
-    v0::MoveBehavior, ContentRef, DeleteDirectoryBehavior, MutationResult, NamespaceId,
+    v0::MoveBehavior, CommitId, ContentRef, DeleteDirectoryBehavior, MutationResult, NamespaceId,
     PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
@@ -16,7 +16,7 @@ pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     behavior: PutBehavior,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
     let content_ref =
         store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes).await?;
@@ -39,7 +39,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     bytes: &[u8],
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
     put_file_bytes(
         store,
@@ -58,9 +58,9 @@ pub(crate) async fn create_dir_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
-    let commit_id = normalized_commit_id(commit_id)?;
+    let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
         namespace_id,
@@ -80,9 +80,9 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
     content_ref: ContentRef,
     behavior: PutBehavior,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
-    let commit_id = normalized_commit_id(commit_id)?;
+    let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
         namespace_id,
@@ -102,7 +102,7 @@ pub(crate) async fn delete_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
     delete_path_with_behavior(
         store,
@@ -120,7 +120,7 @@ pub(crate) async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
     delete_path_with_behavior(
         store,
@@ -139,9 +139,9 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     behavior: DeleteDirectoryBehavior,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
-    let commit_id = normalized_commit_id(commit_id)?;
+    let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
         namespace_id,
@@ -161,9 +161,9 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     from_path: &str,
     to_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
-    let commit_id = normalized_commit_id(commit_id)?;
+    let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
         namespace_id,
@@ -184,9 +184,9 @@ pub(crate) async fn copy_file_path<S: ObjectStore + ?Sized>(
     from_path: &str,
     to_path: &str,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
-    let commit_id = normalized_commit_id(commit_id)?;
+    let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
         namespace_id,
@@ -206,9 +206,9 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     source_revision_no: RevisionNo,
     context: &MutationContext,
-    commit_id: Option<&str>,
+    commit_id: Option<&CommitId>,
 ) -> Result<MutationResult, CoreError> {
-    let commit_id = normalized_commit_id(commit_id)?;
+    let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
         namespace_id,

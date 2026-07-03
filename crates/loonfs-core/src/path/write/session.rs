@@ -68,10 +68,12 @@ mod tests {
     use crate::engine::NamespaceEngine;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::options::Settings;
     use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
     use loonfs_objectstore::fs::LocalFsStore;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
@@ -122,7 +124,9 @@ mod tests {
             .namespace(namespace_id.clone())
             .writer(context.writer_id.clone())
             .writer_version(context.writer_version.clone())
-            .lease_duration_ms(context.lease_duration_ms)
+            .settings(Settings {
+                writer_lease_duration: Duration::from_millis(context.lease_duration_ms),
+            })
             .build()
             .expect("test engine")
     }
