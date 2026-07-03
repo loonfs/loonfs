@@ -13,10 +13,6 @@ pub enum MoveBehavior {
     /// Move only if the destination name is absent.
     #[default]
     NoReplace,
-    /// Reserved for a future version.
-    Replace,
-    /// Reserved for a future version.
-    Exchange,
 }
 
 /// Upload transport mode.

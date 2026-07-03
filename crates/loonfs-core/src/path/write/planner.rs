@@ -494,11 +494,6 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    if behavior != MoveBehavior::NoReplace {
-        return Err(CoreError::CommitValidation(
-            crate::commit::CommitValidationError::UnsupportedMoveBehavior { behavior },
-        ));
-    }
     let from_path = parse_mutation_path(from_path)?;
     let to_path = parse_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, &from_path).await?;

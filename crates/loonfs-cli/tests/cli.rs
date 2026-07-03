@@ -526,7 +526,7 @@ default_profile = ""
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
     let error = json_error(&list);
-    assert_eq!(error["code"], "invalid_config");
+    assert_eq!(error["code"], "invalid_request");
     assert!(error["message"]
         .as_str()
         .unwrap()
@@ -546,7 +546,7 @@ default_profile = "   "
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
     let error = json_error(&list);
-    assert_eq!(error["code"], "invalid_config");
+    assert_eq!(error["code"], "invalid_request");
     assert!(error["message"]
         .as_str()
         .unwrap()
@@ -573,7 +573,7 @@ root = ""
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
     let error = json_error(&list);
-    assert_eq!(error["code"], "invalid_config");
+    assert_eq!(error["code"], "invalid_request");
     assert!(error["message"]
         .as_str()
         .unwrap()
@@ -602,7 +602,7 @@ root = "{}"
     let current = harness.run(&["--json", "current"]);
     assert_failure(&current);
     let error = json_error(&current);
-    assert_eq!(error["code"], "invalid_config");
+    assert_eq!(error["code"], "invalid_request");
     assert!(error["message"]
         .as_str()
         .unwrap()
@@ -675,7 +675,7 @@ fn invalid_remote_urls_are_rejected() {
         "http://",
     ]);
     assert_failure(&missing_host_http);
-    assert_eq!(json_error(&missing_host_http)["code"], "invalid_config");
+    assert_eq!(json_error(&missing_host_http)["code"], "invalid_request");
     assert!(json_error(&missing_host_http)["message"]
         .as_str()
         .unwrap()
@@ -692,7 +692,7 @@ fn invalid_remote_urls_are_rejected() {
         "https://",
     ]);
     assert_failure(&missing_host_https);
-    assert_eq!(json_error(&missing_host_https)["code"], "invalid_config");
+    assert_eq!(json_error(&missing_host_https)["code"], "invalid_request");
 }
 
 #[test]

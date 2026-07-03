@@ -304,8 +304,8 @@ mod tests {
             serde_json::json!("recursive")
         );
         assert_eq!(
-            serde_json::to_value(MoveBehavior::Exchange).expect("move behavior json"),
-            serde_json::json!("exchange")
+            serde_json::to_value(MoveBehavior::NoReplace).expect("move behavior json"),
+            serde_json::json!("no_replace")
         );
     }
 

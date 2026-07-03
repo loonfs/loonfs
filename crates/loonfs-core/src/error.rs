@@ -276,10 +276,12 @@ impl CoreError {
             | CoreError::WalWrite(_)
             | CoreError::Store(_) => ErrorCode::ServerError,
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
-            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => ErrorCode::InvalidPath,
-            CoreError::InvalidNamespaceId(_) => ErrorCode::InvalidNamespaceId,
-            CoreError::InvalidCommitId(_) => ErrorCode::InvalidCommitId,
-            CoreError::InvalidUploadId(_) => ErrorCode::InvalidUploadId,
+            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
+                ErrorCode::InvalidRequest
+            }
+            CoreError::InvalidNamespaceId(_) => ErrorCode::InvalidRequest,
+            CoreError::InvalidCommitId(_) => ErrorCode::InvalidRequest,
+            CoreError::InvalidUploadId(_) => ErrorCode::InvalidRequest,
             CoreError::MissingPath(_) => ErrorCode::PathNotFound,
             CoreError::MissingRevision { .. } => ErrorCode::RevisionNotFound,
             CoreError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
@@ -291,15 +293,15 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::InvalidUploadContent(_) => ErrorCode::InvalidUploadContent,
-            CoreError::InvalidCursor(_) => ErrorCode::InvalidCursor,
+            CoreError::InvalidUploadContent(_) => ErrorCode::InvalidRequest,
+            CoreError::InvalidCursor(_) => ErrorCode::InvalidRequest,
             CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists(_) => ErrorCode::PathConflict,
             CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
             CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
-            CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidPath,
+            CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
         }
     }
@@ -314,7 +316,7 @@ fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
         MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
         MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
         MetadataViewError::SnapshotUnavailable { .. }
-        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidCursor,
+        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidRequest,
         MetadataViewError::ManifestChangedDuringViewLoad { .. } => ErrorCode::StaleHead,
     }
 }
@@ -327,7 +329,7 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
             classify_control_object_load_error(error)
         }
         MetadataProjectionLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
+            ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidRequest,
             ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
             _ => ErrorCode::NamespaceCorrupt,
         },
@@ -350,7 +352,7 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
 
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
-        ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidNamespaceId,
+        ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidRequest,
         ControlObjectLoadError::MissingObject { .. }
         | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceNotFound,
         ControlObjectLoadError::NamespaceMismatch { .. }
@@ -377,7 +379,7 @@ fn classify_wal_chain_load_error(error: &WalChainLoadError) -> ErrorCode {
 
 fn classify_visible_path_error(error: &VisiblePathError) -> ErrorCode {
     match error {
-        VisiblePathError::InvalidAbsolutePath { .. } => ErrorCode::InvalidPath,
+        VisiblePathError::InvalidAbsolutePath { .. } => ErrorCode::InvalidRequest,
         VisiblePathError::RootMissing => ErrorCode::NamespaceCorrupt,
         VisiblePathError::PathNotFound { .. } => ErrorCode::PathNotFound,
         VisiblePathError::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
@@ -472,8 +474,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
             ErrorCode::PathNotFound
         }
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
-        CommitValidationError::UnsupportedMoveBehavior { .. } => ErrorCode::UnsupportedMoveBehavior,
-        CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidPath,
+        CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
         CommitValidationError::StaleWriterEpoch { .. }
         | CommitValidationError::MissingWriterLease
         | CommitValidationError::WriterLeaseHolderMismatch { .. }
@@ -517,7 +518,7 @@ mod tests {
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
-        assert_eq!(ErrorCode::InvalidPath.kind(), ErrorKind::InvalidRequest);
+        assert_eq!(ErrorCode::InvalidRequest.kind(), ErrorKind::InvalidRequest);
         assert_eq!(ErrorCode::PathNotFound.kind(), ErrorKind::NotFound);
         assert_eq!(ErrorCode::NamespaceExists.kind(), ErrorKind::AlreadyExists);
         assert_eq!(
@@ -577,14 +578,14 @@ mod tests {
                     snapshot_floor_seq: ChangeSeq(2),
                     head_seq,
                 },
-                ErrorCode::InvalidCursor,
+                ErrorCode::InvalidRequest,
             ),
             (
                 MetadataViewError::UnsupportedHistoricalRead {
                     requested_seq: ChangeSeq(2),
                     head_seq,
                 },
-                ErrorCode::InvalidCursor,
+                ErrorCode::InvalidRequest,
             ),
             (
                 MetadataViewError::ManifestChangedDuringViewLoad {

@@ -925,9 +925,9 @@ The first standard lower-level mutation set includes:
 The path-oriented filesystem surface may compile higher-level operations into
 these lower-level mutations.
 
-`rename` accepts the explicit move behavior shape for forward compatibility,
-but v0 implements only `no_replace`. Reserved behaviors such as `replace` and
-`exchange` must fail with `unsupported_move_behavior`.
+`rename` carries an explicit move behavior enum for forward compatibility;
+v0 defines only `no_replace`. Unknown behaviors fail request validation, and
+new behaviors arrive as additive enum variants (see "Evolution rules").
 
 These are semantic commit operations. Durable WAL payloads store normalized
 metadata deltas derived from the semantic operations: `create_inode`,

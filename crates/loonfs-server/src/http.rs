@@ -1019,11 +1019,9 @@ async fn begin_direct_put_upload(
 
 fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
     match error {
-        ObjectStoreError::InvalidContentRef(message) => ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidUploadContent,
-            &message,
-        ),
+        ObjectStoreError::InvalidContentRef(message) => {
+            ApiResponseError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
+        }
         error => ApiResponseError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::ServerError,
@@ -1446,7 +1444,7 @@ fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
     value.parse::<u64>().map(InodeId).map_err(|err| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidInodeId,
+            ErrorCode::InvalidRequest,
             &format!("invalid inode_id `{value}`: {err}"),
         )
     })
@@ -1456,7 +1454,7 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
     value.parse::<u64>().map(RevisionNo).map_err(|err| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRevisionNo,
+            ErrorCode::InvalidRequest,
             &format!("invalid revision_no `{value}`: {err}"),
         )
     })
@@ -1475,7 +1473,7 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
     value.parse::<u32>().map_err(|error| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidConfig,
+            ErrorCode::InvalidRequest,
             &format!("invalid limit `{value}`: {error}"),
         )
     })
@@ -1504,7 +1502,7 @@ fn decode_file_revisions_page_cursor(
 fn limit_response_error(error: LimitError) -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidConfig,
+        ErrorCode::InvalidRequest,
         &error.to_string(),
     )
 }
@@ -1512,7 +1510,7 @@ fn limit_response_error(error: LimitError) -> ApiResponseError {
 fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidCursor,
+        ErrorCode::InvalidRequest,
         &error.to_string(),
     )
 }
@@ -1548,7 +1546,7 @@ impl ApiResponseError {
     fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidNamespaceId,
+            ErrorCode::InvalidRequest,
             &error.to_string(),
         )
     }
@@ -1574,12 +1572,12 @@ impl ApiResponseError {
             BootstrapNamespaceError::EmptyHolderId
             | BootstrapNamespaceError::EmptyWriterVersion => Self::new(
                 StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidConfig,
+                ErrorCode::InvalidRequest,
                 &error.to_string(),
             ),
             _ => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::BootstrapFailed,
+                ErrorCode::ServerError,
                 &error.to_string(),
             ),
         }
@@ -1590,7 +1588,7 @@ impl ApiResponseError {
             RuntimeError::Core(error) => Self::core(error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
+                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
             }
             error => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1622,7 +1620,7 @@ impl ApiResponseError {
             RuntimeError::Core(error) => Self::core_for_namespace(namespace, error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
+                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
             }
             error => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1635,16 +1633,7 @@ impl ApiResponseError {
 
 fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
     match code {
-        ErrorCode::InvalidPath
-        | ErrorCode::InvalidNamespaceId
-        | ErrorCode::InvalidCommitId
-        | ErrorCode::InvalidUploadId
-        | ErrorCode::InvalidInodeId
-        | ErrorCode::InvalidRevisionNo
-        | ErrorCode::InvalidCursor
-        | ErrorCode::InvalidConfig
-        | ErrorCode::UnsupportedMoveBehavior
-        | ErrorCode::InvalidUploadContent => StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorCode::NamespaceNotFound
         | ErrorCode::PathNotFound
         | ErrorCode::RevisionNotFound
@@ -1655,11 +1644,8 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::MaintenanceRequired => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::NamespaceDeleted => StatusCode::GONE,
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-        ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
         ErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,
-        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError | ErrorCode::BootstrapFailed => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::NamespaceExists
         | ErrorCode::NamespacePartial
         | ErrorCode::PathConflict

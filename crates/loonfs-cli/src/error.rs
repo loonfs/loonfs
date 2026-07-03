@@ -15,7 +15,7 @@ impl CliError {
     }
 
     pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
-        Self::new("invalid_config", message)
+        Self::new("invalid_request", message)
     }
 
     pub(crate) fn invalid_input(message: impl Into<String>) -> Self {

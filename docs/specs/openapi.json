@@ -3227,9 +3227,7 @@
         "type": "string",
         "description": "Move behavior.",
         "enum": [
-          "no_replace",
-          "replace",
-          "exchange"
+          "no_replace"
         ]
       },
       "NameKey": {
