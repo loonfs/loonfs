@@ -68,7 +68,6 @@ mod tests {
     use crate::engine::NamespaceEngine;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::options::ReadOptions;
     use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
@@ -155,7 +154,7 @@ mod tests {
         let engine = test_engine(&store, &namespace_id, &context);
         for path in ["/wide/a.txt", "/wide/b.txt"] {
             engine
-                .resolve_path(path, ReadOptions::default())
+                .resolve_path(path)
                 .await
                 .expect("published file is visible");
         }
@@ -217,7 +216,7 @@ mod tests {
             .expect("delete sees the create from the same batch");
 
         test_engine(&store, &namespace_id, &context)
-            .resolve_path("/docs/doomed.txt", ReadOptions::default())
+            .resolve_path("/docs/doomed.txt")
             .await
             .expect_err("deleted file is no longer visible");
     }

@@ -39,8 +39,7 @@ use loonfs_core::publish::{
 };
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    ForkOptions, MetadataProjectionLoadError, MutationContext, NamespaceEngine, ReadOptions,
-    WriteOptions,
+    ForkOptions, MutationContext, NamespaceEngine, WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
@@ -56,17 +55,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tempfile::tempdir;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MetadataReadSource {
-    ManifestPlusTail,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MetadataRead<T> {
-    value: T,
-    source: MetadataReadSource,
-}
 
 #[derive(Debug, Clone)]
 struct BindingIdentity {
@@ -388,10 +376,7 @@ fn resolve_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .resolve_path(absolute_path, ReadOptions::default()),
-    )
+    block_on(namespace_engine(store, namespace_id, &mutation_context()).resolve_path(absolute_path))
 }
 
 fn list_path<S: ObjectStore + ?Sized>(
@@ -399,10 +384,7 @@ fn list_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .list_path(absolute_path, ReadOptions::default()),
-    )
+    block_on(namespace_engine(store, namespace_id, &mutation_context()).list_path(absolute_path))
 }
 
 fn page_limit(value: u32) -> EffectiveLimit {
@@ -419,7 +401,6 @@ fn list_path_page<S: ObjectStore + ?Sized>(
     block_on(
         namespace_engine(store, namespace_id, &mutation_context()).list_path_page(
             absolute_path,
-            ReadOptions::default(),
             PageRequest {
                 limit: page_limit(limit),
                 cursor,
@@ -433,10 +414,7 @@ fn read_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .read_file(absolute_path, ReadOptions::default()),
-    )
+    block_on(namespace_engine(store, namespace_id, &mutation_context()).read_file(absolute_path))
 }
 
 fn list_file_revisions<S: ObjectStore + ?Sized>(
@@ -446,7 +424,7 @@ fn list_file_revisions<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .list_file_revisions(absolute_path, ReadOptions::default()),
+            .list_file_revisions(absolute_path),
     )
 }
 
@@ -457,7 +435,7 @@ fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .list_file_revisions_for_inode(inode_id, ReadOptions::default()),
+            .list_file_revisions_for_inode(inode_id),
     )
 }
 
@@ -468,11 +446,8 @@ fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     revision_no: RevisionNo,
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
     block_on(
-        namespace_engine(store, namespace_id, &mutation_context()).read_file_revision(
-            absolute_path,
-            revision_no,
-            ReadOptions::default(),
-        ),
+        namespace_engine(store, namespace_id, &mutation_context())
+            .read_file_revision(absolute_path, revision_no),
     )
 }
 
@@ -483,11 +458,8 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
     block_on(
-        namespace_engine(store, namespace_id, &mutation_context()).read_file_revision_for_inode(
-            inode_id,
-            revision_no,
-            ReadOptions::default(),
-        ),
+        namespace_engine(store, namespace_id, &mutation_context())
+            .read_file_revision_for_inode(inode_id, revision_no),
     )
 }
 
@@ -525,40 +497,22 @@ fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
         .expect("binding exists in change feed")
 }
 
-fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
+fn resolve_path_latest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<MetadataRead<loonfs_api::AuthoritativePathEntry>, CoreError> {
+) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
-    let head = block_on(load_namespace_head_control(store, namespace_id))
-        .map_err(MetadataProjectionLoadError::LoadHead)
-        .map_err(CoreError::MetadataProjection)?;
-    Ok(MetadataRead {
-        value: block_on(engine.resolve_path(
-            absolute_path,
-            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None),
-        ))?,
-        source: MetadataReadSource::ManifestPlusTail,
-    })
+    block_on(engine.resolve_path(absolute_path))
 }
 
-fn list_path_with_read_source<S: ObjectStore + ?Sized>(
+fn list_path_latest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-) -> Result<MetadataRead<Vec<loonfs_api::AuthoritativePathEntry>>, CoreError> {
+) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
-    let head = block_on(load_namespace_head_control(store, namespace_id))
-        .map_err(MetadataProjectionLoadError::LoadHead)
-        .map_err(CoreError::MetadataProjection)?;
-    Ok(MetadataRead {
-        value: block_on(engine.list_path(
-            absolute_path,
-            ReadOptions::manifest_plus_tail_at_head(head.state, head.identity.etag, None, None),
-        ))?,
-        source: MetadataReadSource::ManifestPlusTail,
-    })
+    block_on(engine.list_path(absolute_path))
 }
 
 fn wal_create_dir(
@@ -1718,15 +1672,12 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
     )
     .expect("put file");
 
-    let stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/file.txt")
-        .expect("stat with initial manifest");
-    let list = list_path_with_read_source(&store, &namespace_id, "/docs")
-        .expect("list with initial manifest");
+    let stat =
+        resolve_path_latest(&store, &namespace_id, "/docs/file.txt").expect("stat with manifest");
+    let list = list_path_latest(&store, &namespace_id, "/docs").expect("list with manifest");
 
-    assert_eq!(stat.source, MetadataReadSource::ManifestPlusTail);
-    assert_eq!(list.source, MetadataReadSource::ManifestPlusTail);
-    assert_eq!(stat.value.size_bytes, Some(4));
-    assert_eq!(list.value.len(), 1);
+    assert_eq!(stat.size_bytes, Some(4));
+    assert_eq!(list.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1815,34 +1766,22 @@ async fn query_driven_stat_and_list_use_manifest_plus_tail_with_l0_run_and_wal_o
         list_path(&store, &namespace_id, "/docs/moved.txt").expect("file list");
 
     store.reset_content_blob_get_count();
-    let actual_stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/moved.txt")
-        .expect("materialized stat");
-    let actual_list =
-        list_path_with_read_source(&store, &namespace_id, "/docs").expect("materialized list");
-    let actual_file_list = list_path_with_read_source(&store, &namespace_id, "/docs/moved.txt")
-        .expect("materialized file list");
-    let actual_casefold_stat =
-        resolve_path_with_read_source(&store, &namespace_id, "/DOCS/MOVED.TXT")
-            .expect("materialized casefold stat");
+    let actual_stat =
+        resolve_path_latest(&store, &namespace_id, "/docs/moved.txt").expect("materialized stat");
+    let actual_list = list_path_latest(&store, &namespace_id, "/docs").expect("materialized list");
+    let actual_file_list =
+        list_path_latest(&store, &namespace_id, "/docs/moved.txt").expect("materialized file list");
+    let actual_casefold_stat = resolve_path_latest(&store, &namespace_id, "/DOCS/MOVED.TXT")
+        .expect("materialized casefold stat");
 
-    assert_eq!(actual_stat.source, MetadataReadSource::ManifestPlusTail);
-    assert_eq!(actual_list.source, MetadataReadSource::ManifestPlusTail);
-    assert_eq!(
-        actual_file_list.source,
-        MetadataReadSource::ManifestPlusTail
-    );
-    assert_eq!(
-        actual_casefold_stat.source,
-        MetadataReadSource::ManifestPlusTail
-    );
-    assert_eq!(actual_stat.value, expected_stat);
-    assert_eq!(actual_casefold_stat.value, expected_stat);
-    assert_eq!(actual_list.value, expected_list);
-    assert_eq!(actual_file_list.value, expected_file_list);
+    assert_eq!(actual_stat, expected_stat);
+    assert_eq!(actual_casefold_stat, expected_stat);
+    assert_eq!(actual_list, expected_list);
+    assert_eq!(actual_file_list, expected_file_list);
     assert_eq!(store.content_blob_get_count(), 0);
 
-    assert!(resolve_path_with_read_source(&store, &namespace_id, "/docs/a.txt").is_err());
-    assert!(resolve_path_with_read_source(&store, &namespace_id, "/dead/leaf.txt").is_err());
+    assert!(resolve_path_latest(&store, &namespace_id, "/docs/a.txt").is_err());
+    assert!(resolve_path_latest(&store, &namespace_id, "/dead/leaf.txt").is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1876,13 +1815,12 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
     let expected = resolve_path(&store, &namespace_id, "/docs/report").expect("stat");
-    let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
-        .expect("materialized stat");
+    let actual =
+        resolve_path_latest(&store, &namespace_id, "/docs/report").expect("materialized stat");
 
-    assert_eq!(actual.source, MetadataReadSource::ManifestPlusTail);
-    assert_eq!(actual.value, expected);
-    assert_eq!(actual.value.absolute_path, "/docs/report");
-    assert_eq!(actual.value.size_bytes, Some(5));
+    assert_eq!(actual, expected);
+    assert_eq!(actual.absolute_path, "/docs/report");
+    assert_eq!(actual.size_bytes, Some(5));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
