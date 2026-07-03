@@ -33,7 +33,7 @@ use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::control::read_head_object;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
+use crate::path::write::ops::{delete_path, move_path, put_file_bytes, write_file_bytes};
 use crate::protocol::list_changes_after;
 use crate::MutationContext;
 use async_trait::async_trait;
@@ -744,6 +744,155 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
         row,
         MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == ChangeSeq(2)
     )));
+}
+
+#[tokio::test]
+async fn base_rebuild_drops_revisions_superseded_below_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"one\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write one");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"two\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write two");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance floor");
+
+    let mut last_manifest_id = None;
+    for round in 0..9u32 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        last_manifest_id = Some(checkpoint.manifest_id);
+    }
+
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        last_manifest_id.expect("manifest id"),
+    )
+    .await
+    .expect("load manifest");
+    let revisions = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataTableFamily::Revisions,
+    );
+    let digest_one = loonfs_api::sha256_digest(b"one\n");
+    let digest_two = loonfs_api::sha256_digest(b"two\n");
+    assert!(!revisions.iter().any(|row| matches!(
+        row,
+        MetadataRow::Revision { content_ref, .. } if content_ref.digest == digest_one
+    )));
+    assert!(revisions.iter().any(|row| matches!(
+        row,
+        MetadataRow::Revision { content_ref, .. } if content_ref.digest == digest_two
+    )));
+}
+
+#[tokio::test]
+async fn base_rebuild_drops_bindings_unbound_below_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/tmp.txt",
+        b"scratch\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write tmp");
+    delete_path(&store, &namespace_id, "/docs/tmp.txt", &context, None)
+        .await
+        .expect("delete tmp");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance floor");
+
+    let mut last_manifest_id = None;
+    for round in 0..9u32 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        last_manifest_id = Some(checkpoint.manifest_id);
+    }
+
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        last_manifest_id.expect("manifest id"),
+    )
+    .await
+    .expect("load manifest");
+    let binds = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataTableFamily::DirentryBinds,
+    );
+    assert!(!binds.iter().any(|row| matches!(
+        row,
+        MetadataRow::DirentryBind { display_name, .. } if display_name == "tmp.txt"
+    )));
+    let unbinds = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataTableFamily::DirentryUnbinds,
+    );
+    assert!(
+        unbinds.is_empty(),
+        "spent unbind markers survived: {unbinds:?}"
+    );
 }
 
 #[tokio::test]
