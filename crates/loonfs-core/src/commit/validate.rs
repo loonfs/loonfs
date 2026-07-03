@@ -1,12 +1,11 @@
 use super::frame::{validate_commit_request_frame, validate_commit_request_frame_parts};
-use super::metadata_preview::{MetadataPreview, PublishMetadataPreview};
+use super::metadata_overlay::CommitOverlayRows;
 use super::{
     push_unique_invariant, CommitOp, CommitPlan, CommitRequest, CommitValidationContext,
     CommitValidationError, Precondition, ResolvedBinding, ValidatedOp,
 };
 use crate::invariants::InvariantId;
-use crate::metadata::MetadataState;
-use crate::path::read::CurrentManifestTailView;
+use crate::metadata::{InMemoryMetadataView, MetadataState, MetadataView};
 use crate::{error::CoreError, metadata::RevisionRecord};
 use loonfs_api::wire::control::{HeadState, LeaseState};
 use loonfs_api::{
@@ -31,13 +30,14 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
     pub(crate) head: &'a HeadState,
     pub(crate) lease: &'a LeaseState,
     pub(crate) now_ms: u64,
-    pub(crate) metadata_view: CurrentManifestTailView<'a, S>,
+    pub(crate) metadata_view: MetadataView<'a, 'a, S>,
     pub(crate) accepted_rows: &'a MetadataState,
 }
 
-impl<'a, S: ObjectStore + ?Sized> PublishCommitValidationContext<'a, S> {
-    fn preview(&self) -> PublishMetadataPreview<'a, S> {
-        PublishMetadataPreview::new(self.metadata_view, self.accepted_rows)
+impl<S: ObjectStore + ?Sized> PublishCommitValidationContext<'_, S> {
+    fn metadata_view(&self) -> MetadataView<'_, '_, S> {
+        self.metadata_view
+            .with_overlay(self.accepted_rows, self.head.seq, self.head.name_policy)
     }
 }
 
@@ -46,7 +46,7 @@ pub(crate) async fn resolve_restore_content_refs_for_publish<S: ObjectStore + ?S
     context: &PublishCommitValidationContext<'_, S>,
 ) -> Result<Vec<Option<ContentRef>>, CoreError> {
     let mut resolved_request_revisions = BTreeMap::<(InodeId, RevisionNo), ContentRef>::new();
-    let preview = context.preview();
+    let metadata_view = context.metadata_view();
     let mut resolved = Vec::with_capacity(request.ops.len());
 
     for op in &request.ops {
@@ -72,8 +72,8 @@ pub(crate) async fn resolve_restore_content_refs_for_publish<S: ObjectStore + ?S
                 {
                     Some(content_ref.clone())
                 } else {
-                    preview
-                        .revision_at_seq(*inode_id, *source_revision_no, context.head.seq)
+                    metadata_view
+                        .revision_at_head(*inode_id, *source_revision_no)
                         .await?
                         .map(|revision| revision.content_ref)
                 };
@@ -92,9 +92,9 @@ pub(crate) async fn resolve_restore_content_refs_for_publish<S: ObjectStore + ?S
     Ok(resolved)
 }
 
-pub fn build_commit_plan(
+pub async fn build_commit_plan(
     request: &CommitRequest,
-    context: &CommitValidationContext,
+    context: &CommitValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     validate_commit_request_frame(request, context)?;
 
@@ -106,12 +106,14 @@ pub fn build_commit_plan(
     let shape = compute_commit_shape(request, context)?;
     let validated_metadata = validate_metadata_preconditions(
         request,
+        &context.head,
         context.metadata_state,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
         context.head.name_policy,
         &mut checked_invariants,
-    )?;
+    )
+    .await?;
 
     if !shape.allocated_inode_ids.is_empty() {
         push_unique_invariant(
@@ -175,7 +177,8 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     let shape = compute_commit_shape_from_head(request, context.head)?;
     let validated_metadata = validate_publish_metadata_preconditions(
         request,
-        context.preview(),
+        context.metadata_view,
+        context.accepted_rows,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
         context.head.name_policy,
@@ -285,48 +288,69 @@ fn compute_commit_shape_from_head(
     })
 }
 
-fn validate_metadata_preconditions(
+async fn validate_metadata_preconditions(
     request: &CommitRequest,
+    head: &HeadState,
     metadata_state: &MetadataState,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     name_policy: NamePolicy,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<ValidatedMetadataOps, CommitValidationError> {
-    let mut ephemeral_metadata_state = MetadataPreview::new(metadata_state);
+    let mut overlay_rows = CommitOverlayRows::new();
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut validated_ops = Vec::with_capacity(request.ops.len());
     let mut next_delta_index = 0u32;
 
-    validate_explicit_preconditions(
+    let metadata_view = InMemoryMetadataView::in_memory(
+        head,
+        metadata_state,
+        Some(overlay_rows.rows()),
+        committed_seq,
+        name_policy,
+    );
+    validate_publish_explicit_preconditions(
         &request.preconditions,
-        &ephemeral_metadata_state,
+        &metadata_view,
         committed_seq,
         checked_invariants,
-    )?;
+    )
+    .await
+    .map_err(commit_validation_from_core)?;
 
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
+        let metadata_view = InMemoryMetadataView::in_memory(
+            head,
+            metadata_state,
+            Some(overlay_rows.rows()),
+            committed_seq,
+            name_policy,
+        );
         let validated_op = match op {
             CommitOp::CreateDirectory {
                 parent_inode,
                 display_name,
             } => {
-                let name_key = validate_child_name_absent(
-                    &ephemeral_metadata_state,
+                let name_key = validate_publish_child_name_absent(
+                    &metadata_view,
                     *parent_inode,
                     display_name,
                     committed_seq,
                     name_policy,
-                )?;
-                validate_ancestors_not_subtree_deleted(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_ancestors_not_subtree_deleted(
+                    &metadata_view,
                     *parent_inode,
                     committed_seq,
                     checked_invariants,
                     true,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::CreateDir {
                     op_index,
                     parent_inode: *parent_inode,
@@ -345,20 +369,24 @@ fn validate_metadata_preconditions(
                 display_name,
                 content_ref,
             } => {
-                let name_key = validate_child_name_absent(
-                    &ephemeral_metadata_state,
+                let name_key = validate_publish_child_name_absent(
+                    &metadata_view,
                     *parent_inode,
                     display_name,
                     committed_seq,
                     name_policy,
-                )?;
-                validate_ancestors_not_subtree_deleted(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_ancestors_not_subtree_deleted(
+                    &metadata_view,
                     *parent_inode,
                     committed_seq,
                     checked_invariants,
                     true,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::CreateFile {
                     op_index,
                     parent_inode: *parent_inode,
@@ -379,20 +407,24 @@ fn validate_metadata_preconditions(
                 base_revision_no,
                 content_ref,
             } => {
-                validate_inode_revision_is(
-                    &ephemeral_metadata_state,
+                validate_publish_inode_revision_is(
+                    &metadata_view,
                     *inode_id,
                     *base_revision_no,
                     committed_seq,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 let revision_no = next_revision_no(*inode_id, *base_revision_no, true)?;
-                validate_ancestors_not_subtree_deleted(
-                    &ephemeral_metadata_state,
+                validate_publish_ancestors_not_subtree_deleted(
+                    &metadata_view,
                     *inode_id,
                     committed_seq,
                     checked_invariants,
                     false,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::ReplaceFile {
                     op_index,
                     inode_id: *inode_id,
@@ -406,25 +438,31 @@ fn validate_metadata_preconditions(
                 source_revision_no,
                 base_revision_no,
             } => {
-                validate_restore_target(
-                    &ephemeral_metadata_state,
+                validate_publish_restore_target(
+                    &metadata_view,
                     *inode_id,
                     *base_revision_no,
                     committed_seq,
-                )?;
-                let source_revision = validate_restore_source_revision(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                let source_revision = validate_publish_restore_source_revision(
+                    &metadata_view,
                     *inode_id,
                     *source_revision_no,
                     committed_seq,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 let revision_no = next_revision_no(*inode_id, *base_revision_no, false)?;
-                validate_restore_not_covered(
-                    &ephemeral_metadata_state,
+                validate_publish_restore_not_covered(
+                    &metadata_view,
                     *inode_id,
                     committed_seq,
                     checked_invariants,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::RestoreRevision {
                     op_index,
                     inode_id: *inode_id,
@@ -435,18 +473,24 @@ fn validate_metadata_preconditions(
                 }
             }
             CommitOp::DeleteFile { inode_id } => {
-                let source_binding = resolve_current_binding_for_mutation(
-                    &ephemeral_metadata_state,
+                let source_binding = resolve_publish_current_binding_for_mutation(
+                    &metadata_view,
                     *inode_id,
                     committed_seq,
-                )?;
-                validate_delete_file_target(&ephemeral_metadata_state, *inode_id, committed_seq)?;
-                validate_delete_file_not_covered(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_delete_file_target(&metadata_view, *inode_id, committed_seq)
+                    .await
+                    .map_err(commit_validation_from_core)?;
+                validate_publish_delete_file_not_covered(
+                    &metadata_view,
                     *inode_id,
                     committed_seq,
                     checked_invariants,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::DeleteFile {
                     op_index,
                     inode_id: *inode_id,
@@ -466,37 +510,49 @@ fn validate_metadata_preconditions(
                         behavior: *behavior,
                     });
                 }
-                let source_binding = resolve_current_binding_for_mutation(
-                    &ephemeral_metadata_state,
+                let source_binding = resolve_publish_current_binding_for_mutation(
+                    &metadata_view,
                     *inode_id,
                     committed_seq,
-                )?;
-                validate_rename_source(&ephemeral_metadata_state, *inode_id, committed_seq)?;
-                let new_name_key = validate_rename_target_name_absent(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_rename_source(&metadata_view, *inode_id, committed_seq)
+                    .await
+                    .map_err(commit_validation_from_core)?;
+                let new_name_key = validate_publish_rename_target_name_absent(
+                    &metadata_view,
                     *new_parent_inode,
                     new_display_name,
                     committed_seq,
                     name_policy,
-                )?;
-                validate_rename_does_not_cycle(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_rename_does_not_cycle(
+                    &metadata_view,
                     *inode_id,
                     *new_parent_inode,
                     committed_seq,
-                )?;
-                validate_rename_inode_not_covered(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_rename_inode_not_covered(
+                    &metadata_view,
                     *inode_id,
                     committed_seq,
                     checked_invariants,
-                )?;
-                validate_rename_target_parent_not_covered(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_rename_target_parent_not_covered(
+                    &metadata_view,
                     *new_parent_inode,
                     committed_seq,
                     checked_invariants,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::Rename {
                     op_index,
                     inode_id: *inode_id,
@@ -509,22 +565,24 @@ fn validate_metadata_preconditions(
                 }
             }
             CommitOp::DeleteSubtree { root_inode } => {
-                let source_binding = resolve_current_binding_for_mutation(
-                    &ephemeral_metadata_state,
+                let source_binding = resolve_publish_current_binding_for_mutation(
+                    &metadata_view,
                     *root_inode,
                     committed_seq,
-                )?;
-                validate_delete_subtree_root(
-                    &ephemeral_metadata_state,
-                    *root_inode,
-                    committed_seq,
-                )?;
-                validate_delete_subtree_not_covered(
-                    &ephemeral_metadata_state,
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
+                validate_publish_delete_subtree_root(&metadata_view, *root_inode, committed_seq)
+                    .await
+                    .map_err(commit_validation_from_core)?;
+                validate_publish_delete_subtree_not_covered(
+                    &metadata_view,
                     *root_inode,
                     committed_seq,
                     checked_invariants,
-                )?;
+                )
+                .await
+                .map_err(commit_validation_from_core)?;
                 ValidatedOp::DeleteSubtree {
                     op_index,
                     root_inode: *root_inode,
@@ -534,7 +592,7 @@ fn validate_metadata_preconditions(
                 }
             }
         };
-        ephemeral_metadata_state.apply_validated_op_mut(committed_seq, &validated_op);
+        overlay_rows.apply_validated_op_mut(committed_seq, &validated_op);
         validated_ops.push(validated_op);
     }
 
@@ -543,16 +601,19 @@ fn validate_metadata_preconditions(
 
 async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
-    mut metadata_state: PublishMetadataPreview<'_, S>,
+    base_view: MetadataView<'_, '_, S>,
+    accepted_rows: &MetadataState,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     name_policy: NamePolicy,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<ValidatedMetadataOps, CoreError> {
+    let mut overlay_rows = CommitOverlayRows::from_rows(accepted_rows);
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut validated_ops = Vec::with_capacity(request.ops.len());
     let mut next_delta_index = 0u32;
 
+    let metadata_state = base_view.with_overlay(overlay_rows.rows(), committed_seq, name_policy);
     validate_publish_explicit_preconditions(
         &request.preconditions,
         &metadata_state,
@@ -564,6 +625,8 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
+        let metadata_state =
+            base_view.with_overlay(overlay_rows.rows(), committed_seq, name_policy);
         let validated_op = match op {
             CommitOp::CreateDirectory {
                 parent_inode,
@@ -807,7 +870,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 }
             }
         };
-        metadata_state.apply_validated_op_mut(committed_seq, &validated_op);
+        overlay_rows.apply_validated_op_mut(committed_seq, &validated_op);
         validated_ops.push(validated_op);
     }
 
@@ -849,9 +912,16 @@ fn next_revision_no(
     })
 }
 
+fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
+    match error {
+        CoreError::CommitValidation(error) => error,
+        error => CommitValidationError::ValidatedPreviewApplyFailed(error.to_string()),
+    }
+}
+
 async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
     preconditions: &[Precondition],
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
@@ -920,13 +990,13 @@ async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     name_key: &str,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
+        .inode_at_seq(parent_inode)
         .await?
         .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
@@ -937,10 +1007,7 @@ async fn validate_publish_child_name_absent_precondition<S: ObjectStore + ?Sized
         .into());
     }
 
-    if let Some(existing) = metadata_state
-        .visible_child(parent_inode, name_key, base_seq)
-        .await?
-    {
+    if let Some(existing) = metadata_state.visible_child(parent_inode, name_key).await? {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode,
             name_key: name_key.to_owned(),
@@ -953,12 +1020,12 @@ async fn validate_publish_child_name_absent_precondition<S: ObjectStore + ?Sized
 }
 
 async fn resolve_publish_current_binding_for_mutation<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<ResolvedBinding, CoreError> {
     let binding = metadata_state
-        .current_parent_binding_for_child(inode_id, base_seq)
+        .current_parent_binding_for_child(inode_id)
         .await?
         .ok_or(CommitValidationError::SourceBindingMissing { inode_id })?;
     Ok(ResolvedBinding {
@@ -973,16 +1040,16 @@ async fn resolve_publish_current_binding_for_mutation<S: ObjectStore + ?Sized>(
 
 #[allow(clippy::too_many_arguments)]
 async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     name_key: &str,
     child_inode: InodeId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
+        .inode_at_seq(parent_inode)
         .await?
         .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
@@ -993,10 +1060,7 @@ async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
         .into());
     }
 
-    let Some(existing) = metadata_state
-        .visible_child(parent_inode, name_key, base_seq)
-        .await?
-    else {
+    let Some(existing) = metadata_state.visible_child(parent_inode, name_key).await? else {
         return Err(CommitValidationError::BindingPreconditionMissing {
             parent_inode,
             name_key: name_key.to_owned(),
@@ -1020,12 +1084,12 @@ async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_directory_empty_precondition<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .visible_inode(inode_id, base_seq)
+        .visible_inode(inode_id)
         .await?
         .ok_or(CommitValidationError::DirectoryEmptyPreconditionInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::Dir {
@@ -1038,11 +1102,7 @@ async fn validate_publish_directory_empty_precondition<S: ObjectStore + ?Sized>(
         );
     }
 
-    if !metadata_state
-        .visible_children(inode_id, base_seq)
-        .await?
-        .is_empty()
-    {
+    if !metadata_state.visible_children(inode_id).await?.is_empty() {
         return Err(CommitValidationError::DirectoryEmptyPreconditionNotEmpty { inode_id }.into());
     }
 
@@ -1050,15 +1110,15 @@ async fn validate_publish_directory_empty_precondition<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_child_name_absent<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     display_name: &str,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<String, CoreError> {
     validate_display_name(display_name)?;
     let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
+        .inode_at_seq(parent_inode)
         .await?
         .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
@@ -1071,7 +1131,7 @@ async fn validate_publish_child_name_absent<S: ObjectStore + ?Sized>(
 
     let name_key = name_key_for_display_name(name_policy, display_name);
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode, &name_key, base_seq)
+        .visible_child(parent_inode, &name_key)
         .await?
     {
         return Err(CommitValidationError::CreateChildNameCollision {
@@ -1086,13 +1146,13 @@ async fn validate_publish_child_name_absent<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_inode_revision_is<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode_at_seq(inode_id)
         .await?
         .ok_or(CommitValidationError::ReplaceFileInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::File {
@@ -1104,7 +1164,7 @@ async fn validate_publish_inode_revision_is<S: ObjectStore + ?Sized>(
     }
 
     let actual_revision_no = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
+        .latest_revision_record(inode_id)
         .await?
         .map(|revision| revision.revision_no);
     if actual_revision_no != Some(expected_revision_no) {
@@ -1120,13 +1180,13 @@ async fn validate_publish_inode_revision_is<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_restore_target<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode_at_seq(inode_id)
         .await?
         .ok_or(CommitValidationError::RestoreRevisionInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::File {
@@ -1138,7 +1198,7 @@ async fn validate_publish_restore_target<S: ObjectStore + ?Sized>(
     }
 
     let actual_revision_no = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
+        .latest_revision_record(inode_id)
         .await?
         .map(|revision| revision.revision_no);
     if actual_revision_no != Some(expected_revision_no) {
@@ -1154,13 +1214,13 @@ async fn validate_publish_restore_target<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_restore_source_revision<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<RevisionRecord, CoreError> {
     metadata_state
-        .revision_at_seq(inode_id, source_revision_no, base_seq)
+        .revision_at_head(inode_id, source_revision_no)
         .await?
         .ok_or(
             CommitValidationError::RestoreRevisionSourceRevisionMissing {
@@ -1172,16 +1232,13 @@ async fn validate_publish_restore_source_revision<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_ancestors_not_subtree_deleted<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
     is_create: bool,
 ) -> Result<(), CoreError> {
-    if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(inode_id, base_seq)
-        .await?
-    {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return if is_create {
             Err(CommitValidationError::CreateUnderSubtreeTombstone {
                 parent_inode: inode_id,
@@ -1207,15 +1264,12 @@ async fn validate_publish_ancestors_not_subtree_deleted<S: ObjectStore + ?Sized>
 }
 
 async fn validate_publish_restore_not_covered<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
-    if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(inode_id, base_seq)
-        .await?
-    {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return Err(
             CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
                 inode_id,
@@ -1234,12 +1288,12 @@ async fn validate_publish_restore_not_covered<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_delete_subtree_root<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     root_inode: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .inode_at_seq(root_inode, base_seq)
+        .inode_at_seq(root_inode)
         .await?
         .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode })?;
     if inode.inode_kind != InodeKind::Dir {
@@ -1254,12 +1308,12 @@ async fn validate_publish_delete_subtree_root<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_delete_file_target<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode_at_seq(inode_id)
         .await?
         .ok_or(CommitValidationError::DeleteFileInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::File {
@@ -1274,15 +1328,12 @@ async fn validate_publish_delete_file_target<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_delete_file_not_covered<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
-    if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(inode_id, base_seq)
-        .await?
-    {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return Err(CommitValidationError::DeleteFileCoveredByTombstone {
             inode_id,
             covering_root_inode: tombstone.root_inode_id,
@@ -1299,13 +1350,13 @@ async fn validate_publish_delete_file_not_covered<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_delete_subtree_not_covered<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     root_inode: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(root_inode, base_seq)
+        .covering_subtree_tombstone(root_inode)
         .await?
     {
         return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
@@ -1324,16 +1375,16 @@ async fn validate_publish_delete_subtree_not_covered<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_rename_source<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode_at_seq(inode_id)
         .await?
         .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
     if metadata_state
-        .current_parent_binding_for_child(inode_id, base_seq)
+        .current_parent_binding_for_child(inode_id)
         .await?
         .is_none()
     {
@@ -1344,15 +1395,15 @@ async fn validate_publish_rename_source<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
     display_name: &str,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<String, CoreError> {
     validate_display_name(display_name)?;
     let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
+        .inode_at_seq(parent_inode)
         .await?
         .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
@@ -1365,7 +1416,7 @@ async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
 
     let name_key = name_key_for_display_name(name_policy, display_name);
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode, &name_key, base_seq)
+        .visible_child(parent_inode, &name_key)
         .await?
     {
         return Err(CommitValidationError::RenameTargetNameCollision {
@@ -1380,20 +1431,20 @@ async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_rename_does_not_cycle<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
     new_parent_inode: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode_at_seq(inode_id)
         .await?
         .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::Dir {
         return Ok(());
     }
     if metadata_state
-        .would_create_directory_cycle(inode_id, new_parent_inode, base_seq)
+        .would_create_directory_cycle(inode_id, new_parent_inode)
         .await?
     {
         return Err(CommitValidationError::RenameWouldCycleDirectory {
@@ -1407,15 +1458,12 @@ async fn validate_publish_rename_does_not_cycle<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_rename_inode_not_covered<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
-    if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(inode_id, base_seq)
-        .await?
-    {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return Err(CommitValidationError::RenameInodeUnderSubtreeTombstone {
             inode_id,
             root_inode: tombstone.root_inode_id,
@@ -1432,13 +1480,13 @@ async fn validate_publish_rename_inode_not_covered<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_publish_rename_target_parent_not_covered<S: ObjectStore + ?Sized>(
-    metadata_state: &PublishMetadataPreview<'_, S>,
+    metadata_state: &MetadataView<'_, '_, S>,
     parent_inode: InodeId,
-    base_seq: ChangeSeq,
+    _base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(parent_inode, base_seq)
+        .covering_subtree_tombstone(parent_inode)
         .await?
     {
         return Err(
@@ -1458,533 +1506,10 @@ async fn validate_publish_rename_target_parent_not_covered<S: ObjectStore + ?Siz
     Ok(())
 }
 
-fn validate_explicit_preconditions(
-    preconditions: &[Precondition],
-    metadata_state: &MetadataPreview<'_>,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-) -> Result<(), CommitValidationError> {
-    for precondition in preconditions {
-        match precondition {
-            Precondition::InodeRevisionIs {
-                inode_id,
-                revision_no,
-            } => {
-                validate_inode_revision_is(metadata_state, *inode_id, *revision_no, base_seq)?;
-            }
-            Precondition::AncestorsNotSubtreeDeleted { inode_id } => {
-                validate_ancestors_not_subtree_deleted(
-                    metadata_state,
-                    *inode_id,
-                    base_seq,
-                    checked_invariants,
-                    false,
-                )?;
-            }
-            Precondition::ChildNameAbsent {
-                parent_inode,
-                name_key,
-            } => {
-                validate_child_name_absent_precondition(
-                    metadata_state,
-                    *parent_inode,
-                    name_key,
-                    base_seq,
-                )?;
-            }
-            Precondition::BindingIs {
-                parent_inode,
-                name_key,
-                child_inode,
-                bind_seq,
-                bind_delta_index,
-            } => {
-                validate_binding_is_precondition(
-                    metadata_state,
-                    *parent_inode,
-                    name_key,
-                    *child_inode,
-                    *bind_seq,
-                    *bind_delta_index,
-                    base_seq,
-                )?;
-            }
-            Precondition::DirectoryEmpty { inode_id } => {
-                validate_directory_empty_precondition(metadata_state, *inode_id, base_seq)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_child_name_absent_precondition(
-    metadata_state: &MetadataPreview<'_>,
-    parent_inode: InodeId,
-    name_key: &str,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::NamePreconditionParentNotDirectory {
-            parent_inode,
-            actual_kind: parent.inode_kind,
-        });
-    }
-
-    if let Some(existing) = metadata_state.visible_child(parent_inode, name_key, base_seq) {
-        return Err(CommitValidationError::CreateChildNameCollision {
-            parent_inode,
-            name_key: name_key.to_owned(),
-            child_inode: existing.child_inode_id,
-        });
-    }
-
-    Ok(())
-}
-
-fn resolve_current_binding_for_mutation(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<ResolvedBinding, CommitValidationError> {
-    let binding = metadata_state
-        .current_parent_binding_for_child(inode_id, base_seq)
-        .ok_or(CommitValidationError::SourceBindingMissing { inode_id })?;
-    Ok(ResolvedBinding {
-        parent_inode: binding.parent_inode_id,
-        name_key: binding.name_key,
-        display_name: binding.display_name,
-        child_inode: binding.child_inode_id,
-        bind_seq: binding.bind_seq,
-        bind_delta_index: binding.bind_delta_index,
-    })
-}
-
-fn validate_binding_is_precondition(
-    metadata_state: &MetadataPreview<'_>,
-    parent_inode: InodeId,
-    name_key: &str,
-    child_inode: InodeId,
-    bind_seq: ChangeSeq,
-    bind_delta_index: u32,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::NamePreconditionParentNotDirectory {
-            parent_inode,
-            actual_kind: parent.inode_kind,
-        });
-    }
-
-    let Some(existing) = metadata_state.visible_child(parent_inode, name_key, base_seq) else {
-        return Err(CommitValidationError::BindingPreconditionMissing {
-            parent_inode,
-            name_key: name_key.to_owned(),
-        });
-    };
-    if existing.child_inode_id != child_inode
-        || existing.bind_seq != bind_seq
-        || existing.bind_delta_index != bind_delta_index
-    {
-        return Err(CommitValidationError::BindingPreconditionMismatch {
-            parent_inode,
-            name_key: name_key.to_owned(),
-            expected_child_inode: child_inode,
-            actual_child_inode: Some(existing.child_inode_id),
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_directory_empty_precondition(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .visible_inode(inode_id, base_seq)
-        .ok_or(CommitValidationError::DirectoryEmptyPreconditionInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::Dir {
-        return Err(
-            CommitValidationError::DirectoryEmptyPreconditionInodeNotDirectory {
-                inode_id,
-                actual_kind: inode.inode_kind,
-            },
-        );
-    }
-
-    if !metadata_state
-        .visible_children(inode_id, base_seq)
-        .is_empty()
-    {
-        return Err(CommitValidationError::DirectoryEmptyPreconditionNotEmpty { inode_id });
-    }
-
-    Ok(())
-}
-
-fn validate_child_name_absent(
-    metadata_state: &MetadataPreview<'_>,
-    parent_inode: InodeId,
-    display_name: &str,
-    base_seq: ChangeSeq,
-    name_policy: NamePolicy,
-) -> Result<String, CommitValidationError> {
-    validate_display_name(display_name)?;
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::CreateParentNotDirectory {
-            parent_inode,
-            actual_kind: parent.inode_kind,
-        });
-    }
-
-    let name_key = name_key_for_display_name(name_policy, display_name);
-    if let Some(existing) = metadata_state.visible_child(parent_inode, &name_key, base_seq) {
-        return Err(CommitValidationError::CreateChildNameCollision {
-            parent_inode,
-            name_key,
-            child_inode: existing.child_inode_id,
-        });
-    }
-
-    Ok(name_key)
-}
-
-fn validate_inode_revision_is(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    expected_revision_no: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::ReplaceFileInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::File {
-        return Err(CommitValidationError::ReplaceFileInodeNotFile {
-            inode_id,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    let actual_revision_no = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
-        .map(|revision| revision.revision_no);
-    if actual_revision_no != Some(expected_revision_no) {
-        return Err(CommitValidationError::ReplaceFileBaseRevisionMismatch {
-            inode_id,
-            expected: expected_revision_no,
-            actual: actual_revision_no,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_restore_target(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    expected_revision_no: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RestoreRevisionInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::File {
-        return Err(CommitValidationError::RestoreRevisionInodeNotFile {
-            inode_id,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    let actual_revision_no = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
-        .map(|revision| revision.revision_no);
-    if actual_revision_no != Some(expected_revision_no) {
-        return Err(CommitValidationError::RestoreRevisionBaseRevisionMismatch {
-            inode_id,
-            expected: expected_revision_no,
-            actual: actual_revision_no,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_restore_source_revision(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    source_revision_no: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<crate::metadata::RevisionRecord, CommitValidationError> {
-    metadata_state
-        .revision_at_seq(inode_id, source_revision_no, base_seq)
-        .ok_or(
-            CommitValidationError::RestoreRevisionSourceRevisionMissing {
-                inode_id,
-                source_revision_no,
-            },
-        )
-}
-
-fn validate_ancestors_not_subtree_deleted(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-    is_create: bool,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return if is_create {
-            Err(CommitValidationError::CreateUnderSubtreeTombstone {
-                parent_inode: inode_id,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            })
-        } else {
-            Err(CommitValidationError::ReplaceFileUnderSubtreeTombstone {
-                inode_id,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            })
-        };
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
-    Ok(())
-}
-
-fn validate_restore_not_covered(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return Err(
-            CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
-                inode_id,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            },
-        );
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
-    Ok(())
-}
-
-fn validate_delete_subtree_root(
-    metadata_state: &MetadataPreview<'_>,
-    root_inode: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(root_inode, base_seq)
-        .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode })?;
-    if inode.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::DeleteSubtreeRootNotDirectory {
-            root_inode,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_delete_file_target(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::DeleteFileInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::File {
-        return Err(CommitValidationError::DeleteFileInodeNotFile {
-            inode_id,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_delete_file_not_covered(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return Err(CommitValidationError::DeleteFileCoveredByTombstone {
-            inode_id,
-            covering_root_inode: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
-        });
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
-    Ok(())
-}
-
-fn validate_delete_subtree_not_covered(
-    metadata_state: &MetadataPreview<'_>,
-    root_inode: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(root_inode, base_seq) {
-        return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
-            root_inode,
-            covering_root_inode: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
-        });
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
-    Ok(())
-}
-
-fn validate_rename_source(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
-    if metadata_state
-        .current_parent_binding_for_child(inode_id, base_seq)
-        .is_none()
-    {
-        return Err(CommitValidationError::RenameSourceBindingMissing { inode_id });
-    }
-
-    Ok(())
-}
-
-fn validate_rename_target_name_absent(
-    metadata_state: &MetadataPreview<'_>,
-    parent_inode: InodeId,
-    display_name: &str,
-    base_seq: ChangeSeq,
-    name_policy: NamePolicy,
-) -> Result<String, CommitValidationError> {
-    validate_display_name(display_name)?;
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::RenameTargetParentNotDirectory {
-            parent_inode,
-            actual_kind: parent.inode_kind,
-        });
-    }
-
-    let name_key = name_key_for_display_name(name_policy, display_name);
-    if let Some(existing) = metadata_state.visible_child(parent_inode, &name_key, base_seq) {
-        return Err(CommitValidationError::RenameTargetNameCollision {
-            parent_inode,
-            name_key,
-            child_inode: existing.child_inode_id,
-        });
-    }
-
-    Ok(name_key)
-}
-
 fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError> {
     DisplayName::parse(display_name).map(|_| ()).map_err(|_| {
         CommitValidationError::InvalidDisplayName {
             display_name: display_name.to_owned(),
         }
     })
-}
-
-fn validate_rename_does_not_cycle(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    new_parent_inode: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::Dir {
-        return Ok(());
-    }
-    if metadata_state.would_create_directory_cycle(inode_id, new_parent_inode, base_seq) {
-        return Err(CommitValidationError::RenameWouldCycleDirectory {
-            inode_id,
-            new_parent_inode,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_rename_inode_not_covered(
-    metadata_state: &MetadataPreview<'_>,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return Err(CommitValidationError::RenameInodeUnderSubtreeTombstone {
-            inode_id,
-            root_inode: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
-        });
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
-    Ok(())
-}
-
-fn validate_rename_target_parent_not_covered(
-    metadata_state: &MetadataPreview<'_>,
-    parent_inode: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<InvariantId>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(parent_inode, base_seq) {
-        return Err(
-            CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
-                parent_inode,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            },
-        );
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
-    Ok(())
 }

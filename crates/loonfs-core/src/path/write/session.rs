@@ -1,9 +1,8 @@
 use super::intent::PathMutationIntent;
 use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
-use crate::commit::{CommitPlan, PublishMetadataPreview};
+use crate::commit::CommitPlan;
 use crate::error::CoreError;
-use crate::metadata::{MetadataApplyError, MetadataState};
-use crate::path::read::CurrentManifestTailView;
+use crate::metadata::{MetadataApplyError, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
@@ -41,10 +40,11 @@ impl PublishPlanningSession {
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
-        base_view: CurrentManifestTailView<'_, S>,
+        base_view: MetadataView<'_, '_, S>,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let preview = PublishMetadataPreview::new(base_view, &self.accepted_rows);
-        plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &preview).await
+        let view =
+            base_view.with_overlay(&self.accepted_rows, self.head.seq, self.head.name_policy);
+        plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &view).await
     }
 
     /// Folds an accepted commit into the session so later candidates in the
