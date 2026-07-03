@@ -11,7 +11,7 @@ use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::{
     build_namespace_manifest_from_metadata_state, checkpoint_record_by_id, create_checkpoint,
     create_checkpoint_with_policy, load_checkpoint_projection_metadata_state,
-    ManifestMetadataSource,
+    retained_checkpoint_records, ManifestMetadataSource,
 };
 use super::error::ManifestLoadError;
 use super::load::{
@@ -43,8 +43,8 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
     encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
-    MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
-    NamespaceManifestPayload,
+    MetadataTableFamily as ApiMetadataTableFamily, NamespaceCheckpointRecord,
+    NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
     validate_checkpoint_id, ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId,
@@ -573,6 +573,161 @@ async fn retention_floor_does_not_advance_past_missing_metadata_segment() {
         .envelope
         .state;
     assert_eq!(head.retention_floor_seq, ChangeSeq(0));
+}
+
+#[test]
+fn record_retention_keeps_named_and_newest_unnamed_records() {
+    let record = |seq: u64, name: Option<&str>| NamespaceCheckpointRecord {
+        checkpoint_id: CheckpointId::parse(format!("chk_{seq:032x}")).expect("checkpoint id"),
+        manifest_id: ManifestId(seq),
+        head_seq: ChangeSeq(seq),
+        head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),
+        created_at_ms: seq,
+        expires_at_ms: None,
+        name: name.map(str::to_owned),
+    };
+    let records = vec![
+        record(1, Some("release")),
+        record(2, None),
+        record(3, None),
+        record(4, None),
+        record(5, None),
+        record(6, None),
+        record(7, None),
+    ];
+
+    let kept = retained_checkpoint_records(records);
+
+    let kept_seqs: Vec<u64> = kept.iter().map(|r| r.head_seq.0).collect();
+    assert_eq!(kept_seqs, vec![1, 4, 5, 6, 7]);
+}
+
+#[tokio::test]
+async fn manifest_publication_retains_only_newest_unnamed_checkpoint_records() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    let mut checkpoint_ids = Vec::new();
+    let mut last_manifest_id = None;
+    for round in 0..6u32 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        checkpoint_ids.push(checkpoint.checkpoint_id.clone());
+        last_manifest_id = Some(checkpoint.manifest_id);
+    }
+
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        last_manifest_id.expect("manifest id"),
+    )
+    .await
+    .expect("load manifest");
+    let records = &materialized.manifest.payload.checkpoints;
+    assert_eq!(records.len(), 4);
+    let expected: Vec<_> = checkpoint_ids[checkpoint_ids.len() - 4..].to_vec();
+    let actual: Vec<_> = records
+        .iter()
+        .map(|record| record.checkpoint_id.clone())
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/one.txt",
+        b"one\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write one");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/two.txt",
+        b"two\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write two");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let advanced = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance floor");
+    assert_eq!(advanced.retention_floor_seq, ChangeSeq(2));
+
+    let mut last_manifest_id = None;
+    for round in 0..9u32 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+        last_manifest_id = Some(checkpoint.manifest_id);
+    }
+
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        last_manifest_id.expect("manifest id"),
+    )
+    .await
+    .expect("load manifest");
+    let receipts = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataTableFamily::CommitReceipts,
+    );
+    assert!(!receipts.is_empty());
+    for row in &receipts {
+        if let MetadataRow::CommitReceipt { committed_seq, .. } = row {
+            assert!(
+                *committed_seq >= ChangeSeq(2),
+                "receipt below floor survived: {committed_seq:?}"
+            );
+        }
+    }
+    assert!(receipts.iter().any(|row| matches!(
+        row,
+        MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == ChangeSeq(2)
+    )));
 }
 
 #[tokio::test]

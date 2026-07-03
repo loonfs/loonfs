@@ -879,6 +879,11 @@ Path-level mutations fingerprint the same way with domain
 `loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind,
 normalized absolute paths, and the intent's semantic parameters).
 
+The idempotency horizon is the retention floor. Commit receipts below the
+floor are dropped when metadata runs are rebuilt, so a commit retried from
+below the floor is treated as new — the same re-bootstrap contract the change
+feed gives sub-floor cursors.
+
 A reused `commit_id` with an equal fingerprint replays the originally
 committed response; an unequal fingerprint is rejected as
 `commit_id_reuse_conflict`. Reference values are pinned by tests in
@@ -1215,6 +1220,12 @@ Invariants:
   path; readers never observe a partially compacted state.
 - Compacted inputs MUST remain available until no retained manifest version,
   checkpoint record, or fork GC pin references them.
+
+Unnamed checkpoint records are maintenance bookkeeping. A manifest carries at
+most the four newest unnamed records; publishing a new manifest drops older
+unnamed records. Named checkpoint records persist until explicitly removed.
+Fork sources are protected by their GC pins independently of any checkpoint
+record, so record retention never affects fork safety.
 
 ### 6.3 Retention management
 
