@@ -17,17 +17,11 @@ use loonfs_api::{
     ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DirectoryPageCursor,
     FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId,
     MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
-    DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-
-fn default_page_limit() -> EffectiveLimit {
-    EffectiveLimit::new(NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap_or(NonZeroU32::MIN))
-}
 
 #[doc(hidden)]
 #[derive(Debug, Clone)]
@@ -700,14 +694,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Reads committed changes after `after_seq`.
-    pub async fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
-        self.list_changes_after_with_limit(after_seq, default_page_limit())
-            .await
-    }
-
     /// Reads up to `limit` committed changes after `after_seq`.
-    pub async fn list_changes_after_with_limit(
+    pub async fn list_changes_after(
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
@@ -715,14 +703,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
     }
 
-    /// Starts a durable upload session for this namespace.
-    pub async fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
-        self.begin_upload_with_request(BeginUploadRequest::default())
-            .await
-    }
-
     /// Starts a durable upload session with explicit transport options.
-    pub async fn begin_upload_with_request(
+    pub async fn begin_upload(
         &self,
         request: BeginUploadRequest,
     ) -> CoreResult<BeginUploadResponse> {

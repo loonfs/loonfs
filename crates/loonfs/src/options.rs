@@ -2,8 +2,8 @@
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, ManifestId, MoveBehavior, NamespaceId,
-    PutBehavior,
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, EffectiveLimit, ManifestId, MoveBehavior,
+    NamespaceId, PutBehavior,
 };
 
 /// Current maintenance-related namespace status.
@@ -157,4 +157,11 @@ pub struct CopyOptions {
 pub struct RestoreRevisionOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+}
+
+/// Options for reading the change feed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListChangesOptions {
+    /// Page limit; `None` resolves the default pagination policy.
+    pub limit: Option<EffectiveLimit>,
 }

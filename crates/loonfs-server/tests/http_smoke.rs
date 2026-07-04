@@ -4,8 +4,8 @@
 use bytes::Bytes;
 use loonfs_api::{
     v0::{
-        CommitDelta, CommitOp, CommitRequest as ApiCommitRequest, CompleteUploadRequest,
-        ValidatedContentToken,
+        BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
+        CompleteUploadRequest, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, ContentRef,
     CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest,
@@ -611,7 +611,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let begin = harness
             .client
-            .begin_upload(namespace)
+            .begin_upload(namespace, &BeginUploadRequest::default())
             .expect("begin upload");
         let first_content = harness
             .client
@@ -632,7 +632,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let mismatch_upload = harness
             .client
-            .begin_upload(namespace)
+            .begin_upload(namespace, &BeginUploadRequest::default())
             .expect("begin mismatch upload");
         let staged = harness
             .client
@@ -748,7 +748,7 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
             .expect("create namespace");
         let begin = harness
             .client
-            .begin_upload(namespace)
+            .begin_upload(namespace, &BeginUploadRequest::default())
             .expect("begin upload");
         let staged = harness
             .client
@@ -1891,7 +1891,9 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
 }
 
 fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {
-    let begin = client.begin_upload(namespace).expect("begin upload");
+    let begin = client
+        .begin_upload(namespace, &BeginUploadRequest::default())
+        .expect("begin upload");
     let staged = client
         .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
         .expect("upload content");
