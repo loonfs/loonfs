@@ -141,7 +141,6 @@ pub(crate) fn head_from_manifest(
         writer_epoch: manifest.payload.writer_epoch,
         writer: current_head.writer.clone(),
         next_inode_id: manifest.payload.next_inode_id,
-        retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
         state: current_head.state,

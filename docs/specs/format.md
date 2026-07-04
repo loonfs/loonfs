@@ -60,6 +60,7 @@ The required durable object families and standard key patterns are:
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
+| **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 
 The layout additionally reserves these paths for subsystems that land in
@@ -68,7 +69,6 @@ them, and no other family may claim them:
 
 | Reserved path | Future role |
 | --- | --- |
-| `namespaces/{namespace_id}/wal/floor.json` | Cold lower bound of retained WAL/change history. |
 | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` | First-class durable stable-view pins to a metadata manifest. |
 | `namespaces/{namespace_id}/wal/index.json` | Optional mutable pointer to the newest WAL index run (accelerator, never authority). |
 | `namespaces/{namespace_id}/wal/indexes/{index_id}.json` | Optional immutable runs of visible-chain segment pointers. |
@@ -100,8 +100,8 @@ manifest, checkpoint records, pins, and the retention floor.
 The namespace tree's lifecycle can be read off its grammar:
 
 - **`{subsystem}/{role}.json` objects are mutable singletons with one job**:
-  compare-and-swap pointers and proofs (`wal/head.json`,
-  `metadata/root.json`, and later `wal/floor.json`) that are never swept. If a
+  compare-and-swap pointers and proofs (`wal/head.json`, `wal/floor.json`,
+  and `metadata/root.json`) that are never swept. If a
   singleton cannot be explained in one sentence, it is too broad.
 - **Collections are never authoritative via enumeration** (`wal/segments/`,
   `metadata/manifests/`, `metadata/tables/`, `pins/`, `uploads/`,
@@ -557,8 +557,16 @@ at minimum:
 - `head_commit_id`
 - `state` (lifecycle: absent or `active`, or the terminal `deleted`)
 - `next_inode_id`
-- `retention_floor_seq`
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
+
+`wal/floor.json` is the symmetrical pair to the head — the earliest retained
+commit boundary next to the latest visible one. It records `floor_seq`, the
+verified manifest basis (id, head seq, payload checksum), and verification
+and update stamps. It is updated only by monotonic compare-and-swap on its
+own etag by floor advancement, which is a GC-family operation: it never
+touches the WAL head, so the head changes only when commits land. A missing,
+stale, or unverifiable floor means "retain more history", never less, and the
+floor never affects live commit visibility.
 
 `metadata/root.json` is the live read/recovery pointer. It is updated only by
 monotonic compare-and-swap on its own etag: a replacement must not decrease
@@ -970,13 +978,23 @@ Clients older than the retention floor must re-bootstrap from a fresh
 checkpoint instead of replaying from an obsolete cursor.
 
 The retention floor may advance only after the system has enough verified
-material to keep replay safe at or after that point: advancement verifies
-that every metadata segment referenced by the target manifest still exists
-before the floor moves. The probe is advisory — the atomic guarantee is the
-garbage collector's obligation to never remove reachable objects ("Garbage
+material to keep replay safe at or after that point: advancement derives its
+target from the manifest `metadata/root.json` references and verifies that
+every metadata segment that basis references still exists before the floor
+moves. The probe is advisory — the atomic guarantee is the garbage
+collector's obligation to never remove reachable objects ("Garbage
 collection") — but a segment that already disappeared must block the floor
 while replay can still rebuild the lost state. Corruption discovered after
 advancement is caught by read-path checksum validation.
+
+Advancement then CASes only `wal/floor.json`, recording the new `floor_seq`
+together with the verified basis and its verification stamp. Floor updates
+are monotonic: a replacement never decreases `floor_seq`, and
+`floor_seq <= metadata/root.manifest_head_seq` holds. The floor is necessary
+but not sufficient for deletion — being below it makes an object a deletion
+candidate; actual deletion additionally requires delete-time re-verification,
+and if the floor ever observably passes an active checkpoint's basis,
+retention wins ("Garbage collection").
 
 Creating a checkpoint pins the current durable namespace file-set version. If
 there is no manifest for the current head, the implementation first writes one

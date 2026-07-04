@@ -29,7 +29,9 @@ use super::runs::{
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
-use crate::namespace::control::{read_head_object, read_metadata_root_object};
+use crate::namespace::control::{
+    read_head_object, read_metadata_root_object, read_wal_floor_object,
+};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::ops::{
     delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
@@ -65,6 +67,18 @@ struct CurrentProjection {
     head: HeadState,
     root: MetadataRootState,
     metadata_state: MetadataState,
+}
+
+async fn read_floor_seq<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> ChangeSeq {
+    read_wal_floor_object(store, namespace_id)
+        .await
+        .expect("read wal floor")
+        .envelope
+        .state
+        .floor_seq
 }
 
 async fn load_current_projection<S: ObjectStore + ?Sized>(
@@ -380,10 +394,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         "retention should advance from manifest descriptors without materializing rows"
     );
 
-    let materialization = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    assert_eq!(materialization.head.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
     assert_eq!(
         store
             .list_prefix(&format!(
@@ -466,9 +477,9 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .expect("load after retention")
         .head;
 
-    assert_eq!(after.retention_floor_seq, ChangeSeq(1));
-    assert_eq!(after.writer_epoch, before.writer_epoch);
-    assert_eq!(after.writer, before.writer);
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
+    // Floor advancement no longer touches the head at all.
+    assert_eq!(after, before);
 }
 
 #[tokio::test]
@@ -580,12 +591,7 @@ async fn retention_floor_does_not_advance_past_missing_metadata_segment() {
         matches!(error, CoreError::CheckpointUnavailable(_)),
         "unexpected error: {error:?}"
     );
-    let head = read_head_object(&store, &namespace_id)
-        .await
-        .expect("read head")
-        .envelope
-        .state;
-    assert_eq!(head.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
 }
 
 #[test]
@@ -1287,12 +1293,10 @@ async fn retention_advance_aborts_when_current_manifest_changes() {
         .await
         .expect("floor advance survives a monotonic root swap");
     assert_eq!(response.retention_floor_seq, ChangeSeq(1));
-    let head = read_head_object(&store.inner, &namespace_id)
-        .await
-        .expect("read head")
-        .envelope
-        .state;
-    assert_eq!(head.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(
+        read_floor_seq(&store.inner, &namespace_id).await,
+        ChangeSeq(1)
+    );
 }
 
 #[derive(Debug)]
@@ -1721,7 +1725,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             base_seq: first,
             writer_epoch: materialization.head.writer_epoch,
             next_inode_id: materialization.head.next_inode_id,
-            retention_floor_seq: materialization.head.retention_floor_seq,
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             initialized: true,
             verified: true,
             fork: None,
@@ -3007,6 +3011,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
         ManifestMetadataSource {
             head: &materialization_before.head,
             basis_manifest_id: Some(materialization_before.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization_before.metadata_state,
         },
         &context.writer_version,
@@ -3053,6 +3058,7 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3090,6 +3096,7 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3159,6 +3166,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&raw_store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3231,6 +3239,7 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3363,6 +3372,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3431,7 +3441,7 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
             base_seq: materialization_before.head.seq,
             writer_epoch: materialization_before.head.writer_epoch,
             next_inode_id: materialization_before.head.next_inode_id,
-            retention_floor_seq: materialization_before.head.retention_floor_seq,
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             initialized: true,
             verified: true,
             fork: None,
@@ -3512,6 +3522,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3538,6 +3549,156 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
     .expect("root publication should report CAS race");
 
     assert_eq!(outcome, ManifestPublicationOutcome::RootCasRaceLost);
+}
+
+#[tokio::test]
+async fn floor_cas_never_regresses_under_a_competing_advancement() {
+    // A competing GC actor lands a higher floor between our verification and
+    // CAS. The retry observes it and yields: floors are monotonic.
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &inner,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let store = FloorRaiseOnCasConflictStore {
+        inner,
+        namespace_id: namespace_id.clone(),
+        remaining_conflicts: std::sync::atomic::AtomicUsize::new(1),
+    };
+    let response = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance yields to the competing higher floor");
+    // The competitor installed seq 5; our target of seq 1 must not clobber it.
+    assert_eq!(response.retention_floor_seq, ChangeSeq(5));
+    assert_eq!(
+        read_floor_seq(&store.inner, &namespace_id).await,
+        ChangeSeq(5)
+    );
+}
+
+#[derive(Debug)]
+struct FloorRaiseOnCasConflictStore {
+    inner: LocalFsStore,
+    namespace_id: NamespaceId,
+    remaining_conflicts: std::sync::atomic::AtomicUsize,
+}
+
+impl FloorRaiseOnCasConflictStore {
+    async fn install_higher_floor(&self) {
+        let loaded = read_wal_floor_object(&self.inner, &self.namespace_id)
+            .await
+            .expect("read floor for raise");
+        let mut floor = loaded.envelope.state;
+        floor.floor_seq = ChangeSeq(5);
+        let envelope = loonfs_api::wire::control::WalFloorEnvelope::from_state(
+            loonfs_api::wire::control::ControlObjectKind::WalFloor,
+            "test-writer/0.1.0",
+            floor,
+        )
+        .expect("floor envelope");
+        let bytes =
+            loonfs_api::wire::control::encode_control_object(&envelope).expect("floor bytes");
+        self.inner
+            .put(
+                &loonfs_objectstore::keys::wal_floor(self.namespace_id.as_str()),
+                Bytes::from(bytes),
+                PutMode::Overwrite,
+            )
+            .await
+            .expect("write raised floor");
+    }
+}
+
+#[async_trait]
+impl ObjectStore for FloorRaiseOnCasConflictStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        use std::sync::atomic::Ordering;
+        if key == loonfs_objectstore::keys::wal_floor(self.namespace_id.as_str())
+            && self.remaining_conflicts.load(Ordering::SeqCst) > 0
+        {
+            self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
+            self.install_higher_floor().await;
+            return Err(ObjectStoreError::PreconditionFailed);
+        }
+        self.inner.compare_and_swap(key, expected_etag, bytes).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[tokio::test]
+async fn a_missing_floor_reads_as_retain_everything() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    store
+        .delete(&loonfs_objectstore::keys::wal_floor(namespace_id.as_str()))
+        .await
+        .expect("delete floor");
+
+    let floor = crate::namespace::control::read_wal_floor_seq_or_zero(&store, &namespace_id)
+        .await
+        .expect("missing floor defaults");
+    assert_eq!(floor, ChangeSeq(0));
 }
 
 #[tokio::test]
@@ -3576,6 +3737,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         ManifestMetadataSource {
             head: &materialization.head,
             basis_manifest_id: Some(materialization.root.manifest_id),
+            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,

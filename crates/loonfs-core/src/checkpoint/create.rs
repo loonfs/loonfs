@@ -25,7 +25,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::read_head_and_metadata_root;
+use crate::namespace::control::{read_head_and_metadata_root, read_wal_floor_seq_or_zero};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
@@ -242,6 +242,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
 struct CheckpointProjection<'a, S: ObjectStore + ?Sized> {
     head: HeadState,
     root: MetadataRootState,
+    floor_seq: ChangeSeq,
     manifest_tables: VerifiedMetadataTables<'a, S>,
     tail_state: MetadataState,
 }
@@ -254,6 +255,11 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
         .await
         .map_err(|error| CoreError::MetadataProjection(error.into()))?;
     let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?;
+    let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -313,6 +319,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     Ok(CheckpointProjection {
         head,
         root,
+        floor_seq,
         manifest_tables,
         tail_state: replayed.resulting_metadata_state,
     })
@@ -351,7 +358,6 @@ fn ensure_checkpoint_reconstructed_head_matches(
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
         || current_head.next_inode_id != reconstructed.next_inode_id
-        || current_head.retention_floor_seq != reconstructed.retention_floor_seq
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
     {
@@ -404,7 +410,9 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             base_seq: initial_head.seq,
             writer_epoch: initial_head.writer_epoch,
             next_inode_id: initial_head.next_inode_id,
-            retention_floor_seq: initial_head.retention_floor_seq,
+            // Bootstrap precedes the floor object; nothing is retained
+            // below the genesis seq.
+            retention_floor_seq: ChangeSeq(0),
             initialized: true,
             verified: true,
             fork: None,
@@ -494,7 +502,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             base_seq,
             writer_epoch: projection.head.writer_epoch,
             next_inode_id: projection.head.next_inode_id,
-            retention_floor_seq: projection.head.retention_floor_seq,
+            retention_floor_seq: projection.floor_seq,
             initialized: true,
             verified: true,
             fork: None,
@@ -740,7 +748,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
             // The idempotency horizon is the retention floor: a commit
             // retried from below it re-bootstraps like any sub-floor cursor,
             // so its receipt no longer needs to be carried forward.
-            let retention_floor_seq = projection.head.retention_floor_seq;
+            let retention_floor_seq = projection.floor_seq;
             rows.retain(|row| match row {
                 MetadataRow::CommitReceipt { committed_seq, .. } => {
                     *committed_seq >= retention_floor_seq
@@ -787,7 +795,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     )
     .map_err(index_error)?;
 
-    drop_rows_below_retention_floor(&mut rows_by_family, projection.head.retention_floor_seq)?;
+    drop_rows_below_retention_floor(&mut rows_by_family, projection.floor_seq)?;
 
     build_manifest_tables_from_rows(
         store,
@@ -807,6 +815,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
 pub(super) struct ManifestMetadataSource<'a> {
     pub(super) head: &'a HeadState,
     pub(super) basis_manifest_id: Option<ManifestId>,
+    pub(super) retention_floor_seq: ChangeSeq,
     pub(super) metadata_state: &'a MetadataState,
 }
 
@@ -922,7 +931,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             base_seq,
             writer_epoch: head.writer_epoch,
             next_inode_id: head.next_inode_id,
-            retention_floor_seq: head.retention_floor_seq,
+            retention_floor_seq: source.retention_floor_seq,
             initialized: true,
             verified: true,
             fork: None,

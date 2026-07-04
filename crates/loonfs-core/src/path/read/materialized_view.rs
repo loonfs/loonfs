@@ -479,11 +479,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
-        let page_head_seq = page_head_seq(
-            self.head.seq,
-            self.head.retention_floor_seq,
-            request.cursor.as_ref(),
-        )?;
+        let page_head_seq = page_head_seq(self.head.seq, request.cursor.as_ref())?;
         if page_head_seq != self.head.seq {
             return Err(MetadataViewError::UnsupportedHistoricalRead {
                 requested_seq: page_head_seq,

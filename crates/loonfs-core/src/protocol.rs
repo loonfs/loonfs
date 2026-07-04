@@ -20,11 +20,11 @@ use crate::namespace::catalog::{
     load_namespace_catalog_entry, load_namespace_content_store_id, namespace_initialization_state,
     NamespaceInitializationError, NamespaceInitializationState,
 };
-use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
     load_namespace_head_control, read_head_and_metadata_root,
 };
+use crate::namespace::control::{read_wal_floor_seq_or_zero, ControlObjectLoadError};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
@@ -798,7 +798,6 @@ fn ensure_publish_reconstructed_head_matches(
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
         || current_head.next_inode_id != reconstructed.next_inode_id
-        || current_head.retention_floor_seq != reconstructed.retention_floor_seq
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
     {
@@ -1348,10 +1347,15 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    if after_seq < head.retention_floor_seq {
+    let retention_floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?;
+    if after_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {
             after_seq,
-            retention_floor_seq: head.retention_floor_seq,
+            retention_floor_seq,
         });
     }
     if after_seq >= head.seq {
@@ -1368,7 +1372,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         store,
         WalChainLoadRequest {
             namespace_id,
-            chain_base_seq: head.retention_floor_seq,
+            chain_base_seq: retention_floor_seq,
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: Some(after_seq),

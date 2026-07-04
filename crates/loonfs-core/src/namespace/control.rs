@@ -1,11 +1,11 @@
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
-    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState,
+    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState, WalFloorEnvelope,
 };
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::{
-    content_store_descriptor, metadata_root, namespace_config, wal_head,
+    content_store_descriptor, metadata_root, namespace_config, wal_floor, wal_head,
 };
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
@@ -24,6 +24,13 @@ pub(crate) struct LoadedMetadataRootObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: MetadataRootEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LoadedWalFloorObject {
+    pub(crate) object_key: String,
+    pub(crate) metadata: ObjectMetadata,
+    pub(crate) envelope: WalFloorEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +71,13 @@ pub struct LoadedMetadataRootControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
     pub state: MetadataRootState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedWalFloorControl {
+    pub object_key: String,
+    pub identity: ControlObjectIdentity,
+    pub state: loonfs_api::wire::control::WalFloorState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +182,42 @@ pub(crate) async fn read_content_store_descriptor_object<S: ObjectStore + ?Sized
     })
 }
 
+pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedWalFloorObject, ControlObjectLoadError> {
+    validate_namespace_id_for_control_key(expected_namespace)?;
+    let object_key = wal_floor(expected_namespace.as_str());
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
+    let envelope: WalFloorEnvelope =
+        decode_control_object(&encoded_bytes, ControlObjectKind::WalFloor)
+            .map_err(|err| map_control_codec_error(&object_key, err))?;
+    validate_expected_namespace(
+        &object_key,
+        expected_namespace,
+        &envelope.state.namespace_id,
+    )?;
+
+    Ok(LoadedWalFloorObject {
+        object_key,
+        metadata,
+        envelope,
+    })
+}
+
+/// Reads the floor, treating a missing object as seq 0: a lost floor means
+/// "retain more history", never less.
+pub(crate) async fn read_wal_floor_seq_or_zero<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<loonfs_api::ChangeSeq, ControlObjectLoadError> {
+    match read_wal_floor_object(store, expected_namespace).await {
+        Ok(loaded) => Ok(loaded.envelope.state.floor_seq),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(loonfs_api::ChangeSeq(0)),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
@@ -264,6 +314,19 @@ pub async fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
     let loaded = read_content_store_descriptor_object(store, expected_content_store).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedContentStoreDescriptorControl {
+        object_key: loaded.object_key,
+        identity,
+        state: loaded.envelope.state,
+    })
+}
+
+pub async fn load_namespace_wal_floor_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedWalFloorControl, ControlObjectLoadError> {
+    let loaded = read_wal_floor_object(store, expected_namespace).await?;
+    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
+    Ok(LoadedWalFloorControl {
         object_key: loaded.object_key,
         identity,
         state: loaded.envelope.state,

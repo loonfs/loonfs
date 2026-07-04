@@ -4,7 +4,6 @@ use loonfs_api::{ChangeSeq, DirectoryPageCursor, InodeKind};
 
 pub(super) fn page_head_seq(
     current_head_seq: ChangeSeq,
-    snapshot_floor_seq: ChangeSeq,
     cursor: Option<&DirectoryPageCursor>,
 ) -> Result<ChangeSeq, CoreError> {
     let Some(cursor) = cursor else {
@@ -13,15 +12,6 @@ pub(super) fn page_head_seq(
     if cursor.head_seq > current_head_seq {
         return Err(MetadataViewError::SnapshotUnavailable {
             requested_seq: cursor.head_seq,
-            snapshot_floor_seq,
-            head_seq: current_head_seq,
-        }
-        .into());
-    }
-    if cursor.head_seq < snapshot_floor_seq {
-        return Err(MetadataViewError::SnapshotUnavailable {
-            requested_seq: cursor.head_seq,
-            snapshot_floor_seq,
             head_seq: current_head_seq,
         }
         .into());
