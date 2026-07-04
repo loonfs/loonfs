@@ -4369,7 +4369,7 @@ async fn move_path_directory_cycle_is_would_cycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
+async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -4401,27 +4401,31 @@ async fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     )
     .expect("delete docs");
 
-    let put_error = write_file_bytes(
+    // Deleting `/docs` unbinds the name: it is reusable immediately, and
+    // writes and moves under it create a fresh subtree rather than
+    // conflicting with the dead one. The old subtree stays dead — its
+    // previous child is not resurrected by the recreation.
+    write_file_bytes(
         &store,
         &namespace_id(),
         "/docs/new.txt",
         b"new",
         &context,
-        Some("put-under-tombstone"),
+        Some("put-under-recreated"),
     )
-    .expect_err("put tombstone conflict");
-    assert_eq!(put_error.code(), ErrorCode::TombstoneConflict);
+    .expect("put recreates the subtree");
+    let old_child = resolve_path(&store, &namespace_id(), "/docs/old.txt");
+    assert!(old_child.is_err(), "dead subtree child must stay invisible");
 
-    let move_error = move_path(
+    move_path(
         &store,
         &namespace_id(),
         "/tmp/source.txt",
         "/docs/source.txt",
         &context,
-        Some("move-under-tombstone"),
+        Some("move-under-recreated"),
     )
-    .expect_err("move tombstone conflict");
-    assert_eq!(move_error.code(), ErrorCode::TombstoneConflict);
+    .expect("move lands in the recreated subtree");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

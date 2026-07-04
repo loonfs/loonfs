@@ -1212,6 +1212,14 @@ rows.
 Compaction rewrites metadata runs (and, in the future, content layouts) into
 more efficient physical shapes.
 
+A base rebuild drops rows that no retained sequence can observe: revisions
+superseded at or below the retention floor, bindings superseded or unbound at
+or below the floor, spent unbind markers, and commit receipts below the
+floor. The floor is the single retention policy: history below it — including
+file revision history — is reclaimed, except where a named checkpoint record
+still pins an older manifest that can serve it. Tombstone and inode rows are always
+retained for now; reachability-based dropping for them is future work.
+
 Invariants:
 
 - Compaction MUST NOT change logical content: the visible metadata state at

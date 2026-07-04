@@ -40,7 +40,7 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::namespace_manifest;
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::Instrument;
 
 #[cfg(test)]
@@ -540,6 +540,189 @@ pub(super) fn retained_checkpoint_records(
     checkpoints
 }
 
+/// Drops rows that no retained sequence can observe (format spec,
+/// "Compaction"). Conservative subset: superseded revisions, superseded or
+/// unbound bindings, and spent unbind markers at or below the retention
+/// floor. Tombstone and inode rows are always retained until
+/// reachability-based dropping is designed.
+pub(super) fn drop_rows_below_retention_floor(
+    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
+    retention_floor_seq: ChangeSeq,
+) -> Result<(), CoreError> {
+    // The latest revision at or below the floor is what the floor itself
+    // observes; every older one is superseded at every retained sequence.
+    let mut latest_revision_at_floor = BTreeMap::new();
+    for row in rows_by_family
+        .get(&MetadataTableFamily::Revisions)
+        .into_iter()
+        .flatten()
+    {
+        if let MetadataRow::Revision {
+            inode_id,
+            revision_no,
+            committed_seq,
+            ..
+        } = row
+        {
+            if *committed_seq <= retention_floor_seq {
+                let latest = latest_revision_at_floor
+                    .entry(*inode_id)
+                    .or_insert(*revision_no);
+                if *revision_no > *latest {
+                    *latest = *revision_no;
+                }
+            }
+        }
+    }
+    let retain_revision = |row: &MetadataRow| match row {
+        MetadataRow::Revision {
+            inode_id,
+            revision_no,
+            committed_seq,
+            ..
+        } => {
+            *committed_seq > retention_floor_seq
+                || latest_revision_at_floor.get(inode_id) == Some(revision_no)
+        }
+        _ => true,
+    };
+    for family in [
+        MetadataTableFamily::Revisions,
+        MetadataTableFamily::RevisionsByInodeDesc,
+    ] {
+        if let Some(rows) = rows_by_family.get_mut(&family) {
+            rows.retain(retain_revision);
+        }
+    }
+
+    // At the floor only the latest non-unbound bind per (parent, name) slot
+    // is visible; an unbind marker at or below the floor has finished its
+    // work once every bind it covered is gone.
+    // Unbind identity here omits child_inode_id (the read path also matches
+    // it); the 4-tuple is already unique for writer-produced rows, so the
+    // predicates agree on every legal history.
+    let mut unbound_at_floor = BTreeSet::new();
+    for row in rows_by_family
+        .get(&MetadataTableFamily::DirentryUnbinds)
+        .into_iter()
+        .flatten()
+    {
+        if let MetadataRow::DirentryUnbind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            unbind_seq,
+            ..
+        } = row
+        {
+            if *unbind_seq <= retention_floor_seq {
+                unbound_at_floor.insert((
+                    *parent_inode_id,
+                    name_key.clone(),
+                    *bind_seq,
+                    *bind_delta_index,
+                ));
+            }
+        }
+    }
+    let mut latest_bind_at_floor = BTreeMap::new();
+    for row in rows_by_family
+        .get(&MetadataTableFamily::DirentryBinds)
+        .into_iter()
+        .flatten()
+    {
+        if let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        {
+            if *bind_seq <= retention_floor_seq {
+                let candidate = (*bind_seq, *bind_delta_index);
+                let latest = latest_bind_at_floor
+                    .entry((*parent_inode_id, name_key.clone()))
+                    .or_insert(candidate);
+                if candidate > *latest {
+                    *latest = candidate;
+                }
+            }
+        }
+    }
+    // Load-bearing writer invariant: a bind is only ever superseded by an
+    // operation that also unbinds it, so every non-latest bind at or below
+    // the floor must have a matching unbind at or below the floor. The drop
+    // is only visibility-preserving under that rule; refuse to compact state
+    // that violates it.
+    for row in rows_by_family
+        .get(&MetadataTableFamily::DirentryBinds)
+        .into_iter()
+        .flatten()
+    {
+        if let MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } = row
+        {
+            if *bind_seq <= retention_floor_seq
+                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
+                    != Some(&(*bind_seq, *bind_delta_index))
+                && !unbound_at_floor.contains(&(
+                    *parent_inode_id,
+                    name_key.clone(),
+                    *bind_seq,
+                    *bind_delta_index,
+                ))
+            {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "bind at seq {bind_seq:?} delta {bind_delta_index} for parent {parent_inode_id:?} is superseded at or below the retention floor without an unbind; refusing to drop rows"
+                )));
+            }
+        }
+    }
+
+    let retain_bind = |row: &MetadataRow| match row {
+        MetadataRow::DirentryBind {
+            parent_inode_id,
+            name_key,
+            bind_seq,
+            bind_delta_index,
+            ..
+        } => {
+            *bind_seq > retention_floor_seq
+                || (latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
+                    == Some(&(*bind_seq, *bind_delta_index))
+                    && !unbound_at_floor.contains(&(
+                        *parent_inode_id,
+                        name_key.clone(),
+                        *bind_seq,
+                        *bind_delta_index,
+                    )))
+        }
+        _ => true,
+    };
+    for family in [
+        MetadataTableFamily::DirentryBinds,
+        MetadataTableFamily::DirentryChildBinds,
+    ] {
+        if let Some(rows) = rows_by_family.get_mut(&family) {
+            rows.retain(retain_bind);
+        }
+    }
+    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::DirentryUnbinds) {
+        rows.retain(|row| match row {
+            MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq > retention_floor_seq,
+            _ => true,
+        });
+    }
+    Ok(())
+}
+
 async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -608,6 +791,8 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
             .unwrap_or_default(),
     )
     .map_err(index_error)?;
+
+    drop_rows_below_retention_floor(&mut rows_by_family, projection.head.retention_floor_seq)?;
 
     build_manifest_tables_from_rows(
         store,
