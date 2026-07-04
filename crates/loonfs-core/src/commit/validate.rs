@@ -974,8 +974,8 @@ async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
         return Err(CommitValidationError::BindingPreconditionMismatch {
             parent_inode_id,
             name_key: name_key.to_owned(),
-            expected_child_inode: child_inode_id,
-            actual_child_inode: Some(existing.child_inode_id),
+            expected_child_inode_id: child_inode_id,
+            actual_child_inode_id: Some(existing.child_inode_id),
         }
         .into());
     }
@@ -1226,7 +1226,7 @@ async fn validate_publish_delete_file_not_covered<S: ObjectStore + ?Sized>(
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return Err(CommitValidationError::DeleteFileCoveredByTombstone {
             inode_id,
-            covering_root_inode: tombstone.root_inode_id,
+            covering_root_inode_id: tombstone.root_inode_id,
             tombstone_seq: tombstone.tombstone_seq,
         }
         .into());
@@ -1250,7 +1250,7 @@ async fn validate_publish_delete_subtree_not_covered<S: ObjectStore + ?Sized>(
     {
         return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
             root_inode_id,
-            covering_root_inode: tombstone.root_inode_id,
+            covering_root_inode_id: tombstone.root_inode_id,
             tombstone_seq: tombstone.tombstone_seq,
         }
         .into());

@@ -19,8 +19,8 @@ pub enum CommitValidationError {
     BindingPreconditionMismatch {
         parent_inode_id: InodeId,
         name_key: String,
-        expected_child_inode: InodeId,
-        actual_child_inode: Option<InodeId>,
+        expected_child_inode_id: InodeId,
+        actual_child_inode_id: Option<InodeId>,
     },
     DirectoryEmptyPreconditionInodeMissing {
         inode_id: InodeId,
@@ -99,7 +99,7 @@ pub enum CommitValidationError {
     },
     DeleteFileCoveredByTombstone {
         inode_id: InodeId,
-        covering_root_inode: InodeId,
+        covering_root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     RenameInodeMissing {
@@ -146,7 +146,7 @@ pub enum CommitValidationError {
     },
     DeleteSubtreeRootCoveredByTombstone {
         root_inode_id: InodeId,
-        covering_root_inode: InodeId,
+        covering_root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     RestoreRevisionOverflow {
