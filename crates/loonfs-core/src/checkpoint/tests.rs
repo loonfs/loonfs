@@ -28,7 +28,7 @@ use super::runs::{
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
     DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
 };
-use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::control::read_head_object;
@@ -1076,6 +1076,53 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
         unbinds.is_empty(),
         "spent unbind markers survived: {unbinds:?}"
     );
+}
+
+#[tokio::test]
+async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let limit = u32::try_from(crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS).expect("limit");
+    for round in 0..=limit {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write within backpressure window");
+    }
+
+    let error = write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/one-too-many.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect_err("publish past the backpressure limit must be rejected");
+    assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+
+    // Reads never gate: the change feed still serves the whole tail.
+    let changes = list_changes_after(
+        &store,
+        &namespace_id,
+        ChangeSeq(0),
+        EffectiveLimit::new(NonZeroU32::new(200).expect("nonzero")),
+    )
+    .await
+    .expect("list changes");
+    assert_eq!(changes.through_seq, ChangeSeq(129));
 }
 
 #[tokio::test]

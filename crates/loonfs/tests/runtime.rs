@@ -1805,6 +1805,39 @@ fn explicit_commit_appears_in_change_feed() {
 }
 
 #[test]
+fn publish_auto_ticks_maintenance_once_tail_reaches_threshold() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "auto-tick-test");
+    let namespace_id = namespace();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    for round in 0..33u32 {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body",
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+
+    // The tick runs on the maintenance worker thread; quiesce, then assert.
+    fs.wait_for_background_maintenance();
+    let status = fs
+        .namespace_status_blocking(&namespace_id)
+        .expect("status after auto tick");
+    assert!(
+        status.current_manifest_id > Some(ManifestId(0)),
+        "auto tick should have published a manifest: {status:?}"
+    );
+    assert!(
+        status.wal_tail_segments < 32,
+        "auto tick should have bounded the tail: {status:?}"
+    );
+}
+
+#[test]
 fn namespace_status_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "status-test");

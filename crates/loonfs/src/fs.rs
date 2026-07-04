@@ -55,6 +55,10 @@ pub(crate) struct FsInner {
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
+    pub(crate) maintenance_inflight: std::sync::Mutex<std::collections::BTreeSet<NamespaceId>>,
+    pub(crate) maintenance_idle: std::sync::Condvar,
+    pub(crate) maintenance_worker:
+        std::sync::OnceLock<std::sync::mpsc::Sender<(NamespaceId, MaintenanceTickOptions)>>,
 }
 
 /// Lock accessors for the runtime caches.
@@ -201,6 +205,9 @@ impl Fs {
                 metadata_table_cache,
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::default(),
+                maintenance_inflight: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                maintenance_idle: std::sync::Condvar::new(),
+                maintenance_worker: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -1046,11 +1053,14 @@ impl Fs {
                     .collect::<Vec<_>>();
                 self.invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
             }
-            return publish
+            let wal_tail_segments = publish.wal_tail_segments;
+            let results = publish
                 .results
                 .into_iter()
                 .map(|result| result.map_err(RuntimeError::Core))
                 .collect();
+            self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments);
+            return results;
         }
 
         let results: Vec<_> = self
@@ -1072,6 +1082,116 @@ impl Fs {
             self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         }
         results
+    }
+
+    /// Queues a maintenance tick after a publish that observed the WAL tail
+    /// at or past the checkpoint threshold. Ticks run on a dedicated worker
+    /// thread with its own runtime, so no writer (and no server batch
+    /// pipeline) ever waits behind a checkpoint or base rebuild, and the
+    /// mechanism works under any caller executor — including per-call
+    /// `block_on` embedders whose ambient runtime dies between calls. The
+    /// per-namespace in-flight marker dedupes concurrent publishers and is
+    /// cleared by the worker on every outcome, including tick panics. The
+    /// cache-disabled diagnostic mode never reaches this, as it tracks no
+    /// tail projection to observe.
+    fn maybe_auto_tick_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
+        let options = MaintenanceTickOptions::default();
+        if wal_tail_segments < options.max_wal_tail_segments {
+            return;
+        }
+        {
+            let mut inflight = self
+                .inner
+                .maintenance_inflight
+                .lock()
+                .expect("maintenance inflight lock");
+            if !inflight.insert(namespace_id.clone()) {
+                return;
+            }
+        }
+        let sender = self.maintenance_worker();
+        if sender.send((namespace_id.clone(), options)).is_err() {
+            if let Ok(mut inflight) = self.inner.maintenance_inflight.lock() {
+                inflight.remove(namespace_id);
+            }
+            self.inner.maintenance_idle.notify_all();
+        }
+    }
+
+    /// Blocks until every queued background maintenance tick has finished.
+    ///
+    /// Publishes schedule maintenance on a dedicated worker; call this to
+    /// quiesce before shutdown, or in tests that assert on post-maintenance
+    /// state.
+    pub fn wait_for_background_maintenance(&self) {
+        let mut inflight = self
+            .inner
+            .maintenance_inflight
+            .lock()
+            .expect("maintenance inflight lock");
+        while !inflight.is_empty() {
+            inflight = self
+                .inner
+                .maintenance_idle
+                .wait(inflight)
+                .expect("maintenance inflight lock");
+        }
+    }
+
+    fn maintenance_worker(
+        &self,
+    ) -> &std::sync::mpsc::Sender<(NamespaceId, MaintenanceTickOptions)> {
+        self.inner.maintenance_worker.get_or_init(|| {
+            let (sender, receiver) =
+                std::sync::mpsc::channel::<(NamespaceId, MaintenanceTickOptions)>();
+            // The worker holds only a weak reference: dropping the last Fs
+            // drops FsInner (and this sender with it), which ends the loop
+            // and the thread.
+            let inner = Arc::downgrade(&self.inner);
+            std::thread::Builder::new()
+                .name("loonfs-maintenance".to_owned())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("maintenance runtime");
+                    while let Ok((namespace_id, options)) = receiver.recv() {
+                        let Some(inner) = inner.upgrade() else {
+                            return;
+                        };
+                        let fs = Fs { inner };
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                runtime
+                                    .block_on(fs.maintenance_tick_namespace(&namespace_id, options))
+                            }));
+                        if let Ok(mut inflight) = fs.inner.maintenance_inflight.lock() {
+                            inflight.remove(&namespace_id);
+                        }
+                        fs.inner.maintenance_idle.notify_all();
+                        match outcome {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(error)) => {
+                                tracing::info!(
+                                    phase = "auto_maintenance_tick",
+                                    result = "error",
+                                    error = %error,
+                                    "post-publish maintenance tick failed"
+                                );
+                            }
+                            Err(_) => {
+                                tracing::info!(
+                                    phase = "auto_maintenance_tick",
+                                    result = "panic",
+                                    "post-publish maintenance tick panicked"
+                                );
+                            }
+                        }
+                    }
+                })
+                .expect("spawn maintenance worker");
+            sender
+        })
     }
 
     /// Snapshots the runtime cache counters.

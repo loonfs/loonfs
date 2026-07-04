@@ -158,6 +158,7 @@ pub(crate) struct PublishTailProjection {
     pub(crate) manifest_id: ManifestId,
     pub(crate) manifest_head_seq: ChangeSeq,
     pub(crate) manifest_payload_checksum: String,
+    pub(crate) wal_tail_segments: u64,
     pub(crate) tail_state: MetadataState,
 }
 
@@ -578,7 +579,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         }
     };
     let publish_tail_options = PublishTailOptions::default();
-    let publish_view = match load_publish_metadata_view(
+    let (publish_view, projection) = match load_publish_metadata_view(
         store,
         namespace_id,
         Some(acquired_writer),
@@ -591,9 +592,25 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     ))
     .await
     {
-        Ok((publish_view, _projection)) => publish_view,
+        Ok(value) => value,
         Err(error) => return (0..candidates.len()).map(|_| Err(error.clone())).collect(),
     };
+    if projection.wal_tail_segments > crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS {
+        // Same backpressure contract as the caching engine: the commit
+        // surface must not outrun maintenance either (format spec,
+        // "Maintenance operations").
+        let error = MetadataViewError::MaintenanceRequired {
+            namespace_id: namespace_id.clone(),
+            reason: format!(
+                "wal tail has {} segments; publishes resume once maintenance brings it back to {} or fewer",
+                projection.wal_tail_segments,
+                crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS
+            ),
+        };
+        return (0..candidates.len())
+            .map(|_| Err(CoreError::from(error.clone())))
+            .collect();
+    }
     publish_namespace_mutations_batch_against_publish_view(
         store,
         namespace_id,
@@ -743,6 +760,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalReplay(error))
     })?;
     ensure_publish_reconstructed_head_matches(head, &replayed.resulting_head)?;
+    let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     let projection = PublishTailProjection {
         namespace_id: namespace_id.clone(),
         head_etag: head_etag.to_owned(),
@@ -750,6 +768,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         manifest_id,
         manifest_head_seq: manifest_head.seq,
         manifest_payload_checksum,
+        wal_tail_segments,
         tail_state: replayed.resulting_metadata_state,
     };
     Ok(projection)

@@ -55,6 +55,9 @@ pub struct RuntimeCacheConfig {
     /// Enables namespace control-object caching.
     pub control_cache_enabled: bool,
     /// Maximum namespaces retained in runtime caches.
+    /// Setting this to zero disables the commit-engine cache — a diagnostic
+    /// mode that also disables post-publish auto-maintenance, leaving only
+    /// the hard publish backpressure. Not for production use.
     pub max_cached_namespaces: usize,
     /// Maximum metadata rows retained across cached WAL-tail projections.
     pub max_cached_wal_tail_projection_rows: usize,
