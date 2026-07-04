@@ -159,8 +159,8 @@ pub struct HeadState {
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
-    /// Live read/recovery pointer. If present, basis reconstruction loads this
-    /// manifest before replaying the visible WAL tail.
+    /// Live read/recovery pointer. Reads load this manifest before projecting
+    /// the visible WAL tail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_manifest_id: Option<ManifestId>,
     /// Admin/provenance convenience pointer to the latest checkpoint record.

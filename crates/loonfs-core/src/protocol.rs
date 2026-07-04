@@ -103,7 +103,7 @@ impl PublishBatchAgainstViewResult {
     }
 }
 
-pub(crate) struct PublishManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
+pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
     head: HeadState,
     head_etag: String,
@@ -112,13 +112,13 @@ pub(crate) struct PublishManifestPlusTailView<'a, S: ObjectStore + ?Sized> {
     tail_state: MetadataState,
 }
 
-impl<S: ObjectStore + ?Sized> PublishManifestPlusTailView<'_, S> {
+impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(crate) fn head(&self) -> &HeadState {
         &self.head
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::manifest_plus_tail(&self.head, &self.manifest_tables, &self.tail_state)
+        MetadataView::from_loaded_head(&self.head, &self.manifest_tables, &self.tail_state)
     }
 
     async fn find_commit_receipt(
@@ -579,7 +579,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         }
     };
     let publish_tail_options = PublishTailOptions::default();
-    let publish_view = match load_publish_manifest_plus_tail_view(
+    let publish_view = match load_publish_metadata_view(
         store,
         namespace_id,
         Some(acquired_writer),
@@ -606,13 +606,13 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     .results
 }
 
-pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?Sized>(
+pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
     acquired_writer: Option<AcquiredWriter>,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
-) -> Result<(PublishManifestPlusTailView<'a, S>, PublishTailProjection), CoreError> {
+) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection), CoreError> {
     let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)))?;
@@ -678,7 +678,7 @@ pub(crate) async fn load_publish_manifest_plus_tail_view<'a, S: ObjectStore + ?S
     ensure_publish_head_etag_still_current(store, namespace_id, &head_etag).await?;
 
     Ok((
-        PublishManifestPlusTailView {
+        PublishMetadataView {
             content_store_id: catalog_entry.content_store_id,
             head,
             head_etag,
@@ -828,7 +828,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     namespace_id: &NamespaceId,
     candidates: &[NamespaceMutationCandidate],
     context: &MutationContext,
-    view: &PublishManifestPlusTailView<'_, S>,
+    view: &PublishMetadataView<'_, S>,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::new(Vec::new());
@@ -1098,7 +1098,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
 #[allow(clippy::too_many_arguments)]
 async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
-    view: &PublishManifestPlusTailView<'_, S>,
+    view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession,
     candidate: &NamespaceMutationCandidate,
     index: usize,
@@ -1245,7 +1245,7 @@ fn validate_commit_id(commit_id: &CommitId) -> Result<(), CoreError> {
 #[allow(clippy::too_many_arguments)]
 async fn record_primary_request_or_complete_idempotent<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
-    view: &PublishManifestPlusTailView<'_, S>,
+    view: &PublishMetadataView<'_, S>,
     outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
     aliases: &mut Vec<(usize, usize)>,

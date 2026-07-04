@@ -702,7 +702,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::manifest_plus_tail(&self.head, &self.tables, self.wal_tail_rows.as_ref())
+        MetadataView::from_loaded_head(&self.head, &self.tables, self.wal_tail_rows.as_ref())
     }
 }
 

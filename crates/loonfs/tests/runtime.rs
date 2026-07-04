@@ -1380,7 +1380,7 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
         .expect("list root");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_manifest_plus_tail_hits, 2);
+    assert_eq!(stats.latest_metadata_view_reads, 2);
 }
 
 #[test]
@@ -1413,7 +1413,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
         .expect("list materialized docs");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_manifest_plus_tail_hits, 2);
+    assert_eq!(stats.latest_metadata_view_reads, 2);
     assert_eq!(raw_store.content_blob_get_count(), 0);
     assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
@@ -1452,7 +1452,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     assert_eq!(list[0].absolute_path, "/docs/file.txt");
 
     let stats = fs.runtime_cache_stats();
-    assert_eq!(stats.read_manifest_plus_tail_hits, 2);
+    assert_eq!(stats.latest_metadata_view_reads, 2);
 }
 
 #[test]
@@ -1482,7 +1482,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 
     assert!(after_first.metadata_table_cache_inserts > 0);
     assert!(after_second.metadata_table_cache_hits > after_first.metadata_table_cache_hits);
-    assert_eq!(after_second.read_manifest_plus_tail_hits, 2);
+    assert_eq!(after_second.latest_metadata_view_reads, 2);
 }
 
 #[test]

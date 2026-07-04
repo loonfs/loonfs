@@ -545,7 +545,7 @@ store copies are not supported in v0 unless the content is first imported into
 the destination content store. Inode identity does not cross the namespace
 boundary.
 
-### 2.9 Recovery basis
+### 2.9 Recovery view
 
 Readers reconstruct authoritative state from:
 
@@ -623,12 +623,12 @@ Content must be durable before any metadata change can reference it.
 Content staging is idempotent and has no effect on the visible tree. If the
 caller crashes mid-upload, orphaned content objects are harmless.
 
-#### 3.1.2 Basis reconstruction
+#### 3.1.2 Metadata view loading
 
-Before evaluating commit requests, the server reconstructs the current
-metadata state using the same procedure described in section 3.2.1: load the
-head, load the current manifest (if any), and replay the visible WAL segment
-chain. The server never trusts caller-supplied metadata.
+Before evaluating commit requests, the server loads the current metadata view
+using the same procedure described in section 3.2.1: load the head, load the
+current manifest, and project the visible WAL segment chain. The server never
+trusts caller-supplied metadata.
 
 #### 3.1.3 Validation and logical commits
 
@@ -711,7 +711,7 @@ acceptance inside a batch is not success.
 A rejection judged against ephemeral state advanced by a tentative
 acceptance (step 2 in section 3.1.4) is contingent on that state publishing:
 if publication fails, the writer must report the publication failure for it,
-never the semantic rejection. Rejections judged against the durable basis
+never the semantic rejection. Rejections judged against the durable metadata view
 alone stand regardless of the publication outcome.
 
 ### 3.2 Read protocol
@@ -720,7 +720,7 @@ A read reconstructs the visible filesystem state from durable artifacts on
 object storage. No server-side cache or local database is required for
 correctness; everything needed is in the object store.
 
-#### 3.2.1 Basis reconstruction
+#### 3.2.1 Metadata view loading
 
 The reader builds an in-memory metadata state from two kinds of durable
 object:
@@ -735,19 +735,17 @@ object:
    versions for retention, fork, or stable read workflows. Reads use
    `current_manifest_id`; `latest_checkpoint_id` is not recovery authority.
 4. Use the visible WAL tip named by the head to identify the visible segment
-   chain after the manifest `head_seq` (or from genesis, if no current
-   manifest exists), then replay the logical commit records in ascending
+   chain after the manifest `head_seq`, then replay the logical commit records in ascending
    `seq` order through `head.seq`. Each logical commit appends normalized rows
    to the same metadata tables.
 
-The result is a complete metadata state pinned to one `seq`.
+The result is a metadata view pinned to one `seq`.
 
 For latest path `stat` and directory `list`, an implementation may avoid
-hydrating the complete metadata state when `current_manifest_id` is present.
-The reader may query verified metadata run tables and the visible WAL tail
+hydrating a complete metadata state. The reader may query verified metadata run tables and the visible WAL tail
 overlay directly, provided it applies the same visibility rules and treats
 missing or corrupt manifest/WAL objects as hard errors. If no current manifest
-is published, latest stat/list falls back to full basis reconstruction.
+is published for a complete namespace, the namespace is corrupt.
 
 #### 3.2.2 Visibility rules
 
@@ -986,7 +984,7 @@ The fork protocol is:
    rejected as existing, and a partial target is rejected as partially
    initialized.
 2. Resolve and verify the source namespace descriptor, content-store
-   descriptor, head, checkpoint, and WAL basis.
+   descriptor, head, checkpoint, and WAL visibility chain.
 3. Create or reuse a verified source checkpoint at the current source head.
 4. Build the target head, target manifest, and descriptor using the source
    namespace's `content_store_id`.
@@ -1166,7 +1164,7 @@ visible WAL segment chain over unverified or partial manifest artifacts.
 
 The namespace manifest may reference one or more immutable metadata runs. Runs
 are not a second source of truth; they are rebuildable metadata rows used to
-keep normal basis reconstruction from replaying an unbounded WAL tail.
+keep normal metadata view loading from replaying an unbounded WAL tail.
 
 For file revisions, a valid manifest includes the canonical `revisions` table
 and the `revisions_by_inode_desc` index table. The index table must contain

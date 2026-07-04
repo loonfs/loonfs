@@ -245,7 +245,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
 }
 
 fn model_bootstrap_state() -> ModelMetadataState {
-    loonfs_model::bootstrap_basis_metadata_state()
+    loonfs_model::bootstrap_metadata_state()
 }
 
 fn assert_states_match(sequences: &[Vec<WalDelta>]) {

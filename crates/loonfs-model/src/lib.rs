@@ -10,4 +10,4 @@ mod genesis;
 pub mod metadata;
 pub mod wal;
 
-pub use genesis::bootstrap_basis_metadata_state;
+pub use genesis::bootstrap_metadata_state;

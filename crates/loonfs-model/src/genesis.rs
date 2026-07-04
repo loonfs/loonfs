@@ -1,7 +1,7 @@
 use crate::metadata::{InodeRecord, MetadataState};
 use loonfs_api::{ChangeSeq, InodeId, InodeKind};
 
-pub fn bootstrap_basis_metadata_state() -> MetadataState {
+pub fn bootstrap_metadata_state() -> MetadataState {
     MetadataState {
         inodes: vec![InodeRecord {
             inode_id: InodeId(1),

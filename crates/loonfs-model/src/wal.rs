@@ -16,12 +16,12 @@ pub enum WalReplayError {
 }
 
 pub fn replay_wal_tail_with_metadata(
-    basis_head: &HeadState,
-    basis_metadata_state: &MetadataState,
+    base_head: &HeadState,
+    base_metadata_state: &MetadataState,
     wal_tail: &[(ChangeSeq, Vec<WalDelta>)],
 ) -> Result<ReplayedWalTail, WalReplayError> {
-    let mut current_head = basis_head.clone();
-    let mut current_metadata_state = basis_metadata_state.clone();
+    let mut current_head = base_head.clone();
+    let mut current_metadata_state = base_metadata_state.clone();
 
     for (seq, deltas) in wal_tail {
         let applied = current_metadata_state
