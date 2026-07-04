@@ -1,14 +1,7 @@
-use super::{CommitRequest, CommitValidationContext, CommitValidationError};
+use super::{CommitRequest, CommitValidationError};
 use loonfs_api::wire::control::HeadState;
 
 pub(super) fn validate_commit_request_frame(
-    request: &CommitRequest,
-    context: &CommitValidationContext,
-) -> Result<(), CommitValidationError> {
-    validate_commit_request_frame_parts(request, &context.head)
-}
-
-pub(super) fn validate_commit_request_frame_parts(
     request: &CommitRequest,
     head: &HeadState,
 ) -> Result<(), CommitValidationError> {

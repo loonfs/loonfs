@@ -726,7 +726,10 @@ impl Fs {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        validate_runtime_mutation_path(absolute_path)?;
+        // Pre-flight the mutation-path invariant before staging content so an
+        // invalid or root path cannot orphan an already-written content blob;
+        // core re-checks the same invariant when the intent is planned.
+        loonfs_core::path::validate_path_for_mutation(absolute_path)?;
         let store = self.store();
         let stored = loonfs_core::content::store_bytes_as_content(&store, namespace_id, bytes)
             .await
@@ -1339,18 +1342,6 @@ pub(crate) fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
         Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => true,
         _ => false,
     }
-}
-
-fn validate_runtime_mutation_path(absolute_path: &str) -> Result<()> {
-    let path = AbsolutePath::parse(absolute_path).map_err(|error| {
-        RuntimeError::Core(CoreError::InvalidPath(
-            error.invalid_path_input().to_owned(),
-        ))
-    })?;
-    if path.is_root() {
-        return Err(RuntimeError::Core(CoreError::RootMutationForbidden));
-    }
-    Ok(())
 }
 
 fn default_page_limit() -> EffectiveLimit {
