@@ -145,6 +145,103 @@ mod tests {
     };
     use loonfs_api::ManifestId;
 
+    /// Pins every standard key pattern in the format spec's "Durable object
+    /// families" table to the key this crate actually builds for that family.
+    ///
+    /// The table is normative: a new family must be added to the table and to
+    /// this test together, and neither the spec pattern nor the builder can
+    /// change without the other.
+    #[test]
+    fn standard_key_patterns_match_format_spec_table() {
+        const HEX: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let spec = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/specs/format.md"
+        ))
+        .expect("read docs/specs/format.md");
+        let section = spec
+            .split_once("### 1.2 Durable object families")
+            .expect("format.md section 1.2 exists")
+            .1
+            .split_once("\n### ")
+            .expect("a section follows 1.2")
+            .0;
+
+        let mut patterns = std::collections::BTreeMap::new();
+        for line in section.lines() {
+            let Some(row) = line.strip_prefix("| **") else {
+                continue;
+            };
+            let Some((family, rest)) = row.split_once("**") else {
+                continue;
+            };
+            let Some(pattern) = rest
+                .rsplit_once("| `")
+                .and_then(|(_, tail)| tail.split_once('`'))
+                .map(|(pattern, _)| pattern)
+            else {
+                continue;
+            };
+            patterns.insert(family.to_owned(), pattern.to_owned());
+        }
+
+        let substitute = |pattern: &str| -> String {
+            pattern
+                .replace("{namespace_id}", "ns-1")
+                .replace("{owner_namespace_id}", "ns-1")
+                .replace("{source_namespace_id}", "ns-1")
+                .replace("{content_store_id}", "cs-1")
+                .replace("{start_seq:020}", &format!("{:020}", 42))
+                .replace("{suffix}", "0123456789abcdef")
+                .replace("{manifest_id:020}", &format!("{:020}", 400))
+                .replace("{checkpoint_id}", "chk-1")
+                .replace("{table_id}", "tbl-1")
+                .replace("{pin_id}", "pin-1")
+                .replace("{upload_id}", "up-1")
+                .replace("{hex[0..2]}", &HEX[0..2])
+                .replace("{hex[2..4]}", &HEX[2..4])
+                .replace("{hex}", HEX)
+        };
+
+        let built = [
+            ("Namespace config", namespace_config("ns-1")),
+            ("WAL head", wal_head("ns-1")),
+            (
+                "WAL segments",
+                wal_segment("ns-1", &format!("{:020}-{}", 42, "0123456789abcdef")),
+            ),
+            (
+                "Metadata manifests",
+                metadata_manifest("ns-1", ManifestId(400)),
+            ),
+            ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
+            ("Metadata tables", metadata_table("ns-1", "tbl-1")),
+            ("Pins", pin("ns-1", "pin-1")),
+            ("Upload sessions", upload_session("ns-1", "up-1")),
+            ("Content-store descriptor", content_store_descriptor("cs-1")),
+            ("Metadata root", metadata_root("ns-1")),
+            ("WAL floor", wal_floor("ns-1")),
+            (
+                "Content objects",
+                content_blob("cs-1", &format!("sha256:{HEX}")).expect("content key"),
+            ),
+        ];
+
+        let expected: std::collections::BTreeMap<String, String> = built
+            .into_iter()
+            .map(|(family, key)| (family.to_owned(), key))
+            .collect();
+        let actual: std::collections::BTreeMap<String, String> = patterns
+            .into_iter()
+            .map(|(family, pattern)| (family, substitute(&pattern)))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "the format.md durable-families table and the key builders must list \
+             the same families with the same key shapes"
+        );
+    }
+
     #[test]
     fn key_builders_match_spec_examples() {
         assert_eq!(namespace_config("ns-1"), "namespaces/ns-1/namespace.json");
