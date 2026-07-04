@@ -18,9 +18,7 @@ use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_tables,
 };
-use super::publish::{
-    publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
-};
+use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
@@ -31,7 +29,7 @@ use super::runs::{
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::{read_head_object, read_metadata_root_object};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::ops::{
     delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
@@ -41,7 +39,7 @@ use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
@@ -65,6 +63,7 @@ use tempfile::tempdir;
 #[derive(Debug)]
 struct CurrentProjection {
     head: HeadState,
+    root: MetadataRootState,
     metadata_state: MetadataState,
 }
 
@@ -74,8 +73,16 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
 ) -> Result<CurrentProjection, CoreError> {
     let (head, metadata_state) =
         load_checkpoint_projection_metadata_state(store, namespace_id).await?;
+    let root = read_metadata_root_object(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?
+        .envelope
+        .state;
     Ok(CurrentProjection {
         head,
+        root,
         metadata_state,
     })
 }
@@ -152,7 +159,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         .await
         .expect("materialization after");
 
-    assert_eq!(after.head.current_manifest_id, Some(checkpoint.manifest_id));
+    assert_eq!(after.root.manifest_id, checkpoint.manifest_id);
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -227,11 +234,15 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(
-        materialization.head.current_manifest_id,
-        Some(ManifestId(1))
-    );
-    assert!(materialization.head.latest_checkpoint_id.is_some());
+    assert_eq!(materialization.root.manifest_id, ManifestId(1));
+    let current_manifest = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        materialization.root.manifest_id,
+    )
+    .await
+    .expect("load current manifest");
+    assert!(!current_manifest.manifest.payload.checkpoints.is_empty());
     let bootstrap_manifest =
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(0))
             .await
@@ -320,10 +331,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(
-        materialization.head.current_manifest_id,
-        Some(ManifestId(0))
-    );
+    assert_eq!(materialization.root.manifest_id, ManifestId(0));
 }
 
 #[tokio::test]
@@ -1266,27 +1274,25 @@ async fn retention_advance_aborts_when_current_manifest_changes() {
         .await
         .expect("create checkpoint");
 
-    // Lose the floor CAS once while a competing maintenance actor installs a
-    // different current manifest; the retry must abort instead of publishing
-    // a floor derived from the replaced manifest.
+    // Lose the floor CAS once while a competing compactor swaps the root to
+    // a same-seq replacement mid-flight. Root updates are monotonic, so the
+    // replacement covers at least the derived floor and the retried publish
+    // is safe to complete.
     let store = ManifestSwapOnCasConflictStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("store"),
         namespace_id: namespace_id.clone(),
         remaining_conflicts: std::sync::atomic::AtomicUsize::new(1),
     };
-    let error = advance_retention_floor(&store, &namespace_id, &context)
+    let response = advance_retention_floor(&store, &namespace_id, &context)
         .await
-        .expect_err("floor derived from a replaced manifest must not publish");
-    assert!(
-        matches!(error, CoreError::CheckpointUnavailable(_)),
-        "unexpected error: {error:?}"
-    );
+        .expect("floor advance survives a monotonic root swap");
+    assert_eq!(response.retention_floor_seq, ChangeSeq(1));
     let head = read_head_object(&store.inner, &namespace_id)
         .await
         .expect("read head")
         .envelope
         .state;
-    assert_eq!(head.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(head.retention_floor_seq, ChangeSeq(1));
 }
 
 #[derive(Debug)]
@@ -1298,22 +1304,24 @@ struct ManifestSwapOnCasConflictStore {
 
 impl ManifestSwapOnCasConflictStore {
     async fn install_competing_manifest_id(&self) {
-        let loaded = read_head_object(&self.inner, &self.namespace_id)
+        let loaded = read_metadata_root_object(&self.inner, &self.namespace_id)
             .await
-            .expect("read head for swap");
-        let mut head = loaded.envelope.state;
-        head.current_manifest_id = head.current_manifest_id.map(|id| ManifestId(id.0 + 1));
-        let envelope = loonfs_api::wire::control::HeadStateEnvelope::from_state(
-            loonfs_api::wire::control::ControlObjectKind::WalHead,
+            .expect("read root for swap");
+        let mut root = loaded.envelope.state;
+        // Same-seq replacement referencing a different manifest: the shape a
+        // pure compaction publishes.
+        root.manifest_id = ManifestId(root.manifest_id.0 + 1);
+        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+            loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
             "test-writer/0.1.0",
-            head,
+            root,
         )
-        .expect("head envelope");
+        .expect("root envelope");
         let bytes =
-            loonfs_api::wire::control::encode_control_object(&envelope).expect("head bytes");
+            loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
         self.inner
             .put(
-                &wal_head(self.namespace_id.as_str()),
+                &loonfs_objectstore::keys::metadata_root(self.namespace_id.as_str()),
                 Bytes::from(bytes),
                 PutMode::Overwrite,
             )
@@ -1707,12 +1715,12 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id: manifest_id(materialization.head.seq),
+            prev_manifest_id: Some(materialization.root.manifest_id),
             head_seq: materialization.head.seq,
             head_commit_id: materialization.head.head_commit_id.clone(),
             base_seq: first,
             writer_epoch: materialization.head.writer_epoch,
             next_inode_id: materialization.head.next_inode_id,
-            name_policy: materialization.head.name_policy,
             retention_floor_seq: materialization.head.retention_floor_seq,
             initialized: true,
             verified: true,
@@ -2823,6 +2831,7 @@ async fn overwrite_manifest(
     manifest: NamespaceManifestEnvelope,
 ) {
     let manifest_key = metadata_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
+    let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.writer_version, manifest.payload)
             .expect("updated manifest");
@@ -2832,6 +2841,31 @@ async fn overwrite_manifest(
         .put_overwrite(&manifest_key, Bytes::from(manifest_bytes))
         .await
         .expect("overwrite manifest");
+    // Keep the tampered manifest consistent with the root's checksum pin, as
+    // a well-formed-but-divergent publisher would: the point of these tests
+    // is the deeper row-level guards, not the checksum pin.
+    let loaded_root = read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read root");
+    if loaded_root.envelope.state.manifest_id == manifest_id {
+        let mut root = loaded_root.envelope.state;
+        root.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
+        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+            loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
+            "test-writer/0.1.0",
+            root,
+        )
+        .expect("root envelope");
+        let bytes =
+            loonfs_api::wire::control::encode_control_object(&envelope).expect("root bytes");
+        store
+            .put_overwrite(
+                &loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+                Bytes::from(bytes),
+            )
+            .await
+            .expect("overwrite root");
+    }
 }
 
 fn assert_revision_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
@@ -2972,6 +3006,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization_before.head,
+            basis_manifest_id: Some(materialization_before.root.manifest_id),
             metadata_state: &materialization_before.metadata_state,
         },
         &context.writer_version,
@@ -2988,10 +3023,7 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(
-        materialization_after.head.current_manifest_id,
-        Some(first.manifest_id)
-    );
+    assert_eq!(materialization_after.root.manifest_id, first.manifest_id);
     assert_eq!(
         materialization_after.head.seq,
         orphan_manifest.payload.head_seq
@@ -3020,6 +3052,7 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3056,6 +3089,7 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3124,6 +3158,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3164,10 +3199,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(
-        materialization_after.head.current_manifest_id,
-        Some(ManifestId(2))
-    );
+    assert_eq!(materialization_after.root.manifest_id, ManifestId(2));
 }
 
 #[tokio::test]
@@ -3198,6 +3230,7 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3211,11 +3244,12 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
     write_namespace_manifest(&store, &manifest_without_checkpoint)
         .await
         .expect("write manifest");
-    publish_current_manifest_id(
+    publish_metadata_root(
         &store,
         &namespace_id,
-        ManifestId(1),
+        &manifest_without_checkpoint,
         &CheckpointId::parse("chk_00000000000000000000000000000099").expect("checkpoint id"),
+        context.now_ms,
         &context.writer_version,
     )
     .await
@@ -3328,6 +3362,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
         &namespace_id,
         ManifestMetadataSource {
             head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
             metadata_state: &materialization.metadata_state,
         },
         &context.writer_version,
@@ -3390,12 +3425,12 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id: ManifestId(materialization_before.head.seq.0),
+            prev_manifest_id: Some(materialization_before.root.manifest_id),
             head_seq: materialization_before.head.seq,
             head_commit_id: materialization_before.head.head_commit_id.clone(),
             base_seq: materialization_before.head.seq,
             writer_epoch: materialization_before.head.writer_epoch,
             next_inode_id: materialization_before.head.next_inode_id,
-            name_policy: materialization_before.head.name_policy,
             retention_floor_seq: materialization_before.head.retention_floor_seq,
             initialized: true,
             verified: true,
@@ -3427,11 +3462,12 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
 
     let checkpoint_id =
         CheckpointId::parse("chk_00000000000000000000000000000099").expect("checkpoint id");
-    let outcome = publish_current_manifest_id(
+    let outcome = publish_metadata_root(
         &store,
         &namespace_id,
-        ManifestId(materialization_before.head.seq.0),
+        &manifest,
         &checkpoint_id,
+        context.now_ms,
         &context.writer_version,
     )
     .await
@@ -3452,24 +3488,239 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
     let context = test_context();
     let store = HeadCasFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        wal_head(namespace_id.as_str()),
+        loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
     );
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-
-    store.fail_head_cas();
-    let outcome = publish_current_manifest_id(
+    write_file_bytes(
         &store,
         &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let materialization = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    let manifest = build_namespace_manifest_from_metadata_state(
+        &store,
+        &namespace_id,
+        ManifestMetadataSource {
+            head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
+            metadata_state: &materialization.metadata_state,
+        },
+        &context.writer_version,
+        MetadataLsmPolicy::default(),
         ManifestId(1),
+        None,
+    )
+    .await
+    .expect("build manifest");
+    write_namespace_manifest(&store, &manifest)
+        .await
+        .expect("write manifest");
+
+    store.fail_head_cas();
+    let outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &manifest,
         &CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
+        context.now_ms,
         &context.writer_version,
     )
     .await
-    .expect("current manifest publication should report CAS race");
+    .expect("root publication should report CAS race");
 
-    assert_eq!(outcome, ManifestPublicationOutcome::HeadCasRaceLost);
+    assert_eq!(outcome, ManifestPublicationOutcome::RootCasRaceLost);
+}
+
+#[tokio::test]
+async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
+    // A pure compaction publishes a different manifest for the same logical
+    // seq. The monotonic root accepts it: seq must not decrease, the
+    // manifest may change.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let materialization = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert_eq!(materialization.root.manifest_id, checkpoint.manifest_id);
+    let compacted = build_namespace_manifest_from_metadata_state(
+        &store,
+        &namespace_id,
+        ManifestMetadataSource {
+            head: &materialization.head,
+            basis_manifest_id: Some(materialization.root.manifest_id),
+            metadata_state: &materialization.metadata_state,
+        },
+        &context.writer_version,
+        MetadataLsmPolicy::default(),
+        ManifestId(checkpoint.manifest_id.0 + 1),
+        None,
+    )
+    .await
+    .expect("build compacted manifest");
+    assert_eq!(
+        compacted.payload.head_seq,
+        materialization.root.manifest_head_seq
+    );
+    write_namespace_manifest(&store, &compacted)
+        .await
+        .expect("write compacted manifest");
+
+    let outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &compacted,
+        &checkpoint.checkpoint_id,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await
+    .expect("same-seq replacement publishes");
+    match outcome {
+        ManifestPublicationOutcome::Published(root) => {
+            assert_eq!(root.manifest_id, compacted.payload.manifest_id);
+            assert_eq!(
+                root.manifest_head_seq,
+                materialization.root.manifest_head_seq
+            );
+        }
+        other => panic!("expected published compacted root, got {other:?}"),
+    }
+    assert_eq!(
+        compacted.payload.prev_manifest_id,
+        Some(checkpoint.manifest_id)
+    );
+
+    // Reads keep working against the replaced root.
+    let after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization after compaction");
+    assert_eq!(after.root.manifest_id, compacted.payload.manifest_id);
+    assert!(metadata_states_equivalent(
+        &materialization.metadata_state,
+        &after.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn read_anchor_reloads_the_head_when_the_root_is_ahead() {
+    // A reader that loads a stale head next to a fresher root must reload
+    // the head instead of treating the pair as corruption.
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let stale_head = inner
+        .get_with_metadata(&wal_head(namespace_id.as_str()))
+        .await
+        .expect("read bootstrap head")
+        .expect("bootstrap head exists");
+
+    write_file_bytes(
+        &inner,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&inner, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    let store = StaleHeadOnceStore {
+        inner,
+        head_key: wal_head(namespace_id.as_str()),
+        stale_head: std::sync::Mutex::new(Some(stale_head)),
+    };
+    let projection = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("read anchor resolves the stale-head race by reloading");
+    assert_eq!(projection.head.seq, ChangeSeq(1));
+    assert_eq!(projection.root.manifest_head_seq, ChangeSeq(1));
+}
+
+#[derive(Debug)]
+struct StaleHeadOnceStore {
+    inner: LocalFsStore,
+    head_key: String,
+    stale_head: std::sync::Mutex<Option<ObjectBody>>,
+}
+
+#[async_trait]
+impl ObjectStore for StaleHeadOnceStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        if key == self.head_key {
+            if let Some(stale) = self.stale_head.lock().expect("stale head lock").take() {
+                return Ok(Some(stale));
+            }
+        }
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
 }
 
 fn test_context() -> MutationContext {

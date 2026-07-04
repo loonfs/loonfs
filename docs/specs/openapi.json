@@ -2813,18 +2813,7 @@
               },
               {
                 "$ref": "#/components/schemas/ManifestId",
-                "description": "Head's current manifest pointer after the operation."
-              }
-            ]
-          },
-          "latest_checkpoint_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/CheckpointId",
-                "description": "Latest checkpoint id recorded on the head after the operation."
+                "description": "Manifest `metadata/root.json` references after the operation."
               }
             ]
           },

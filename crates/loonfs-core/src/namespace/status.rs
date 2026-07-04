@@ -4,7 +4,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::{
@@ -61,7 +61,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         Err(error) => return Err(map_namespace_initialization_error_to_core(error)),
     }
 
-    let loaded_head = read_head_object(store, expected_namespace)
+    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, expected_namespace)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -72,19 +72,18 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         });
     }
     let head = loaded_head.envelope.state;
-    let manifest_id = head.current_manifest_id.ok_or_else(|| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::MissingCurrentManifest {
-            namespace_id: expected_namespace.clone(),
-        })
-    })?;
-    let manifest_head_seq =
-        load_namespace_manifest_envelope(store, expected_namespace, manifest_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?
-            .payload
-            .head_seq;
+    let root = loaded_root.envelope.state;
+    let manifest = load_namespace_manifest_envelope(store, expected_namespace, root.manifest_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+        })?;
+    let manifest_head_seq = manifest.payload.head_seq;
+    let latest_checkpoint_id = manifest
+        .payload
+        .checkpoints
+        .last()
+        .map(|record| record.checkpoint_id.clone());
     let wal_tail_segments = if head.visible_wal_tip.is_some() {
         count_wal_tail_segments_by_position(store, expected_namespace, manifest_head_seq).await?
     } else {
@@ -93,8 +92,8 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        current_manifest_id: head.current_manifest_id,
-        latest_checkpoint_id: head.latest_checkpoint_id,
+        current_manifest_id: Some(root.manifest_id),
+        latest_checkpoint_id,
         wal_tail_segments,
         retention_floor_seq: head.retention_floor_seq,
     })

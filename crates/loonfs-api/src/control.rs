@@ -17,15 +17,17 @@ pub enum ControlObjectKind {
     NamespaceConfig,
     ContentStoreDescriptor,
     WalHead,
+    MetadataRoot,
     NamespaceGcPinState,
     UploadSession,
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::NamespaceConfig,
         Self::ContentStoreDescriptor,
         Self::WalHead,
+        Self::MetadataRoot,
         Self::NamespaceGcPinState,
         Self::UploadSession,
     ];
@@ -41,6 +43,7 @@ impl ControlObjectKind {
             Self::NamespaceConfig => 1,
             Self::ContentStoreDescriptor => 1,
             Self::WalHead => 1,
+            Self::MetadataRoot => 1,
             Self::NamespaceGcPinState => 1,
             Self::UploadSession => 1,
         }
@@ -51,6 +54,7 @@ impl ControlObjectKind {
             Self::NamespaceConfig => "namespace_config",
             Self::ContentStoreDescriptor => "content_store_descriptor",
             Self::WalHead => "wal_head",
+            Self::MetadataRoot => "metadata_root",
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::UploadSession => "upload_session",
         }
@@ -65,6 +69,27 @@ impl ControlObjectKind {
 pub struct NamespaceConfigState {
     pub namespace_id: NamespaceId,
     pub content_store_id: ContentStoreId,
+    /// Immutable per namespace, chosen at creation: the single authority for
+    /// name-key computation on both the write and read paths.
+    #[serde(default)]
+    pub name_policy: NamePolicy,
+}
+
+/// Cold pointer to the best known materialized metadata root.
+///
+/// Replaces the head's `current_manifest_id`: manifest publication CASes
+/// this object, never the WAL head, so head watchers see only commits.
+/// Updates are monotonic in `manifest_head_seq`; a same-seq replacement may
+/// reference a different manifest (pure compaction), and a lower-seq
+/// replacement no-ops. This object never defines live visibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataRootState {
+    pub namespace_id: NamespaceId,
+    pub manifest_id: ManifestId,
+    pub manifest_head_seq: ChangeSeq,
+    /// Must equal `payload_checksum` in the referenced manifest envelope.
+    pub manifest_payload_checksum: String,
+    pub updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,17 +182,6 @@ pub struct HeadState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer: Option<WriterBlock>,
     pub next_inode_id: InodeId,
-    #[serde(default)]
-    pub name_policy: NamePolicy,
-    /// Live read/recovery pointer. Reads load this manifest before projecting
-    /// the visible WAL tail.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_manifest_id: Option<ManifestId>,
-    /// Admin/provenance convenience pointer to the latest checkpoint record.
-    /// Reads do not use this as authority; checkpoints pin manifests for
-    /// retention, forks, stable reads, and restore workflows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_checkpoint_id: Option<CheckpointId>,
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
@@ -193,9 +207,6 @@ impl HeadState {
             writer_epoch: WriterEpoch(0),
             writer: None,
             next_inode_id: InodeId(2),
-            name_policy: NamePolicy::default(),
-            current_manifest_id: None,
-            latest_checkpoint_id: None,
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
             recent_segments: Vec::new(),
@@ -263,6 +274,7 @@ where
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type NamespaceConfigEnvelope = ControlObjectEnvelope<NamespaceConfigState>;
+pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 pub type NamespaceGcPinStateEnvelope = ControlObjectEnvelope<NamespaceGcPinState>;
 

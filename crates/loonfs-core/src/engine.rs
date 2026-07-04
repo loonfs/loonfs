@@ -15,8 +15,9 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DirectoryPageCursor,
-    FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, MutationResult,
-    NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, DEFAULT_PAGE_LIMIT,
+    FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId,
+    MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo,
+    DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroU32;
@@ -33,6 +34,7 @@ fn default_page_limit() -> EffectiveLimit {
 pub struct RuntimeReadContext {
     head: HeadState,
     head_etag: String,
+    manifest_id: ManifestId,
     table_cache: Option<Arc<MetadataTableCache>>,
     tail_cache: Option<Arc<WalTailProjectionCache>>,
 }
@@ -42,12 +44,14 @@ impl RuntimeReadContext {
     pub fn pinned_head(
         head: HeadState,
         head_etag: String,
+        manifest_id: ManifestId,
         table_cache: Option<Arc<MetadataTableCache>>,
         tail_cache: Option<Arc<WalTailProjectionCache>>,
     ) -> Self {
         Self {
             head,
             head_etag,
+            manifest_id,
             table_cache,
             tail_cache,
         }
@@ -58,6 +62,7 @@ fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_
     ReadLoadContext::pinned_head(
         &options.head,
         Some(options.head_etag.as_str()),
+        options.manifest_id,
         options.table_cache.as_deref(),
         options.tail_cache.as_deref(),
     )

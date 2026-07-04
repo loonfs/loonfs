@@ -2162,7 +2162,7 @@ fn maintenance_tick_rejects_zero_threshold() {
 }
 
 #[test]
-fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
+fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -2185,7 +2185,7 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
     )
     .expect("put file");
 
-    raw_store.fail_head_cas();
+    raw_store.fail_root_cas();
     let tick = fs
         .maintenance_tick_namespace_blocking(
             &namespace_id,
@@ -2193,7 +2193,7 @@ fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
                 max_wal_tail_segments: 1,
             },
         )
-        .expect("maintenance tick should not fail on current manifest publish race");
+        .expect("maintenance tick should not fail on metadata root publish race");
 
     assert_eq!(
         tick.outcome,
@@ -2262,9 +2262,11 @@ fn separate_runtime_instances_share_object_store_state() {
 struct HeadCasFailureStore {
     inner: LocalFsStore,
     head_key: String,
+    root_key: String,
     wal_prefix: String,
     manifest_prefix: String,
     fail_head_cas: AtomicBool,
+    fail_root_cas: AtomicBool,
     wal_get_count: AtomicUsize,
     manifest_get_count: AtomicUsize,
     head_get_count: AtomicUsize,
@@ -2275,9 +2277,11 @@ impl HeadCasFailureStore {
         Self {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             head_key: wal_head(namespace),
+            root_key: loonfs_objectstore::keys::metadata_root(namespace),
             wal_prefix: format!("namespaces/{namespace}/wal/segments/"),
             manifest_prefix: format!("namespaces/{namespace}/metadata/manifests/"),
             fail_head_cas: AtomicBool::new(false),
+            fail_root_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
             manifest_get_count: AtomicUsize::new(0),
             head_get_count: AtomicUsize::new(0),
@@ -2290,6 +2294,10 @@ impl HeadCasFailureStore {
 
     fn allow_head_cas(&self) {
         self.fail_head_cas.store(false, Ordering::SeqCst);
+    }
+
+    fn fail_root_cas(&self) {
+        self.fail_root_cas.store(true, Ordering::SeqCst);
     }
 
     fn reset_wal_get_count(&self) {
@@ -2360,6 +2368,12 @@ impl ObjectStore for HeadCasFailureStore {
         if key == self.head_key
             && matches!(&mode, PutMode::CompareAndSwap { .. })
             && self.fail_head_cas.load(Ordering::SeqCst)
+        {
+            return Err(ObjectStoreError::PreconditionFailed);
+        }
+        if key == self.root_key
+            && matches!(&mode, PutMode::CompareAndSwap { .. })
+            && self.fail_root_cas.load(Ordering::SeqCst)
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }

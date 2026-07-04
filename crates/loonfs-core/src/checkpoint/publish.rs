@@ -1,28 +1,30 @@
 //! Durable manifest publication: write manifest objects idempotently and
-//! advance `current_manifest_id` on the head by compare-and-swap.
+//! advance `metadata/root.json` by monotonic compare-and-swap.
 
 use super::create::checkpoint_record_by_id;
 use super::error::ManifestLoadError;
 use super::load::{load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present};
-use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::namespace::control::read_metadata_root_object;
 use bytes::Bytes;
-use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::control::{
+    encode_control_object, ControlObjectKind, MetadataRootEnvelope, MetadataRootState,
+};
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
 use loonfs_api::{CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-// Mutable head CAS retries are about writer concurrency, not manifest id
+// Root CAS retries are about publisher concurrency, not manifest id
 // allocation. Keep this separate so errors describe the failed phase.
-pub(super) const HEAD_CAS_RETRY_LIMIT: usize = 8;
+pub(super) const ROOT_CAS_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
-    Published(Box<HeadState>),
+    Published(MetadataRootState),
     CurrentManifestMissingCheckpoint { current_manifest_id: ManifestId },
-    HeadCasRaceLost,
+    RootCasRaceLost,
 }
 
 #[tracing::instrument(
@@ -94,87 +96,40 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "publish_compacted_head", key_class = "wal_head")
+    fields(phase = "publish_metadata_root", key_class = "metadata_root")
 )]
-pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
+pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest: &NamespaceManifestEnvelope,
     checkpoint_id: &CheckpointId,
+    updated_at_ms: u64,
     writer_version: &str,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
-    enum HeadAdvance {
-        AlreadyCurrent(Box<HeadState>),
-        Published(Box<HeadState>),
-    }
-
-    let advance = update_head(
-        store,
-        namespace_id,
-        writer_version,
-        HEAD_CAS_RETRY_LIMIT,
-        |loaded| {
-            let current_head = &loaded.envelope.state;
-            if current_head.current_manifest_id >= Some(manifest_id) {
-                return Ok(HeadUpdate::Noop(HeadAdvance::AlreadyCurrent(Box::new(
-                    current_head.clone(),
-                ))));
-            }
-
-            // Maintenance head update, not semantic writer publication.
-            //
-            // This operation does not acquire writer_epoch. It only moves the
-            // manifest/checkpoint pointer forward and is linearized by the head
-            // CAS. If the head changes concurrently, the caller reloads and
-            // retries/rebases. Operations that publish user mutations or
-            // intentionally stop writers must acquire writer_epoch first.
-            let next_head = HeadState {
-                namespace_id: current_head.namespace_id.clone(),
-                seq: current_head.seq,
-                head_commit_id: current_head.head_commit_id.clone(),
-                writer_epoch: current_head.writer_epoch,
-                writer: current_head.writer.clone(),
-                next_inode_id: current_head.next_inode_id,
-                name_policy: current_head.name_policy,
-                current_manifest_id: Some(manifest_id),
-                latest_checkpoint_id: Some(checkpoint_id.clone()),
-                retention_floor_seq: current_head.retention_floor_seq,
-                visible_wal_tip: current_head.visible_wal_tip.clone(),
-                recent_segments: current_head.recent_segments.clone(),
-                state: current_head.state,
-            };
-            Ok(HeadUpdate::Replace {
-                next: Box::new(next_head.clone()),
-                outcome: HeadAdvance::Published(Box::new(next_head)),
-            })
-        },
-    )
-    .await;
-
-    let advance = match advance {
-        Ok(advance) => advance,
-        Err(ControlUpdateError::RetryExhausted { .. }) => {
-            return Ok(ManifestPublicationOutcome::HeadCasRaceLost);
-        }
-        Err(ControlUpdateError::LoadHead(error)) => {
-            return Err(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::LoadHead(error),
-            ));
-        }
-        Err(other) => return Err(CoreError::Store(other.to_string())),
-    };
-
-    match advance {
-        HeadAdvance::Published(next_head) => Ok(ManifestPublicationOutcome::Published(next_head)),
-        HeadAdvance::AlreadyCurrent(current_head) => {
-            let current_manifest_id = current_head.current_manifest_id.ok_or_else(|| {
-                CoreError::CheckpointUnavailable(format!(
-                    "namespace `{}` has no published manifest",
-                    namespace_id.as_str()
-                ))
+    // Manifest publication CASes metadata/root.json, never the WAL head:
+    // head watchers see only commits. Updates are monotonic in
+    // manifest_head_seq; a same-seq replacement may reference a different
+    // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
+    // whatever newer root someone else already published.
+    let manifest_id = manifest.payload.manifest_id;
+    let manifest_head_seq = manifest.payload.head_seq;
+    for _attempt in 0..ROOT_CAS_RETRY_LIMIT {
+        let loaded = read_metadata_root_object(store, namespace_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             })?;
+        let current = &loaded.envelope.state;
+        let superseded = current.manifest_head_seq > manifest_head_seq
+            || (current.manifest_head_seq == manifest_head_seq
+                && current.manifest_id == manifest_id
+                && current.manifest_payload_checksum == manifest.payload_checksum);
+        if superseded {
+            // Someone already published something at least as new. The
+            // checkpoint is durable only if the manifest the root now
+            // references still carries it.
             let current_manifest =
-                load_namespace_manifest_envelope(store, namespace_id, current_manifest_id)
+                load_namespace_manifest_envelope(store, namespace_id, current.manifest_id)
                     .await
                     .map_err(|error| {
                         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
@@ -182,13 +137,41 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                         ))
                     })?;
             if checkpoint_record_by_id(&current_manifest, checkpoint_id).is_some() {
-                return Ok(ManifestPublicationOutcome::Published(current_head));
+                return Ok(ManifestPublicationOutcome::Published(current.clone()));
             }
-            Ok(
+            return Ok(
                 ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
-                    current_manifest_id,
+                    current_manifest_id: current.manifest_id,
                 },
-            )
+            );
+        }
+
+        let next = MetadataRootState {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            manifest_head_seq,
+            manifest_payload_checksum: manifest.payload_checksum.clone(),
+            updated_at_ms,
+        };
+        let envelope = MetadataRootEnvelope::from_state(
+            ControlObjectKind::MetadataRoot,
+            writer_version,
+            next.clone(),
+        )
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+        let encoded =
+            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+        let expected_etag = loaded.metadata.etag.as_deref().ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!("missing root etag for `{}`", loaded.object_key))
+        })?;
+        match store
+            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
+            .await
+        {
+            Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
+            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
+            Err(error) => return Err(CoreError::Store(error.to_string())),
         }
     }
+    Ok(ManifestPublicationOutcome::RootCasRaceLost)
 }

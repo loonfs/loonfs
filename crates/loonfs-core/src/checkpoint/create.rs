@@ -11,9 +11,7 @@ use super::load::{
     load_verified_manifest_tables_with_cache, validate_direntry_child_bind_index,
     validate_revision_by_inode_desc_index,
 };
-use super::publish::{
-    publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
-};
+use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::row::manifest_rows_for_family;
 use super::runs::{
     flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL,
@@ -22,15 +20,15 @@ use super::runs::{
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
+use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::read_head_and_metadata_root;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::NamespaceState;
+use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily, NamespaceCheckpointRecord, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
@@ -96,13 +94,12 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                     checkpoint_id: checkpoint.checkpoint_id.clone(),
                     checkpoint_seq: checkpoint.head_seq,
                     manifest_id: checkpoint.manifest_id,
-                    current_manifest_id: projection.head.current_manifest_id,
-                    latest_checkpoint_id: projection.head.latest_checkpoint_id.clone(),
+                    current_manifest_id: Some(projection.root.manifest_id),
                 });
             }
         }
 
-        let mut manifest_id = next_manifest_id(&projection.head)?;
+        let mut manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
         let mut manifest_ready = false;
         for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
             let checkpoint_record = NamespaceCheckpointRecord {
@@ -201,24 +198,23 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                 manifest_id
             ))
         })?;
-        match publish_current_manifest_id(
+        match publish_metadata_root(
             store,
             namespace_id,
-            manifest_id,
+            &manifest,
             &checkpoint.checkpoint_id,
+            context.now_ms,
             &context.writer_version,
         )
         .await?
         {
-            ManifestPublicationOutcome::Published(resulting_head) => {
-                let resulting_head = *resulting_head;
+            ManifestPublicationOutcome::Published(root) => {
                 return Ok(CreateCheckpointResponse {
                     namespace_id: namespace_id.clone(),
                     checkpoint_id: checkpoint.checkpoint_id.clone(),
                     checkpoint_seq: checkpoint.head_seq,
                     manifest_id: checkpoint.manifest_id,
-                    current_manifest_id: resulting_head.current_manifest_id,
-                    latest_checkpoint_id: resulting_head.latest_checkpoint_id,
+                    current_manifest_id: Some(root.manifest_id),
                 });
             }
             ManifestPublicationOutcome::CurrentManifestMissingCheckpoint { .. } => {
@@ -227,7 +223,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                 // checkpoint id so the operation remains idempotent.
                 continue;
             }
-            ManifestPublicationOutcome::HeadCasRaceLost => {
+            ManifestPublicationOutcome::RootCasRaceLost => {
                 saw_head_cas_race = true;
                 continue;
             }
@@ -245,6 +241,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
 
 struct CheckpointProjection<'a, S: ObjectStore + ?Sized> {
     head: HeadState,
+    root: MetadataRootState,
     manifest_tables: VerifiedMetadataTables<'a, S>,
     tail_state: MetadataState,
 }
@@ -256,12 +253,13 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-    let loaded_head = read_head_object(store, namespace_id)
+    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     let head = loaded_head.envelope.state;
+    let root = loaded_root.envelope.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -269,17 +267,21 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let manifest_id =
-        head.current_manifest_id
-            .ok_or_else(|| MetadataViewError::MissingManifest {
-                namespace_id: namespace_id.clone(),
-            })?;
     let manifest_tables =
-        load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
+        load_verified_manifest_tables_with_cache(store, None, namespace_id, root.manifest_id)
             .await
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
+    if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "metadata root for `{}` references manifest {:?} with checksum {} but the manifest carries {}",
+            namespace_id.as_str(),
+            root.manifest_id,
+            root.manifest_payload_checksum,
+            manifest_tables.manifest().payload_checksum,
+        )));
+    }
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let wal_chain = load_validated_wal_chain(
         store,
@@ -310,6 +312,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     ensure_checkpoint_reconstructed_head_matches(&head, &replayed.resulting_head)?;
     Ok(CheckpointProjection {
         head,
+        root,
         manifest_tables,
         tail_state: replayed.resulting_metadata_state,
     })
@@ -348,9 +351,6 @@ fn ensure_checkpoint_reconstructed_head_matches(
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
         || current_head.next_inode_id != reconstructed.next_inode_id
-        || current_head.name_policy != reconstructed.name_policy
-        || current_head.current_manifest_id != reconstructed.current_manifest_id
-        || current_head.latest_checkpoint_id != reconstructed.latest_checkpoint_id
         || current_head.retention_floor_seq != reconstructed.retention_floor_seq
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
@@ -363,12 +363,6 @@ fn ensure_checkpoint_reconstructed_head_matches(
         ));
     }
     Ok(())
-}
-
-pub(super) fn next_manifest_id(head: &HeadState) -> Result<ManifestId, CoreError> {
-    head.current_manifest_id
-        .map(next_manifest_id_after)
-        .unwrap_or_else(|| Ok(ManifestId(head.seq.0)))
 }
 
 pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId, CoreError> {
@@ -404,12 +398,12 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id,
+            prev_manifest_id: None,
             head_seq: initial_head.seq,
             head_commit_id: initial_head.head_commit_id.clone(),
             base_seq: initial_head.seq,
             writer_epoch: initial_head.writer_epoch,
             next_inode_id: initial_head.next_inode_id,
-            name_policy: initial_head.name_policy,
             retention_floor_seq: initial_head.retention_floor_seq,
             initialized: true,
             verified: true,
@@ -494,12 +488,12 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id,
+            prev_manifest_id: Some(projection.root.manifest_id),
             head_seq,
             head_commit_id: projection.head.head_commit_id.clone(),
             base_seq,
             writer_epoch: projection.head.writer_epoch,
             next_inode_id: projection.head.next_inode_id,
-            name_policy: projection.head.name_policy,
             retention_floor_seq: projection.head.retention_floor_seq,
             initialized: true,
             verified: true,
@@ -812,6 +806,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 pub(super) struct ManifestMetadataSource<'a> {
     pub(super) head: &'a HeadState,
+    pub(super) basis_manifest_id: Option<ManifestId>,
     pub(super) metadata_state: &'a MetadataState,
 }
 
@@ -835,7 +830,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let head = source.head;
     let metadata_state = source.metadata_state;
     let head_seq = head.seq;
-    let previous_manifest = match head.current_manifest_id {
+    let previous_manifest = match source.basis_manifest_id {
         Some(previous_id) => Some(
             load_manifest_materialization_for_inspection(store, namespace_id, previous_id)
                 .await
@@ -921,12 +916,12 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id,
+            prev_manifest_id: source.basis_manifest_id,
             head_seq,
             head_commit_id: head.head_commit_id.clone(),
             base_seq,
             writer_epoch: head.writer_epoch,
             next_inode_id: head.next_inode_id,
-            name_policy: head.name_policy,
             retention_floor_seq: head.retention_floor_seq,
             initialized: true,
             verified: true,

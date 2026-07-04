@@ -273,10 +273,6 @@ impl NamespaceCommitEngine {
             self.invalidate();
             return wal_tail_segments;
         };
-        if resulting_head.current_manifest_id != Some(projection.manifest_id) {
-            self.invalidate();
-            return wal_tail_segments;
-        }
         for record in &published.published_records {
             if projection
                 .tail_state
@@ -326,11 +322,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         .await?;
         let session = PublishPlanningSession::new(view.head());
         let base_view = view.metadata_view();
-        let metadata_view = base_view.with_overlay(
-            session.accepted_rows(),
-            session.head().seq,
-            session.head().name_policy,
-        );
+        let metadata_view = base_view.with_overlay(session.accepted_rows(), session.head().seq);
         plan_path_mutation_against_publish_view(
             namespace_id,
             intent,

@@ -10,7 +10,7 @@ use crate::metadata::{
     ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
 };
 use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::read_head_object;
+use crate::namespace::control::read_head_and_metadata_root;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
@@ -18,8 +18,8 @@ use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ContentStoreId,
     DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
-    ListFileRevisionsResponse, NameKey, NamespaceId, Page, PageRequest, PaginationPolicy,
-    RevisionNo,
+    ListFileRevisionsResponse, ManifestId, NameKey, NamePolicy, NamespaceId, Page, PageRequest,
+    PaginationPolicy, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -31,6 +31,11 @@ pub(crate) enum ReadViewContext<'a> {
     PinnedHead {
         head: &'a HeadState,
         head_etag: Option<&'a str>,
+        /// Manifest pinned together with the head when the snapshot was
+        /// taken. The live root may have moved past a pinned head; the
+        /// pinned pair stays consistent (any manifest at or below the
+        /// pinned seq serves it, with WAL replay covering the rest).
+        manifest_id: ManifestId,
     },
 }
 
@@ -53,11 +58,16 @@ impl<'a> ReadLoadContext<'a> {
     pub(crate) fn pinned_head(
         head: &'a HeadState,
         head_etag: Option<&'a str>,
+        manifest_id: ManifestId,
         table_cache: Option<&'a MetadataTableCache>,
         tail_cache: Option<&'a WalTailProjectionCache>,
     ) -> Self {
         Self {
-            view: ReadViewContext::PinnedHead { head, head_etag },
+            view: ReadViewContext::PinnedHead {
+                head,
+                head_etag,
+                manifest_id,
+            },
             table_cache,
             tail_cache,
         }
@@ -71,19 +81,29 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
 ) -> Result<LoadedMetadataView<'a, S>, CoreError> {
     match context.view {
         ReadViewContext::Latest => {
-            let loaded_head = read_head_object(store, namespace_id)
+            let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
                 .await
                 .map_err(MetadataProjectionLoadError::LoadHead)?;
             LoadedMetadataView::load_at_head(
                 store,
                 namespace_id,
                 loaded_head.envelope.state,
+                loaded_root.envelope.state.manifest_id,
                 context,
             )
             .await
         }
-        ReadViewContext::PinnedHead { head, .. } => {
-            LoadedMetadataView::load_at_head(store, namespace_id, head.clone(), context).await
+        ReadViewContext::PinnedHead {
+            head, manifest_id, ..
+        } => {
+            LoadedMetadataView::load_at_head(
+                store,
+                namespace_id,
+                head.clone(),
+                manifest_id,
+                context,
+            )
+            .await
         }
     }
 }
@@ -91,6 +111,7 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     namespace_id: NamespaceId,
     content_store_id: ContentStoreId,
+    name_policy: NamePolicy,
     head: HeadState,
     tables: VerifiedMetadataTables<'a, S>,
     wal_tail_rows: Arc<MetadataState>,
@@ -101,6 +122,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &'a S,
         namespace_id: &NamespaceId,
         head: HeadState,
+        manifest_id: ManifestId,
         load_context: ReadLoadContext<'a>,
     ) -> Result<Self, CoreError> {
         if &head.namespace_id != namespace_id {
@@ -114,11 +136,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 namespace_id: namespace_id.clone(),
             });
         }
-        let manifest_id =
-            head.current_manifest_id
-                .ok_or_else(|| MetadataViewError::MissingManifest {
-                    namespace_id: namespace_id.clone(),
-                })?;
         let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
             .await
             .map_err(MetadataProjectionLoadError::from)?;
@@ -150,6 +167,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
                     content_store_id: catalog_entry.content_store_id,
+                    name_policy: catalog_entry.namespace_config.name_policy,
                     head,
                     tables,
                     wal_tail_rows,
@@ -191,6 +209,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(Self {
             namespace_id: namespace_id.clone(),
             content_store_id: catalog_entry.content_store_id,
+            name_policy: catalog_entry.namespace_config.name_policy,
             head,
             tables,
             wal_tail_rows,
@@ -703,7 +722,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.tables, self.wal_tail_rows.as_ref())
+        MetadataView::from_loaded_head(
+            &self.head,
+            self.name_policy,
+            &self.tables,
+            self.wal_tail_rows.as_ref(),
+        )
     }
 }
 

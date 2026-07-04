@@ -133,13 +133,14 @@ impl<'a> InMemoryMetadataView<'a> {
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn from_loaded_head(
         head: &'a HeadState,
+        name_policy: NamePolicy,
         tables: &'a VerifiedMetadataTables<'store, S>,
         wal_tail_rows: &'a MetadataState,
     ) -> Self {
         Self {
             snapshot: MetadataSnapshot {
                 visible_seq: head.seq,
-                name_policy: head.name_policy,
+                name_policy,
             },
             sources: MetadataSourceStack {
                 overlay: None,
@@ -150,16 +151,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
+    pub(crate) fn name_policy(&self) -> NamePolicy {
+        self.snapshot.name_policy
+    }
+
     pub(crate) fn with_overlay<'view>(
         &'view self,
         overlay: &'view MetadataState,
         visible_seq: ChangeSeq,
-        name_policy: NamePolicy,
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
             snapshot: MetadataSnapshot {
                 visible_seq,
-                name_policy,
+                name_policy: self.snapshot.name_policy,
             },
             sources: MetadataSourceStack {
                 overlay: Some(overlay),

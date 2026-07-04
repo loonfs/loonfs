@@ -42,8 +42,7 @@ impl PublishPlanningSession {
         intent: &PathMutationIntent,
         base_view: MetadataView<'_, '_, S>,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let view =
-            base_view.with_overlay(&self.accepted_rows, self.head.seq, self.head.name_policy);
+        let view = base_view.with_overlay(&self.accepted_rows, self.head.seq);
         plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &view).await
     }
 

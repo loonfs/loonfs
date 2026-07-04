@@ -263,7 +263,7 @@ fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
 ) -> ApiCommitPrecondition {
     let display_name =
         DisplayName::parse(display_name).expect("path planner should provide valid display name");
-    let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+    let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
     ApiCommitPrecondition::ChildNameAbsent {
         parent_inode,
         name_key,
@@ -286,7 +286,7 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
 
     for component in absolute_path.components() {
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+        let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
         let Some(bound_child) = view
             .metadata_state
             .visible_child(current_inode, name_key.as_str())
@@ -646,7 +646,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
     let mut creating_missing_ancestors = false;
     for component in &components[..components.len() - 1] {
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
+        let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
         if !creating_missing_ancestors {
             if let Some(child) = view
                 .metadata_state
@@ -810,8 +810,7 @@ mod tests {
         .expect("publish view");
         let empty_overlay = MetadataState::default();
         let base_view = view.metadata_view();
-        let metadata_view =
-            base_view.with_overlay(&empty_overlay, view.head().seq, view.head().name_policy);
+        let metadata_view = base_view.with_overlay(&empty_overlay, view.head().seq);
         plan_path_mutation_against_publish_view(namespace_id, intent, view.head(), &metadata_view)
             .await
     }

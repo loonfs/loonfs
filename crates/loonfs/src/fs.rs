@@ -520,7 +520,7 @@ impl Fs {
             .first()
             .map(|entry| entry.head_seq)
             .or(request_head_seq)
-            .unwrap_or(head.state.seq);
+            .unwrap_or(head.head.state.seq);
         let next_cursor = page.next_cursor;
         let response = ListPathEntriesResponse {
             namespace_id: namespace_id.clone(),
@@ -581,7 +581,7 @@ impl Fs {
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
-            head.state.seq,
+            head.head.state.seq,
             page,
             fallback_inode_id,
         )?)
@@ -624,7 +624,7 @@ impl Fs {
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
-            head.state.seq,
+            head.head.state.seq,
             page,
             Some(inode_id),
         )?)

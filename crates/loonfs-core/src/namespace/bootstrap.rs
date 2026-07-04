@@ -10,14 +10,16 @@ use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope, NamespaceConfigState,
-    WriterBlock,
+    ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
+    NamespaceConfigEnvelope, NamespaceConfigState, WriterBlock,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, InodeId, InodeKind, ManifestId, NamespaceId,
+    ChangeSeq, ContentStoreId, InodeId, InodeKind, NamePolicy, NamespaceId,
     NamespaceIdValidationError, NamespaceSummary,
 };
-use loonfs_objectstore::keys::{content_store_descriptor, namespace_config, wal_head};
+use loonfs_objectstore::keys::{
+    content_store_descriptor, metadata_root, namespace_config, wal_head,
+};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -111,7 +113,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     }
 
     let mut initial_head = HeadState::initial(namespace_id.clone());
-    initial_head.current_manifest_id = Some(ManifestId(initial_head.seq.0));
     initial_head.writer = Some(WriterBlock {
         writer_id: context.writer_id.clone(),
         writer_session_id: context.writer_session_id.clone(),
@@ -126,6 +127,28 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     .await
     .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
     write_namespace_manifest(store, &initial_manifest)
+        .await
+        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+
+    let root_envelope = MetadataRootEnvelope::from_state(
+        ControlObjectKind::MetadataRoot,
+        &context.writer_version,
+        MetadataRootState {
+            namespace_id: namespace_id.clone(),
+            manifest_id: initial_manifest.payload.manifest_id,
+            manifest_head_seq: initial_head.seq,
+            manifest_payload_checksum: initial_manifest.payload_checksum.clone(),
+            updated_at_ms: context.now_ms,
+        },
+    )
+    .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+    let root_bytes = encode_control_object(&root_envelope)
+        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+    store
+        .put_if_absent(
+            &metadata_root(namespace_id.as_str()),
+            Bytes::from(root_bytes),
+        )
         .await
         .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
 
@@ -151,6 +174,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         NamespaceConfigState {
             namespace_id: namespace_id.clone(),
             content_store_id,
+            name_policy: NamePolicy::default(),
         },
     )
     .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;

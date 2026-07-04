@@ -2,8 +2,8 @@ use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId, NamePolicy,
-    NamespaceId, RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId, NamespaceId,
+    RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -327,13 +327,17 @@ impl MetadataSstEnvelope {
 pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
     pub manifest_id: ManifestId,
+    /// Same-namespace manifest this one was derived from; null for the
+    /// bootstrap or fork-initial manifest. Provenance and a discovery aid,
+    /// never authority — superseded-table sets are derived by predecessor
+    /// diff, not encoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_manifest_id: Option<ManifestId>,
     pub head_seq: ChangeSeq,
     pub head_commit_id: CommitId,
     pub base_seq: ChangeSeq,
     pub writer_epoch: WriterEpoch,
     pub next_inode_id: InodeId,
-    #[serde(default)]
-    pub name_policy: NamePolicy,
     pub retention_floor_seq: ChangeSeq,
     pub initialized: bool,
     pub verified: bool,
@@ -638,10 +642,7 @@ mod tests {
         MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
         NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
-    use crate::{
-        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamePolicy, NamespaceId,
-        WriterEpoch,
-    };
+    use crate::{ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
     use std::collections::BTreeMap;
 
     #[test]
@@ -649,6 +650,7 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
             NamespaceManifestPayload {
+                prev_manifest_id: None,
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(10),
                 head_seq: ChangeSeq(10),
@@ -657,7 +659,6 @@ mod tests {
                 base_seq: ChangeSeq(10),
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
-                name_policy: NamePolicy::default(),
                 retention_floor_seq: ChangeSeq(0),
                 initialized: true,
                 verified: true,
@@ -704,6 +705,7 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
             NamespaceManifestPayload {
+                prev_manifest_id: None,
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(12),
                 head_seq: ChangeSeq(12),
@@ -712,7 +714,6 @@ mod tests {
                 base_seq: ChangeSeq(10),
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
-                name_policy: NamePolicy::default(),
                 retention_floor_seq: ChangeSeq(0),
                 initialized: true,
                 verified: true,

@@ -59,6 +59,7 @@ The required durable object families and standard key patterns are:
 | **Pins** | Immutable | Protect source checkpoint/manifest references used by forked namespaces; stored under the **source** namespace, whose GC is the consumer. | `namespaces/{source_namespace_id}/pins/{pin_id}.json` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
+| **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 
 The layout additionally reserves these paths for subsystems that land in
@@ -68,7 +69,6 @@ them, and no other family may claim them:
 | Reserved path | Future role |
 | --- | --- |
 | `namespaces/{namespace_id}/wal/floor.json` | Cold lower bound of retained WAL/change history. |
-| `namespaces/{namespace_id}/metadata/root.json` | Cold pointer to the best known materialized metadata root. |
 | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` | First-class durable stable-view pins to a metadata manifest. |
 | `namespaces/{namespace_id}/wal/index.json` | Optional mutable pointer to the newest WAL index run (accelerator, never authority). |
 | `namespaces/{namespace_id}/wal/indexes/{index_id}.json` | Optional immutable runs of visible-chain segment pointers. |
@@ -100,8 +100,8 @@ manifest, checkpoint records, pins, and the retention floor.
 The namespace tree's lifecycle can be read off its grammar:
 
 - **`{subsystem}/{role}.json` objects are mutable singletons with one job**:
-  compare-and-swap pointers and proofs (`wal/head.json`, and later
-  `wal/floor.json` and `metadata/root.json`) that are never swept. If a
+  compare-and-swap pointers and proofs (`wal/head.json`,
+  `metadata/root.json`, and later `wal/floor.json`) that are never swept. If a
   singleton cannot be explained in one sentence, it is too broad.
 - **Collections are never authoritative via enumeration** (`wal/segments/`,
   `metadata/manifests/`, `metadata/tables/`, `pins/`, `uploads/`,
@@ -545,8 +545,8 @@ boundary.
 
 Readers reconstruct authoritative state from:
 
-1. the current head;
-2. the namespace manifest named by `head.current_manifest_id`, if any; and
+1. the current head and the metadata root, fetched concurrently;
+2. the namespace manifest named by `metadata/root.json`; and
 3. the visible WAL segment chain after that manifest through `head.seq`,
    replayed as logical commits in ascending `seq` order.
 
@@ -557,14 +557,18 @@ at minimum:
 - `head_commit_id`
 - `state` (lifecycle: absent or `active`, or the terminal `deleted`)
 - `next_inode_id`
-- `current_manifest_id`
-- `latest_checkpoint_id`
 - `retention_floor_seq`
-- `wal_tip_segment_id` or an equivalent visible tail pointer
+- `visible_wal_tip` and the bounded `recent_segments` accelerator
 
-`current_manifest_id` is the live read/recovery pointer. `latest_checkpoint_id`
-is an admin/provenance convenience pointer to a checkpoint record; readers do
-not use it as the file-set authority.
+`metadata/root.json` is the live read/recovery pointer. It is updated only by
+monotonic compare-and-swap on its own etag: a replacement must not decrease
+`manifest_head_seq`, a same-seq replacement may reference a different manifest
+(that is how pure compaction publishes a better physical layout of the same
+logical state), and a lower-seq attempt no-ops in favor of the newer root.
+The root never defines live visibility, and a stale root only costs extra WAL
+replay. A reader that observes `root.manifest_head_seq > head.seq` reloads
+the head — the root can only reference published state, so a fresh head read
+observes at least the root's seq; this race is not corruption.
 
 A checkpoint is a durable pin to a namespace manifest version. It is
 authoritative only when its checkpoint record and referenced namespace
@@ -728,13 +732,13 @@ object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the
    namespace's immutable content-store relationship.
-2. Read the namespace **head** object to learn the current `seq`,
-   `current_manifest_id`, `latest_checkpoint_id`, and visible WAL tip.
-3. If `current_manifest_id` is set, load and verify that namespace manifest.
-   The manifest references one or more materialized metadata runs through its
-   `head_seq`. It may also contain checkpoint records that pin manifest
-   versions for retention, fork, or stable read workflows. Reads use
-   `current_manifest_id`; `latest_checkpoint_id` is not recovery authority.
+2. Read the namespace **head** object (current `seq` and visible WAL tip)
+   and `metadata/root.json` (the manifest pointer), concurrently.
+3. Load and verify the manifest the root references; its payload checksum
+   must match the root's `manifest_payload_checksum`. The manifest references
+   one or more materialized metadata runs through its `head_seq`. It may also
+   contain checkpoint records that pin manifest versions for retention, fork,
+   or stable read workflows.
 4. Use the visible WAL tip named by the head to identify the visible segment
    chain after the manifest `head_seq`, then replay the logical commit records in ascending
    `seq` order through `head.seq`. Each logical commit appends normalized rows
@@ -977,8 +981,9 @@ advancement is caught by read-path checksum validation.
 Creating a checkpoint pins the current durable namespace file-set version. If
 there is no manifest for the current head, the implementation first writes one
 as an internal materialization step. It then records a checkpoint id such as
-`chk_<32hex>` in manifest state and updates the head's `current_manifest_id`
-and `latest_checkpoint_id`. Repeating checkpoint creation for the same
+`chk_<32hex>` in manifest state and publishes the manifest by monotonic CAS
+on `metadata/root.json` — never by touching the WAL head, so head watchers
+observe only commits. Repeating checkpoint creation for the same
 already-pinned manifest returns the existing checkpoint record. A live
 manifest does not need to be checkpoint-pinned; checkpoint records explain why
 a manifest version must be retained.
