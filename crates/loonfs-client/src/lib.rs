@@ -76,6 +76,9 @@ pub struct NamespacePath {
 }
 
 /// Error returned by the blocking HTTP client.
+///
+/// Foreign causes (io, json, ureq) are stringified for now; this crate has no
+/// Clone/serde constraint, so switching to `#[source]` chains later is fine.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ClientError {

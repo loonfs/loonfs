@@ -7,6 +7,8 @@ use loonfs_objectstore::keys::{namespace_config, wal_head};
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
+// Both variants share ControlObjectLoadError; conversion stays explicit so
+// `?` cannot pick a variant silently.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum NamespaceCatalogLoadError {
     #[error("failed to load namespace descriptor: {0}")]
@@ -28,14 +30,16 @@ pub(crate) enum NamespaceInitializationState {
     Complete,
 }
 
+// The two Load* variants share ControlObjectLoadError; conversion stays
+// explicit so `?` cannot pick a variant silently.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum NamespaceInitializationError {
     #[error(transparent)]
     InvalidNamespaceId(#[from] NamespaceIdValidationError),
-    #[error("failed to inspect namespace descriptor object: {0}")]
-    InspectNamespaceDescriptor(String),
-    #[error("failed to inspect namespace head object: {0}")]
-    InspectNamespaceHead(String),
+    #[error("failed to inspect namespace descriptor object `{object_key}`: {message}")]
+    InspectNamespaceDescriptor { object_key: String, message: String },
+    #[error("failed to inspect namespace head object `{object_key}`: {message}")]
+    InspectNamespaceHead { object_key: String, message: String },
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
@@ -89,12 +93,20 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
     let descriptor_exists = store
         .head(&descriptor_key)
         .await
-        .map_err(|err| NamespaceInitializationError::InspectNamespaceDescriptor(err.to_string()))?
+        .map_err(
+            |err| NamespaceInitializationError::InspectNamespaceDescriptor {
+                object_key: descriptor_key.clone(),
+                message: err.message(),
+            },
+        )?
         .is_some();
     let head_exists = store
         .head(&head_key)
         .await
-        .map_err(|err| NamespaceInitializationError::InspectNamespaceHead(err.to_string()))?
+        .map_err(|err| NamespaceInitializationError::InspectNamespaceHead {
+            object_key: head_key.clone(),
+            message: err.message(),
+        })?
         .is_some();
 
     match (descriptor_exists, head_exists) {

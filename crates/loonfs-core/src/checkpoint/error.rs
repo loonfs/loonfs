@@ -5,8 +5,12 @@ use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Coarse failure class of a manifest load: corruption versus store trouble.
+///
+/// Deliberately not named `*ErrorKind` to avoid colliding with the wire-level
+/// caller-action concept in [`loonfs_api::ErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ManifestLoadErrorKind {
+pub enum ManifestLoadFailureClass {
     Corrupt,
     Store,
 }
@@ -150,12 +154,12 @@ pub enum ManifestLoadError {
 }
 
 impl ManifestLoadError {
-    pub fn kind(&self) -> ManifestLoadErrorKind {
+    pub fn failure_class(&self) -> ManifestLoadFailureClass {
         match self {
             Self::ReadManifest { .. }
             | Self::ReadSegment { .. }
-            | Self::ManifestConflict { .. } => ManifestLoadErrorKind::Store,
-            _ => ManifestLoadErrorKind::Corrupt,
+            | Self::ManifestConflict { .. } => ManifestLoadFailureClass::Store,
+            _ => ManifestLoadFailureClass::Corrupt,
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::checkpoint::load_namespace_manifest_envelope;
-use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
@@ -42,7 +42,7 @@ pub struct NamespaceHeadEtagProbe {
 pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
-) -> Result<NamespaceHeadSummary, CoreError> {
+) -> Result<NamespaceHeadSummary> {
     match namespace_initialization_state(store, expected_namespace).await {
         Ok(NamespaceInitializationState::Complete) => {}
         Ok(NamespaceInitializationState::Absent) => {
@@ -111,11 +111,12 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_head_seq: ChangeSeq,
-) -> Result<u64, CoreError> {
+) -> Result<u64> {
+    let wal_prefix = wal_segment_prefix(namespace_id.as_str());
     let keys = store
-        .list_prefix(&wal_segment_prefix(namespace_id.as_str()))
+        .list_prefix(&wal_prefix)
         .await
-        .map_err(|error| CoreError::Store(format!("list WAL tail segments: {error}")))?;
+        .map_err(|error| CoreError::store(&wal_prefix, &error))?;
     let tail_segments = keys
         .iter()
         .filter_map(|key| wal_segment_id_from_key(key))
@@ -123,7 +124,7 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
         .filter(|start_seq| *start_seq > manifest_head_seq)
         .count();
     u64::try_from(tail_segments)
-        .map_err(|_| CoreError::Store("WAL tail segment count overflow".to_owned()))
+        .map_err(|_| CoreError::Internal("WAL tail segment count overflow".to_owned()))
 }
 
 #[tracing::instrument(
@@ -136,7 +137,7 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
 pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
-) -> Result<NamespaceHeadEtagProbe, CoreError> {
+) -> Result<NamespaceHeadEtagProbe> {
     NamespaceId::parse(expected_namespace.as_str())?;
     let object_key = wal_head(expected_namespace.as_str());
     let metadata = store
@@ -144,7 +145,10 @@ pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
         .await
         .map_err(|err| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                ControlObjectLoadError::Store(err.to_string()),
+                ControlObjectLoadError::Store {
+                    object_key: object_key.clone(),
+                    message: err.message(),
+                },
             ))
         })?
         .ok_or_else(|| {
@@ -175,9 +179,16 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
                 error,
             ))
         }
-        NamespaceInitializationError::InspectNamespaceDescriptor(_)
-        | NamespaceInitializationError::InspectNamespaceHead(_) => {
-            CoreError::Store(error.to_string())
+        NamespaceInitializationError::InspectNamespaceDescriptor {
+            object_key,
+            message,
         }
+        | NamespaceInitializationError::InspectNamespaceHead {
+            object_key,
+            message,
+        } => CoreError::Store {
+            object_key,
+            message,
+        },
     }
 }

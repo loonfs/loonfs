@@ -38,6 +38,7 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
@@ -260,18 +261,37 @@ fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
     }
 }
 
-pub async fn serve(config: ServerConfig) -> Result<(), String> {
-    let bind: SocketAddr = config
-        .bind
-        .parse()
-        .map_err(|err: std::net::AddrParseError| err.to_string())?;
-    let app = app(config).map_err(|err| err.to_string())?;
+/// Failure starting or running the HTTP server.
+#[derive(Debug, Error)]
+pub enum ServeError {
+    #[error("invalid bind address `{addr}`: {source}")]
+    BindAddr {
+        addr: String,
+        #[source]
+        source: std::net::AddrParseError,
+    },
+    #[error("invalid server config: {0}")]
+    Config(#[from] ServerConfigError),
+    #[error("failed to bind `{addr}`: {source}")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("server failed while serving requests: {0}")]
+    Serve(#[source] std::io::Error),
+}
+
+pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
+    let bind: SocketAddr = config.bind.parse().map_err(|source| ServeError::BindAddr {
+        addr: config.bind.clone(),
+        source,
+    })?;
+    let app = app(config)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .map_err(|err| err.to_string())?;
-    axum::serve(listener, app)
-        .await
-        .map_err(|err| err.to_string())
+        .map_err(|source| ServeError::Bind { addr: bind, source })?;
+    axum::serve(listener, app).await.map_err(ServeError::Serve)
 }
 
 #[cfg_attr(
@@ -978,11 +998,10 @@ async fn begin_direct_put_upload(
         ));
     };
     let Some(content_ref) = request.content_ref else {
-        return Err(ApiResponseError::runtime_for_namespace(
-            &namespace_id,
-            RuntimeError::Core(CoreError::InvalidUploadContent(
-                "direct_put requires content_ref at begin_upload".to_owned(),
-            )),
+        return Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "invalid upload content: direct_put requires content_ref at begin_upload",
         ));
     };
 

@@ -187,9 +187,13 @@ impl NamespacePublisher {
             operation_class,
             enqueued_at,
         )?;
-        receiver
-            .await
-            .unwrap_or_else(|_| Err(CoreError::Store("publisher task stopped".to_owned())))
+        receiver.await.unwrap_or_else(|_| {
+            Err(CoreError::HeadPublish(
+                CommitHeadPublishError::OutcomeUnknown(
+                    "publisher task stopped before reporting an outcome".to_owned(),
+                ),
+            ))
+        })
     }
 
     fn admit(
@@ -604,7 +608,7 @@ impl NamespacePublisher {
             let mut results = results.into_iter();
             for candidate in candidates {
                 let result = results.next().unwrap_or_else(|| {
-                    Err(CoreError::Store(
+                    Err(CoreError::Internal(
                         "publisher returned too few batch results".to_owned(),
                     ))
                 });
@@ -754,10 +758,10 @@ fn is_retryable_head_publish(result: &CommitResult) -> bool {
 fn runtime_error_to_core(error: RuntimeError) -> CoreError {
     match error {
         RuntimeError::Core(error) => error,
-        RuntimeError::Bootstrap(error) => CoreError::Store(error.to_string()),
-        RuntimeError::Config(message) => CoreError::Store(message),
-        RuntimeError::RuntimeTask(message) => CoreError::Store(message),
-        other => CoreError::Store(other.to_string()),
+        RuntimeError::Bootstrap(error) => CoreError::Internal(error.to_string()),
+        RuntimeError::Config(message) => CoreError::Internal(message),
+        RuntimeError::RuntimeTask(message) => CoreError::Internal(message),
+        other => CoreError::Internal(other.to_string()),
     }
 }
 
@@ -1148,8 +1152,9 @@ mod tests {
                 && self.lose_next_head_cas_ack.swap(false, Ordering::SeqCst);
             let metadata = self.inner.put(key, bytes, mode).await?;
             if lose_ack {
-                return Err(ObjectStoreError::Transport(
-                    "injected lost head CAS acknowledgement".to_owned(),
+                return Err(ObjectStoreError::transport(
+                    key,
+                    "injected lost head CAS acknowledgement",
                 ));
             }
             Ok(metadata)
@@ -1271,7 +1276,9 @@ mod tests {
         assert_eq!(operation_class(&path), "path_mutation");
         assert_eq!(result_label(&Ok::<_, CoreError>(())), "ok");
         assert_eq!(
-            result_label(&Err::<(), _>(CoreError::Store("private error".to_owned()))),
+            result_label(&Err::<(), _>(CoreError::Internal(
+                "private error".to_owned()
+            ))),
             "error"
         );
         assert_eq!(usize_to_u64(7), 7);

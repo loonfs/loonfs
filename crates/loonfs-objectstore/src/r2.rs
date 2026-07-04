@@ -23,7 +23,7 @@ pub struct CloudflareR2Store {
 impl CloudflareR2Store {
     pub fn new(config: CloudflareR2StoreConfig) -> Result<Self, ObjectStoreError> {
         if config.account_id.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "account id must not be empty".to_owned(),
             ));
         }

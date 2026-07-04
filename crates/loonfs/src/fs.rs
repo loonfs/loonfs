@@ -380,7 +380,7 @@ impl Fs {
             }
         } else {
             let Some(current_manifest_id) = checkpoint.current_manifest_id else {
-                return Err(RuntimeError::Core(CoreError::Store(
+                return Err(RuntimeError::Core(CoreError::Internal(
                     "checkpoint publication returned no current manifest id".to_owned(),
                 )));
             };
@@ -989,7 +989,7 @@ impl Fs {
         .into_iter()
         .next()
         .unwrap_or_else(|| {
-            Err(RuntimeError::Core(CoreError::Store(
+            Err(RuntimeError::Core(CoreError::Internal(
                 "empty commit batch".to_owned(),
             )))
         })
@@ -1024,7 +1024,7 @@ impl Fs {
             )
             .await;
         let response = results.pop().unwrap_or_else(|| {
-            Err(RuntimeError::Core(CoreError::Store(
+            Err(RuntimeError::Core(CoreError::Internal(
                 "empty path mutation batch".to_owned(),
             )))
         })?;

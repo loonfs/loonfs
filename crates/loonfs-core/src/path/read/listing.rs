@@ -1,11 +1,11 @@
-use crate::error::{CoreError, MetadataViewError};
+use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_api::{ChangeSeq, DirectoryPageCursor, InodeKind};
 
 pub(super) fn page_head_seq(
     current_head_seq: ChangeSeq,
     cursor: Option<&DirectoryPageCursor>,
-) -> Result<ChangeSeq, CoreError> {
+) -> Result<ChangeSeq> {
     let Some(cursor) = cursor else {
         return Ok(current_head_seq);
     };
@@ -22,7 +22,7 @@ pub(super) fn page_head_seq(
 pub(super) fn validate_directory_cursor(
     cursor: &DirectoryPageCursor,
     resolved: &ResolvedVisiblePath,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if resolved.inode_kind != InodeKind::Dir {
         return Err(invalid_cursor(
             "directory cursor resolved to a non-directory path",

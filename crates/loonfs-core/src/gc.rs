@@ -51,12 +51,12 @@ impl Default for GcConfig {
 impl GcConfig {
     fn validate(&self) -> Result<(), CoreError> {
         if self.grace_window_ms == 0 {
-            return Err(CoreError::Store(
+            return Err(CoreError::Internal(
                 "gc grace_window_ms must be greater than zero".to_owned(),
             ));
         }
         if self.reap_window_ms < self.grace_window_ms {
-            return Err(CoreError::Store(
+            return Err(CoreError::Internal(
                 "gc reap_window_ms must be at least the grace window".to_owned(),
             ));
         }
@@ -105,7 +105,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     let namespace_complete = store
         .head(&config_key)
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))?
+        .map_err(|error| CoreError::store(&config_key, &error))?
         .is_some();
     if !namespace_complete {
         return reap_abandoned_bootstrap(store, namespace_id, config, context).await;
@@ -246,7 +246,7 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         let Some(bytes) = store
             .get(&key, None)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?
+            .map_err(|error| CoreError::store(&key, &error))?
         else {
             continue;
         };
@@ -277,7 +277,7 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         let Some(bytes) = store
             .get(&key, None)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?
+            .map_err(|error| CoreError::store(&key, &error))?
         else {
             continue;
         };
@@ -379,7 +379,7 @@ async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
         let Some(metadata) = store
             .head(key)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?
+            .map_err(|error| CoreError::store(key, &error))?
         else {
             continue;
         };
@@ -398,7 +398,7 @@ async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
     let complete_now = store
         .head(&namespace_config(namespace_id.as_str()))
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))?
+        .map_err(|error| CoreError::store(namespace_config(namespace_id.as_str()), &error))?
         .is_some();
     if complete_now {
         report.retained_candidates = u64::try_from(keys.len()).unwrap_or(u64::MAX);
@@ -408,7 +408,7 @@ async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
         store
             .delete(&key)
             .await
-            .map_err(|error| CoreError::Store(error.to_string()))?;
+            .map_err(|error| CoreError::store(&key, &error))?;
         report.reaped_abandoned_objects += 1;
     }
     Ok(report)
@@ -424,7 +424,7 @@ async fn delete_if_aged<S: ObjectStore + ?Sized>(
     let Some(metadata) = store
         .head(key)
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))?
+        .map_err(|error| CoreError::store(key, &error))?
     else {
         // Already gone; nothing to count.
         return Ok(false);
@@ -441,7 +441,7 @@ async fn delete_if_aged<S: ObjectStore + ?Sized>(
     store
         .delete(key)
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))?;
+        .map_err(|error| CoreError::store(key, &error))?;
     Ok(true)
 }
 
@@ -465,7 +465,7 @@ async fn list_prefix<S: ObjectStore + ?Sized>(
     store
         .list_prefix(prefix)
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))
+        .map_err(|error| CoreError::store(prefix, &error))
 }
 
 fn manifest_id_of(key: &str) -> Option<ManifestId> {

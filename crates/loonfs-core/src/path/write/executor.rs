@@ -1,6 +1,6 @@
 use super::intent::PathMutationIntent;
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::Result;
 use crate::publisher::{DirectObjectStorePublisher, PublishOptions};
 use loonfs_api::{CommitId, MutationResult, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -14,7 +14,7 @@ pub(super) async fn submit_path_intent<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
-) -> Result<MutationResult, CoreError> {
+) -> Result<MutationResult> {
     DirectObjectStorePublisher::new(store)
         .submit_path_intent(namespace_id, intent, context, PublishOptions::default())
         .await

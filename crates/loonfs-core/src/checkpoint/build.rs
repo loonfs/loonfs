@@ -6,7 +6,7 @@ use super::runs::{
     MetadataTableManifest, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
     MAX_MAINTENANCE_TABLE_IO,
 };
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use crate::storage::content::write_immutable_object;
 use futures::future::try_join_all;
@@ -26,7 +26,7 @@ pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataState,
     writer_version: &str,
     max_rows_per_segment: usize,
-) -> Result<Vec<MetadataTableManifest>, CoreError> {
+) -> Result<Vec<MetadataTableManifest>> {
     build_manifest_tables_from_rows(
         store,
         namespace_id,
@@ -67,7 +67,7 @@ pub(super) async fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
     writer_version: &str,
-) -> Result<Vec<MetadataTableManifest>, CoreError> {
+) -> Result<Vec<MetadataTableManifest>> {
     build_manifest_tables_from_rows(
         store,
         namespace_id,
@@ -106,7 +106,7 @@ pub(super) async fn build_manifest_tables_from_rows<S, RowsForFamily>(
     writer_version: &str,
     mut rows_for_family: RowsForFamily,
     segmentation: MetadataTableSegmentation,
-) -> Result<Vec<MetadataTableManifest>, CoreError>
+) -> Result<Vec<MetadataTableManifest>>
 where
     S: ObjectStore + ?Sized,
     RowsForFamily: FnMut(MetadataTableFamily) -> Vec<MetadataRow>,
@@ -126,7 +126,7 @@ where
         let mut requests = Vec::with_capacity(segments.len());
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
-                .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
+                .map_err(|_| CoreError::Internal("metadata SST index overflow".to_owned()))?;
             let table_id = MetadataTableId::generate();
             let object_key = metadata_table(namespace_id.as_str(), table_id.as_str());
             requests.push(MetadataSstWriteRequest {
@@ -186,7 +186,7 @@ pub(super) struct MetadataSstWriteRequest<'a> {
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSstWriteRequest<'_>,
-) -> Result<MetadataFileRef, CoreError> {
+) -> Result<MetadataFileRef> {
     let row_keys = request
         .rows
         .iter()
@@ -212,10 +212,19 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         max_key: page.max_key.clone(),
         pages: vec![page],
     };
-    let envelope = MetadataSstEnvelope::from_payload(request.writer_version, payload)
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    let encoded = encode_metadata_sst_envelope_zstd(&envelope)
-        .map_err(|err| CoreError::Store(err.to_string()))?;
+    let envelope =
+        MetadataSstEnvelope::from_payload(request.writer_version, payload).map_err(|err| {
+            CoreError::Internal(format!(
+                "failed to build metadata SST envelope `{}`: {err}",
+                request.object_key
+            ))
+        })?;
+    let encoded = encode_metadata_sst_envelope_zstd(&envelope).map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to encode metadata SST `{}`: {err}",
+            request.object_key
+        ))
+    })?;
     write_immutable_object(store, &request.object_key, &encoded).await?;
     Ok(MetadataFileRef {
         owner_namespace_id: request.namespace_id.clone(),

@@ -4,8 +4,8 @@ use super::row_decode::{
     tombstone_from_manifest_row, unbind_matches_binding,
 };
 use crate::checkpoint::{string_prefix_upper_bound, ManifestLoadError, VerifiedMetadataTables};
-use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::error::{CoreError, Result};
 use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
@@ -21,7 +21,7 @@ pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     inode_id: InodeId,
-) -> Result<Option<InodeRecord>, CoreError> {
+) -> Result<Option<InodeRecord>> {
     let key = format!("inode-{:020}", inode_id.0);
     Ok(tables
         .get(MetadataTableFamily::Inodes, &key)
@@ -33,7 +33,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
 pub(super) async fn direntry_binds_for_parent<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     parent_inode_id: InodeId,
-) -> Result<Vec<DirentryBindRecord>, CoreError> {
+) -> Result<Vec<DirentryBindRecord>> {
     let prefix = format!("direntry-{:020}-", parent_inode_id.0);
     Ok(tables
         .scan_prefix(MetadataTableFamily::DirentryBinds, &prefix)
@@ -55,7 +55,7 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
     start_after_name_key: Option<&str>,
     start_after_row_key: Option<&str>,
     limit: usize,
-) -> Result<Vec<ManifestDirentryBindCandidate>, CoreError> {
+) -> Result<Vec<ManifestDirentryBindCandidate>> {
     let parent_prefix = format!("direntry-{:020}-", parent_inode_id.0);
     let lower_bound = if let Some(row_key) = start_after_row_key {
         resume_after_row_key(row_key)
@@ -85,7 +85,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     parent_inode_id: InodeId,
     name_key: &str,
-) -> Result<Vec<DirentryBindRecord>, CoreError> {
+) -> Result<Vec<DirentryBindRecord>> {
     let encoded_name_key = hex_encode_row_key_component(name_key);
     let prefix = format!("direntry-{:020}-{encoded_name_key}-", parent_inode_id.0);
     Ok(tables
@@ -100,7 +100,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     child_inode_id: InodeId,
-) -> Result<Vec<DirentryBindRecord>, CoreError> {
+) -> Result<Vec<DirentryBindRecord>> {
     let prefix = format!("direntry-child-{:020}-", child_inode_id.0);
     Ok(tables
         .scan_prefix(MetadataTableFamily::DirentryChildBinds, &prefix)
@@ -114,7 +114,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
 pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     direntry: &DirentryBindRecord,
-) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
+) -> Result<Vec<DirentryUnbindRecord>> {
     let encoded_name_key = hex_encode_row_key_component(&direntry.name_key);
     let prefix = format!(
         "direntry-unbind-{:020}-{}-{:020}-{:010}-",
@@ -157,7 +157,7 @@ impl RevisionPagePosition {
 pub(super) async fn latest_revision_for_inode<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     inode_id: InodeId,
-) -> Result<Option<RevisionRecord>, CoreError> {
+) -> Result<Option<RevisionRecord>> {
     Ok(revisions_for_inode_page_desc(tables, inode_id, None, 1)
         .await?
         .into_iter()
@@ -168,7 +168,7 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     inode_id: InodeId,
     revision_no: RevisionNo,
-) -> Result<Option<RevisionRecord>, CoreError> {
+) -> Result<Option<RevisionRecord>> {
     let exact_prefix = revision_by_inode_desc_exact_revision_prefix(inode_id, revision_no);
     Ok(tables
         .scan_range_page(
@@ -189,7 +189,7 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     start_after: Option<RevisionPagePosition>,
     limit: usize,
-) -> Result<Vec<RevisionRecord>, CoreError> {
+) -> Result<Vec<RevisionRecord>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -214,7 +214,7 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
 pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     root_inode_id: InodeId,
-) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
+) -> Result<Vec<SubtreeTombstoneRecord>> {
     let prefix = format!("tombstone-{:020}-", root_inode_id.0);
     Ok(tables
         .scan_prefix(MetadataTableFamily::Tombstones, &prefix)
@@ -228,7 +228,7 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     commit_id: &CommitId,
-) -> Result<Option<CommitReceiptRecord>, CoreError> {
+) -> Result<Option<CommitReceiptRecord>> {
     let encoded_commit_id = hex_encode_row_key_component(commit_id.as_str());
     let prefix = format!("commit-receipt-{encoded_commit_id}-");
     Ok(tables

@@ -52,22 +52,22 @@ pub struct S3CompatiblePresigner {
 impl S3CompatiblePresigner {
     pub fn new(config: S3PresignerConfig) -> Result<Self, ObjectStoreError> {
         if config.bucket.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "bucket must not be empty".to_owned(),
             ));
         }
         if config.region.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "region must not be empty".to_owned(),
             ));
         }
         if config.access_key_id.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "access key id must not be empty".to_owned(),
             ));
         }
         if config.secret_access_key.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "secret access key must not be empty".to_owned(),
             ));
         }
@@ -140,19 +140,21 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         now: SystemTime,
     ) -> Result<PresignedUrl, ObjectStoreError> {
         if request.expires_in.is_zero() {
-            return Err(ObjectStoreError::Transport(
-                "presigned URL expiry must be greater than zero".to_owned(),
+            return Err(ObjectStoreError::transport(
+                request.object_key,
+                "presigned URL expiry must be greater than zero",
             ));
         }
         if request.expires_in.as_secs() > 604_800 {
-            return Err(ObjectStoreError::Transport(
-                "presigned URL expiry must not exceed seven days".to_owned(),
+            return Err(ObjectStoreError::transport(
+                request.object_key,
+                "presigned URL expiry must not exceed seven days",
             ));
         }
 
         let endpoint = self.endpoint(request.object_key)?;
         let required_headers = s3_direct_put_required_headers(request.content_ref)?;
-        let dates = aws_dates(now)?;
+        let dates = aws_dates(request.object_key, now)?;
         let credential_scope = format!(
             "{}/{}/s3/aws4_request",
             dates.short_date, self.config.region
@@ -207,7 +209,8 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             "{}://{}{}?{}&X-Amz-Signature={}",
             endpoint.scheme, endpoint.host, endpoint.canonical_uri, canonical_query, signature
         );
-        let expires_at_ms = unix_ms(now)? + request.expires_in.as_millis() as u64;
+        let expires_at_ms =
+            unix_ms(request.object_key, now)? + request.expires_in.as_millis() as u64;
 
         Ok(PresignedUrl {
             method: "PUT".to_owned(),
@@ -289,13 +292,13 @@ fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint, ObjectStoreError> {
         .map(|rest| ("https", rest))
         .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
         .ok_or_else(|| {
-            ObjectStoreError::Transport(
+            ObjectStoreError::Configuration(
                 "endpoint url must start with http:// or https://".to_owned(),
             )
         })?;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     if authority.is_empty() {
-        return Err(ObjectStoreError::Transport(
+        return Err(ObjectStoreError::Configuration(
             "endpoint url must include authority".to_owned(),
         ));
     }
@@ -314,9 +317,10 @@ fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint, ObjectStoreError> {
 fn scope_object_key(prefix: Option<&str>, key: &str) -> Result<String, ObjectStoreError> {
     let key = key.trim_start_matches('/');
     if key.is_empty() {
-        return Err(ObjectStoreError::InvalidKey(
-            "object key must not be empty".to_owned(),
-        ));
+        return Err(ObjectStoreError::InvalidKey {
+            object_key: key.to_owned(),
+            message: "object key must not be empty".to_owned(),
+        });
     }
     Ok(match prefix {
         Some(prefix) if !prefix.trim_matches('/').is_empty() => {
@@ -326,9 +330,12 @@ fn scope_object_key(prefix: Option<&str>, key: &str) -> Result<String, ObjectSto
     })
 }
 
-fn unix_ms(time: SystemTime) -> Result<u64, ObjectStoreError> {
+fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64, ObjectStoreError> {
     let duration = time.duration_since(std::time::UNIX_EPOCH).map_err(|err| {
-        ObjectStoreError::Transport(format!("system time is before unix epoch: {err}"))
+        ObjectStoreError::transport(
+            object_key,
+            format!("system time is before unix epoch: {err}"),
+        )
     })?;
     Ok(duration.as_millis() as u64)
 }

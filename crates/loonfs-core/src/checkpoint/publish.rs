@@ -54,7 +54,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             let Some(existing) = load_namespace_manifest_envelope_if_present(
                 store,
                 &manifest.payload.namespace_id,
@@ -140,9 +140,12 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             writer_version,
             next.clone(),
         )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded =
-            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| {
+            CoreError::Internal(format!("failed to build metadata root envelope: {err}"))
+        })?;
+        let encoded = encode_control_object(&envelope).map_err(|err| {
+            CoreError::Internal(format!("failed to encode metadata root object: {err}"))
+        })?;
         let expected_etag = loaded.metadata.etag.as_deref().ok_or_else(|| {
             CoreError::NamespaceCorrupt(format!("missing root etag for `{}`", loaded.object_key))
         })?;
@@ -151,8 +154,10 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             .await
         {
             Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-            Err(error) => return Err(CoreError::Store(error.to_string())),
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+            ) => continue,
+            Err(error) => return Err(CoreError::store(&loaded.object_key, &error)),
         }
     }
     Ok(ManifestPublicationOutcome::RootCasRaceLost)

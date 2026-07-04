@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn map_core_error_surfaces_registry_codes_verbatim() {
-        let error = map_core_error(CoreError::MissingRevision {
+        let error = map_core_error(CoreError::RevisionNotFound {
             inode_id: InodeId(42),
             revision_no: RevisionNo(7),
         });

@@ -83,8 +83,8 @@ pub enum DurableContentValidationError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub(crate) enum ImmutableObjectWriteError {
-    #[error("{0}")]
-    Store(String),
+    #[error("failed to write immutable object `{object_key}`: {message}")]
+    Store { object_key: String, message: String },
 }
 
 pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
@@ -183,7 +183,7 @@ async fn validate_content_metadata<S: ObjectStore + ?Sized>(
         Err(err) => {
             return Err(DurableContentValidationError::Store {
                 object_key: object_key.to_owned(),
-                message: err.to_string(),
+                message: err.message(),
             })
         }
     };
@@ -237,7 +237,7 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
-        .map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| CoreError::Internal(format!("failed to derive content blob key: {err}")))?;
     write_immutable_object(store, &object_key, bytes).await?;
 
     Ok(StoredContent {
@@ -259,15 +259,19 @@ pub(crate) async fn write_immutable_object<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             if existing_object_matches_expected_bytes(store, object_key, expected_bytes).await? {
                 return Ok(());
             }
-            Err(ImmutableObjectWriteError::Store(format!(
-                "immutable object `{object_key}` already exists with different bytes"
-            )))
+            Err(ImmutableObjectWriteError::Store {
+                object_key: object_key.to_owned(),
+                message: "object already exists with different bytes".to_owned(),
+            })
         }
-        Err(err) => Err(ImmutableObjectWriteError::Store(err.to_string())),
+        Err(err) => Err(ImmutableObjectWriteError::Store {
+            object_key: object_key.to_owned(),
+            message: err.message(),
+        }),
     }
 }
 
@@ -278,11 +282,12 @@ async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<bool, ImmutableObjectWriteError> {
     let expected_size = expected_bytes.len() as u64;
     let expected_digest = sha256_digest(expected_bytes);
-    if let Some(metadata) = store
-        .head_with_checksum(object_key)
-        .await
-        .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
-    {
+    if let Some(metadata) = store.head_with_checksum(object_key).await.map_err(|err| {
+        ImmutableObjectWriteError::Store {
+            object_key: object_key.to_owned(),
+            message: err.message(),
+        }
+    })? {
         if metadata.size_bytes != expected_size {
             return Ok(false);
         }
@@ -294,11 +299,13 @@ async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
     let existing = store
         .get(object_key, None)
         .await
-        .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
-        .ok_or_else(|| {
-            ImmutableObjectWriteError::Store(format!(
-                "missing immutable object `{object_key}` after precondition failure"
-            ))
+        .map_err(|err| ImmutableObjectWriteError::Store {
+            object_key: object_key.to_owned(),
+            message: err.message(),
+        })?
+        .ok_or_else(|| ImmutableObjectWriteError::Store {
+            object_key: object_key.to_owned(),
+            message: "object is missing after precondition failure".to_owned(),
         })?;
     Ok(existing == expected_bytes)
 }
@@ -314,7 +321,7 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
         }),
         Err(err) => Err(DurableContentValidationError::Store {
             object_key: object_key.to_owned(),
-            message: err.to_string(),
+            message: err.message(),
         }),
     }
 }
