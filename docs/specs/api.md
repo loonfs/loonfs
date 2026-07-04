@@ -204,7 +204,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is not yet available; retry. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
 | `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |

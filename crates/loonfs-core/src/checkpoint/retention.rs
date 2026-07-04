@@ -11,6 +11,8 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
+const MAX_RETENTION_PROBE_IO: usize = 8;
+
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -39,24 +41,44 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     let target_floor = manifest_tables.manifest().payload.head_seq;
+    if loaded_head.envelope.state.retention_floor_seq >= target_floor {
+        // Already advanced; skip the existence probes on the idempotent
+        // re-invocation path.
+        return Ok(AdvanceRetentionResponse {
+            namespace_id: namespace_id.clone(),
+            retention_floor_seq: loaded_head.envelope.state.retention_floor_seq,
+        });
+    }
 
     // Advancing the floor surrenders the WAL replay promise below the
     // target, so every metadata segment the target manifest references must
-    // still exist before that promise is given up. Corruption discovered
-    // later is caught by read-path checksums; disappearance must be caught
-    // here, while replay can still rebuild the state.
-    for metadata_file in &manifest_tables.manifest().payload.metadata_files {
-        let present = store
-            .head(&metadata_file.object_key)
-            .await
-            .map_err(|error| CoreError::Store(error.to_string()))?
-            .is_some();
-        if !present {
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "retention floor cannot advance: missing metadata segment `{}`",
-                metadata_file.object_key
-            )));
-        }
+    // still exist before that promise is given up. This probe is advisory
+    // defense-in-depth: the atomic guarantee belongs to the deleter — GC
+    // must never remove an object reachable from the current manifest or a
+    // retained checkpoint or pin (format spec, "Garbage collection").
+    // Corruption discovered later is caught by read-path checksums.
+    for metadata_files in manifest_tables
+        .manifest()
+        .payload
+        .metadata_files
+        .chunks(MAX_RETENTION_PROBE_IO)
+    {
+        let probes = metadata_files.iter().map(|metadata_file| async move {
+            let present = store
+                .head(&metadata_file.object_key)
+                .await
+                .map_err(|error| CoreError::Store(error.to_string()))?
+                .is_some();
+            if present {
+                Ok(())
+            } else {
+                Err(CoreError::CheckpointUnavailable(format!(
+                    "retention floor cannot advance: missing metadata segment `{}`",
+                    metadata_file.object_key
+                )))
+            }
+        });
+        futures::future::try_join_all(probes).await?;
     }
 
     update_head(
