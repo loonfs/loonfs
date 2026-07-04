@@ -1,7 +1,6 @@
 use crate::{
     v0::{MoveBehavior, ValidatedContentToken},
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ErrorCode, InodeId, ManifestId, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -9,11 +8,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiError {
-    /// Stable machine-readable reason from the [`ErrorCode`] registry.
+    /// Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)
+    /// registry.
     ///
     /// Carried as a string so clients keep working when a newer server
-    /// introduces a code they do not know; use [`ApiError::error_code`] for
-    /// typed access.
+    /// introduces a code they do not know; use
+    /// [`ErrorCode::parse`](crate::ErrorCode::parse) for typed access.
     pub code: String,
     /// For `not_supported` errors, the capability-document feature key the
     /// client should reconcile against.
@@ -21,14 +21,6 @@ pub struct ApiError {
     pub feature: Option<String>,
     /// Human-readable error message.
     pub message: String,
-}
-
-impl ApiError {
-    /// Returns the registered code, or `None` for codes this build does not
-    /// know.
-    pub fn error_code(&self) -> Option<ErrorCode> {
-        ErrorCode::parse(&self.code)
-    }
 }
 
 /// Request to create a namespace.

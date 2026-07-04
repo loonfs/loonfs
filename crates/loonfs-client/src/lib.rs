@@ -14,10 +14,11 @@ use loonfs_api::{
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MutationResult, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest, RevisionNo,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
+    ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -104,6 +105,45 @@ pub enum ClientError {
     Io(String),
     #[error("json error: {0}")]
     Json(String),
+}
+
+impl ClientError {
+    /// Returns the typed code for [`ClientError::Api`] errors, or `None` for
+    /// non-API errors and for codes this build does not know (clients must
+    /// tolerate unknown codes).
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        match self {
+            ClientError::Api { code, .. } => ErrorCode::parse(code),
+            _ => None,
+        }
+    }
+
+    /// Returns the caller-action category for [`ClientError::Api`] errors.
+    ///
+    /// Known codes classify through [`ErrorCode::kind`]. Unknown codes (a
+    /// newer server) fall back to the HTTP status class, so retry decisions
+    /// still work: 503 is [`ErrorKind::Unavailable`], other 5xx are
+    /// [`ErrorKind::Internal`], and 4xx are [`ErrorKind::InvalidRequest`].
+    pub fn kind(&self) -> Option<ErrorKind> {
+        match self {
+            ClientError::Api { status, code, .. } => match ErrorCode::parse(code) {
+                Some(code) => Some(code.kind()),
+                None => kind_for_status_class(*status),
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Coarse status-class fallback for error codes this build does not know.
+fn kind_for_status_class(status: u16) -> Option<ErrorKind> {
+    match status {
+        // 503 stays retryable even when the code is unknown.
+        503 => Some(ErrorKind::Unavailable),
+        400..=499 => Some(ErrorKind::InvalidRequest),
+        500..=599 => Some(ErrorKind::Internal),
+        _ => None,
+    }
 }
 
 impl ClientConfig {
@@ -1085,9 +1125,54 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, ClientConfig, ClientError, NamespacePath};
+    use super::{Client, ClientConfig, ClientError, ErrorCode, ErrorKind, NamespacePath};
     use std::fs;
     use tempfile::tempdir;
+
+    fn api_error(status: u16, code: &str) -> ClientError {
+        ClientError::Api {
+            status,
+            code: code.to_owned(),
+            feature: None,
+            message: "test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn api_errors_with_known_codes_classify_through_the_registry() {
+        let error = api_error(409, "stale_revision");
+        assert_eq!(error.error_code(), Some(ErrorCode::StaleRevision));
+        assert_eq!(error.kind(), Some(ErrorKind::Conflict));
+
+        let error = api_error(410, "namespace_deleted");
+        assert_eq!(error.error_code(), Some(ErrorCode::NamespaceDeleted));
+        assert_eq!(error.kind(), Some(ErrorKind::Gone));
+
+        let error = api_error(503, "commit_outcome_unknown");
+        assert_eq!(error.error_code(), Some(ErrorCode::CommitOutcomeUnknown));
+        assert_eq!(error.kind(), Some(ErrorKind::OutcomeUnknown));
+    }
+
+    #[test]
+    fn api_errors_with_unknown_codes_fall_back_to_the_status_class() {
+        for (status, kind) in [
+            (400, ErrorKind::InvalidRequest),
+            (404, ErrorKind::InvalidRequest),
+            (500, ErrorKind::Internal),
+            (503, ErrorKind::Unavailable),
+        ] {
+            let error = api_error(status, "code_from_a_newer_server");
+            assert_eq!(error.error_code(), None);
+            assert_eq!(error.kind(), Some(kind), "status {status}");
+        }
+    }
+
+    #[test]
+    fn non_api_errors_have_no_code_or_kind() {
+        let error = ClientError::Http("connection refused".to_owned());
+        assert_eq!(error.error_code(), None);
+        assert_eq!(error.kind(), None);
+    }
 
     #[test]
     fn load_rejects_invalid_server_url() {

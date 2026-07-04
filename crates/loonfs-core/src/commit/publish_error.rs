@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-#[non_exhaustive]
 pub enum CommitHeadPublishError {
     #[error("writer version must not be empty")]
     EmptyWriterVersion,

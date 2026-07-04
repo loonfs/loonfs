@@ -1943,7 +1943,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable machine-readable reason from the [`ErrorCode`] registry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use [`ApiError::error_code`] for\ntyped access."
+            "description": "Stable machine-readable reason from the [`ErrorCode`](crate::ErrorCode)\nregistry.\n\nCarried as a string so clients keep working when a newer server\nintroduces a code they do not know; use\n[`ErrorCode::parse`](crate::ErrorCode::parse) for typed access."
           },
           "feature": {
             "type": [

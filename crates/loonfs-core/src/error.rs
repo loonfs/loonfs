@@ -499,11 +499,11 @@ mod tests {
     fn public_error_kind_groups_detailed_codes() {
         assert_eq!(ErrorCode::InvalidRequest.kind(), ErrorKind::InvalidRequest);
         assert_eq!(ErrorCode::PathNotFound.kind(), ErrorKind::NotFound);
+        assert_eq!(ErrorCode::NamespaceDeleted.kind(), ErrorKind::Gone);
         assert_eq!(ErrorCode::NamespaceExists.kind(), ErrorKind::AlreadyExists);
-        assert_eq!(
-            ErrorCode::StaleRevision.kind(),
-            ErrorKind::PreconditionFailed
-        );
+        // Precondition failures are 409 resource-state conflicts in v0
+        // (api.md, "Standard error contract"), so the kind is Conflict.
+        assert_eq!(ErrorCode::StaleRevision.kind(), ErrorKind::Conflict);
         assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
         assert_eq!(
             ErrorCode::MaintenanceRequired.kind(),

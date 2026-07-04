@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use loonfs::publish::PathMutationIntent;
 use loonfs::{
     payload_class, BootstrapNamespaceError, ChangeSeq, CoreError, CreateNamespaceOptions,
-    DeleteNamespaceOptions, ErrorCode, Fs, JsonlObjectStoreMetricsRecorder,
+    DeleteNamespaceOptions, ErrorCode, ErrorKind, Fs, JsonlObjectStoreMetricsRecorder,
     ObjectStoreMetricsRecorder, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{
@@ -1765,36 +1765,27 @@ impl ApiResponseError {
 }
 
 fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
-    match code {
-        ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
-        ErrorCode::NamespaceNotFound
-        | ErrorCode::PathNotFound
-        | ErrorCode::RevisionNotFound
-        | ErrorCode::UploadNotFound => StatusCode::NOT_FOUND,
-        ErrorCode::CommitQueueFull
-        | ErrorCode::CommitOutcomeUnknown
-        | ErrorCode::CheckpointUnavailable
-        | ErrorCode::MaintenanceRequired => StatusCode::SERVICE_UNAVAILABLE,
-        ErrorCode::NamespaceDeleted => StatusCode::GONE,
-        ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-        ErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,
-        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
-        ErrorCode::NamespaceExists
-        | ErrorCode::NamespacePartial
-        | ErrorCode::PathConflict
-        | ErrorCode::DirectoryNotEmpty
-        | ErrorCode::StaleHead
-        | ErrorCode::StaleRevision
-        | ErrorCode::TombstoneConflict
-        | ErrorCode::WriterFenced
-        | ErrorCode::WouldCycle
-        | ErrorCode::CommitIdReuseConflict
-        | ErrorCode::UploadAlreadyCompleted
-        | ErrorCode::UploadContentConflict
-        | ErrorCode::RebootstrapRequired => StatusCode::CONFLICT,
-        // A code without an explicit arm serves as 500 until someone decides
+    status_for_error_kind(code.kind())
+}
+
+/// Maps a caller-action [`ErrorKind`] to the HTTP status this server serves:
+/// the api.md error table is the source of truth, and the spec-table sync
+/// test below enforces that this mapping composed with [`ErrorCode::kind`]
+/// reproduces it exactly.
+fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
+    match kind {
+        ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+        ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+        ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        ErrorKind::Gone => StatusCode::GONE,
+        ErrorKind::AlreadyExists | ErrorKind::Conflict => StatusCode::CONFLICT,
+        ErrorKind::NotSupported => StatusCode::NOT_IMPLEMENTED,
+        ErrorKind::Unavailable | ErrorKind::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorKind::DataCorruption | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        // A kind without an explicit arm serves as 500 until someone decides
         // its real status. The spec-table test below fails on any code whose
-        // served status disagrees with the api.md registry, so new codes
+        // served status disagrees with the api.md registry, so new kinds
         // cannot ship on this default silently.
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
