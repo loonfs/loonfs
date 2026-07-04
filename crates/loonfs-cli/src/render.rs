@@ -288,7 +288,7 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),
             mode: Some("remote".to_owned()),
-            error: CliError::new("client_error", "connection refused"),
+            error: CliError::client_error("connection refused"),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
             &json_error(&failure).expect("json error renders")

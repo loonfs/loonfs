@@ -15,7 +15,7 @@ use loonfs_api::wire::control::{
     WriterBlock,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, InodeId, InodeKind, NamePolicy, NamespaceId,
+    ChangeSeq, ContentStoreId, ErrorCode, InodeId, InodeKind, NamePolicy, NamespaceId,
     NamespaceIdValidationError, NamespaceSummary,
 };
 use loonfs_objectstore::keys::{
@@ -50,6 +50,32 @@ pub enum BootstrapNamespaceError {
     HeadWrite(String),
     #[error("failed to write initial namespace manifest: {0}")]
     ManifestWrite(String),
+}
+
+impl BootstrapNamespaceError {
+    /// Returns the stable machine-readable reason for this error.
+    ///
+    /// This is the single source of truth for the wire code every surface
+    /// (HTTP server, CLI) reports for a bootstrap failure, mirroring
+    /// [`CoreError::code`](crate::Error::code).
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            BootstrapNamespaceError::InvalidNamespaceId(_)
+            | BootstrapNamespaceError::EmptyHolderId
+            | BootstrapNamespaceError::EmptyWriterVersion => ErrorCode::InvalidRequest,
+            BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
+            BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => {
+                ErrorCode::NamespacePartial
+            }
+            BootstrapNamespaceError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+            BootstrapNamespaceError::Descriptor(_)
+            | BootstrapNamespaceError::DescriptorWrite(_)
+            | BootstrapNamespaceError::ContentStoreWrite(_)
+            | BootstrapNamespaceError::Head(_)
+            | BootstrapNamespaceError::HeadWrite(_)
+            | BootstrapNamespaceError::ManifestWrite(_) => ErrorCode::ServerError,
+        }
+    }
 }
 
 impl From<NamespaceInitializationError> for BootstrapNamespaceError {

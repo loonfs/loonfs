@@ -29,7 +29,7 @@ pub fn main() -> ExitCode {
                     kind: output.kind,
                     profile: output.profile.clone(),
                     mode: output.mode,
-                    error: error::CliError::new("io_error", format!("i/o error: {err}")),
+                    error: error::CliError::io(err),
                 };
                 let _ = render::render_error(&failure, runtime.json);
                 ExitCode::FAILURE

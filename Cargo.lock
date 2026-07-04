@@ -1108,7 +1108,6 @@ dependencies = [
  "loonfs",
  "loonfs-api",
  "loonfs-client",
- "loonfs-core",
  "loonfs-objectstore",
  "serde",
  "serde_json",

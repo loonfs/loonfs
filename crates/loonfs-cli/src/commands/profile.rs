@@ -148,7 +148,7 @@ fn run_profile_remove(
                 kind,
                 Some(name.to_owned()),
                 None,
-                CliError::new("cancelled", "operation cancelled"),
+                CliError::cancelled(),
             ));
         }
     }

@@ -2,7 +2,7 @@ use super::output::CommandFailure;
 use crate::args::{CommandKind, TargetSelectorArgs};
 use crate::error::CliError;
 use crate::resolve::{load_cli_config, resolve_namespace, resolve_target_profile_from_config};
-use loonfs_api::NamespaceId;
+use loonfs_api::{ErrorCode, NamespaceId};
 use loonfs_client::NamespacePath;
 use std::path::{Path, PathBuf};
 
@@ -50,9 +50,11 @@ pub(crate) fn resolve_command_context(
 // --- general helpers ---
 
 pub(crate) fn validate_namespace_id(namespace: &str) -> Result<(), CliError> {
+    // A malformed namespace id surfaces its registry code so both profile
+    // modes report the same code the server would serve for it.
     NamespaceId::parse(namespace)
         .map(|_| ())
-        .map_err(|error| CliError::invalid_input(error.to_string()))
+        .map_err(|error| CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
 }
 
 pub(crate) fn namespace_path(

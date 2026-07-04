@@ -2,7 +2,7 @@ use crate::backend::ResolvedTarget;
 use crate::config::{default_config_path, load_config, CliConfig};
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
-use loonfs_api::NamespaceId;
+use loonfs_api::{ErrorCode, NamespaceId};
 
 pub(crate) struct LoadedConfig {
     pub path: std::path::PathBuf,
@@ -58,7 +58,8 @@ pub(crate) fn resolve_namespace(
 }
 
 fn validate_namespace(namespace: &str) -> Result<ResolvedNamespace, CliError> {
-    NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))?;
+    NamespaceId::parse(namespace)
+        .map_err(|error| CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))?;
     Ok(ResolvedNamespace {
         namespace: namespace.to_owned(),
     })

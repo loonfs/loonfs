@@ -1685,35 +1685,8 @@ impl ApiResponseError {
     }
 
     fn bootstrap(error: BootstrapNamespaceError) -> Self {
-        match error {
-            BootstrapNamespaceError::InvalidNamespaceId(error) => Self::invalid_namespace_id(error),
-            BootstrapNamespaceError::NamespaceAlreadyExists { .. } => Self::new(
-                StatusCode::CONFLICT,
-                ErrorCode::NamespaceExists,
-                &error.to_string(),
-            ),
-            BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => Self::new(
-                StatusCode::CONFLICT,
-                ErrorCode::NamespacePartial,
-                &error.to_string(),
-            ),
-            BootstrapNamespaceError::NamespaceDeleted { .. } => Self::new(
-                StatusCode::GONE,
-                ErrorCode::NamespaceDeleted,
-                &error.to_string(),
-            ),
-            BootstrapNamespaceError::EmptyHolderId
-            | BootstrapNamespaceError::EmptyWriterVersion => Self::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &error.to_string(),
-            ),
-            _ => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::ServerError,
-                &error.to_string(),
-            ),
-        }
+        let code = error.code();
+        Self::new(status_for_core_error_code(code), code, &error.to_string())
     }
 
     fn runtime(error: RuntimeError) -> Self {

@@ -200,12 +200,15 @@ fn map_client_error(error: ClientError) -> CliError {
         ClientError::ConfigValidation { field, reason } => {
             CliError::invalid_config(format!("invalid `{field}`: {reason}"))
         }
-        ClientError::InvalidNamespacePath(message) | ClientError::InvalidCommitId(message) => {
-            CliError::invalid_input(message)
+        ClientError::InvalidNamespacePath(message) => CliError::invalid_input(message),
+        ClientError::InvalidCommitId(message) => {
+            // The registry code core and server report for a malformed commit
+            // id, so pre-flight client validation matches backend behavior.
+            CliError::new(ErrorCode::InvalidRequest.as_str(), message)
         }
         ClientError::Http(message) | ClientError::Json(message) => CliError::client_error(message),
         ClientError::Api { code, message, .. } => CliError::new(code, message),
-        ClientError::Io(message) => CliError::new("io_error", format!("i/o error: {message}")),
+        ClientError::Io(message) => CliError::io(std::io::Error::other(message)),
         other => CliError::client_error(other.to_string()),
     }
 }
@@ -337,7 +340,9 @@ impl Backend for EmbeddedBackend {
                     cursor: cursor
                         .map(loonfs_api::decode_file_revisions_cursor)
                         .transpose()
-                        .map_err(|error| CliError::new("invalid_request", error.to_string()))?,
+                        .map_err(|error| {
+                            CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                        })?,
                 },
             ),
         )
@@ -464,7 +469,8 @@ impl Backend for EmbeddedBackend {
 }
 
 fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
-    NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))
+    NamespaceId::parse(namespace)
+        .map_err(|error| CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
 }
 
 fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, CliError> {
@@ -482,8 +488,8 @@ fn map_runtime_error(error: RuntimeError) -> CliError {
         RuntimeError::Core(error) => map_core_error(error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
-        RuntimeError::RuntimeTask(message) => CliError::new("runtime_error", message),
-        other => CliError::new("runtime_error", other.to_string()),
+        RuntimeError::RuntimeTask(message) => CliError::runtime_error(message),
+        other => CliError::runtime_error(other.to_string()),
     }
 }
 
@@ -492,23 +498,23 @@ fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> C
         RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace, error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => CliError::invalid_config(message),
-        RuntimeError::RuntimeTask(message) => CliError::new("runtime_error", message),
-        other => CliError::new("runtime_error", other.to_string()),
+        RuntimeError::RuntimeTask(message) => CliError::runtime_error(message),
+        other => CliError::runtime_error(other.to_string()),
     }
 }
 
-fn map_core_error(error: CoreError) -> CliError {
-    if matches!(error.code(), ErrorCode::InvalidRequest) {
-        return CliError::invalid_input(error.to_string());
-    }
+// Embedded-mode failures surface the same registry code the server would
+// serve for the identical failure, so `loon --json` consumers see one code
+// per mistake regardless of profile mode.
 
+fn map_core_error(error: CoreError) -> CliError {
     CliError::new(error.code().as_str(), error.to_string())
 }
 
 fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> CliError {
     if matches!(error.code(), ErrorCode::NamespaceNotFound) {
         return CliError::new(
-            "namespace_not_found",
+            ErrorCode::NamespaceNotFound.as_str(),
             format!("namespace `{namespace}` does not exist"),
         );
     }
@@ -517,24 +523,7 @@ fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> CliErro
 }
 
 fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {
-    match &error {
-        BootstrapNamespaceError::InvalidNamespaceId(_) => {
-            CliError::invalid_input(error.to_string())
-        }
-        BootstrapNamespaceError::NamespaceAlreadyExists { .. } => {
-            CliError::new("namespace_exists", error.to_string())
-        }
-        BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => {
-            CliError::new("namespace_partial", error.to_string())
-        }
-        BootstrapNamespaceError::NamespaceDeleted { .. } => {
-            CliError::new("namespace_deleted", error.to_string())
-        }
-        BootstrapNamespaceError::EmptyHolderId | BootstrapNamespaceError::EmptyWriterVersion => {
-            CliError::invalid_config(error.to_string())
-        }
-        _ => CliError::new("server_error", error.to_string()),
-    }
+    CliError::new(error.code().as_str(), error.to_string())
 }
 
 fn default_writer_id() -> String {
@@ -659,24 +648,41 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_core_error, Backend, EmbeddedTarget};
+    use super::{map_bootstrap_error, map_core_error, Backend, EmbeddedTarget};
     use crate::config::StoreConfig;
-    use loonfs::CoreError;
+    use loonfs::{BootstrapNamespaceError, CoreError, ErrorCode};
     use loonfs_api::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
     use loonfs_client::NamespacePath;
-    use loonfs_core::commit::CommitValidationError;
     use tempfile::tempdir;
 
     #[test]
-    fn map_core_error_uses_revision_not_found_code() {
-        let error = map_core_error(CoreError::CommitValidation(
-            CommitValidationError::RestoreRevisionSourceRevisionMissing {
-                inode_id: InodeId(42),
-                source_revision_no: RevisionNo(7),
-            },
-        ));
+    fn map_core_error_surfaces_registry_codes_verbatim() {
+        let error = map_core_error(CoreError::MissingRevision {
+            inode_id: InodeId(42),
+            revision_no: RevisionNo(7),
+        });
 
-        assert_eq!(error.code, "revision_not_found");
+        assert_eq!(error.code, ErrorCode::RevisionNotFound.as_str());
+    }
+
+    #[test]
+    fn map_core_error_does_not_rewrite_invalid_id_codes() {
+        // Embedded mode must report the same code the server serves for the
+        // identical failure, not a CLI-local `invalid_input` rewrite.
+        let invalid_id = NamespaceId::parse("bad/name").expect_err("invalid namespace id");
+        let error = map_core_error(CoreError::InvalidNamespaceId(invalid_id));
+
+        assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+    }
+
+    #[test]
+    fn map_bootstrap_error_surfaces_registry_codes_verbatim() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let error =
+            map_bootstrap_error(BootstrapNamespaceError::NamespaceAlreadyExists { namespace_id });
+
+        assert_eq!(error.code, ErrorCode::NamespaceExists.as_str());
+        assert!(error.message.contains("already exists"));
     }
 
     #[test]

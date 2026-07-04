@@ -28,7 +28,6 @@ toml.workspace = true
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
-loonfs-core = { path = "../loonfs-core" }
 tempfile.workspace = true
 ureq.workspace = true
 
