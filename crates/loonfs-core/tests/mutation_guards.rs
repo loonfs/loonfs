@@ -24,7 +24,7 @@ use loonfs_api::{
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
-    NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, WriterEpoch,
+    NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, UploadId, WriterEpoch,
 };
 use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitOpResult, CommitRequest,
@@ -183,7 +183,7 @@ fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
 fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    upload_id: &str,
+    upload_id: &UploadId,
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::UploadContentResponse, CoreError> {
@@ -193,7 +193,7 @@ fn upload_content<S: ObjectStore + ?Sized>(
 fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    upload_id: &str,
+    upload_id: &UploadId,
     request: &CompleteUploadRequest,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::CompleteUploadResponse, CoreError> {
@@ -1383,10 +1383,11 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         .await
         .expect("store content");
 
-    let upload_id = "upl_00000000000000000000000000000001";
+    let upload_id =
+        UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
-        upload_id: upload_id.to_owned(),
+        upload_id: upload_id.clone(),
         mode: UploadMode::DirectPut,
         direct_put_content_ref: None,
         staged_content_ref: None,
@@ -1399,7 +1400,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
     let encoded = encode_control_object(&envelope).expect("encode upload session");
     store
         .put_if_absent(
-            &upload_session(namespace_id.as_str(), upload_id),
+            &upload_session(namespace_id.as_str(), upload_id.as_str()),
             Bytes::from(encoded),
         )
         .await
@@ -1408,7 +1409,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
     let error = complete_upload(
         &store,
         &namespace_id,
-        upload_id,
+        &upload_id,
         &CompleteUploadRequest {
             content_ref: stored.content_ref,
         },
@@ -2043,14 +2044,10 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
     let invalid_upload_id = ["upl", "123"].join("-");
-    let error = upload_content(
-        &store,
-        &namespace_id,
-        &invalid_upload_id,
-        b"hello",
-        &context,
-    )
-    .expect_err("invalid upload_id should be rejected");
+    let error = UploadId::parse(&invalid_upload_id)
+        .map_err(CoreError::InvalidUploadId)
+        .map(|upload_id| upload_content(&store, &namespace_id, &upload_id, b"hello", &context))
+        .expect_err("invalid upload_id should be rejected");
 
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
@@ -3516,7 +3513,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .map(|metadata_file| metadata_file.object_key.clone())
         .collect::<Vec<_>>();
     assert!(store
-        .head(&pin_key(source_namespace_id.as_str(), &pin.state.pin_id))
+        .head(&pin_key(
+            source_namespace_id.as_str(),
+            pin.state.pin_id.as_str()
+        ))
         .await
         .expect("head source pin")
         .is_some());

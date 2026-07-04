@@ -2092,7 +2092,7 @@
             "$ref": "#/components/schemas/NamespaceId"
           },
           "upload_id": {
-            "type": "string"
+            "$ref": "#/components/schemas/UploadId"
           }
         }
       },
@@ -2822,7 +2822,7 @@
             "$ref": "#/components/schemas/NamespaceId"
           },
           "upload_id": {
-            "type": "string"
+            "$ref": "#/components/schemas/UploadId"
           },
           "validated_content_token": {
             "type": [
@@ -3541,9 +3541,13 @@
             "$ref": "#/components/schemas/NamespaceId"
           },
           "upload_id": {
-            "type": "string"
+            "$ref": "#/components/schemas/UploadId"
           }
         }
+      },
+      "UploadId": {
+        "type": "string",
+        "description": "Durable id for one upload session."
       },
       "UploadMode": {
         "type": "string",

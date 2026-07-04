@@ -1209,7 +1209,7 @@ mod tests {
         display_name: impl Into<String>,
     ) -> CommitRequest {
         CommitRequest {
-            commit_id: CommitId::try_new(commit_id.into()).expect("valid commit id"),
+            commit_id: CommitId::parse(commit_id.into()).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),

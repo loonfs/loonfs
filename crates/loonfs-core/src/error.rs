@@ -9,7 +9,7 @@ use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
     ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind, ManifestId,
-    NamespaceId, NamespaceIdValidationError,
+    NamespaceId, NamespaceIdValidationError, UploadId,
 };
 use thiserror::Error;
 
@@ -83,11 +83,11 @@ pub enum CoreError {
     #[error("{0}")]
     CheckpointUnavailable(String),
     #[error("upload session `{upload_id}` was not found")]
-    UploadNotFound { upload_id: String },
+    UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
-    UploadAlreadyCompleted { upload_id: String },
+    UploadAlreadyCompleted { upload_id: UploadId },
     #[error("upload session `{upload_id}` content conflicts with prior content")]
-    UploadContentConflict { upload_id: String },
+    UploadContentConflict { upload_id: UploadId },
     #[error("invalid upload content: {0}")]
     InvalidUploadContent(String),
     #[error("invalid cursor: {0}")]

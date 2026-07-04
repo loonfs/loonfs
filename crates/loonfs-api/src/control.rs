@@ -3,8 +3,8 @@ use crate::envelope::EnvelopeProbe;
 use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId, NamePolicy,
-    NamespaceId,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, GcPinId, InodeId, ManifestId,
+    NamePolicy, NamespaceId, UploadId, WalSegmentId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -183,7 +183,7 @@ pub struct CheckpointRecordState {
 /// tables), so manifest facts are never duplicated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceGcPinState {
-    pub pin_id: String,
+    pub pin_id: GcPinId,
     pub source_namespace_id: NamespaceId,
     pub target_namespace_id: NamespaceId,
     pub source_checkpoint_id: CheckpointId,
@@ -193,7 +193,7 @@ pub struct NamespaceGcPinState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalSegmentPointer {
     pub object_key: String,
-    pub segment_id: String,
+    pub segment_id: WalSegmentId,
     pub start_seq: ChangeSeq,
     pub end_seq: ChangeSeq,
     /// Checksum of the referenced segment's payload bytes, in `sha256:<hex>`
@@ -300,7 +300,7 @@ pub struct CompletedUpload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadSessionState {
     pub namespace_id: NamespaceId,
-    pub upload_id: String,
+    pub upload_id: UploadId,
     #[serde(default, skip_serializing_if = "UploadMode::is_service_proxied")]
     pub mode: UploadMode,
     /// For direct_put sessions, the content ref the presigned URL was minted for.

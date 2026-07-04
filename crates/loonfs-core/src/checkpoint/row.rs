@@ -1,4 +1,4 @@
-use crate::metadata::MetadataState;
+use crate::metadata::{record_name_key, MetadataState};
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::ChangeSeq;
 
@@ -22,7 +22,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|inode| MetadataRow::Inode {
                 inode_id: inode.inode_id,
-                inode_kind: inode.inode_kind.clone(),
+                inode_kind: inode.inode_kind,
                 created_seq: inode.created_seq,
             })
             .collect::<Vec<_>>(),
@@ -32,7 +32,7 @@ pub(super) fn manifest_rows_for_family(
                 .iter()
                 .map(|direntry| MetadataRow::DirentryBind {
                     parent_inode_id: direntry.parent_inode_id,
-                    name_key: direntry.name_key.clone(),
+                    name_key: record_name_key(&direntry.name_key),
                     display_name: direntry.display_name.clone(),
                     child_inode_id: direntry.child_inode_id,
                     bind_seq: direntry.bind_seq,
@@ -45,7 +45,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|unbind| MetadataRow::DirentryUnbind {
                 parent_inode_id: unbind.parent_inode_id,
-                name_key: unbind.name_key.clone(),
+                name_key: record_name_key(&unbind.name_key),
                 child_inode_id: unbind.child_inode_id,
                 bind_seq: unbind.bind_seq,
                 bind_delta_index: unbind.bind_delta_index,

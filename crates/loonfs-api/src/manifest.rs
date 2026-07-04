@@ -2,8 +2,8 @@ use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId, MetadataTableId,
+    NameKey, NamespaceId, RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ pub enum MetadataSegmentKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataFileRef {
     pub owner_namespace_id: NamespaceId,
-    pub table_id: String,
+    pub table_id: MetadataTableId,
     pub object_key: String,
     pub run_seq: ChangeSeq,
     pub level: u32,
@@ -116,7 +116,7 @@ pub enum MetadataRow {
     },
     DirentryBind {
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         display_name: String,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
@@ -124,7 +124,7 @@ pub enum MetadataRow {
     },
     DirentryUnbind {
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
@@ -176,14 +176,14 @@ impl MetadataRow {
                 ..
             } => match family {
                 MetadataTableFamily::DirentryChildBinds => {
-                    let name_key = hex_encode_row_key_component(name_key);
+                    let name_key = hex_encode_row_key_component(name_key.as_str());
                     format!(
                         "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
                         child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
                     )
                 }
                 _ => {
-                    let name_key = hex_encode_row_key_component(name_key);
+                    let name_key = hex_encode_row_key_component(name_key.as_str());
                     format!(
                         "direntry-{:020}-{name_key}-{:020}-{:010}",
                         parent_inode_id.0, bind_seq.0, bind_delta_index
@@ -199,7 +199,7 @@ impl MetadataRow {
                 unbind_delta_index,
                 ..
             } => {
-                let name_key = hex_encode_row_key_component(name_key);
+                let name_key = hex_encode_row_key_component(name_key.as_str());
                 format!(
                     "direntry-unbind-{:020}-{name_key}-{:020}-{:010}-{:020}-{:010}",
                     parent_inode_id.0,
@@ -267,7 +267,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataSstPayload {
     pub namespace_id: NamespaceId,
-    pub table_id: String,
+    pub table_id: MetadataTableId,
     pub run_seq: ChangeSeq,
     pub level: u32,
     pub family: MetadataTableFamily,
@@ -627,7 +627,10 @@ mod tests {
         MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
         NamespaceManifestPayload,
     };
-    use crate::{ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
+    use crate::{
+        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, MetadataTableId, NameKey,
+        NamespaceId, WriterEpoch,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -739,7 +742,7 @@ mod tests {
     fn direntry_bind_row_key_supports_parent_and_child_indexes() {
         let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
-            name_key: "report.txt".to_owned(),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
             display_name: "Report.txt".to_owned(),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
@@ -760,7 +763,7 @@ mod tests {
     fn row_keys_hex_encode_dash_containing_variable_components() {
         let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
-            name_key: "report-2024".to_owned(),
+            name_key: NameKey::parse("report-2024").expect("valid name key"),
             display_name: "report-2024".to_owned(),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
@@ -806,7 +809,7 @@ mod tests {
     ) -> MetadataFileRef {
         MetadataFileRef {
             owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
-            table_id: table_id.to_owned(),
+            table_id: MetadataTableId::parse(table_id).expect("valid table id"),
             object_key: object_key.to_owned(),
             run_seq,
             level,

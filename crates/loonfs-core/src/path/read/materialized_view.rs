@@ -547,11 +547,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             Some(DirectoryPageCursor {
                 head_seq: page_head_seq,
                 dir_inode_id: resolved.inode_id,
-                last_name_key: NameKey::try_new(last.binding.name_key.clone()).map_err(
-                    |error| {
-                        CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))
-                    },
-                )?,
+                last_name_key: NameKey::parse(&last.binding.name_key).map_err(|error| {
+                    CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))
+                })?,
             })
         } else {
             None
@@ -662,7 +660,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             namespace_id: self.namespace_id.clone(),
             absolute_path: resolved.absolute_path.clone(),
             inode_id: resolved.inode_id,
-            inode_kind: resolved.inode_kind.clone(),
+            inode_kind: resolved.inode_kind,
             head_seq: self.head.seq,
             parent_inode_id: resolved.parent_inode_id,
             display_name: resolved.display_name.clone(),

@@ -38,7 +38,8 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
-    InodeId, InodeKind, ManifestId, NamePolicy, NamespaceId, RevisionNo, WriterEpoch,
+    GcPinId, InodeId, InodeKind, ManifestId, MetadataTableId, NameKey, NamePolicy, NamespaceId,
+    RevisionNo, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -118,10 +119,19 @@ fn sample_content_ref() -> ContentRef {
     ContentRef::whole_file_v0(b"golden bytes")
 }
 
+fn table_id() -> MetadataTableId {
+    MetadataTableId::parse("tbl_0123456789abcdef0123456789abcdef").expect("valid table id")
+}
+
+fn name_key(value: &str) -> NameKey {
+    NameKey::parse(value).expect("valid name key")
+}
+
 fn sample_wal_pointer() -> WalSegmentPointer {
     WalSegmentPointer {
         object_key: "namespaces/demo/wal/00000000000000000002-fedcba9876543210.wal.zst".to_owned(),
-        segment_id: "00000000000000000002-fedcba9876543210".to_owned(),
+        segment_id: WalSegmentId::parse("00000000000000000002-fedcba9876543210")
+            .expect("valid segment id"),
         start_seq: ChangeSeq(1),
         end_seq: ChangeSeq(1),
         payload_checksum: sha256_digest(b"previous segment payload"),
@@ -180,7 +190,8 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
         WRITER_VERSION,
         WalSegmentPayload {
             namespace_id: namespace_id(),
-            segment_id: "00000000000000000001-0123456789abcdef".to_owned(),
+            segment_id: WalSegmentId::parse("00000000000000000001-0123456789abcdef")
+                .expect("valid segment id"),
             writer_epoch: WriterEpoch(3),
             prev_visible_segment: Some(sample_wal_pointer()),
             base_head_seq: ChangeSeq(1),
@@ -209,7 +220,7 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
         },
         MetadataRow::DirentryBind {
             parent_inode_id: InodeId(1),
-            name_key: "docs".to_owned(),
+            name_key: name_key("docs"),
             display_name: "Docs".to_owned(),
             child_inode_id: InodeId(7),
             bind_seq: ChangeSeq(2),
@@ -217,7 +228,7 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
         },
         MetadataRow::DirentryUnbind {
             parent_inode_id: InodeId(1),
-            name_key: "old.txt".to_owned(),
+            name_key: name_key("old.txt"),
             child_inode_id: InodeId(5),
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
@@ -258,7 +269,7 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
         WRITER_VERSION,
         MetadataSstPayload {
             namespace_id: namespace_id(),
-            table_id: "tbl_0123456789abcdef0123456789abcdef".to_owned(),
+            table_id: table_id(),
             run_seq: ChangeSeq(2),
             level: 0,
             family: MetadataTableFamily::Inodes,
@@ -301,7 +312,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             )]),
             metadata_files: vec![MetadataFileRef {
                 owner_namespace_id: namespace_id(),
-                table_id: "tbl_0123456789abcdef0123456789abcdef".to_owned(),
+                table_id: table_id(),
                 object_key:
                     "namespaces/demo/metadata/tables/tbl_0123456789abcdef0123456789abcdef.sst.zst"
                         .to_owned(),
@@ -510,7 +521,8 @@ fn control_objects_match_golden_bytes() {
         "control_namespace_gc_pin_state.v1.json",
         ControlObjectKind::NamespaceGcPinState,
         NamespaceGcPinState {
-            pin_id: "pin_0123456789abcdef0123456789abcdef".to_owned(),
+            pin_id: GcPinId::parse("pin_0123456789abcdef0123456789abcdef")
+                .expect("valid gc pin id"),
             source_namespace_id: namespace_id(),
             target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
@@ -522,7 +534,8 @@ fn control_objects_match_golden_bytes() {
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
-            upload_id: "up_0123456789abcdef0123456789abcdef".to_owned(),
+            upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
+                .expect("valid upload id"),
             mode: UploadMode::ServiceProxied,
             direct_put_content_ref: None,
             staged_content_ref: Some(sample_content_ref()),

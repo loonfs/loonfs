@@ -30,7 +30,7 @@ pub(super) fn direntry_bind_from_manifest_row(row: MetadataRow) -> Option<Dirent
             bind_delta_index,
         } => Some(DirentryBindRecord {
             parent_inode_id,
-            name_key,
+            name_key: name_key.as_str().to_owned(),
             display_name,
             child_inode_id,
             bind_seq,
@@ -52,7 +52,7 @@ pub(super) fn direntry_unbind_from_manifest_row(row: MetadataRow) -> Option<Dire
             unbind_delta_index,
         } => Some(DirentryUnbindRecord {
             parent_inode_id,
-            name_key,
+            name_key: name_key.as_str().to_owned(),
             child_inode_id,
             bind_seq,
             bind_delta_index,

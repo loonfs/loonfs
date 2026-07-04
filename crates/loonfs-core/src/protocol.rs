@@ -47,8 +47,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{
-    generate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreId,
-    EffectiveLimit, ManifestId, NameKey, NamePolicy, NamespaceId,
+    ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreId, EffectiveLimit, ManifestId,
+    NameKey, NamePolicy, NamespaceId, UploadId,
 };
 use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session, wal_head};
 use loonfs_objectstore::ObjectStore;
@@ -273,8 +273,8 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     mode: UploadMode,
     direct_put_content_ref: Option<ContentRef>,
     context: &MutationContext,
-) -> Result<String, CoreError> {
-    let upload_id = generate_upload_id();
+) -> Result<UploadId, CoreError> {
+    let upload_id = UploadId::generate();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
@@ -292,7 +292,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let encoded =
         encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
-    let object_key = upload_session(namespace_id.as_str(), &upload_id);
+    let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
         .await
@@ -368,7 +368,7 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
 pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    upload_id: &str,
+    upload_id: &UploadId,
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<UploadContentResponse, CoreError> {
@@ -430,7 +430,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    upload_id: &str,
+    upload_id: &UploadId,
     request: &CompleteUploadRequest,
     context: &MutationContext,
 ) -> Result<CompleteUploadResponse, CoreError> {
@@ -1431,7 +1431,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
             semantic_op_index,
             delta_index: *delta_index,
             inode_id: *inode_id,
-            inode_kind: inode_kind.clone(),
+            inode_kind: *inode_kind,
         },
         WalDelta::BindDirentry {
             delta_index,
@@ -1443,7 +1443,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
             semantic_op_index,
             delta_index: *delta_index,
             parent_inode_id: *parent_inode_id,
-            name_key: NameKey::try_new(name_key.clone()).map_err(|err| {
+            name_key: NameKey::parse(name_key).map_err(|err| {
                 CoreError::NamespaceCorrupt(format!("invalid WAL name_key: {err}"))
             })?,
             display_name: display_name.clone(),
@@ -1460,7 +1460,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
             semantic_op_index,
             delta_index: *delta_index,
             parent_inode_id: *parent_inode_id,
-            name_key: NameKey::try_new(name_key.clone()).map_err(|err| {
+            name_key: NameKey::parse(name_key).map_err(|err| {
                 CoreError::NamespaceCorrupt(format!("invalid WAL name_key: {err}"))
             })?,
             child_inode_id: *child_inode_id,

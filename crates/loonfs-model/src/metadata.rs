@@ -123,7 +123,7 @@ impl MetadataState {
                 } => {
                     metadata_state.inodes.push(InodeRecord {
                         inode_id: *inode_id,
-                        inode_kind: inode_kind.clone(),
+                        inode_kind: *inode_kind,
                         created_seq: committed_seq,
                     });
                     push_unique_invariant(&mut checked_invariants, "create_inode_writes_inode_row");

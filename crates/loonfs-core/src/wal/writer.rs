@@ -5,7 +5,7 @@ use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
 };
-use loonfs_api::{generate_wal_segment_id, ChangeSeq, NamespaceId, WriterEpoch};
+use loonfs_api::{ChangeSeq, NamespaceId, WalSegmentId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn prepare_wal_segment(
@@ -66,7 +66,7 @@ pub(crate) fn prepare_wal_segment(
     // listings and reclamation scans sort by history position; its random
     // suffix keeps competing proposals (and losers' harmless orphans) from
     // ever colliding on a name.
-    let segment_id = generate_wal_segment_id(start_seq);
+    let segment_id = WalSegmentId::generate(start_seq);
     let payload = WalSegmentPayload {
         namespace_id,
         segment_id: segment_id.clone(),
@@ -81,7 +81,7 @@ pub(crate) fn prepare_wal_segment(
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
     let encoded_bytes = encode_wal_segment_envelope_zstd(&envelope)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
-    let object_key = wal_segment(envelope.payload.namespace_id.as_str(), &segment_id);
+    let object_key = wal_segment(envelope.payload.namespace_id.as_str(), segment_id.as_str());
 
     Ok(PreparedWalSegment {
         object_key,

@@ -13,7 +13,7 @@ use loonfs::{
     MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
     NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    UploadContentResponse,
+    UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::fs::LocalFsStore;
@@ -148,13 +148,13 @@ trait FsTestExt {
     fn upload_content_blocking(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadContentResponse>;
     fn complete_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse>;
     fn commit_operations_blocking(
@@ -296,7 +296,7 @@ impl FsTestExt for Fs {
     fn upload_content_blocking(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadContentResponse> {
         block_on(self.upload_content(namespace_id, upload_id, bytes))
@@ -305,7 +305,7 @@ impl FsTestExt for Fs {
     fn complete_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse> {
         block_on(self.complete_upload(namespace_id, upload_id, request))

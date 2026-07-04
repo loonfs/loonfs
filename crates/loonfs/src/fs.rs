@@ -24,9 +24,9 @@ use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_directory_cursor, encode_file_revisions_cursor, generated_id, AbsolutePath,
     CapabilityDocument, DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
-    Page, PageRequest, PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROTOCOL_VERSION,
+    Page, PageRequest, PaginationPolicy, UploadId, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
@@ -950,7 +950,7 @@ impl Fs {
     pub async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
         Ok(self
@@ -963,7 +963,7 @@ impl Fs {
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
         Ok(self

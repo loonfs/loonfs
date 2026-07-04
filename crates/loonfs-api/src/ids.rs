@@ -1,56 +1,26 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::borrow::Borrow;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
 const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 
-/// Durable id for one namespace.
-///
-/// A namespace is one filesystem history. This id is not a display name and
-/// should not be reused after destruction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = String))]
-pub struct NamespaceId(String);
-
-/// Durable id for an immutable content store.
-///
-/// Content stores own file bytes. Namespaces point at content stores.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = String))]
-pub struct ContentStoreId(String);
-
-/// Client-supplied idempotency key for one logical commit.
-///
-/// Reuse the same `CommitId` when retrying the same request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = String))]
-pub struct CommitId(String);
-
-/// Durable checkpoint identifier.
-///
-/// A checkpoint is a durable bookmark to a namespace manifest version.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = String))]
-pub struct CheckpointId(String);
+// ---------------------------------------------------------------------------
+// Validation errors
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid namespace_id {value:?}: {reason}")]
 pub struct NamespaceIdValidationError {
     value: String,
-    reason: &'static str,
+    reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid commit_id {value:?}: {reason}")]
 pub struct CommitIdValidationError {
     value: String,
-    reason: &'static str,
+    reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -64,7 +34,7 @@ pub struct GeneratedIdValidationError {
 #[error("invalid name_key {value:?}: {reason}")]
 pub struct NameKeyValidationError {
     value: String,
-    reason: &'static str,
+    reason: String,
 }
 
 impl NamespaceIdValidationError {
@@ -72,8 +42,8 @@ impl NamespaceIdValidationError {
         &self.value
     }
 
-    pub fn reason(&self) -> &'static str {
-        self.reason
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
@@ -82,8 +52,8 @@ impl CommitIdValidationError {
         &self.value
     }
 
-    pub fn reason(&self) -> &'static str {
-        self.reason
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
@@ -102,153 +72,192 @@ impl NameKeyValidationError {
         &self.value
     }
 
-    pub fn reason(&self) -> &'static str {
-        self.reason
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
-impl NamespaceId {
-    /// Parses and validates a namespace id.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, NamespaceIdValidationError> {
-        let value = value.as_ref();
-        validate_namespace_id(value)?;
-        Ok(Self(value.to_owned()))
-    }
+// ---------------------------------------------------------------------------
+// Id macros
+// ---------------------------------------------------------------------------
 
-    /// Builds a namespace id from an owned string after validation.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, NamespaceIdValidationError> {
-        let value = value.into();
-        validate_namespace_id(&value)?;
-        Ok(Self(value))
-    }
+/// Defines a validated string-id newtype.
+///
+/// Every string id gets the same surface: `parse` (the only fallible
+/// constructor), `as_str`, `TryFrom<&str>`/`TryFrom<String>`/`FromStr`
+/// (all delegating to `parse`), `AsRef<str>`, `Borrow<str>`, `Display`
+/// (the plain inner string), and serde as a plain string with validation
+/// on deserialize.
+///
+/// Two forms:
+/// - `string_id!(Name, error = ErrType, validate = validator)` uses a custom
+///   `fn(&str) -> Result<(), ErrType>` validator.
+/// - `string_id!(Name, prefix = "xyz")` validates the project-standard
+///   server-generated shape `xyz_<32 lowercase hex>` and adds a
+///   `generate()` constructor.
+///
+/// Type-specific constructors that the macro cannot express (for example
+/// `CommitId::generate` or `NameKey::for_display_name`) live in a separate
+/// `impl` block next to the invocation.
+macro_rules! string_id {
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        error = $error:ty,
+        validate = $validate:expr
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+        #[cfg_attr(feature = "openapi", schema(value_type = String))]
+        pub struct $name(String);
 
-    /// Returns the serialized namespace id.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+        impl $name {
+            /// Parses and validates the id from its serialized form.
+            pub fn parse(value: impl AsRef<str>) -> Result<Self, $error> {
+                let value = value.as_ref();
+                ($validate)(value)?;
+                Ok(Self(value.to_owned()))
+            }
+
+            /// Returns the serialized id.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = $error;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Self::parse(value)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = $error;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::parse(value)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = $error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::parse(value)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(&self.0)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        prefix = $prefix:literal
+    ) => {
+        string_id! {
+            $(#[$meta])*
+            $name,
+            error = GeneratedIdValidationError,
+            validate = |value: &str| validate_generated_id($prefix, value)
+        }
+
+        impl $name {
+            /// Generates a valid random id.
+            pub fn generate() -> Self {
+                Self(generated_id($prefix))
+            }
+        }
+    };
 }
 
-impl CommitId {
-    /// Parses and validates a commit id.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, CommitIdValidationError> {
-        let value = value.as_ref();
-        validate_commit_id(value)?;
-        Ok(Self(value.to_owned()))
-    }
+/// Defines a numeric (`u64`) id newtype.
+///
+/// Every numeric id gets `Copy`, ordering and hashing derives, `From<u64>`,
+/// `Display` as the plain inner number, and serde as a plain number. The
+/// inner field stays public: numeric ids are constructed positionally
+/// (`InodeId(7)`) and read via `.0`.
+macro_rules! numeric_id {
+    (
+        $(#[$meta:meta])*
+        $name:ident
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+        #[cfg_attr(feature = "openapi", schema(value_type = u64))]
+        pub struct $name(pub u64);
 
-    /// Builds a commit id from an owned string after validation.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, CommitIdValidationError> {
-        let value = value.into();
-        validate_commit_id(&value)?;
-        Ok(Self(value))
-    }
+        impl From<u64> for $name {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
 
-    /// Returns the serialized commit id.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Generates a valid random commit id.
-    pub fn generate() -> Self {
-        Self(generated_id("c"))
-    }
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
 }
+
+pub(crate) use string_id;
+
+// ---------------------------------------------------------------------------
+// Shared validators and generators
+// ---------------------------------------------------------------------------
 
 /// Generates a project-standard opaque durable identifier.
 ///
 /// Generated server-side IDs use an underscore prefix plus a 32-character
-/// lowercase UUID-simple body, such as `cs_<32hex>` or `seg_<32hex>`.
+/// lowercase UUID-simple body, such as `cs_<32hex>` or `chk_<32hex>`.
+///
+/// Ids in the id inventory generate through their newtype `generate()`
+/// constructors; this helper stays public for free-form generated labels
+/// (for example writer-session ids) that have no validated id type.
 pub fn generated_id(prefix: &'static str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
-pub fn generate_upload_id() -> String {
-    generated_id("upl")
-}
-
-/// WAL segment ids order by history position and stay unique under races.
-///
-/// The 20-digit prefix is the segment's `start_seq`, so listings sort by
-/// position and reclamation can range-scan below a boundary cursor. The
-/// 16-hex suffix keeps speculative writes unique: racing writers proposing
-/// different segments for the same position never collide, and the head
-/// compare-and-swap chooses among them. The name is an inspection and
-/// reclamation hint only — recovery authority is the head and chain.
-pub fn generate_wal_segment_id(start_seq: ChangeSeq) -> String {
-    let suffix = Uuid::new_v4().simple().to_string();
-    format!("{:020}-{}", start_seq.0, &suffix[..16])
-}
-
-pub fn generate_metadata_table_id() -> String {
-    generated_id("tbl")
-}
-
-pub fn generate_gc_pin_id() -> String {
-    generated_id("pin")
-}
-
-pub fn generate_checkpoint_id() -> CheckpointId {
-    CheckpointId::generate()
-}
-
-pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("upl", value.as_ref())
-}
-
-/// Start seq encoded in a WAL segment id's 20-digit position prefix.
-///
-/// Returns `None` when the value does not follow the generated id shape, so
-/// listings can skip foreign objects instead of failing. Like the name
-/// itself, the parsed position is an inspection and reclamation hint only —
-/// recovery authority is the head and chain.
-pub fn wal_segment_id_start_seq(segment_id: &str) -> Option<ChangeSeq> {
-    validate_wal_segment_id(segment_id).ok()?;
-    let (position, _) = segment_id.split_once('-')?;
-    position.parse().ok().map(ChangeSeq)
-}
-
-pub fn validate_wal_segment_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
-    let value = value.as_ref();
-    let Some((position, suffix)) = value.split_once('-') else {
-        return Err(generated_id_error(
-            value,
-            "must be `<20 digit start_seq>-<16 lowercase hex>`".to_owned(),
-        ));
-    };
-    if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(generated_id_error(
-            value,
-            "position prefix must be 20 decimal digits".to_owned(),
-        ));
-    }
-    if suffix.len() != 16
-        || !suffix
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err(generated_id_error(
-            value,
-            "suffix must be 16 lowercase hex characters".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-pub fn validate_metadata_table_id(
-    value: impl AsRef<str>,
-) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("tbl", value.as_ref())
-}
-
-pub fn validate_gc_pin_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("pin", value.as_ref())
-}
-
-pub fn validate_checkpoint_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("chk", value.as_ref())
-}
-
-pub fn validate_generated_id(
+fn validate_generated_id(
     prefix: &'static str,
     value: &str,
 ) -> Result<(), GeneratedIdValidationError> {
@@ -307,6 +316,32 @@ fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
     Ok(())
 }
 
+fn check_wal_segment_id(value: &str) -> Result<(), GeneratedIdValidationError> {
+    let Some((position, suffix)) = value.split_once('-') else {
+        return Err(generated_id_error(
+            value,
+            "must be `<20 digit start_seq>-<16 lowercase hex>`".to_owned(),
+        ));
+    };
+    if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(generated_id_error(
+            value,
+            "position prefix must be 20 decimal digits".to_owned(),
+        ));
+    }
+    if suffix.len() != 16
+        || !suffix
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(generated_id_error(
+            value,
+            "suffix must be 16 lowercase hex characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_id_grammar(value: &str) -> Result<(), &'static str> {
     if value.is_empty() {
         return Err("must not be empty");
@@ -342,14 +377,14 @@ fn is_allowed_id_tail_char(ch: char) -> bool {
 fn namespace_id_error(value: &str, reason: &'static str) -> NamespaceIdValidationError {
     NamespaceIdValidationError {
         value: value.to_owned(),
-        reason,
+        reason: reason.to_owned(),
     }
 }
 
 fn commit_id_error(value: &str, reason: &'static str) -> CommitIdValidationError {
     CommitIdValidationError {
         value: value.to_owned(),
-        reason,
+        reason: reason.to_owned(),
     }
 }
 
@@ -363,77 +398,122 @@ fn generated_id_error(value: &str, reason: String) -> GeneratedIdValidationError
 fn name_key_error(value: &str, reason: &'static str) -> NameKeyValidationError {
     NameKeyValidationError {
         value: value.to_owned(),
-        reason,
+        reason: reason.to_owned(),
     }
 }
 
-impl ContentStoreId {
-    /// Generates a valid random content-store id.
+// ---------------------------------------------------------------------------
+// String ids
+// ---------------------------------------------------------------------------
+
+string_id! {
+    /// Durable id for one namespace.
+    ///
+    /// A namespace is one filesystem history. This id is not a display name and
+    /// should not be reused after destruction.
+    NamespaceId,
+    error = NamespaceIdValidationError,
+    validate = validate_namespace_id
+}
+
+string_id! {
+    /// Durable id for an immutable content store.
+    ///
+    /// Content stores own file bytes. Namespaces point at content stores.
+    ContentStoreId,
+    prefix = "cs"
+}
+
+string_id! {
+    /// Client-supplied idempotency key for one logical commit.
+    ///
+    /// Reuse the same `CommitId` when retrying the same request.
+    CommitId,
+    error = CommitIdValidationError,
+    validate = validate_commit_id
+}
+
+impl CommitId {
+    /// Generates a valid random commit id.
     pub fn generate() -> Self {
-        Self(generated_id("cs"))
-    }
-
-    /// Parses and validates a content-store id.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, GeneratedIdValidationError> {
-        let value = value.as_ref();
-        validate_generated_id("cs", value)?;
-        Ok(Self(value.to_owned()))
-    }
-
-    /// Builds a content-store id from an owned string after validation.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, GeneratedIdValidationError> {
-        let value = value.into();
-        validate_generated_id("cs", &value)?;
-        Ok(Self(value))
-    }
-
-    /// Returns the serialized content-store id.
-    pub fn as_str(&self) -> &str {
-        &self.0
+        Self(generated_id("c"))
     }
 }
 
-impl CheckpointId {
-    /// Generates a valid random checkpoint id.
-    pub fn generate() -> Self {
-        Self(generated_id("chk"))
-    }
+string_id! {
+    /// Durable checkpoint identifier.
+    ///
+    /// A checkpoint is a durable bookmark to a namespace manifest version.
+    CheckpointId,
+    prefix = "chk"
+}
 
-    /// Parses and validates a checkpoint id.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, GeneratedIdValidationError> {
-        let value = value.as_ref();
-        validate_checkpoint_id(value)?;
-        Ok(Self(value.to_owned()))
-    }
+string_id! {
+    /// Durable id for one upload session.
+    UploadId,
+    prefix = "upl"
+}
 
-    /// Builds a checkpoint id from an owned string after validation.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, GeneratedIdValidationError> {
-        let value = value.into();
-        validate_checkpoint_id(&value)?;
-        Ok(Self(value))
-    }
+string_id! {
+    /// Durable id for one metadata SST table file.
+    MetadataTableId,
+    prefix = "tbl"
+}
 
-    /// Returns the serialized checkpoint id.
-    pub fn as_str(&self) -> &str {
-        &self.0
+string_id! {
+    /// Durable id for one GC pin.
+    ///
+    /// Pins prevent a source namespace's GC from collecting metadata files a
+    /// fork still shares.
+    GcPinId,
+    prefix = "pin"
+}
+
+string_id! {
+    /// Durable id for one WAL segment.
+    WalSegmentId,
+    error = GeneratedIdValidationError,
+    validate = check_wal_segment_id
+}
+
+impl WalSegmentId {
+    /// WAL segment ids order by history position and stay unique under races.
+    ///
+    /// The 20-digit prefix is the segment's `start_seq`, so listings sort by
+    /// position and reclamation can range-scan below a boundary cursor. The
+    /// 16-hex suffix keeps speculative writes unique: racing writers proposing
+    /// different segments for the same position never collide, and the head
+    /// compare-and-swap chooses among them. The name is an inspection and
+    /// reclamation hint only — recovery authority is the head and chain.
+    pub fn generate(start_seq: ChangeSeq) -> Self {
+        let suffix = Uuid::new_v4().simple().to_string();
+        Self(format!("{:020}-{}", start_seq.0, &suffix[..16]))
     }
+}
+
+/// Start seq encoded in a WAL segment id's 20-digit position prefix.
+///
+/// Returns `None` when the value does not follow the generated id shape, so
+/// listings can skip foreign objects instead of failing. Like the name
+/// itself, the parsed position is an inspection and reclamation hint only —
+/// recovery authority is the head and chain.
+pub fn wal_segment_id_start_seq(segment_id: &str) -> Option<ChangeSeq> {
+    check_wal_segment_id(segment_id).ok()?;
+    let (position, _) = segment_id.split_once('-')?;
+    position.parse().ok().map(ChangeSeq)
+}
+
+string_id! {
+    /// Name-policy-derived directory entry key.
+    ///
+    /// Use this for exact name preconditions. Keep user-facing spelling in
+    /// `DisplayName`.
+    NameKey,
+    error = NameKeyValidationError,
+    validate = validate_name_key
 }
 
 impl NameKey {
-    /// Parses and validates a stored name key.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, NameKeyValidationError> {
-        let value = value.as_ref();
-        validate_name_key(value)?;
-        Ok(Self(value.to_owned()))
-    }
-
-    /// Builds a name key from an owned string after validation.
-    pub fn try_new(value: impl Into<String>) -> Result<Self, NameKeyValidationError> {
-        let value = value.into();
-        validate_name_key(&value)?;
-        Ok(Self(value))
-    }
-
     /// Computes the lookup key for a display name under a namespace name policy.
     pub fn for_display_name(policy: crate::NamePolicy, display_name: &crate::DisplayName) -> Self {
         Self(crate::name_key_for_display_name(
@@ -441,282 +521,52 @@ impl NameKey {
             display_name.as_str(),
         ))
     }
-
-    /// Returns the stored lookup key.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
-impl TryFrom<&str> for NamespaceId {
-    type Error = NamespaceIdValidationError;
+// ---------------------------------------------------------------------------
+// Numeric ids
+// ---------------------------------------------------------------------------
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
+numeric_id! {
+    /// Numeric identity of a file or directory within a namespace.
+    ///
+    /// Inodes are stable across renames.
+    InodeId
 }
 
-impl TryFrom<String> for NamespaceId {
-    type Error = NamespaceIdValidationError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
+numeric_id! {
+    /// Monotonically increasing file revision counter within one file inode.
+    RevisionNo
 }
 
-impl TryFrom<&str> for ContentStoreId {
-    type Error = GeneratedIdValidationError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
+numeric_id! {
+    /// Monotonically increasing namespace commit sequence number.
+    ///
+    /// This is the global visibility order for a namespace.
+    ChangeSeq
 }
 
-impl TryFrom<String> for ContentStoreId {
-    type Error = GeneratedIdValidationError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
+numeric_id! {
+    /// Monotonically increasing namespace manifest identity.
+    ///
+    /// This is the durable file-set version identity for namespace manifests.
+    /// Initial/fork manifests may be seeded from the current head sequence, but
+    /// later manifest ids can advance for checkpoint metadata, compaction, or
+    /// fork/index metadata without a new namespace commit.
+    ManifestId
 }
 
-impl TryFrom<&str> for CommitId {
-    type Error = CommitIdValidationError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
+numeric_id! {
+    /// Monotonically increasing writer epoch for namespace write fencing.
+    WriterEpoch
 }
 
-impl TryFrom<String> for CommitId {
-    type Error = CommitIdValidationError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl TryFrom<&str> for CheckpointId {
-    type Error = GeneratedIdValidationError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse(value)
-    }
-}
-
-impl TryFrom<String> for CheckpointId {
-    type Error = GeneratedIdValidationError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl AsRef<str> for NamespaceId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl AsRef<str> for ContentStoreId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl AsRef<str> for CommitId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl AsRef<str> for CheckpointId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl AsRef<str> for NameKey {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for NamespaceId {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for ContentStoreId {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for CommitId {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for CheckpointId {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for NameKey {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Serialize for NamespaceId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl Serialize for ContentStoreId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl Serialize for CommitId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl Serialize for CheckpointId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl Serialize for NameKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for NamespaceId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        NamespaceId::try_new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-impl<'de> Deserialize<'de> for CommitId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        CommitId::try_new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-impl<'de> Deserialize<'de> for ContentStoreId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        ContentStoreId::try_new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-impl<'de> Deserialize<'de> for CheckpointId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        CheckpointId::try_new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-impl<'de> Deserialize<'de> for NameKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        NameKey::try_new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Numeric identity of a file or directory within a namespace.
-///
-/// Inodes are stable across renames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = u64))]
-pub struct InodeId(pub u64);
-
-/// Monotonically increasing file revision counter within one file inode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = u64))]
-pub struct RevisionNo(pub u64);
-
-/// Monotonically increasing namespace commit sequence number.
-///
-/// This is the global visibility order for a namespace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = u64))]
-pub struct ChangeSeq(pub u64);
-
-/// Monotonically increasing namespace manifest identity.
-///
-/// This is the durable file-set version identity for namespace manifests.
-/// Initial/fork manifests may be seeded from the current head sequence, but
-/// later manifest ids can advance for checkpoint metadata, compaction, or
-/// fork/index metadata without a new namespace commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = u64))]
-pub struct ManifestId(pub u64);
-
-/// Monotonically increasing writer epoch for namespace write fencing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = u64))]
-pub struct WriterEpoch(pub u64);
-
-/// Name-policy-derived directory entry key.
-///
-/// Use this for exact name preconditions. Keep user-facing spelling in
-/// `DisplayName`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "openapi", schema(value_type = String))]
-pub struct NameKey(String);
+// ---------------------------------------------------------------------------
+// Filesystem item kind
+// ---------------------------------------------------------------------------
 
 /// Filesystem item kind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InodeKind {
@@ -724,60 +574,6 @@ pub enum InodeKind {
     File,
     /// Directory with child bindings.
     Dir,
-}
-
-impl fmt::Display for NamespaceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl fmt::Display for ContentStoreId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl fmt::Display for CommitId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl fmt::Display for CheckpointId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl fmt::Display for NameKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl fmt::Display for InodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "inode-{}", self.0)
-    }
-}
-
-impl fmt::Display for RevisionNo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl fmt::Display for ChangeSeq {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl fmt::Display for WriterEpoch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
 }
 
 impl fmt::Display for InodeKind {
@@ -789,25 +585,11 @@ impl fmt::Display for InodeKind {
     }
 }
 
-impl From<u64> for ManifestId {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl fmt::Display for ManifestId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "manifest-{}", self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
-        generate_wal_segment_id, validate_checkpoint_id, validate_gc_pin_id,
-        validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, ChangeSeq,
-        CheckpointId, CommitId, ContentStoreId, NameKey, NamespaceId,
+        ChangeSeq, CheckpointId, CommitId, ContentStoreId, GcPinId, MetadataTableId, NameKey,
+        NamespaceId, UploadId, WalSegmentId,
     };
     use std::collections::BTreeSet;
 
@@ -884,11 +666,25 @@ mod tests {
                 .as_str(),
             "chk_00000000000000000000000000000001"
         );
+        assert_eq!(
+            NameKey::try_from("report.txt".to_owned())
+                .expect("valid name key")
+                .as_str(),
+            "report.txt"
+        );
 
         assert!(NamespaceId::try_from("invalid/name").is_err());
         assert!(CommitId::try_from("invalid/name").is_err());
         assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
         assert!(CheckpointId::try_from("chk_0000000000000000000000000000000g").is_err());
+        assert!(NameKey::try_from("a/b").is_err());
+    }
+
+    #[test]
+    fn identity_from_str_delegates_to_parse() {
+        let namespace_id: NamespaceId = "demo".parse().expect("valid namespace id");
+        assert_eq!(namespace_id.as_str(), "demo");
+        assert!("invalid/name".parse::<NamespaceId>().is_err());
     }
 
     #[test]
@@ -958,39 +754,39 @@ mod tests {
     }
 
     #[test]
-    fn generated_upload_wal_segment_table_and_pin_validators_reject_hyphenated_ids() {
-        assert!(validate_upload_id("upl_00000000000000000000000000000001").is_ok());
-        assert!(validate_metadata_table_id("tbl_00000000000000000000000000000001").is_ok());
-        assert!(validate_gc_pin_id("pin_00000000000000000000000000000001").is_ok());
-        assert!(validate_checkpoint_id("chk_00000000000000000000000000000001").is_ok());
-        assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
-        assert!(validate_wal_segment_id("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
-        assert!(validate_wal_segment_id("412-9f2a6c0e4b7d4a90").is_err());
-        assert!(validate_wal_segment_id("00000000000000000412-9F2A6C0E4B7D4A90").is_err());
-        assert!(validate_wal_segment_id("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
-        assert!(validate_metadata_table_id(["tbl", "123"].join("-")).is_err());
-        assert!(validate_gc_pin_id(["pin", "123"].join("-")).is_err());
-        assert!(validate_checkpoint_id(["chk", "123"].join("-")).is_err());
+    fn generated_upload_wal_segment_table_and_pin_ids_reject_hyphenated_ids() {
+        assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
+        assert!(MetadataTableId::parse("tbl_00000000000000000000000000000001").is_ok());
+        assert!(GcPinId::parse("pin_00000000000000000000000000000001").is_ok());
+        assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
+        assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
+        assert!(WalSegmentId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
+        assert!(WalSegmentId::parse("412-9f2a6c0e4b7d4a90").is_err());
+        assert!(WalSegmentId::parse("00000000000000000412-9F2A6C0E4B7D4A90").is_err());
+        assert!(WalSegmentId::parse("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
+        assert!(MetadataTableId::parse(["tbl", "123"].join("-")).is_err());
+        assert!(GcPinId::parse(["pin", "123"].join("-")).is_err());
+        assert!(CheckpointId::parse(["chk", "123"].join("-")).is_err());
     }
 
     #[test]
     fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
-        let upload_id = generate_upload_id();
-        let wal_segment_id = generate_wal_segment_id(ChangeSeq(412));
-        let metadata_table_id = generate_metadata_table_id();
-        let gc_pin_id = generate_gc_pin_id();
-        let checkpoint_id = generate_checkpoint_id();
+        let upload_id = UploadId::generate();
+        let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
+        let metadata_table_id = MetadataTableId::generate();
+        let gc_pin_id = GcPinId::generate();
+        let checkpoint_id = CheckpointId::generate();
 
-        assert_generated_id_shape(&upload_id, "upl");
-        assert!(wal_segment_id.starts_with("00000000000000000412-"));
-        assert_generated_id_shape(&metadata_table_id, "tbl");
-        assert_generated_id_shape(&gc_pin_id, "pin");
+        assert_generated_id_shape(upload_id.as_str(), "upl");
+        assert!(wal_segment_id.as_str().starts_with("00000000000000000412-"));
+        assert_generated_id_shape(metadata_table_id.as_str(), "tbl");
+        assert_generated_id_shape(gc_pin_id.as_str(), "pin");
         assert_generated_id_shape(checkpoint_id.as_str(), "chk");
-        assert!(validate_upload_id(&upload_id).is_ok());
-        assert!(validate_wal_segment_id(&wal_segment_id).is_ok());
-        assert!(validate_metadata_table_id(&metadata_table_id).is_ok());
-        assert!(validate_gc_pin_id(&gc_pin_id).is_ok());
-        assert!(validate_checkpoint_id(checkpoint_id.as_str()).is_ok());
+        assert!(UploadId::parse(upload_id.as_str()).is_ok());
+        assert!(WalSegmentId::parse(wal_segment_id.as_str()).is_ok());
+        assert!(MetadataTableId::parse(metadata_table_id.as_str()).is_ok());
+        assert!(GcPinId::parse(gc_pin_id.as_str()).is_ok());
+        assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
     }
 
     #[test]
@@ -999,12 +795,21 @@ mod tests {
         // distinct.
         let mut ids = BTreeSet::new();
         for _ in 0..128 {
-            let id = generate_wal_segment_id(ChangeSeq(412));
+            let id = WalSegmentId::generate(ChangeSeq(412));
             assert!(
                 ids.insert(id.clone()),
                 "generated duplicate WAL segment id {id}"
             );
         }
+    }
+
+    #[test]
+    fn wal_segment_id_start_seq_reads_position_prefix() {
+        assert_eq!(
+            super::wal_segment_id_start_seq("00000000000000000412-9f2a6c0e4b7d4a90"),
+            Some(ChangeSeq(412))
+        );
+        assert_eq!(super::wal_segment_id_start_seq("not-a-segment-id"), None);
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {

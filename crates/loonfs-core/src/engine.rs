@@ -16,7 +16,7 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DirectoryPageCursor,
     FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId,
-    MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo,
+    MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
     DEFAULT_PAGE_LIMIT,
 };
 use loonfs_objectstore::ObjectStore;
@@ -79,7 +79,7 @@ pub struct DirectPutUploadTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeginDirectPutUploadTargetResponse {
     pub namespace_id: NamespaceId,
-    pub upload_id: String,
+    pub upload_id: UploadId,
     pub target: DirectPutUploadTarget,
 }
 
@@ -752,7 +752,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Uploads whole-file content into an upload session.
     pub async fn upload_content(
         &self,
-        upload_id: &str,
+        upload_id: &UploadId,
         bytes: &[u8],
     ) -> CoreResult<UploadContentResponse> {
         crate::protocol::upload_content(
@@ -768,7 +768,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Completes an upload session when the expected content ref matches.
     pub async fn complete_upload(
         &self,
-        upload_id: &str,
+        upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> CoreResult<CompleteUploadResponse> {
         crate::protocol::complete_upload(

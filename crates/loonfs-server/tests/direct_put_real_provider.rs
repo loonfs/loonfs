@@ -102,7 +102,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
             .client
             .complete_upload(
                 namespace,
-                &begin.upload_id,
+                begin.upload_id.as_str(),
                 &CompleteUploadRequest {
                     content_ref: content_ref.clone(),
                 },
@@ -155,7 +155,7 @@ fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace: &str) {
     expect_client_rejection(
         client.complete_upload(
             namespace,
-            &begin.upload_id,
+            begin.upload_id.as_str(),
             &CompleteUploadRequest { content_ref },
         ),
         "complete wrong-bytes direct put",
@@ -182,7 +182,7 @@ fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace:
     expect_client_rejection(
         client.complete_upload(
             namespace,
-            &begin.upload_id,
+            begin.upload_id.as_str(),
             &CompleteUploadRequest { content_ref },
         ),
         "complete missing-checksum direct put",
@@ -209,7 +209,7 @@ fn assert_direct_put_is_no_replace(client: &Client, namespace: &str) {
     let complete = client
         .complete_upload(
             namespace,
-            &begin.upload_id,
+            begin.upload_id.as_str(),
             &CompleteUploadRequest { content_ref },
         )
         .expect("complete first direct put");
