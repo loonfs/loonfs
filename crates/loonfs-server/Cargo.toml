@@ -22,7 +22,6 @@ bytes.workspace = true
 clap.workspace = true
 http.workspace = true
 loonfs-api = { path = "../loonfs-api" }
-loonfs-core = { path = "../loonfs-core" }
 loonfs = { path = "../loonfs" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
 serde.workspace = true
@@ -38,6 +37,9 @@ utoipa = { workspace = true, optional = true }
 async-trait.workspace = true
 futures.workspace = true
 loonfs-client = { path = "../loonfs-client" }
+# Test-only white-box access to the durable head-control plane
+# (`load_namespace_head_control`); production code depends on `loonfs` alone.
+loonfs-core = { path = "../loonfs-core" }
 tempfile.workspace = true
 ureq.workspace = true
 

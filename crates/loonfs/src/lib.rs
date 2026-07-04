@@ -12,8 +12,6 @@ mod options;
 mod time;
 mod trace;
 
-use std::sync::Arc;
-
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
@@ -28,27 +26,37 @@ pub use loonfs_api::{
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DirectoryPageCursor, DisplayName,
     EffectiveLimit, FileRevision, FileRevisionsPageCursor, FilesystemOperationResponse, InodeId,
     InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult,
-    NameKey, NamePolicy, NamespaceId, NamespaceSummary, Page, PageRequest, PaginationPolicy,
-    PutBehavior, RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROTOCOL_VERSION,
+    NameKey, NamePolicy, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
+    PaginationPolicy, PutBehavior, RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapNamespaceError, DeleteNamespaceOptions,
-    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind,
+    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, GcConfig, GcReport,
 };
 
 /// Server-integration seam: the vocabulary a batching publisher uses to
 /// submit work to the runtime. Most embedded users never need this module.
 pub mod publish {
+    pub use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+}
+
+/// Server-integration seam: mint/verify surface for the short-lived content
+/// tokens a serving session uses to admit already-validated direct-put
+/// content. Most embedded users never need this module.
+pub mod content_tokens {
+    pub use loonfs_core::content::{
+        mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
+    };
 }
 pub use loonfs_objectstore::metrics::{
     JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
 };
-pub use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore};
 
 pub use cache::RuntimeCacheStats;
 pub use config::{
@@ -60,12 +68,10 @@ pub use fs::{Fs, FsBuilder};
 pub use options::{
     CopyOptions, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
-    NamespaceStatus, PutFileOptions, RestoreRevisionOptions,
+    PutFileOptions, RestoreRevisionOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
-/// Shared object-store handle used by the runtime.
-pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 /// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 

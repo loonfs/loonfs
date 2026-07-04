@@ -6,6 +6,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use loonfs::content_tokens::{
+    mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
+};
 use loonfs::publish::PathMutationIntent;
 use loonfs::{
     payload_class, BootstrapNamespaceError, ChangeSeq, CoreError, CreateNamespaceOptions,
@@ -27,9 +30,6 @@ use loonfs_api::{
     GcResponse, InodeId, LimitError, ListFileRevisionsResponse, NamespaceId,
     NamespaceIdValidationError, PageCursorError, PageRequest, PaginationPolicy,
     RestoreFileRevisionRequest, RevisionNo, UploadId, FEATURE_UPLOADS_DIRECT_PUT,
-};
-use loonfs_core::content::{
-    mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
 };
 use loonfs_objectstore::{
     presign::{ObjectTransferIssuer, PresignedPutRequest},
@@ -516,13 +516,7 @@ async fn namespace_status_handler(
         .namespace_status(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok(Json(loonfs_api::NamespaceStatusResponse {
-        namespace_id: status.namespace_id,
-        head_seq: status.head_seq,
-        current_manifest_id: status.current_manifest_id,
-        wal_tail_segments: status.wal_tail_segments,
-        retention_floor_seq: status.retention_floor_seq,
-    }))
+    Ok(Json(status))
 }
 
 #[cfg_attr(
@@ -1357,8 +1351,8 @@ async fn gc_namespace_handler(
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let request = request.unwrap_or_default();
-    let defaults = loonfs_core::GcConfig::default();
-    let config = loonfs_core::GcConfig {
+    let defaults = loonfs::GcConfig::default();
+    let config = loonfs::GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
         reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
     };
@@ -1786,8 +1780,8 @@ impl IntoResponse for ApiResponseError {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic, clippy::disallowed_methods)]
-    // HTTP smoke helpers use wall-clock lease timestamps and panic in unexpected match arms.
+    #![allow(clippy::panic)]
+    // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
     /// The compile-time forcing function for new error codes moved here when
     /// `ErrorCode` became `#[non_exhaustive]`: every registered code must
@@ -1856,12 +1850,11 @@ mod tests {
     use axum::body::Bytes;
     use futures::stream::BoxStream;
     use loonfs::{
-        CreateNamespaceOptions, Fs, FsConfig, PutFileOptions, RuntimeCacheConfig, TraceMode,
-        TraceStoreKind,
+        CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, PutFileOptions, RuntimeCacheConfig,
+        TraceMode, TraceStoreKind,
     };
     use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
     use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-    use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{
@@ -1870,7 +1863,6 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
     #[derive(Debug)]
@@ -2101,15 +2093,7 @@ mod tests {
     async fn http_delete_missing_path_returns_path_not_found() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let now_ms = now_ms();
-        bootstrap_namespace(
-            store.as_ref(),
-            &namespace_id("demo"),
-            &context("server-writer", now_ms),
-            false,
-        )
-        .await
-        .expect("bootstrap namespace");
+        bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
@@ -2131,41 +2115,31 @@ mod tests {
     async fn http_put_over_directory_and_move_into_existing_target_return_path_conflict() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let now_ms = now_ms();
-        let context = context("server-writer", now_ms);
-        bootstrap_namespace(store.as_ref(), &namespace_id("demo"), &context, false)
-            .await
-            .expect("bootstrap namespace");
+        let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
         write_file_bytes(
-            store.as_ref(),
+            &seeder,
             &namespace_id("demo"),
             "/docs/readme.txt",
             b"readme",
-            &context,
-            Some("seed-docs"),
+            "seed-docs",
         )
-        .await
-        .expect("seed docs");
+        .await;
         write_file_bytes(
-            store.as_ref(),
+            &seeder,
             &namespace_id("demo"),
             "/tmp/a.txt",
             b"from tmp",
-            &context,
-            Some("seed-tmp"),
+            "seed-tmp",
         )
-        .await
-        .expect("seed tmp");
+        .await;
         write_file_bytes(
-            store.as_ref(),
+            &seeder,
             &namespace_id("demo"),
             "/docs/a.txt",
             b"in docs",
-            &context,
-            Some("seed-target"),
+            "seed-target",
         )
-        .await
-        .expect("seed target");
+        .await;
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
@@ -2196,40 +2170,24 @@ mod tests {
     async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let now_ms = now_ms();
-        let context = context("server-writer", now_ms);
-        bootstrap_namespace(store.as_ref(), &namespace_id("demo"), &context, false)
-            .await
-            .expect("bootstrap namespace");
+        let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
         write_file_bytes(
-            store.as_ref(),
+            &seeder,
             &namespace_id("demo"),
             "/docs/old.txt",
             b"old",
-            &context,
-            Some("seed-docs"),
+            "seed-docs",
         )
-        .await
-        .expect("seed docs");
+        .await;
         write_file_bytes(
-            store.as_ref(),
+            &seeder,
             &namespace_id("demo"),
             "/tmp/source.txt",
             b"source",
-            &context,
-            Some("seed-source"),
+            "seed-source",
         )
-        .await
-        .expect("seed source");
-        delete_path(
-            store.as_ref(),
-            &namespace_id("demo"),
-            "/docs",
-            &context,
-            Some("delete-docs"),
-        )
-        .await
-        .expect("delete docs");
+        .await;
+        delete_path_recursive(&seeder, &namespace_id("demo"), "/docs", "delete-docs").await;
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
@@ -2265,15 +2223,7 @@ mod tests {
     async fn http_path_mutation_retries_transient_stale_head_cas() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(StaleHeadOnceStore::new(temp_dir.path(), "demo")) as SharedStore;
-        let now_ms = now_ms();
-        bootstrap_namespace(
-            store.as_ref(),
-            &namespace_id("demo"),
-            &context("server-writer", now_ms),
-            false,
-        )
-        .await
-        .expect("bootstrap namespace");
+        bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
@@ -2296,15 +2246,7 @@ mod tests {
         // epoch immediately and fences the previous session.
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let now_ms = now_ms();
-        bootstrap_namespace(
-            store.as_ref(),
-            &namespace_id("demo"),
-            &context("other-writer", now_ms),
-            false,
-        )
-        .await
-        .expect("bootstrap namespace");
+        bootstrap_namespace(&store, "other-writer", &namespace_id("demo")).await;
         let store_for_check = store.clone();
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -2388,91 +2330,61 @@ mod tests {
         }
     }
 
-    fn context(writer_id: &str, now_ms: u64) -> MutationContext {
-        MutationContext {
-            writer_id: writer_id.to_owned(),
-            writer_session_id: format!("wrs_{writer_id}"),
-            writer_version: format!("{writer_id}/0.1.0"),
-            now_ms,
-        }
-    }
-
-    fn namespace_engine<'a, S: ObjectStore + ?Sized>(
-        store: &'a S,
+    /// Bootstraps a namespace through a second embedded runtime — seeding
+    /// durable state as `writer_id` would from another process — and returns
+    /// that runtime for follow-up seed writes.
+    async fn bootstrap_namespace(
+        store: &SharedStore,
+        writer_id: &str,
         namespace_id: &NamespaceId,
-        context: &MutationContext,
-    ) -> NamespaceEngine<&'a S> {
-        NamespaceEngine::builder(store)
-            .namespace(namespace_id.clone())
-            .writer(context.writer_id.clone())
-            .writer_session_id(context.writer_session_id.clone())
-            .writer_version(context.writer_version.clone())
-            .build()
-            .expect("test context should build namespace engine")
-    }
-
-    async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &NamespaceId,
-        context: &MutationContext,
-        allow_existing: bool,
-    ) -> Result<loonfs_api::NamespaceSummary, loonfs_core::BootstrapNamespaceError> {
-        namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(BootstrapOptions { allow_existing })
+    ) -> Fs {
+        let fs = test_runtime(store.clone(), writer_id);
+        fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
+            .expect("bootstrap namespace");
+        fs
     }
 
-    async fn write_file_bytes<S: ObjectStore + ?Sized>(
-        store: &S,
+    async fn write_file_bytes(
+        fs: &Fs,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         bytes: &[u8],
-        context: &MutationContext,
-        commit_id: Option<&str>,
-    ) -> Result<loonfs_api::MutationResult, loonfs_core::Error> {
-        namespace_engine(store, namespace_id, context)
-            .put_file(
-                absolute_path,
-                bytes,
-                WriteOptions {
-                    commit_id: commit_id
-                        .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                    put_behavior: PutBehavior::Replace,
-                    ..WriteOptions::default()
-                },
-            )
-            .await
+        commit_id: &str,
+    ) {
+        fs.put_file_bytes(
+            namespace_id,
+            absolute_path,
+            bytes,
+            PutFileOptions {
+                behavior: PutBehavior::Replace,
+                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("seed `{absolute_path}`: {error}"));
     }
 
-    async fn delete_path<S: ObjectStore + ?Sized>(
-        store: &S,
+    async fn delete_path_recursive(
+        fs: &Fs,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        context: &MutationContext,
-        commit_id: Option<&str>,
-    ) -> Result<loonfs_api::MutationResult, loonfs_core::Error> {
-        namespace_engine(store, namespace_id, context)
-            .delete_path(
-                absolute_path,
-                WriteOptions {
-                    commit_id: commit_id
-                        .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                    delete_behavior: DeleteDirectoryBehavior::Recursive,
-                    ..WriteOptions::default()
-                },
-            )
-            .await
+        commit_id: &str,
+    ) {
+        fs.delete_path(
+            namespace_id,
+            absolute_path,
+            DeleteOptions {
+                behavior: DeleteDirectoryBehavior::Recursive,
+                commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
     }
 
     fn namespace_id(value: &str) -> NamespaceId {
         NamespaceId::parse(value).expect("valid namespace id")
-    }
-
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_millis() as u64
     }
 
     fn assert_api_error<T: std::fmt::Debug>(
