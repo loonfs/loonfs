@@ -133,12 +133,12 @@ pub(crate) fn fail(
     kind: CommandKind,
     profile: Option<String>,
     mode: Option<String>,
-    error: CliError,
+    error: impl Into<CliError>,
 ) -> CommandFailure {
     CommandFailure {
         kind,
         profile,
         mode,
-        error,
+        error: error.into(),
     }
 }
