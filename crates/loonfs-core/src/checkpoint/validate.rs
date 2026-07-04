@@ -51,7 +51,7 @@ pub(super) fn validate_manifest_materialization_ranges(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "base_seq {:?} is after manifest head_seq {:?}",
+                "base_seq `{}` is after manifest head_seq `{}`",
                 payload.base_seq, payload.head_seq
             ),
         });
@@ -85,7 +85,7 @@ pub(super) fn validate_manifest_materialization_ranges(
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
-                    "metadata file `{}` run seq {:?} is outside [{:?}, {:?}]",
+                    "metadata file `{}` run seq `{}` is outside [`{}`, `{}`]",
                     metadata_file.table_id,
                     metadata_file.run_seq,
                     payload.base_seq,
@@ -101,7 +101,7 @@ pub(super) fn validate_manifest_materialization_ranges(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "namespace manifest has no metadata file at base_seq {:?}",
+                "namespace manifest has no metadata file at base_seq `{}`",
                 payload.base_seq
             ),
         });
@@ -110,7 +110,7 @@ pub(super) fn validate_manifest_materialization_ranges(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: format!(
-                "namespace manifest has no metadata file at head_seq {:?}",
+                "namespace manifest has no metadata file at head_seq `{}`",
                 payload.head_seq
             ),
         });
@@ -303,7 +303,7 @@ pub(super) fn validate_manifest_row_seq_range(
                 return Err(ManifestLoadError::SegmentDescriptorMismatch {
                     object_key: object_key.to_owned(),
                     message: format!(
-                        "row {row_index} seq `{row_seq:?}` is before expected min `{min_seq:?}`"
+                        "row {row_index} seq `{row_seq}` is before expected min `{min_seq}`"
                     ),
                 });
             }
@@ -312,7 +312,7 @@ pub(super) fn validate_manifest_row_seq_range(
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: object_key.to_owned(),
                 message: format!(
-                    "row {row_index} seq `{row_seq:?}` is after expected max `{max_seq:?}`"
+                    "row {row_index} seq `{row_seq}` is after expected max `{max_seq}`"
                 ),
             });
         }

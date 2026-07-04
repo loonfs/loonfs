@@ -762,6 +762,33 @@ impl fmt::Display for InodeId {
     }
 }
 
+impl fmt::Display for RevisionNo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for ChangeSeq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for WriterEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for InodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File => f.write_str("file"),
+            Self::Dir => f.write_str("dir"),
+        }
+    }
+}
+
 impl From<u64> for ManifestId {
     fn from(value: u64) -> Self {
         Self(value)

@@ -299,7 +299,7 @@ fn validate_manifest_table_descriptors(
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: manifest_object_key.to_owned(),
                 message: format!(
-                    "metadata run {:?} has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
+                    "metadata run `{}` has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
                     run.run_seq
                 ),
             });
@@ -308,7 +308,7 @@ fn validate_manifest_table_descriptors(
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: manifest_object_key.to_owned(),
                 message: format!(
-                    "metadata run {:?} has {revision_rows} revision rows but {revision_by_inode_desc_rows} revision index rows",
+                    "metadata run `{}` has {revision_rows} revision rows but {revision_by_inode_desc_rows} revision index rows",
                     run.run_seq
                 ),
             });

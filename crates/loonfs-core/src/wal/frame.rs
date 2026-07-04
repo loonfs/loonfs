@@ -16,22 +16,25 @@ pub struct PreparedWalSegment {
     pub checked_invariants: Vec<InvariantId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalBuildError {
+    #[error("writer version must not be empty")]
     EmptyWriterVersion,
+    #[error("WAL segment contains no records")]
     EmptySegment,
+    #[error("WAL build namespace mismatch: request `{request}`, plan `{plan}`")]
     NamespaceMismatch {
         request: NamespaceId,
         plan: NamespaceId,
     },
-    BaseHeadSeqMismatch {
-        request: ChangeSeq,
-        plan: ChangeSeq,
-    },
+    #[error("WAL build base head seq mismatch: request `{request}`, plan `{plan}`")]
+    BaseHeadSeqMismatch { request: ChangeSeq, plan: ChangeSeq },
+    #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
     NonContiguousSeq {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
+    #[error("WAL codec error: {0}")]
     Codec(String),
 }
 
@@ -150,14 +153,14 @@ impl ValidatedWalChain {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalChainLoadError {
-    #[error("invalid WAL chain seq range: base `{chain_base_seq:?}` is after head `{head_seq:?}`")]
+    #[error("invalid WAL chain seq range: base `{chain_base_seq}` is after head `{head_seq}`")]
     InvalidSeqRange {
         chain_base_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
-    #[error("missing visible WAL tip for seq `{seq:?}` under `{prefix}`")]
+    #[error("missing visible WAL tip for seq `{seq}` under `{prefix}`")]
     MissingVisibleTip { prefix: String, seq: ChangeSeq },
-    #[error("visible WAL tip ends at `{actual:?}`, expected head seq `{expected:?}`")]
+    #[error("visible WAL tip ends at `{actual}`, expected head seq `{expected}`")]
     TipEndSeqMismatch {
         expected: ChangeSeq,
         actual: ChangeSeq,
@@ -169,22 +172,16 @@ pub enum WalChainLoadError {
     #[error("WAL pointer does not match segment payload for `{object_key}`")]
     PointerMismatch { object_key: String },
     #[error(
-        "WAL chain does not reach expected head seq: expected `{expected:?}`, actual `{actual:?}`"
+        "WAL chain does not reach expected head seq: expected `{expected}`, actual `{actual}`"
     )]
     HeadSeqMismatch {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
-    #[error("WAL chain suffix does not cover requested cursor `{after_seq:?}`")]
+    #[error("WAL chain suffix does not cover requested cursor `{after_seq}`")]
     CursorNotCovered { after_seq: ChangeSeq },
-    #[error("wal replay validation failed: {0:?}")]
-    Replay(WalReplayError),
-}
-
-impl From<WalReplayError> for WalChainLoadError {
-    fn from(value: WalReplayError) -> Self {
-        Self::Replay(value)
-    }
+    #[error("wal replay validation failed: {0}")]
+    Replay(#[from] WalReplayError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,31 +191,40 @@ pub(crate) struct ReplayedWalTail {
     pub checked_invariants: Vec<InvariantId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalReplayError {
+    #[error("WAL codec error: {0}")]
     Codec(String),
-    ObjectKeyMismatch {
-        expected: String,
-        actual: String,
-    },
+    #[error("WAL object key mismatch: expected `{expected}`, actual `{actual}`")]
+    ObjectKeyMismatch { expected: String, actual: String },
+    #[error("WAL segment namespace mismatch: expected `{expected}`, actual `{actual}`")]
     NamespaceMismatch {
         expected: NamespaceId,
         actual: NamespaceId,
     },
+    #[error("WAL segment base head seq mismatch: expected `{expected}`, actual `{actual}`")]
     BaseHeadSeqMismatch {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
+    #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
     NonContiguousSeq {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
+    #[error(
+        "WAL segment writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
+    )]
     WriterEpochMismatch {
         expected_max: WriterEpoch,
         actual: WriterEpoch,
     },
+    #[error("WAL segment contains no records")]
     EmptySegment,
+    #[error("WAL segment summary does not match its records")]
     SegmentSummaryMismatch,
-    MetadataApply(MetadataApplyError),
+    #[error(transparent)]
+    MetadataApply(#[from] MetadataApplyError),
+    #[error("sequence counter overflow")]
     SeqOverflow,
 }

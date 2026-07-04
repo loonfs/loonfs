@@ -1051,7 +1051,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 Ok(_) => Ok(wal),
                 Err(error) => Err(CoreError::WalWrite(error.to_string())),
             },
-            Err(error) => Err(CoreError::Store(format!("wal build failed: {error:?}"))),
+            Err(error) => Err(CoreError::Store(format!("wal build failed: {error}"))),
         }
     };
     wal_span.record("result", if wal_result.is_ok() { "ok" } else { "error" });
@@ -1076,7 +1076,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     let head_publish = match head_publish {
         Ok(value) => value,
         Err(error) => {
-            let error = CoreError::Store(format!("head publish preparation failed: {error:?}"));
+            let error = CoreError::Store(format!("head publish preparation failed: {error}"));
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
             return PublishBatchAgainstViewResult::invalidate_projection(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),

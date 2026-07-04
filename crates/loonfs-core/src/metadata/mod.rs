@@ -162,7 +162,7 @@ pub enum VisiblePathError {
     #[error("visible path not found: `{absolute_path}`")]
     PathNotFound { absolute_path: String },
     #[error(
-        "path component traversal expected directory at `{absolute_path}` but found inode `{inode_id:?}` kind `{inode_kind:?}`"
+        "path component traversal expected directory at `{absolute_path}` but found inode `{inode_id}` kind `{inode_kind}`"
     )]
     PathComponentNotDirectory {
         absolute_path: String,
@@ -171,8 +171,11 @@ pub enum VisiblePathError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum MetadataApplyError {
+    #[error(
+        "revision counter overflow for inode `{inode_id}` at base revision `{base_revision_no}`"
+    )]
     RevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,

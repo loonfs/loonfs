@@ -314,7 +314,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             })?;
     if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
-            "metadata root for `{}` references manifest {:?} with checksum {} but the manifest carries {}",
+            "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",
             namespace_id.as_str(),
             root.manifest_id,
             root.manifest_payload_checksum,
@@ -681,7 +681,7 @@ pub(super) fn drop_rows_below_retention_floor(
                 ))
             {
                 return Err(CoreError::NamespaceCorrupt(format!(
-                    "bind at seq {bind_seq:?} delta {bind_delta_index} for parent {parent_inode_id:?} is superseded at or below the retention floor without an unbind; refusing to drop rows"
+                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
                 )));
             }
         }

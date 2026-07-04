@@ -38,7 +38,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         })?;
     if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
-            "metadata root for `{}` references manifest {:?} with checksum {} but the manifest carries {}",
+            "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",
             namespace_id.as_str(),
             root.manifest_id,
             root.manifest_payload_checksum,
