@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 /// is durable contract, not an
 /// implementation detail. `identity::tests` pins the encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommitOp {
     CreateDirectory {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         display_name: String,
     },
     CreateFile {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         display_name: String,
         content_ref: ContentRef,
     },
@@ -36,11 +36,11 @@ pub enum CommitOp {
     },
     Rename {
         inode_id: InodeId,
-        new_parent_inode: InodeId,
+        new_parent_inode_id: InodeId,
         new_display_name: String,
         behavior: MoveBehavior,
     },
     DeleteSubtree {
-        root_inode: InodeId,
+        root_inode_id: InodeId,
     },
 }

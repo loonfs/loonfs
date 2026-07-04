@@ -27,7 +27,7 @@ fn content_ref(seed: &str) -> ContentRef {
 fn create_dir(
     delta_index: u32,
     inode_id: InodeId,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: &str,
 ) -> Vec<WalDelta> {
     vec![
@@ -38,13 +38,13 @@ fn create_dir(
         },
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
-            parent_inode,
+            parent_inode_id,
             name_key: loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 display_name,
             ),
             display_name: display_name.to_owned(),
-            child_inode: inode_id,
+            child_inode_id: inode_id,
         },
     ]
 }
@@ -52,7 +52,7 @@ fn create_dir(
 fn create_file(
     delta_index: u32,
     inode_id: InodeId,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: &str,
     content_ref: ContentRef,
 ) -> Vec<WalDelta> {
@@ -64,13 +64,13 @@ fn create_file(
         },
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
-            parent_inode,
+            parent_inode_id,
             name_key: loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 display_name,
             ),
             display_name: display_name.to_owned(),
-            child_inode: inode_id,
+            child_inode_id: inode_id,
         },
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
@@ -98,25 +98,25 @@ fn append_revision(
 fn bind(
     delta_index: u32,
     inode_id: InodeId,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: &str,
 ) -> Vec<WalDelta> {
     vec![WalDelta::BindDirentry {
         delta_index,
-        parent_inode,
+        parent_inode_id,
         name_key: loonfs_api::name_key_for_display_name(
             loonfs_api::NamePolicy::default(),
             display_name,
         ),
         display_name: display_name.to_owned(),
-        child_inode: inode_id,
+        child_inode_id: inode_id,
     }]
 }
 
-fn tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
+fn tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
-        root_inode,
+        root_inode_id,
     }]
 }
 

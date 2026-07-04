@@ -528,9 +528,9 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
     pub(crate) async fn would_create_directory_cycle(
         &self,
         inode_id: InodeId,
-        new_parent_inode: InodeId,
+        new_parent_inode_id: InodeId,
     ) -> Result<bool, CoreError> {
-        let mut current = Some(new_parent_inode);
+        let mut current = Some(new_parent_inode_id);
         let mut visited = BTreeSet::new();
 
         while let Some(candidate_inode_id) = current {

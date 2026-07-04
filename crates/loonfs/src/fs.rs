@@ -1414,7 +1414,7 @@ mod tests {
                 },
                 CommitOp::Rename {
                     inode_id: InodeId(2),
-                    new_parent_inode: InodeId(1),
+                    new_parent_inode_id: InodeId(1),
                     new_display_name: "report.txt".to_owned(),
                     behavior: MoveBehavior::NoReplace,
                 },

@@ -13,6 +13,11 @@ normative where implemented.
 Nothing in this document depends on how work is scheduled or which API surface
 a deployment exposes.
 
+Encoding conventions used by every durable and wire shape in this specification:
+field names and enum values are `snake_case`; fields holding typed identifiers
+are suffixed `_id`; tagged unions carry their discriminator in a `kind` field;
+decoders tolerate unknown fields (readers ignore what they do not understand).
+
 ## 1. Object store contract
 
 LoonFS relies on object storage as its only required durable dependency. The

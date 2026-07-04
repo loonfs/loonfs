@@ -29,7 +29,7 @@ impl WalEnvelopeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "delta", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WalDelta {
     CreateInode {
         delta_index: u32,
@@ -38,16 +38,16 @@ pub enum WalDelta {
     },
     BindDirentry {
         delta_index: u32,
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         name_key: String,
         display_name: String,
-        child_inode: InodeId,
+        child_inode_id: InodeId,
     },
     UnbindDirentry {
         delta_index: u32,
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         name_key: String,
-        child_inode: InodeId,
+        child_inode_id: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
     },
@@ -59,7 +59,7 @@ pub enum WalDelta {
     },
     TombstoneSubtree {
         delta_index: u32,
-        root_inode: InodeId,
+        root_inode_id: InodeId,
     },
 }
 

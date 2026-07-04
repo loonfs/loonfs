@@ -142,19 +142,19 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             semantic_op_index: 0,
             delta: WalDelta::BindDirentry {
                 delta_index: 1,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: "docs".to_owned(),
                 display_name: "Docs".to_owned(),
-                child_inode: InodeId(7),
+                child_inode_id: InodeId(7),
             },
         },
         WalCommitDelta {
             semantic_op_index: 1,
             delta: WalDelta::UnbindDirentry {
                 delta_index: 2,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: "old.txt".to_owned(),
-                child_inode: InodeId(5),
+                child_inode_id: InodeId(5),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
             },
@@ -172,7 +172,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             semantic_op_index: 3,
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 4,
-                root_inode: InodeId(9),
+                root_inode_id: InodeId(9),
             },
         },
     ];
@@ -799,19 +799,19 @@ fn wal_delta_wire_tags_match_spec_names() {
         (
             serde_json::to_value(WalDelta::BindDirentry {
                 delta_index: 0,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: "a".to_owned(),
                 display_name: "a".to_owned(),
-                child_inode: InodeId(2),
+                child_inode_id: InodeId(2),
             }),
             "bind_direntry",
         ),
         (
             serde_json::to_value(WalDelta::UnbindDirentry {
                 delta_index: 0,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: "a".to_owned(),
-                child_inode: InodeId(2),
+                child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
             }),
@@ -829,13 +829,13 @@ fn wal_delta_wire_tags_match_spec_names() {
         (
             serde_json::to_value(WalDelta::TombstoneSubtree {
                 delta_index: 0,
-                root_inode: InodeId(2),
+                root_inode_id: InodeId(2),
             }),
             "tombstone_subtree",
         ),
     ];
     for (value, expected_tag) in cases {
         let value = value.expect("serialize delta");
-        assert_eq!(value["delta"], expected_tag, "in {value}");
+        assert_eq!(value["kind"], expected_tag, "in {value}");
     }
 }

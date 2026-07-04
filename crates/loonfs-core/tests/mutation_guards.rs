@@ -463,7 +463,7 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    child_inode_id: InodeId,
+    target_child_inode_id: InodeId,
 ) -> BindingIdentity {
     list_changes_after(store, namespace_id, ChangeSeq(0))
         .expect("change feed")
@@ -476,14 +476,14 @@ fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
                 .filter_map(move |delta| match delta {
                     CommitDelta::BindDirentry {
                         delta_index,
-                        parent_inode,
+                        parent_inode_id,
                         name_key,
-                        child_inode,
+                        child_inode_id,
                         ..
-                    } if child_inode == child_inode_id => Some(BindingIdentity {
-                        parent_inode_id: parent_inode,
+                    } if child_inode_id == target_child_inode_id => Some(BindingIdentity {
+                        parent_inode_id,
                         name_key,
-                        child_inode_id: child_inode,
+                        child_inode_id,
                         bind_seq: change.seq,
                         bind_delta_index: delta_index,
                     }),
@@ -515,7 +515,7 @@ fn list_path_latest<S: ObjectStore + ?Sized>(
 fn wal_create_dir(
     delta_index: u32,
     inode_id: InodeId,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: String,
 ) -> Vec<WalDelta> {
     vec![
@@ -526,13 +526,13 @@ fn wal_create_dir(
         },
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
-            parent_inode,
+            parent_inode_id,
             name_key: loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 &display_name,
             ),
             display_name,
-            child_inode: inode_id,
+            child_inode_id: inode_id,
         },
     ]
 }
@@ -540,7 +540,7 @@ fn wal_create_dir(
 fn wal_create_file(
     delta_index: u32,
     inode_id: InodeId,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: String,
     content_ref: ContentRef,
 ) -> Vec<WalDelta> {
@@ -552,13 +552,13 @@ fn wal_create_file(
         },
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
-            parent_inode,
+            parent_inode_id,
             name_key: loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 &display_name,
             ),
             display_name,
-            child_inode: inode_id,
+            child_inode_id: inode_id,
         },
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
@@ -583,10 +583,10 @@ fn wal_append_revision(
     }]
 }
 
-fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
+fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
-        root_inode,
+        root_inode_id,
     }]
 }
 
@@ -644,11 +644,11 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             },
             CommitOp::CreateFile {
-                parent_inode: InodeId(2),
+                parent_inode_id: InodeId(2),
                 display_name: "readme.txt".to_owned(),
                 content_ref: content_ref("content-1"),
             },
@@ -699,7 +699,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateFile {
-                parent_inode: InodeId(2),
+                parent_inode_id: InodeId(2),
                 display_name: "new.txt".to_owned(),
                 content_ref: content_ref("content-2"),
             }],
@@ -713,7 +713,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     assert!(matches!(
         create_error,
         CommitValidationError::CreateUnderSubtreeTombstone {
-            parent_inode: InodeId(2),
+            parent_inode_id: InodeId(2),
             ..
         }
     ));
@@ -2172,7 +2172,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
                 commit_id: CommitId::parse("req-batch-a").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
                 message: None,
@@ -2181,7 +2181,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
                 commit_id: CommitId::parse("req-batch-b").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
                 message: None,
@@ -2324,7 +2324,7 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::Rename {
                     inode_id: file_inode,
-                    new_parent_inode: docs_inode,
+                    new_parent_inode_id: docs_inode,
                     new_display_name: "moved.txt".to_owned(),
                     behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 }],
@@ -2333,9 +2333,9 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
             ApiCommitRequest {
                 commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
                 preconditions: vec![CommitPrecondition::BindingIs {
-                    parent_inode: docs_inode,
+                    parent_inode_id: docs_inode,
                     name_key: original_binding.name_key.clone(),
-                    child_inode: file_inode,
+                    child_inode_id: file_inode,
                     bind_seq: original_binding.bind_seq,
                     bind_delta_index: original_binding.bind_delta_index,
                 }],
@@ -2372,7 +2372,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
             commit_id: CommitId::parse("seed-empty-dir").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
             message: None,
@@ -2396,7 +2396,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
                     .expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateFile {
-                    parent_inode: docs_inode,
+                    parent_inode_id: docs_inode,
                     display_name: "child.txt".to_owned(),
                     content_ref: content.content_ref,
                 }],
@@ -2409,7 +2409,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
                     inode_id: docs_inode,
                 }],
                 ops: vec![ApiCommitOp::DeleteSubtree {
-                    root_inode: docs_inode,
+                    root_inode_id: docs_inode,
                 }],
                 message: None,
             },
@@ -2918,7 +2918,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         commit_id: CommitId::parse("req-duplicate").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDirectory {
-            parent_inode: InodeId(1),
+            parent_inode_id: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
         message: None,
@@ -2967,7 +2967,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         commit_id: CommitId::parse("retry-across-writer").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDirectory {
-            parent_inode: InodeId(1),
+            parent_inode_id: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
         message: None,
@@ -3004,7 +3004,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
                 message: None,
@@ -3013,7 +3013,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                 commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
                 message: None,
@@ -3065,7 +3065,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
             commit_id: CommitId::parse("invalid-create-name").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "a/b".to_owned(),
             }],
             message: None,
@@ -3100,7 +3100,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::Rename {
                 inode_id: file.inode_id,
-                new_parent_inode: InodeId(1),
+                new_parent_inode_id: InodeId(1),
                 new_display_name: ".".to_owned(),
                 behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }],
@@ -3955,7 +3955,7 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
             commit_id: CommitId::parse("restore-create").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "restore.txt".to_owned(),
                 content_ref: first.content_ref.clone(),
             }],
@@ -4076,7 +4076,7 @@ async fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
                 .expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
-                parent_inode: InodeId(99),
+                parent_inode_id: InodeId(99),
                 display_name: "missing.txt".to_owned(),
                 content_ref: content_ref("missing-content"),
             }],
@@ -4192,7 +4192,7 @@ async fn restore_revision_resolves_same_request_source_before_durable_content_va
                 .expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "restore.txt".to_owned(),
                 content_ref: first.content_ref.clone(),
             }],
@@ -4502,9 +4502,9 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         ApiCommitRequest {
             commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
             preconditions: vec![CommitPrecondition::BindingIs {
-                parent_inode: old_binding.parent_inode_id,
+                parent_inode_id: old_binding.parent_inode_id,
                 name_key: old_binding.name_key.clone(),
-                child_inode: old_binding.child_inode_id,
+                child_inode_id: old_binding.child_inode_id,
                 bind_seq: old_binding.bind_seq,
                 bind_delta_index: old_binding.bind_delta_index,
             }],

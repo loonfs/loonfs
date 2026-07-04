@@ -321,12 +321,12 @@ async fn validate_metadata_preconditions(
         );
         let validated_op = match op {
             CommitOp::CreateDirectory {
-                parent_inode,
+                parent_inode_id,
                 display_name,
             } => {
                 let name_key = validate_publish_child_name_absent(
                     &metadata_view,
-                    *parent_inode,
+                    *parent_inode_id,
                     display_name,
                     name_policy,
                 )
@@ -334,7 +334,7 @@ async fn validate_metadata_preconditions(
                 .map_err(commit_validation_from_core)?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_view,
-                    *parent_inode,
+                    *parent_inode_id,
                     checked_invariants,
                     true,
                 )
@@ -342,10 +342,10 @@ async fn validate_metadata_preconditions(
                 .map_err(commit_validation_from_core)?;
                 ValidatedOp::CreateDir {
                     op_index,
-                    parent_inode: *parent_inode,
+                    parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    child_inode: next_allocated_inode(
+                    child_inode_id: next_allocated_inode(
                         &mut allocated_inode_ids,
                         CommitValidationError::NextInodeOverflow,
                     )?,
@@ -354,13 +354,13 @@ async fn validate_metadata_preconditions(
                 }
             }
             CommitOp::CreateFile {
-                parent_inode,
+                parent_inode_id,
                 display_name,
                 content_ref,
             } => {
                 let name_key = validate_publish_child_name_absent(
                     &metadata_view,
-                    *parent_inode,
+                    *parent_inode_id,
                     display_name,
                     name_policy,
                 )
@@ -368,7 +368,7 @@ async fn validate_metadata_preconditions(
                 .map_err(commit_validation_from_core)?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_view,
-                    *parent_inode,
+                    *parent_inode_id,
                     checked_invariants,
                     true,
                 )
@@ -376,10 +376,10 @@ async fn validate_metadata_preconditions(
                 .map_err(commit_validation_from_core)?;
                 ValidatedOp::CreateFile {
                     op_index,
-                    parent_inode: *parent_inode,
+                    parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    child_inode: next_allocated_inode(
+                    child_inode_id: next_allocated_inode(
                         &mut allocated_inode_ids,
                         CommitValidationError::NextInodeOverflow,
                     )?,
@@ -467,7 +467,7 @@ async fn validate_metadata_preconditions(
             }
             CommitOp::Rename {
                 inode_id,
-                new_parent_inode,
+                new_parent_inode_id,
                 new_display_name,
                 behavior: _,
             } => {
@@ -480,7 +480,7 @@ async fn validate_metadata_preconditions(
                     .map_err(commit_validation_from_core)?;
                 let new_name_key = validate_publish_rename_target_name_absent(
                     &metadata_view,
-                    *new_parent_inode,
+                    *new_parent_inode_id,
                     new_display_name,
                     name_policy,
                 )
@@ -489,7 +489,7 @@ async fn validate_metadata_preconditions(
                 validate_publish_rename_does_not_cycle(
                     &metadata_view,
                     *inode_id,
-                    *new_parent_inode,
+                    *new_parent_inode_id,
                 )
                 .await
                 .map_err(commit_validation_from_core)?;
@@ -502,7 +502,7 @@ async fn validate_metadata_preconditions(
                 .map_err(commit_validation_from_core)?;
                 validate_publish_rename_target_parent_not_covered(
                     &metadata_view,
-                    *new_parent_inode,
+                    *new_parent_inode_id,
                     checked_invariants,
                 )
                 .await
@@ -511,31 +511,31 @@ async fn validate_metadata_preconditions(
                     op_index,
                     inode_id: *inode_id,
                     source_binding,
-                    new_parent_inode: *new_parent_inode,
+                    new_parent_inode_id: *new_parent_inode_id,
                     new_display_name: new_display_name.clone(),
                     new_name_key,
                     unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                     bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                 }
             }
-            CommitOp::DeleteSubtree { root_inode } => {
+            CommitOp::DeleteSubtree { root_inode_id } => {
                 let source_binding =
-                    resolve_publish_current_binding_for_mutation(&metadata_view, *root_inode)
+                    resolve_publish_current_binding_for_mutation(&metadata_view, *root_inode_id)
                         .await
                         .map_err(commit_validation_from_core)?;
-                validate_publish_delete_subtree_root(&metadata_view, *root_inode)
+                validate_publish_delete_subtree_root(&metadata_view, *root_inode_id)
                     .await
                     .map_err(commit_validation_from_core)?;
                 validate_publish_delete_subtree_not_covered(
                     &metadata_view,
-                    *root_inode,
+                    *root_inode_id,
                     checked_invariants,
                 )
                 .await
                 .map_err(commit_validation_from_core)?;
                 ValidatedOp::DeleteSubtree {
                     op_index,
-                    root_inode: *root_inode,
+                    root_inode_id: *root_inode_id,
                     source_binding,
                     unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                     tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
@@ -577,29 +577,29 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
         let metadata_state = base_view.with_overlay(overlay_rows.rows(), committed_seq);
         let validated_op = match op {
             CommitOp::CreateDirectory {
-                parent_inode,
+                parent_inode_id,
                 display_name,
             } => {
                 let name_key = validate_publish_child_name_absent(
                     &metadata_state,
-                    *parent_inode,
+                    *parent_inode_id,
                     display_name,
                     name_policy,
                 )
                 .await?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_state,
-                    *parent_inode,
+                    *parent_inode_id,
                     checked_invariants,
                     true,
                 )
                 .await?;
                 ValidatedOp::CreateDir {
                     op_index,
-                    parent_inode: *parent_inode,
+                    parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    child_inode: next_allocated_inode(
+                    child_inode_id: next_allocated_inode(
                         &mut allocated_inode_ids,
                         CommitValidationError::NextInodeOverflow,
                     )?,
@@ -608,30 +608,30 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 }
             }
             CommitOp::CreateFile {
-                parent_inode,
+                parent_inode_id,
                 display_name,
                 content_ref,
             } => {
                 let name_key = validate_publish_child_name_absent(
                     &metadata_state,
-                    *parent_inode,
+                    *parent_inode_id,
                     display_name,
                     name_policy,
                 )
                 .await?;
                 validate_publish_ancestors_not_subtree_deleted(
                     &metadata_state,
-                    *parent_inode,
+                    *parent_inode_id,
                     checked_invariants,
                     true,
                 )
                 .await?;
                 ValidatedOp::CreateFile {
                     op_index,
-                    parent_inode: *parent_inode,
+                    parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    child_inode: next_allocated_inode(
+                    child_inode_id: next_allocated_inode(
                         &mut allocated_inode_ids,
                         CommitValidationError::NextInodeOverflow,
                     )?,
@@ -714,7 +714,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
             }
             CommitOp::Rename {
                 inode_id,
-                new_parent_inode,
+                new_parent_inode_id,
                 new_display_name,
                 behavior: _,
             } => {
@@ -724,7 +724,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 validate_publish_rename_source(&metadata_state, *inode_id).await?;
                 let new_name_key = validate_publish_rename_target_name_absent(
                     &metadata_state,
-                    *new_parent_inode,
+                    *new_parent_inode_id,
                     new_display_name,
                     name_policy,
                 )
@@ -732,7 +732,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 validate_publish_rename_does_not_cycle(
                     &metadata_state,
                     *inode_id,
-                    *new_parent_inode,
+                    *new_parent_inode_id,
                 )
                 .await?;
                 validate_publish_rename_inode_not_covered(
@@ -743,7 +743,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 .await?;
                 validate_publish_rename_target_parent_not_covered(
                     &metadata_state,
-                    *new_parent_inode,
+                    *new_parent_inode_id,
                     checked_invariants,
                 )
                 .await?;
@@ -751,27 +751,27 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                     op_index,
                     inode_id: *inode_id,
                     source_binding,
-                    new_parent_inode: *new_parent_inode,
+                    new_parent_inode_id: *new_parent_inode_id,
                     new_display_name: new_display_name.clone(),
                     new_name_key,
                     unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                     bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                 }
             }
-            CommitOp::DeleteSubtree { root_inode } => {
+            CommitOp::DeleteSubtree { root_inode_id } => {
                 let source_binding =
-                    resolve_publish_current_binding_for_mutation(&metadata_state, *root_inode)
+                    resolve_publish_current_binding_for_mutation(&metadata_state, *root_inode_id)
                         .await?;
-                validate_publish_delete_subtree_root(&metadata_state, *root_inode).await?;
+                validate_publish_delete_subtree_root(&metadata_state, *root_inode_id).await?;
                 validate_publish_delete_subtree_not_covered(
                     &metadata_state,
-                    *root_inode,
+                    *root_inode_id,
                     checked_invariants,
                 )
                 .await?;
                 ValidatedOp::DeleteSubtree {
                     op_index,
-                    root_inode: *root_inode,
+                    root_inode_id: *root_inode_id,
                     source_binding,
                     unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                     tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
@@ -850,28 +850,28 @@ async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
                 .await?;
             }
             Precondition::ChildNameAbsent {
-                parent_inode,
+                parent_inode_id,
                 name_key,
             } => {
                 validate_publish_child_name_absent_precondition(
                     metadata_state,
-                    *parent_inode,
+                    *parent_inode_id,
                     name_key,
                 )
                 .await?;
             }
             Precondition::BindingIs {
-                parent_inode,
+                parent_inode_id,
                 name_key,
-                child_inode,
+                child_inode_id,
                 bind_seq,
                 bind_delta_index,
             } => {
                 validate_publish_binding_is_precondition(
                     metadata_state,
-                    *parent_inode,
+                    *parent_inode_id,
                     name_key,
-                    *child_inode,
+                    *child_inode_id,
                     *bind_seq,
                     *bind_delta_index,
                 )
@@ -888,26 +888,29 @@ async fn validate_publish_explicit_preconditions<S: ObjectStore + ?Sized>(
 
 async fn validate_publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     name_key: &str,
 ) -> Result<(), CoreError> {
     let parent = metadata_state
-        .inode_at_seq(parent_inode)
+        .inode_at_seq(parent_inode_id)
         .await?
-        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
+        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode_id })?;
     if parent.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::NamePreconditionParentNotDirectory {
-            parent_inode,
+            parent_inode_id,
             actual_kind: parent.inode_kind,
         }
         .into());
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, name_key).await? {
+    if let Some(existing) = metadata_state
+        .visible_child(parent_inode_id, name_key)
+        .await?
+    {
         return Err(CommitValidationError::CreateChildNameCollision {
-            parent_inode,
+            parent_inode_id,
             name_key: name_key.to_owned(),
-            child_inode: existing.child_inode_id,
+            child_inode_id: existing.child_inode_id,
         }
         .into());
     }
@@ -924,10 +927,10 @@ async fn resolve_publish_current_binding_for_mutation<S: ObjectStore + ?Sized>(
         .await?
         .ok_or(CommitValidationError::SourceBindingMissing { inode_id })?;
     Ok(ResolvedBinding {
-        parent_inode: binding.parent_inode_id,
+        parent_inode_id: binding.parent_inode_id,
         name_key: binding.name_key,
         display_name: binding.display_name,
-        child_inode: binding.child_inode_id,
+        child_inode_id: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
     })
@@ -936,39 +939,42 @@ async fn resolve_publish_current_binding_for_mutation<S: ObjectStore + ?Sized>(
 #[allow(clippy::too_many_arguments)]
 async fn validate_publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     name_key: &str,
-    child_inode: InodeId,
+    child_inode_id: InodeId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
 ) -> Result<(), CoreError> {
     let parent = metadata_state
-        .inode_at_seq(parent_inode)
+        .inode_at_seq(parent_inode_id)
         .await?
-        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
+        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode_id })?;
     if parent.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::NamePreconditionParentNotDirectory {
-            parent_inode,
+            parent_inode_id,
             actual_kind: parent.inode_kind,
         }
         .into());
     }
 
-    let Some(existing) = metadata_state.visible_child(parent_inode, name_key).await? else {
+    let Some(existing) = metadata_state
+        .visible_child(parent_inode_id, name_key)
+        .await?
+    else {
         return Err(CommitValidationError::BindingPreconditionMissing {
-            parent_inode,
+            parent_inode_id,
             name_key: name_key.to_owned(),
         }
         .into());
     };
-    if existing.child_inode_id != child_inode
+    if existing.child_inode_id != child_inode_id
         || existing.bind_seq != bind_seq
         || existing.bind_delta_index != bind_delta_index
     {
         return Err(CommitValidationError::BindingPreconditionMismatch {
-            parent_inode,
+            parent_inode_id,
             name_key: name_key.to_owned(),
-            expected_child_inode: child_inode,
+            expected_child_inode: child_inode_id,
             actual_child_inode: Some(existing.child_inode_id),
         }
         .into());
@@ -1004,18 +1010,18 @@ async fn validate_publish_directory_empty_precondition<S: ObjectStore + ?Sized>(
 
 async fn validate_publish_child_name_absent<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: &str,
     name_policy: NamePolicy,
 ) -> Result<String, CoreError> {
     validate_display_name(display_name)?;
     let parent = metadata_state
-        .inode_at_seq(parent_inode)
+        .inode_at_seq(parent_inode_id)
         .await?
-        .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
+        .ok_or(CommitValidationError::CreateParentMissing { parent_inode_id })?;
     if parent.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::CreateParentNotDirectory {
-            parent_inode,
+            parent_inode_id,
             actual_kind: parent.inode_kind,
         }
         .into());
@@ -1023,13 +1029,13 @@ async fn validate_publish_child_name_absent<S: ObjectStore + ?Sized>(
 
     let name_key = name_key_for_display_name(name_policy, display_name);
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode, &name_key)
+        .visible_child(parent_inode_id, &name_key)
         .await?
     {
         return Err(CommitValidationError::CreateChildNameCollision {
-            parent_inode,
+            parent_inode_id,
             name_key,
-            child_inode: existing.child_inode_id,
+            child_inode_id: existing.child_inode_id,
         }
         .into());
     }
@@ -1129,15 +1135,15 @@ async fn validate_publish_ancestors_not_subtree_deleted<S: ObjectStore + ?Sized>
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return if is_create {
             Err(CommitValidationError::CreateUnderSubtreeTombstone {
-                parent_inode: inode_id,
-                root_inode: tombstone.root_inode_id,
+                parent_inode_id: inode_id,
+                root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             }
             .into())
         } else {
             Err(CommitValidationError::ReplaceFileUnderSubtreeTombstone {
                 inode_id,
-                root_inode: tombstone.root_inode_id,
+                root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             }
             .into())
@@ -1160,7 +1166,7 @@ async fn validate_publish_restore_not_covered<S: ObjectStore + ?Sized>(
         return Err(
             CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
                 inode_id,
-                root_inode: tombstone.root_inode_id,
+                root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             }
             .into(),
@@ -1176,15 +1182,15 @@ async fn validate_publish_restore_not_covered<S: ObjectStore + ?Sized>(
 
 async fn validate_publish_delete_subtree_root<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    root_inode: InodeId,
+    root_inode_id: InodeId,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
-        .inode_at_seq(root_inode)
+        .inode_at_seq(root_inode_id)
         .await?
-        .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode })?;
+        .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode_id })?;
     if inode.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::DeleteSubtreeRootNotDirectory {
-            root_inode,
+            root_inode_id,
             actual_kind: inode.inode_kind,
         }
         .into());
@@ -1235,15 +1241,15 @@ async fn validate_publish_delete_file_not_covered<S: ObjectStore + ?Sized>(
 
 async fn validate_publish_delete_subtree_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    root_inode: InodeId,
+    root_inode_id: InodeId,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(root_inode)
+        .covering_subtree_tombstone(root_inode_id)
         .await?
     {
         return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
-            root_inode,
+            root_inode_id,
             covering_root_inode: tombstone.root_inode_id,
             tombstone_seq: tombstone.tombstone_seq,
         }
@@ -1278,18 +1284,18 @@ async fn validate_publish_rename_source<S: ObjectStore + ?Sized>(
 
 async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: &str,
     name_policy: NamePolicy,
 ) -> Result<String, CoreError> {
     validate_display_name(display_name)?;
     let parent = metadata_state
-        .inode_at_seq(parent_inode)
+        .inode_at_seq(parent_inode_id)
         .await?
-        .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
+        .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode_id })?;
     if parent.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::RenameTargetParentNotDirectory {
-            parent_inode,
+            parent_inode_id,
             actual_kind: parent.inode_kind,
         }
         .into());
@@ -1297,13 +1303,13 @@ async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
 
     let name_key = name_key_for_display_name(name_policy, display_name);
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode, &name_key)
+        .visible_child(parent_inode_id, &name_key)
         .await?
     {
         return Err(CommitValidationError::RenameTargetNameCollision {
-            parent_inode,
+            parent_inode_id,
             name_key,
-            child_inode: existing.child_inode_id,
+            child_inode_id: existing.child_inode_id,
         }
         .into());
     }
@@ -1314,7 +1320,7 @@ async fn validate_publish_rename_target_name_absent<S: ObjectStore + ?Sized>(
 async fn validate_publish_rename_does_not_cycle<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
     inode_id: InodeId,
-    new_parent_inode: InodeId,
+    new_parent_inode_id: InodeId,
 ) -> Result<(), CoreError> {
     let inode = metadata_state
         .inode_at_seq(inode_id)
@@ -1324,12 +1330,12 @@ async fn validate_publish_rename_does_not_cycle<S: ObjectStore + ?Sized>(
         return Ok(());
     }
     if metadata_state
-        .would_create_directory_cycle(inode_id, new_parent_inode)
+        .would_create_directory_cycle(inode_id, new_parent_inode_id)
         .await?
     {
         return Err(CommitValidationError::RenameWouldCycleDirectory {
             inode_id,
-            new_parent_inode,
+            new_parent_inode_id,
         }
         .into());
     }
@@ -1345,7 +1351,7 @@ async fn validate_publish_rename_inode_not_covered<S: ObjectStore + ?Sized>(
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return Err(CommitValidationError::RenameInodeUnderSubtreeTombstone {
             inode_id,
-            root_inode: tombstone.root_inode_id,
+            root_inode_id: tombstone.root_inode_id,
             tombstone_seq: tombstone.tombstone_seq,
         }
         .into());
@@ -1360,17 +1366,17 @@ async fn validate_publish_rename_inode_not_covered<S: ObjectStore + ?Sized>(
 
 async fn validate_publish_rename_target_parent_not_covered<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataView<'_, '_, S>,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CoreError> {
     if let Some(tombstone) = metadata_state
-        .covering_subtree_tombstone(parent_inode)
+        .covering_subtree_tombstone(parent_inode_id)
         .await?
     {
         return Err(
             CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
-                parent_inode,
-                root_inode: tombstone.root_inode_id,
+                parent_inode_id,
+                root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             }
             .into(),
