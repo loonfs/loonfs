@@ -306,6 +306,7 @@ A representative v0 binding is shown below.
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
+| Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; nothing sweeps without an explicit call) |
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile; everything else
 shown belongs to `core/v0`.

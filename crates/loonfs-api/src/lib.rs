@@ -48,9 +48,9 @@ pub use error::{ErrorCode, ErrorKind};
 pub use http::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest,
-    ListFileRevisionsResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
-    PutBehavior, RestoreFileRevisionRequest,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, ListFileRevisionsResponse, MutationResult, NamespaceStatusResponse,
+    NamespaceSummary, PutBehavior, RestoreFileRevisionRequest,
 };
 pub use ids::{
     generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,

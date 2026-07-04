@@ -1941,6 +1941,7 @@ fn maintenance_tick_below_threshold_is_not_needed() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 2,
+                gc: None,
             },
         )
         .expect("maintenance tick");
@@ -1970,6 +1971,7 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 1,
+                gc: None,
             },
         )
         .expect("maintenance tick");
@@ -2007,6 +2009,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
         &namespace_id,
         MaintenanceTickOptions {
             max_wal_tail_segments: 1,
+            gc: None,
         },
     )
     .expect("first maintenance tick");
@@ -2023,6 +2026,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 1,
+                gc: None,
             },
         )
         .expect("second maintenance tick");
@@ -2102,6 +2106,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 2,
+                gc: None,
             },
         )
         .expect("maintenance tick");
@@ -2126,6 +2131,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 2,
+                gc: None,
             },
         )
         .expect("maintenance tick at segment threshold");
@@ -2152,6 +2158,7 @@ fn maintenance_tick_rejects_zero_threshold() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 0,
+                gc: None,
             },
         )
         .expect_err("zero threshold should fail");
@@ -2191,6 +2198,7 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
             &namespace_id,
             MaintenanceTickOptions {
                 max_wal_tail_segments: 1,
+                gc: None,
             },
         )
         .expect("maintenance tick should not fail on metadata root publish race");

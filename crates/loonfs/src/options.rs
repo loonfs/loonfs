@@ -27,12 +27,16 @@ pub struct NamespaceStatus {
 pub struct MaintenanceTickOptions {
     /// Publish a checkpoint when the visible WAL tail reaches this many segments.
     pub max_wal_tail_segments: u64,
+    /// Run the mark-and-sweep garbage collector after the tick's checkpoint
+    /// and retention work. Nothing sweeps unless this is set.
+    pub gc: Option<loonfs_core::GcConfig>,
 }
 
 impl Default for MaintenanceTickOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
+            gc: None,
         }
     }
 }
@@ -70,6 +74,8 @@ pub struct MaintenanceTickResult {
     pub status_before: NamespaceStatus,
     /// What the tick did.
     pub outcome: MaintenanceTickOutcome,
+    /// Garbage-collection report when the tick opted into sweeping.
+    pub gc: Option<loonfs_core::GcReport>,
 }
 
 /// Options for creating a namespace.

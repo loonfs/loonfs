@@ -69,6 +69,14 @@ pub fn metadata_root(namespace: &str) -> String {
     ObjectLayout::new().metadata_root(namespace).into_string()
 }
 
+pub fn metadata_manifest_prefix(namespace: &str) -> String {
+    ObjectLayout::new().metadata_manifest_prefix(namespace)
+}
+
+pub fn metadata_table_prefix(namespace: &str) -> String {
+    ObjectLayout::new().metadata_table_prefix(namespace)
+}
+
 pub fn metadata_manifest(namespace: &str, manifest_id: ManifestId) -> String {
     ObjectLayout::new()
         .metadata_manifest(namespace, manifest_id)

@@ -352,6 +352,7 @@ impl DelegatingWriteStore {
             version: None,
             size_bytes: 0,
             checksum_sha256: None,
+            last_modified_ms: None,
         }
     }
 }

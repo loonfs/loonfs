@@ -36,6 +36,7 @@ mod context;
 mod control_update;
 mod engine;
 mod error;
+pub mod gc;
 mod invariants;
 pub mod metadata;
 pub mod namespace;
@@ -90,6 +91,7 @@ pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuil
 pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
 };
+pub use gc::{gc_namespace, GcConfig, GcReport};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};

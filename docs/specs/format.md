@@ -1266,24 +1266,54 @@ material to support readers from the new floor forward.
 
 Delete is tombstone-first. Garbage collection is the separate process that
 eventually reclaims content or metadata that is no longer reachable and no
-longer protected by retention policy.
+longer protected by retention policy. GC and floor advancement are the only
+consumers of listing, and nothing sweeps by default: a pass runs only through
+the admin endpoint or an explicit maintenance-tick opt-in.
 
-Reclamation follows the tree's grammar (section 1.3). Ordered streams
-(`wal/`, `manifest/`) reclaim by advancing their boundary
-cursor in `gc/`: range-scan below the cursor, verify the bounded window
-against the reference rules below, sweep, advance. Collections reclaim by
-reachability or expiry. Either way:
+v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
+`wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
+`metadata/tables/`, `checkpoints/`, `pins/`, and `wal/segments/` collections.
+Because floor, root, and checkpoint publication no longer serialize through
+one head CAS, two cross-object races must be closed explicitly —
+create-vs-collect (a record written while GC concludes its basis is
+unreferenced) and publish-in-flight (an object written moments before its
+publishing CAS) — under these rules:
 
-Garbage collection must be conservative. It MUST NOT remove an object that is
-reachable from any retained version. Concretely, it may reclaim an object only
-when:
+1. **Grace window.** A configured window `T`, with
+   `T > publish_budget + request_timeout` and
+   `T > verify_budget + request_timeout` by comfortable margin. GC never
+   deletes any object younger than `T`, reachable or not, and treats any
+   checkpoint or pin record younger than `T` as a root regardless of state.
+   An object without a provider timestamp reads as young.
+2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
+   nominates an object for deletion.
+3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
+   `checkpoints/` and `pins/`, re-reads the root, head, and floor, and drops
+   from the batch anything reachable from that fresh root set. Candidate
+   selection may be arbitrarily stale; deletion may not.
+4. Roots: `metadata/root.json`; active, non-expired checkpoint records; pins
+   (resolving pin -> checkpoint -> manifest -> tables); and the visible chain
+   from `wal/head.json.visible_wal_tip` down to the floor.
+5. Missing, corrupt, or ambiguous roots cause retention, not deletion — an
+   unreadable pin checkpoint suppresses manifest and table deletion for the
+   whole pass.
+6. Only validated manifests are trusted to protect data.
+7. WAL needed to replay from the chosen metadata root to the head is never
+   deleted.
+8. **Retention wins residual races.** If the floor is ever observed ahead of
+   an active checkpoint's basis, the checkpoint's objects remain protected;
+   reconciling the floor is an explicit recovery action.
+9. **Abandoned bootstraps.** A namespace tree with no `namespace.json` whose
+   newest object is older than the reap window `R` (`R >= T`) may be reaped,
+   re-checking the marker's absence immediately before deleting. Pins whose
+   target namespace never completed bootstrap are reaped under the same rule.
 
-- no visible metadata references it;
-- no retained historical metadata still needs it;
-- no checkpoint record, fork GC pin, or retention promise still protects it;
-  and
-- no active session, upload, or other control-plane object still depends on
-  it.
+Deletion proceeds data first, records last, so a crash mid-sweep leaves
+orphaned data for the next pass rather than a record whose data vanished.
+Pins whose target namespace is verifiably terminally deleted (target head
+`state = deleted`, re-checked at delete time) are releasable. The intended
+end-state remains tracked deletion derived from manifest predecessor diffs,
+with the listing sweep demoted to a low-frequency backstop.
 
 ### 6.5 Control-object cleanup
 

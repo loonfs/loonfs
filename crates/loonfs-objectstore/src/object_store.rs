@@ -24,6 +24,12 @@ pub struct ObjectMetadata {
     /// This is part of the object-store contract only when present. Callers must fall back to
     /// reading and hashing object bytes if this field is absent.
     pub checksum_sha256: Option<String>,
+    /// Provider last-modified time in unix milliseconds, when available.
+    ///
+    /// Advisory: garbage collection uses it for grace/reap age checks and
+    /// treats an absent value as "young" (retain). Never a validity input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified_ms: Option<u64>,
 }
 
 /// Full object bytes returned with metadata from the same read operation.

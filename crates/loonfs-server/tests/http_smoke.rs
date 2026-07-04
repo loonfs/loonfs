@@ -1451,6 +1451,47 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-gc",
+        "http-admin-gc",
+    ))
+    .await;
+    let client = harness.client.clone();
+    let server_url = harness.server_url.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        client
+            .write_file_bytes(&target, b"hello gc\n")
+            .expect("write file");
+        post_checkpoint(&server_url, namespace).expect("checkpoint");
+
+        // A freshly written namespace sits entirely inside the grace
+        // window: the pass runs, deletes nothing, and reads keep working.
+        let report = post_gc(&server_url, namespace).expect("gc pass");
+        assert_eq!(report.deleted_wal_segments, 0);
+        assert_eq!(report.deleted_metadata_tables, 0);
+        assert_eq!(report.deleted_manifests, 0);
+        assert_eq!(report.deleted_checkpoint_records, 0);
+        assert!(!report.degraded_retention);
+
+        let bytes = client.read_file_bytes(&target).expect("read file");
+        assert_eq!(bytes, b"hello gc\n");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -1675,6 +1716,13 @@ fn post_checkpoint(
 ) -> Result<CreateCheckpointResponse, ApiError> {
     post_admin_json(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoint"),
+        "test-token",
+    )
+}
+
+fn post_gc(server_url: &str, namespace: &str) -> Result<loonfs_api::GcResponse, ApiError> {
+    post_admin_json(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
         "test-token",
     )
 }
