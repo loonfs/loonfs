@@ -751,7 +751,6 @@ mod tests {
             writer_session_id: "wrs_test".to_owned(),
             writer_version: "test".to_owned(),
             now_ms: 1,
-            lease_duration_ms: 60_000,
         }
     }
 

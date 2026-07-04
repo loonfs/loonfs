@@ -97,17 +97,17 @@ pub struct WalSegmentPointer {
     pub payload_checksum: String,
 }
 
+/// Who most recently acquired the writer epoch, and when.
+///
+/// Observability only, written during the epoch-acquisition CAS. Fencing
+/// authority is `writer_epoch` + CAS; nothing may consult this block for
+/// commit validity, takeover permission, or expiry, and no wall-clock
+/// comparison may gate a publish.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WriterLease {
+pub struct WriterBlock {
     pub writer_id: String,
     pub writer_session_id: String,
-    pub lease_expires_at_ms: u64,
-}
-
-impl WriterLease {
-    pub fn is_valid_at(&self, now_ms: u64) -> bool {
-        self.lease_expires_at_ms > now_ms
-    }
+    pub acquired_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +115,6 @@ pub struct AcquiredWriter {
     pub writer_id: String,
     pub writer_session_id: String,
     pub writer_epoch: WriterEpoch,
-    pub lease_expires_at_ms: u64,
 }
 
 /// Lifecycle state recorded in the namespace head.
@@ -154,8 +153,9 @@ pub struct HeadState {
     pub seq: ChangeSeq,
     pub head_commit_id: CommitId,
     pub writer_epoch: WriterEpoch,
+    /// Non-authoritative record of the most recent epoch acquisition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub writer_lease: Option<WriterLease>,
+    pub writer: Option<WriterBlock>,
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
@@ -171,6 +171,12 @@ pub struct HeadState {
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
+    /// Bounded newest-first accelerator over the visible chain, always
+    /// including the tip; rewritten by the commit CAS. Chain links remain
+    /// the only history authority — any disagreement resolves in favor of
+    /// the chain, and this array never protects anything from GC.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_segments: Vec<WalSegmentPointer>,
     /// Lifecycle state. Absent means active, on read and on write, so the
     /// field appears only in deleted heads.
     #[serde(default, skip_serializing_if = "NamespaceState::is_active")]
@@ -185,13 +191,14 @@ impl HeadState {
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
                 .expect("genesis commit id is valid"),
             writer_epoch: WriterEpoch(0),
-            writer_lease: None,
+            writer: None,
             next_inode_id: InodeId(2),
             name_policy: NamePolicy::default(),
             current_manifest_id: None,
             latest_checkpoint_id: None,
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
+            recent_segments: Vec::new(),
             state: NamespaceState::Active,
         }
     }

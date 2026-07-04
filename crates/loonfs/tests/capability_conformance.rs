@@ -23,7 +23,6 @@ fn embedded_capabilities() -> CapabilityDocument {
         FsConfig {
             writer_id: "capability-conformance".to_owned(),
             writer_version: "test".to_owned(),
-            lease_duration_ms: 60_000,
             runtime_cache: RuntimeCacheConfig::default(),
             trace_mode: TraceMode::Embedded,
             trace_store_kind: TraceStoreKind::LocalFs,

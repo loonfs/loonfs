@@ -212,7 +212,6 @@ fn build_fs_with_metrics_jsonl_path(
     let mut builder = Fs::builder(store)
         .writer_id(config.writer_id.clone())
         .writer_version(config.writer_version.clone())
-        .lease_duration_ms(config.lease_duration_ms)
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
@@ -1719,7 +1718,7 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::StaleHead
         | ErrorCode::StaleRevision
         | ErrorCode::TombstoneConflict
-        | ErrorCode::LeaseConflict
+        | ErrorCode::WriterFenced
         | ErrorCode::WouldCycle
         | ErrorCode::CommitIdReuseConflict
         | ErrorCode::UploadAlreadyCompleted
@@ -1816,7 +1815,7 @@ mod tests {
     };
     use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
     use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-    use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, Settings, WriteOptions};
+    use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{
@@ -1825,7 +1824,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
     #[derive(Debug)]
@@ -2246,7 +2245,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn http_active_lease_held_by_other_writer_returns_lease_conflict() {
+    async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
+        // With no lease, the server's first semantic write acquires the
+        // epoch immediately and fences the previous session.
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let now_ms = now_ms();
@@ -2258,19 +2259,31 @@ mod tests {
         )
         .await
         .expect("bootstrap namespace");
+        let store_for_check = store.clone();
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
-            let target = NamespacePath::parse("demo:/notes/blocked.txt").expect("target");
-            assert_api_error(
-                harness.client.write_file_bytes(&target, b"blocked"),
-                409,
-                "lease_conflict",
-                None,
-            );
+            let target = NamespacePath::parse("demo:/notes/taken-over.txt").expect("target");
+            let result = harness
+                .client
+                .write_file_bytes(&target, b"taken over")
+                .expect("first write takes over the namespace");
+            assert_eq!(result.committed_seq, ChangeSeq(1));
         })
         .await
         .expect("join blocking task");
+
+        let head = loonfs_core::control::load_namespace_head_control(
+            store_for_check.as_ref(),
+            &namespace_id("demo"),
+        )
+        .await
+        .expect("read head")
+        .state;
+        assert_eq!(
+            head.writer.expect("writer block").writer_id,
+            "server-writer"
+        );
 
         harness.server.abort();
     }
@@ -2306,7 +2319,6 @@ mod tests {
             FsConfig {
                 writer_id: writer_id.to_owned(),
                 writer_version: format!("{writer_id}/0.1.0"),
-                lease_duration_ms: 60_000,
                 runtime_cache: RuntimeCacheConfig::default(),
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,
@@ -2322,7 +2334,6 @@ mod tests {
             content_token_secret: "test-content-token-secret".to_owned(),
             writer_id: writer_id.to_owned(),
             writer_version: format!("{writer_id}/0.1.0"),
-            lease_duration_ms: 60_000,
             runtime_cache: RuntimeCacheConfigOverrides::default(),
             store: StoreConfig::LocalFs {
                 root: root.display().to_string(),
@@ -2337,7 +2348,6 @@ mod tests {
             writer_session_id: format!("wrs_{writer_id}"),
             writer_version: format!("{writer_id}/0.1.0"),
             now_ms,
-            lease_duration_ms: 60_000,
         }
     }
 
@@ -2351,9 +2361,6 @@ mod tests {
             .writer(context.writer_id.clone())
             .writer_session_id(context.writer_session_id.clone())
             .writer_version(context.writer_version.clone())
-            .settings(Settings {
-                writer_lease_duration: Duration::from_millis(context.lease_duration_ms),
-            })
             .build()
             .expect("test context should build namespace engine")
     }

@@ -289,6 +289,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
+            recent_segments: &head.recent_segments,
         },
     )
     .await

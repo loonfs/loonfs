@@ -107,21 +107,22 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             // Maintenance head update.
             //
             // Advancing retention_floor_seq is a metadata-retention decision. It
-            // preserves writer_epoch and writer_lease and is serialized by head
-            // CAS. It must not make new WAL visible and must not delete
+            // preserves writer_epoch and the writer block and is serialized by
+            // head CAS. It must not make new WAL visible and must not delete
             // checkpoint-reachable files by itself.
             let next_head = HeadState {
                 namespace_id: head.namespace_id.clone(),
                 seq: head.seq,
                 head_commit_id: head.head_commit_id.clone(),
                 writer_epoch: head.writer_epoch,
-                writer_lease: head.writer_lease.clone(),
+                writer: head.writer.clone(),
                 next_inode_id: head.next_inode_id,
                 name_policy: head.name_policy,
                 current_manifest_id: head.current_manifest_id,
                 latest_checkpoint_id: head.latest_checkpoint_id.clone(),
                 retention_floor_seq: target_floor,
                 visible_wal_tip: head.visible_wal_tip.clone(),
+                recent_segments: head.recent_segments.clone(),
                 state: head.state,
             };
             Ok(HeadUpdate::Replace {

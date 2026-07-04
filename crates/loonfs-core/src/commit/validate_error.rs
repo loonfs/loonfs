@@ -161,19 +161,6 @@ pub enum CommitValidationError {
         active: WriterEpoch,
         requested: WriterEpoch,
     },
-    MissingWriterLease,
-    WriterLeaseHolderMismatch {
-        expected: String,
-        actual: String,
-    },
-    WriterLeaseSessionMismatch {
-        expected: String,
-        actual: String,
-    },
-    WriterLeaseExpired {
-        lease_expires_at_ms: u64,
-        now_ms: u64,
-    },
     ValidatedPreviewApplyFailed(String),
     SeqOverflow,
     NextInodeOverflow,

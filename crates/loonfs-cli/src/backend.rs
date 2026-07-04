@@ -15,8 +15,6 @@ use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use std::future::Future;
 use std::sync::Arc;
 
-const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
-
 pub(crate) trait Backend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError>;
     fn delete_namespace(
@@ -569,13 +567,11 @@ impl ResolvedTarget {
                 store,
                 writer_id,
                 writer_version,
-                lease_duration_ms,
                 ..
             } => Ok(Self::Embedded(Box::new(EmbeddedTarget::new(
                 store,
                 writer_id.as_deref(),
                 writer_version.as_deref(),
-                *lease_duration_ms,
             )?))),
             ProfileConfig::Remote {
                 server_url,
@@ -609,7 +605,6 @@ impl EmbeddedTarget {
         store_config: &StoreConfig,
         writer_id: Option<&str>,
         writer_version: Option<&str>,
-        lease_duration_ms: Option<u64>,
     ) -> Result<Self, CliError> {
         let store = store_config.object_store()?;
         let store: SharedObjectStore = Arc::new(store);
@@ -622,7 +617,6 @@ impl EmbeddedTarget {
                 writer_version: writer_version
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
-                lease_duration_ms: lease_duration_ms.unwrap_or(DEFAULT_LEASE_DURATION_MS),
                 runtime_cache: RuntimeCacheConfig::default(),
                 trace_mode: TraceMode::Embedded,
                 trace_store_kind: trace_store_kind(store_config),
@@ -666,7 +660,7 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_core_error, Backend, EmbeddedTarget, DEFAULT_LEASE_DURATION_MS};
+    use super::{map_core_error, Backend, EmbeddedTarget};
     use crate::config::StoreConfig;
     use loonfs::CoreError;
     use loonfs_api::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
@@ -687,44 +681,13 @@ mod tests {
     }
 
     #[test]
-    fn embedded_target_uses_five_second_default_lease_when_unset() {
-        let temp_dir = tempdir().expect("create temp dir");
-        let store = StoreConfig::LocalFs {
-            root: temp_dir.path().display().to_string(),
-            key_prefix: None,
-        };
-
-        let target = EmbeddedTarget::new(&store, None, None, None).expect("build embedded target");
-
-        assert_eq!(
-            target.backend.fs.config().lease_duration_ms,
-            DEFAULT_LEASE_DURATION_MS
-        );
-        assert_eq!(target.backend.fs.config().lease_duration_ms, 5_000);
-    }
-
-    #[test]
-    fn embedded_target_preserves_explicit_lease_duration() {
-        let temp_dir = tempdir().expect("create temp dir");
-        let store = StoreConfig::LocalFs {
-            root: temp_dir.path().display().to_string(),
-            key_prefix: None,
-        };
-
-        let target =
-            EmbeddedTarget::new(&store, None, None, Some(12_345)).expect("build embedded target");
-
-        assert_eq!(target.backend.fs.config().lease_duration_ms, 12_345);
-    }
-
-    #[test]
     fn embedded_backend_generates_non_empty_commit_id_for_embedded_put() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = EmbeddedTarget::new(&store, None, None, None).expect("build embedded target");
+        let target = EmbeddedTarget::new(&store, None, None).expect("build embedded target");
         target
             .backend
             .create_namespace("demo")

@@ -15,7 +15,7 @@ use loonfs_api::{
         decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
         ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope,
         NamespaceConfigState, NamespaceGcPinStateEnvelope, UploadSessionEnvelope,
-        UploadSessionState, WriterLease,
+        UploadSessionState, WriterBlock,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
@@ -39,7 +39,7 @@ use loonfs_core::publish::{
 };
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    MutationContext, NamespaceEngine, Settings, WriteOptions,
+    MutationContext, NamespaceEngine, WriteOptions,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
@@ -54,7 +54,6 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
 use tempfile::tempdir;
 
 #[derive(Debug, Clone)]
@@ -80,9 +79,6 @@ fn namespace_engine<'a, S: ObjectStore + ?Sized>(
         .writer(context.writer_id.clone())
         .writer_session_id(context.writer_session_id.clone())
         .writer_version(context.writer_version.clone())
-        .settings(Settings {
-            writer_lease_duration: Duration::from_millis(context.lease_duration_ms),
-        })
         .build()
         .expect("test context should build namespace engine")
 }
@@ -2977,18 +2973,11 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
 
     let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
         .expect("writer a commit");
-    let writer_a_lease_expires_at_ms = block_on(load_namespace_head_control(&store, &namespace_id))
-        .expect("load writer a head")
-        .state
-        .writer_lease
-        .expect("writer a lease")
-        .lease_expires_at_ms;
     let writer_b = MutationContext {
         writer_id: "writer-b".to_owned(),
         writer_session_id: "wrs-writer-b".to_owned(),
         writer_version: "writer-b/0.1.0".to_owned(),
-        now_ms: writer_a_lease_expires_at_ms.saturating_add(1),
-        lease_duration_ms: writer_a.lease_duration_ms,
+        now_ms: writer_a.now_ms.saturating_add(1),
     };
 
     let retry =
@@ -4875,10 +4864,10 @@ fn validation_context(
         seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         writer_epoch: WriterEpoch(1),
-        writer_lease: Some(WriterLease {
+        writer: Some(WriterBlock {
             writer_id: "writer-a".to_owned(),
             writer_session_id: "wrs_test".to_owned(),
-            lease_expires_at_ms: 10_000,
+            acquired_at_ms: 1_000,
         }),
         next_inode_id,
         name_policy: loonfs_api::NamePolicy::default(),
@@ -4888,11 +4877,11 @@ fn validation_context(
         ),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
+        recent_segments: Vec::new(),
         state: Default::default(),
     };
     CommitValidationContext {
         head,
-        now_ms: 1_000,
         metadata_state,
     }
 }
@@ -4903,7 +4892,6 @@ fn mutation_context() -> MutationContext {
         writer_session_id: "wrs_test".to_owned(),
         writer_version: "writer-a/0.1.0".to_owned(),
         now_ms: 1_000,
-        lease_duration_ms: 60_000,
     }
 }
 

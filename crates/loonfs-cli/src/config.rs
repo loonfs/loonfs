@@ -36,8 +36,6 @@ pub(crate) enum ProfileConfig {
         writer_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writer_version: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lease_duration_ms: Option<u64>,
     },
     Remote {
         server_url: String,
@@ -204,13 +202,11 @@ impl ProfileConfig {
                 default_namespace,
                 writer_id,
                 writer_version,
-                lease_duration_ms,
             } => ProfileConfig::Embedded {
                 store: store.redacted(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
                 writer_version: writer_version.clone(),
-                lease_duration_ms: *lease_duration_ms,
             },
             ProfileConfig::Remote {
                 server_url,

@@ -133,13 +133,14 @@ pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                 seq: current_head.seq,
                 head_commit_id: current_head.head_commit_id.clone(),
                 writer_epoch: current_head.writer_epoch,
-                writer_lease: current_head.writer_lease.clone(),
+                writer: current_head.writer.clone(),
                 next_inode_id: current_head.next_inode_id,
                 name_policy: current_head.name_policy,
                 current_manifest_id: Some(manifest_id),
                 latest_checkpoint_id: Some(checkpoint_id.clone()),
                 retention_floor_seq: current_head.retention_floor_seq,
                 visible_wal_tip: current_head.visible_wal_tip.clone(),
+                recent_segments: current_head.recent_segments.clone(),
                 state: current_head.state,
             };
             Ok(HeadUpdate::Replace {

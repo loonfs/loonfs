@@ -11,7 +11,7 @@ use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope, NamespaceConfigState,
-    WriterLease,
+    WriterBlock,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, InodeId, InodeKind, ManifestId, NamespaceId,
@@ -112,10 +112,10 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
     let mut initial_head = HeadState::initial(namespace_id.clone());
     initial_head.current_manifest_id = Some(ManifestId(initial_head.seq.0));
-    initial_head.writer_lease = Some(WriterLease {
+    initial_head.writer = Some(WriterBlock {
         writer_id: context.writer_id.clone(),
         writer_session_id: context.writer_session_id.clone(),
-        lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
+        acquired_at_ms: context.now_ms,
     });
     let initial_manifest = build_initial_namespace_manifest(
         store,

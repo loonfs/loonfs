@@ -42,6 +42,11 @@ pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) head_seq: ChangeSeq,
     pub(crate) visible_tip: Option<WalSegmentPointer>,
     pub(crate) stop_after_seq: Option<ChangeSeq>,
+    /// The head's `recent_segments` accelerator, used only to prefetch the
+    /// replay gap concurrently. Chain links stay the sole history
+    /// authority: wrong or missing hints cost a fallback fetch, never
+    /// correctness.
+    pub(crate) recent_segments: &'a [WalSegmentPointer],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

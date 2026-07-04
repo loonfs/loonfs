@@ -1,26 +1,4 @@
 use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
-use std::time::Duration;
-
-/// User-tweakable namespace engine settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Settings {
-    /// How long this writer's namespace lease should remain valid.
-    pub writer_lease_duration: Duration,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            writer_lease_duration: Duration::from_millis(5_000),
-        }
-    }
-}
-
-impl Settings {
-    pub(crate) fn writer_lease_duration_ms(self) -> u64 {
-        u64::try_from(self.writer_lease_duration.as_millis()).unwrap_or(u64::MAX)
-    }
-}
 
 /// Options for namespace bootstrap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

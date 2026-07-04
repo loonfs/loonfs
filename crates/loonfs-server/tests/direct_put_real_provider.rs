@@ -25,7 +25,6 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
         content_token_secret: CONTENT_TOKEN_SECRET.to_owned(),
         writer_id: "direct-put-aws-s3".to_owned(),
         writer_version: "direct-put-aws-s3/0.1.0".to_owned(),
-        lease_duration_ms: 60_000,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         store: StoreConfig::AwsS3 {
             bucket: config.bucket,
@@ -52,7 +51,6 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
         content_token_secret: CONTENT_TOKEN_SECRET.to_owned(),
         writer_id: "direct-put-r2".to_owned(),
         writer_version: "direct-put-r2/0.1.0".to_owned(),
-        lease_duration_ms: 60_000,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         store: StoreConfig::CloudflareR2 {
             bucket: config.bucket,

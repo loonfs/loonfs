@@ -181,7 +181,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
-| `lease_conflict` | 409 | Another writer holds the namespace lease. |
+| `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed. |

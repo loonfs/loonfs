@@ -82,6 +82,5 @@ pub(crate) enum ValidatedOp {
 #[derive(Debug, Clone)]
 pub struct CommitValidationContext<'a> {
     pub head: HeadState,
-    pub now_ms: u64,
     pub metadata_state: &'a MetadataState,
 }

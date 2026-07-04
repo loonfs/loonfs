@@ -57,7 +57,7 @@ pub enum ErrorCode {
     StaleHead,
     StaleRevision,
     TombstoneConflict,
-    LeaseConflict,
+    WriterFenced,
     WouldCycle,
     CommitIdReuseConflict,
     CommitOutcomeUnknown,
@@ -89,7 +89,7 @@ impl ErrorCode {
         ErrorCode::StaleHead,
         ErrorCode::StaleRevision,
         ErrorCode::TombstoneConflict,
-        ErrorCode::LeaseConflict,
+        ErrorCode::WriterFenced,
         ErrorCode::WouldCycle,
         ErrorCode::CommitIdReuseConflict,
         ErrorCode::CommitOutcomeUnknown,
@@ -127,7 +127,7 @@ impl ErrorCode {
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::TombstoneConflict
-            | ErrorCode::LeaseConflict
+            | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::UploadAlreadyCompleted
@@ -152,7 +152,7 @@ impl ErrorCode {
             ErrorCode::StaleHead => "stale_head",
             ErrorCode::StaleRevision => "stale_revision",
             ErrorCode::TombstoneConflict => "tombstone_conflict",
-            ErrorCode::LeaseConflict => "lease_conflict",
+            ErrorCode::WriterFenced => "writer_fenced",
             ErrorCode::WouldCycle => "would_cycle",
             ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
             ErrorCode::CommitOutcomeUnknown => "commit_outcome_unknown",

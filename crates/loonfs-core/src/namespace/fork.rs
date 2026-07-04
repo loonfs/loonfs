@@ -14,7 +14,7 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
     NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
-    NamespaceGcPinStateEnvelope, NamespaceState, WriterLease,
+    NamespaceGcPinStateEnvelope, NamespaceState, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
@@ -83,10 +83,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         seq: fork_seq,
         head_commit_id: source_head_commit_id.clone(),
         writer_epoch: WriterEpoch(0),
-        writer_lease: Some(WriterLease {
+        writer: Some(WriterBlock {
             writer_id: context.writer_id.clone(),
             writer_session_id: context.writer_session_id.clone(),
-            lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
+            acquired_at_ms: context.now_ms,
         }),
         next_inode_id: source_manifest.payload.next_inode_id,
         name_policy: source_manifest.payload.name_policy,
@@ -94,6 +94,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         latest_checkpoint_id: Some(target_checkpoint_id.clone()),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
+        recent_segments: Vec::new(),
         state: NamespaceState::Active,
     };
     let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(

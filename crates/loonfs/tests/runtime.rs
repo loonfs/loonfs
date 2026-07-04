@@ -381,7 +381,6 @@ fn open_validates_runtime_config() {
             FsConfig {
                 writer_id: "   ".to_owned(),
                 writer_version: "runtime-test/0.1.0".to_owned(),
-                lease_duration_ms: 5_000,
                 runtime_cache: RuntimeCacheConfig::default(),
                 trace_mode: TraceMode::Embedded,
                 trace_store_kind: TraceStoreKind::LocalFs,
@@ -391,31 +390,16 @@ fn open_validates_runtime_config() {
     );
     assert_config_error(
         Fs::open(
-            object_store.clone(),
+            object_store,
             FsConfig {
                 writer_id: "runtime-test".to_owned(),
                 writer_version: "   ".to_owned(),
-                lease_duration_ms: 5_000,
                 runtime_cache: RuntimeCacheConfig::default(),
                 trace_mode: TraceMode::Embedded,
                 trace_store_kind: TraceStoreKind::LocalFs,
             },
         ),
         "writer_version",
-    );
-    assert_config_error(
-        Fs::open(
-            object_store,
-            FsConfig {
-                writer_id: "runtime-test".to_owned(),
-                writer_version: "runtime-test/0.1.0".to_owned(),
-                lease_duration_ms: 0,
-                runtime_cache: RuntimeCacheConfig::default(),
-                trace_mode: TraceMode::Embedded,
-                trace_store_kind: TraceStoreKind::LocalFs,
-            },
-        ),
-        "lease_duration_ms",
     );
 }
 

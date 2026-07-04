@@ -7,7 +7,6 @@ use crate::config::{default_writer_version, validate_config};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::DEFAULT_LEASE_DURATION_MS;
 use crate::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
@@ -85,7 +84,6 @@ pub struct FsBuilder {
     store: SharedObjectStore,
     writer_id: Option<String>,
     writer_version: String,
-    lease_duration_ms: u64,
     runtime_cache: RuntimeCacheConfig,
     trace_mode: TraceMode,
     trace_store_kind: TraceStoreKind,
@@ -99,7 +97,6 @@ impl FsBuilder {
             store,
             writer_id: None,
             writer_version: default_writer_version(),
-            lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
             trace_mode: TraceMode::Embedded,
             trace_store_kind: TraceStoreKind::Unknown,
@@ -116,12 +113,6 @@ impl FsBuilder {
     /// Sets the writer version used in mutation context.
     pub fn writer_version(mut self, writer_version: impl Into<String>) -> Self {
         self.writer_version = writer_version.into();
-        self
-    }
-
-    /// Sets the lease duration for write operations.
-    pub fn lease_duration_ms(mut self, lease_duration_ms: u64) -> Self {
-        self.lease_duration_ms = lease_duration_ms;
         self
     }
 
@@ -170,7 +161,6 @@ impl FsBuilder {
             FsConfig {
                 writer_id,
                 writer_version: self.writer_version,
-                lease_duration_ms: self.lease_duration_ms,
                 runtime_cache: self.runtime_cache,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
@@ -1294,11 +1284,6 @@ impl Fs {
             .writer(self.inner.config.writer_id.clone())
             .writer_session_id(self.inner.writer_session_id.clone())
             .writer_version(self.inner.config.writer_version.clone())
-            .settings(loonfs_core::Settings {
-                writer_lease_duration: std::time::Duration::from_millis(
-                    self.inner.config.lease_duration_ms,
-                ),
-            })
             .build()
             .expect("validated runtime config should build namespace engine")
     }
@@ -1309,7 +1294,6 @@ impl Fs {
             writer_session_id: self.inner.writer_session_id.clone(),
             writer_version: self.inner.config.writer_version.clone(),
             now_ms: current_time_ms(),
-            lease_duration_ms: self.inner.config.lease_duration_ms,
         }
     }
 }

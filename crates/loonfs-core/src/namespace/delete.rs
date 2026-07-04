@@ -3,7 +3,7 @@
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::control::read_head_object;
-use crate::namespace::writer_epoch::{acquire_writer_epoch, WriterEpochAcquireError};
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -63,15 +63,15 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         // The epoch is the fence: any takeover bumps it, so a mismatch means
         // another writer owns the namespace and this delete must not land.
         if head.writer_epoch != acquired_writer.writer_epoch {
-            return Err(match &head.writer_lease {
-                Some(lease) => CoreError::WriterEpoch(WriterEpochAcquireError::HeldByOtherWriter {
-                    writer_id: lease.writer_id.clone(),
-                    lease_expires_at_ms: lease.lease_expires_at_ms,
-                }),
-                None => CoreError::NamespaceCorrupt(
-                    "namespace head advanced its writer epoch without an active lease".to_owned(),
-                ),
-            });
+            let winner = head
+                .writer
+                .as_ref()
+                .map(|writer| writer.writer_id.as_str())
+                .unwrap_or("unknown");
+            return Err(CoreError::WriterFenced(format!(
+                "delete with epoch {} was fenced by epoch {} (writer `{winner}`)",
+                acquired_writer.writer_epoch.0, head.writer_epoch.0
+            )));
         }
 
         if let Some(expected) = options.expected_head_seq {

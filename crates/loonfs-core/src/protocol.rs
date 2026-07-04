@@ -5,8 +5,9 @@ use crate::commit::{
     build_commit_plan_for_publish, commit_request_from_v0, core_commit_fingerprint,
     materialize_commit, prepare_commit_head_publish, publish_commit_head,
     resolve_restore_content_refs_for_publish, wal_payload_from_materialized_commit,
-    CommitExecutionContext, CommitIdentitySource, CommitOp, CommitRequest as CoreCommitRequest,
-    MaterializedCommit, PreparedCommit, PublishCommitValidationContext, SemanticMutationIdentity,
+    CommitExecutionContext, CommitHeadPublishError, CommitIdentitySource, CommitOp,
+    CommitRequest as CoreCommitRequest, MaterializedCommit, PreparedCommit,
+    PublishCommitValidationContext, SemanticMutationIdentity,
 };
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
@@ -30,6 +31,7 @@ use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::{
     validate_durable_content_reference, write_immutable_object, ContentValidationTracker,
 };
+use crate::timing::MonotonicTimer;
 use crate::wal::{
     load_validated_wal_chain, prepare_wal_segment, project_validated_wal_tail, WalChainLoadRequest,
 };
@@ -609,12 +611,16 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .map(|_| Err(CoreError::from(error.clone())))
             .collect();
     }
+    // One-shot path: each call is its own writer-session decision, so a
+    // fresh budget timer per call is correct.
+    let timer = crate::timing::StdMonotonicTimer::default();
     publish_namespace_mutations_batch_against_publish_view(
         store,
         namespace_id,
         &candidates,
         context,
         &publish_view,
+        &timer,
     )
     .await
     .results
@@ -708,18 +714,16 @@ fn ensure_publish_head_matches_acquired_writer(
     head: &HeadState,
     acquired_writer: &AcquiredWriter,
 ) -> Result<(), CoreError> {
-    let Some(lease) = &head.writer_lease else {
-        return Err(CoreError::NamespaceCorrupt(
-            "namespace head is missing active writer lease after epoch acquisition".to_owned(),
-        ));
-    };
-    if head.writer_epoch != acquired_writer.writer_epoch
-        || lease.writer_id != acquired_writer.writer_id
-        || lease.writer_session_id != acquired_writer.writer_session_id
-    {
-        return Err(CoreError::Store(
-            "loaded namespace head does not match acquired writer epoch".to_owned(),
-        ));
+    if head.writer_epoch != acquired_writer.writer_epoch {
+        let winner = head
+            .writer
+            .as_ref()
+            .map(|writer| writer.writer_id.as_str())
+            .unwrap_or("unknown");
+        return Err(CoreError::WriterFenced(format!(
+            "writer epoch {} was fenced by epoch {} (writer `{winner}`)",
+            acquired_writer.writer_epoch.0, head.writer_epoch.0
+        )));
     }
     Ok(())
 }
@@ -742,6 +746,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
+            recent_segments: &head.recent_segments,
         },
     )
     .await
@@ -835,6 +840,13 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
+/// Self-enforced budget between starting the WAL segment PUT and initiating
+/// the head CAS. Sized so budget + request timeout sit well inside the GC
+/// grace window; overrunning it abandons the segment instead of publishing a
+/// stale-timed one. Local monotonic elapsed time only — never a validity
+/// input (format spec, "WAL head").
+pub(crate) const PUBLISH_BUDGET_MS: u64 = 60_000;
+
 pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
@@ -843,6 +855,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     candidates: &[NamespaceMutationCandidate],
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
+    timer: &dyn MonotonicTimer,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::new(Vec::new());
@@ -892,7 +905,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             };
             let validation = PublishCommitValidationContext {
                 head: session.head(),
-                now_ms: context.now_ms,
                 metadata_view: view.metadata_view(),
                 accepted_rows: session.accepted_rows(),
             };
@@ -1010,6 +1022,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         key_class = "wal_segment",
         result = tracing::field::Empty
     );
+    let put_started_ms = timer.monotonic_now_ms();
     let wal_result: Result<_, CoreError> = {
         let _span = wal_span.enter();
         match prepare_wal_segment(
@@ -1061,6 +1074,17 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             );
         }
     };
+    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
+    if elapsed_ms > PUBLISH_BUDGET_MS {
+        let error = CoreError::HeadPublish(CommitHeadPublishError::PublishBudgetExceeded {
+            elapsed_ms,
+            budget_ms: PUBLISH_BUDGET_MS,
+        });
+        fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
+        return PublishBatchAgainstViewResult::invalidate_projection(
+            finish_batch_outcomes_with_aliases(outcomes, &aliases),
+        );
+    }
     let head_cas_span = tracing::info_span!(
         "publisher.batch_cas_head",
         phase = "batch_cas_head",
@@ -1344,6 +1368,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: Some(after_seq),
+            recent_segments: &head.recent_segments,
         },
     )
     .await
