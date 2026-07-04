@@ -136,7 +136,7 @@ pub enum MetadataViewError {
         reason: String,
     },
     #[error(
-        "metadata snapshot `{requested_seq:?}` is outside available range `{snapshot_floor_seq:?}`..=`{head_seq:?}`"
+        "the cursor's snapshot (seq {requested_seq:?}) is no longer available (retained range {snapshot_floor_seq:?}..={head_seq:?}); restart the listing"
     )]
     SnapshotUnavailable {
         requested_seq: ChangeSeq,
@@ -315,8 +315,11 @@ fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
     match error {
         MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
         MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
+        // A well-formed cursor whose snapshot aged out is a state condition,
+        // not a malformed request: the client's recovery is to restart the
+        // listing, same as a sub-floor change cursor.
         MetadataViewError::SnapshotUnavailable { .. }
-        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::InvalidRequest,
+        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::RebootstrapRequired,
         MetadataViewError::ManifestChangedDuringViewLoad { .. } => ErrorCode::StaleHead,
     }
 }
@@ -578,14 +581,14 @@ mod tests {
                     snapshot_floor_seq: ChangeSeq(2),
                     head_seq,
                 },
-                ErrorCode::InvalidRequest,
+                ErrorCode::RebootstrapRequired,
             ),
             (
                 MetadataViewError::UnsupportedHistoricalRead {
                     requested_seq: ChangeSeq(2),
                     head_seq,
                 },
-                ErrorCode::InvalidRequest,
+                ErrorCode::RebootstrapRequired,
             ),
             (
                 MetadataViewError::ManifestChangedDuringViewLoad {

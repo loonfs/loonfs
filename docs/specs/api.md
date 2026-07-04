@@ -157,11 +157,12 @@ and names the capability-document key the client should reconcile against.
 Clients must branch on `code`, must tolerate codes they do not recognize, and
 must not parse `message`.
 
-Two codes exist specifically so capability handling is uniform from day one:
+One code exists specifically so capability handling is uniform from day one:
 
 - `not_supported` (HTTP 501): the deployment does not implement the requested
   op or feature. Any op may return it; a client maps the error to its
   `feature` key and disables or degrades that code path.
+
 The full registry (`ErrorCode` in `loonfs-api`):
 
 | Code | HTTP status | Meaning |
@@ -185,7 +186,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
-| `rebootstrap_required` | 409 | The change cursor is older than the retention floor. |
+| `rebootstrap_required` | 409 | The resume position — a change cursor or listing snapshot — is no longer available; restart from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |

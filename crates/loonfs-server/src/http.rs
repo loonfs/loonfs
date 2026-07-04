@@ -376,7 +376,7 @@ async fn delete_namespace_handler(
 async fn create_namespace(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateNamespaceRequest>,
+    AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(request.namespace_id)?;
@@ -412,7 +412,7 @@ async fn fork_namespace_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<ForkNamespaceRequest>,
+    AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let source_namespace_id = parse_namespace_id(namespace)?;
@@ -760,7 +760,7 @@ async fn restore_inode_revision(
     State(state): State<AppState>,
     AxumPath((namespace, inode_id, source_revision_no)): AxumPath<(String, String, String)>,
     headers: HeaderMap,
-    Json(request): Json<RestoreFileRevisionRequest>,
+    AppJson(request): AppJson<RestoreFileRevisionRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -812,7 +812,7 @@ async fn filesystem_operation(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<FilesystemOperationRequest>,
+    AppJson(request): AppJson<FilesystemOperationRequest>,
 ) -> Result<Json<FilesystemOperationResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -947,11 +947,11 @@ async fn begin_upload_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    request: Option<Json<BeginUploadRequest>>,
+    OptionalAppJson(request): OptionalAppJson<BeginUploadRequest>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
-    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let request = request.unwrap_or_default();
     if request.mode.unwrap_or_default() == UploadMode::DirectPut {
         return begin_direct_put_upload(state, namespace_id, request).await;
     }
@@ -1147,7 +1147,7 @@ async fn complete_upload_handler(
     State(state): State<AppState>,
     AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<CompleteUploadRequest>,
+    AppJson(request): AppJson<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -1193,7 +1193,7 @@ async fn commit_operations_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<ApiCommitRequest>,
+    AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -1513,6 +1513,72 @@ fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
         ErrorCode::InvalidRequest,
         &error.to_string(),
     )
+}
+
+/// A `Json` extractor whose rejections stay inside the error contract:
+/// malformed bodies answer 400 with an `invalid_request` `ApiError` body
+/// instead of the raw framework rejection.
+struct AppJson<T>(T);
+
+#[axum::async_trait]
+impl<S, T> axum::extract::FromRequest<S> for AppJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(AppJson(value)),
+            Err(rejection) => Err(ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &rejection.body_text(),
+            )),
+        }
+    }
+}
+
+/// Like [`AppJson`], but an absent (empty) body is `None` rather than an
+/// error, while a present-but-malformed body still answers 400 in-envelope.
+struct OptionalAppJson<T>(Option<T>);
+
+const MAX_OPTIONAL_JSON_BODY_BYTES: usize = 1024 * 1024;
+
+#[axum::async_trait]
+impl<S, T> axum::extract::FromRequest<S> for OptionalAppJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let body = axum::body::to_bytes(req.into_body(), MAX_OPTIONAL_JSON_BODY_BYTES)
+            .await
+            .map_err(|error| {
+                ApiResponseError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidRequest,
+                    &format!("request body unreadable: {error}"),
+                )
+            })?;
+        if body.is_empty() {
+            return Ok(OptionalAppJson(None));
+        }
+        let value = serde_json::from_slice(&body).map_err(|error| {
+            ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &format!("request body is not valid JSON for this operation: {error}"),
+            )
+        })?;
+        Ok(OptionalAppJson(Some(value)))
+    }
 }
 
 struct ApiResponseError {
