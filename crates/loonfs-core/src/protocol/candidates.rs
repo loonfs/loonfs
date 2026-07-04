@@ -7,11 +7,11 @@ use crate::commit::{
     commit_request_from_v0, core_commit_fingerprint, CommitExecutionContext, CommitIdentitySource,
     CommitOp, CommitRequest as CoreCommitRequest, SemanticMutationIdentity,
 };
+use crate::commit_engine::NamespaceMutationCandidate;
 use crate::content::ContentAdmission;
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
-use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::ContentValidationTracker;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};

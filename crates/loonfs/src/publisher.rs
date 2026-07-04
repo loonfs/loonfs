@@ -1,11 +1,38 @@
-use loonfs::content_tokens::ContentAdmission;
-use loonfs::publish::{
-    CommitHeadPublishError, NamespaceMutationCandidate, PathMutationIntent,
-    SemanticMutationIdentity,
-};
-use loonfs::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, RuntimeError};
+//! Opt-in concurrent-write front-end for the embedded runtime.
+//!
+//! [`PublisherRegistry`] funnels every mutation for a namespace through one
+//! per-namespace publisher that:
+//!
+//! - coalesces concurrent requests into a single batched publication (one
+//!   WAL segment, one head compare-and-swap),
+//! - deduplicates resubmissions by commit id — a duplicate joins the
+//!   in-flight request, while reusing a commit id for semantically
+//!   different contents is rejected,
+//! - sequences namespace deletion as a barrier: work admitted before the
+//!   delete publishes first, work admitted after it fails once the delete
+//!   succeeds,
+//! - retries stale-head and unknown-outcome compare-and-swap results with
+//!   the same commit ids, so durable receipts replay instead of surfacing
+//!   ambiguity, and
+//! - paces successive head compare-and-swap attempts per namespace.
+//!
+//! Use it when one process hosts many concurrent writers to the same
+//! namespaces: the reference server constructs a registry over its shared
+//! [`Fs`], and an embedded host with many in-process writer agents can do
+//! exactly the same. A solo writer does not need it — the direct [`Fs`]
+//! mutation methods publish immediately, while this front-end deliberately
+//! trades latency for batching: every submission waits out a 100ms
+//! coalescing window (`COALESCING_DELAY`) so concurrent requests share one
+//! publication, and publications for one namespace are paced at least 1s
+//! apart (`MIN_NAMESPACE_CAS_INTERVAL`) so hot namespaces amortize work
+//! into larger batches instead of thrashing head compare-and-swaps.
+
+use crate::content_tokens::ContentAdmission;
+use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
+use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Notify};
@@ -26,21 +53,29 @@ async fn coalescing_delay() {
     tokio::time::sleep(COALESCING_DELAY).await;
 }
 
+/// Shared front door to the per-namespace publishers of one [`Fs`].
+///
+/// Cloning is cheap; clones share the same per-namespace publishers, so
+/// every writer in the process should submit through clones of one
+/// registry.
 #[derive(Clone)]
-pub(crate) struct PublisherRegistry {
+pub struct PublisherRegistry {
     inner: Arc<Mutex<HashMap<NamespaceId, NamespacePublisher>>>,
     fs: Arc<Fs>,
 }
 
 impl PublisherRegistry {
-    pub(crate) fn new(fs: Arc<Fs>) -> Self {
+    /// Creates a registry whose publishers submit batches through `fs`.
+    pub fn new(fs: Arc<Fs>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             fs,
         }
     }
 
-    pub(crate) async fn submit_commit(
+    /// Submits one explicit semantic commit request through the
+    /// namespace's publisher.
+    pub async fn submit_commit(
         &self,
         namespace_id: NamespaceId,
         request: ApiCommitRequest,
@@ -49,7 +84,9 @@ impl PublisherRegistry {
             .await
     }
 
-    pub(crate) async fn submit_path_intent(
+    /// Submits one path-level mutation intent through the namespace's
+    /// publisher.
+    pub async fn submit_path_intent(
         &self,
         namespace_id: NamespaceId,
         intent: PathMutationIntent,
@@ -58,7 +95,9 @@ impl PublisherRegistry {
             .await
     }
 
-    pub(crate) async fn submit_path_intent_with_content_admission(
+    /// Submits a path-level mutation intent together with the content
+    /// admissions vouching for its already-validated direct-put content.
+    pub async fn submit_path_intent_with_content_admission(
         &self,
         namespace_id: NamespaceId,
         intent: PathMutationIntent,
@@ -71,7 +110,10 @@ impl PublisherRegistry {
         .await
     }
 
-    pub(crate) async fn submit_delete(
+    /// Submits a namespace deletion, sequenced as a barrier: mutations
+    /// admitted before it publish first, and mutations admitted after it
+    /// fail once the delete succeeds.
+    pub async fn submit_delete(
         &self,
         namespace_id: NamespaceId,
         options: DeleteNamespaceOptions,
@@ -750,9 +792,7 @@ fn is_retryable_head_publish(result: &CommitResult) -> bool {
     matches!(
         result,
         Err(CoreError::HeadPublish(
-            CommitHeadPublishError::StaleHead
-                | CommitHeadPublishError::PublishBudgetExceeded { .. }
-                | CommitHeadPublishError::OutcomeUnknown(_)
+            CommitHeadPublishError::StaleHead | CommitHeadPublishError::OutcomeUnknown(_)
         ))
     )
 }
@@ -763,7 +803,6 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
         RuntimeError::Bootstrap(error) => CoreError::Internal(error.to_string()),
         RuntimeError::Config(message) => CoreError::Internal(message),
         RuntimeError::RuntimeTask(message) => CoreError::Internal(message),
-        other => CoreError::Internal(other.to_string()),
     }
 }
 
@@ -820,19 +859,18 @@ mod tests {
     // Publisher tests use panic in async result helpers for precise diagnostics.
 
     use super::*;
-    use crate::config::{RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
+    use crate::{
+        BeginUploadRequest, CreateNamespaceOptions, ErrorCode, FsConfig, RuntimeCacheConfig,
+        SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
+    };
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::BoxStream;
-    use loonfs::{
-        BeginUploadRequest, CreateNamespaceOptions, ErrorCode, Fs, FsConfig, RuntimeCacheConfig,
-        SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
-    };
     use loonfs_api::v0::{CommitOp, CommitRequest};
     use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loonfs_api::{ChangeSeq, InodeId, PutBehavior};
     use loonfs_objectstore::fs::LocalFsStore;
-    use loonfs_objectstore::keys::wal_head;
+    use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
@@ -1172,28 +1210,13 @@ mod tests {
         }
     }
 
-    fn test_config(root: &Path) -> Arc<ServerConfig> {
-        Arc::new(ServerConfig {
-            bind: "127.0.0.1:0".to_owned(),
-            auth_token: None,
-            content_token_secret: "test-content-token-secret".into(),
-            writer_id: "writer-a".to_owned(),
-            writer_version: "test".to_owned(),
-            runtime_cache: RuntimeCacheConfigOverrides::default(),
-            store: StoreConfig::LocalFs {
-                root: root.display().to_string(),
-                key_prefix: None,
-            },
-        })
-    }
-
-    fn test_fs(store: SharedStore, config: &ServerConfig) -> Arc<Fs> {
+    fn test_fs(store: SharedStore) -> Arc<Fs> {
         Arc::new(
             Fs::open(
                 store,
                 FsConfig {
-                    writer_id: config.writer_id.clone(),
-                    writer_version: config.writer_version.clone(),
+                    writer_id: "writer-a".to_owned(),
+                    writer_version: "test".to_owned(),
                     runtime_cache: RuntimeCacheConfig::default(),
                     trace_mode: TraceMode::Remote,
                     trace_store_kind: TraceStoreKind::LocalFs,
@@ -1290,8 +1313,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared.clone(), &config);
+        let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1332,7 +1354,7 @@ mod tests {
         assert_eq!(pending_response.committed_seq, ChangeSeq(2));
 
         let wal_keys = shared
-            .list_prefix("namespaces/demo/wal/segments/")
+            .list_prefix(&wal_segment_prefix("demo"))
             .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 2);
@@ -1344,8 +1366,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared.clone(), &config);
+        let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1385,8 +1406,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared.clone(), &config);
+        let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1452,8 +1472,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared.clone(), &config);
+        let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1491,8 +1510,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(LostHeadCasAckStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared, &config);
+        let fs = test_fs(shared);
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1518,8 +1536,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared.clone(), &config);
+        let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1570,8 +1587,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
-        let config = test_config(temp_dir.path());
-        let fs = test_fs(shared.clone(), &config);
+        let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
@@ -1655,20 +1671,8 @@ mod tests {
     async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let config = Arc::new(ServerConfig {
-            bind: "127.0.0.1:0".to_owned(),
-            auth_token: None,
-            content_token_secret: "test-content-token-secret".into(),
-            writer_id: "writer-a".to_owned(),
-            writer_version: "test".to_owned(),
-            runtime_cache: RuntimeCacheConfigOverrides::default(),
-            store: StoreConfig::LocalFs {
-                root: temp_dir.path().display().to_string(),
-                key_prefix: None,
-            },
-        });
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let fs = test_fs(store.clone(), &config);
+        let fs = test_fs(store.clone());
         create_namespace(&fs, &namespace_id).await;
         let registry = PublisherRegistry::new(fs);
 
@@ -1699,7 +1703,7 @@ mod tests {
         assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(2));
 
         let wal_keys = store
-            .list_prefix("namespaces/demo/wal/segments/")
+            .list_prefix(&wal_segment_prefix("demo"))
             .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 1);
@@ -1709,20 +1713,8 @@ mod tests {
     async fn publisher_batches_explicit_commit_and_path_intent_together() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let config = Arc::new(ServerConfig {
-            bind: "127.0.0.1:0".to_owned(),
-            auth_token: None,
-            content_token_secret: "test-content-token-secret".into(),
-            writer_id: "writer-a".to_owned(),
-            writer_version: "test".to_owned(),
-            runtime_cache: RuntimeCacheConfigOverrides::default(),
-            store: StoreConfig::LocalFs {
-                root: temp_dir.path().display().to_string(),
-                key_prefix: None,
-            },
-        });
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let fs = test_fs(store.clone(), &config);
+        let fs = test_fs(store.clone());
         create_namespace(&fs, &namespace_id).await;
         let upload = fs
             .begin_upload(
@@ -1770,7 +1762,7 @@ mod tests {
         );
 
         let wal_keys = store
-            .list_prefix("namespaces/demo/wal/segments/")
+            .list_prefix(&wal_segment_prefix("demo"))
             .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 1);
