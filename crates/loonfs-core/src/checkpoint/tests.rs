@@ -10,8 +10,8 @@ use super::build::{
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::{
     build_namespace_manifest_from_metadata_state, checkpoint_record_by_id, create_checkpoint,
-    create_checkpoint_with_policy, load_checkpoint_projection_metadata_state,
-    retained_checkpoint_records, ManifestMetadataSource,
+    create_checkpoint_with_policy, drop_rows_below_retention_floor,
+    load_checkpoint_projection_metadata_state, retained_checkpoint_records, ManifestMetadataSource,
 };
 use super::error::ManifestLoadError;
 use super::load::{
@@ -33,7 +33,9 @@ use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::control::read_head_object;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::write::ops::{delete_path, move_path, put_file_bytes, write_file_bytes};
+use crate::path::write::ops::{
+    delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
+};
 use crate::protocol::list_changes_after;
 use crate::MutationContext;
 use async_trait::async_trait;
@@ -48,7 +50,7 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::{
     validate_checkpoint_id, ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId,
-    NamespaceId, PutBehavior,
+    NamespaceId, PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest, wal_segment};
@@ -744,6 +746,187 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
         row,
         MetadataRow::CommitReceipt { committed_seq, .. } if *committed_seq == ChangeSeq(2)
     )));
+}
+
+#[test]
+fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
+    use std::collections::BTreeMap;
+    let bind = |seq: u64, delta: u32| MetadataRow::DirentryBind {
+        parent_inode_id: InodeId(1),
+        name_key: "docs".to_owned(),
+        display_name: "docs".to_owned(),
+        child_inode_id: InodeId(2),
+        bind_seq: ChangeSeq(seq),
+        bind_delta_index: delta,
+    };
+    let unbind = |bind_seq: u64, delta: u32, unbind_seq: u64| MetadataRow::DirentryUnbind {
+        parent_inode_id: InodeId(1),
+        name_key: "docs".to_owned(),
+        child_inode_id: InodeId(2),
+        bind_seq: ChangeSeq(bind_seq),
+        bind_delta_index: delta,
+        unbind_seq: ChangeSeq(unbind_seq),
+        unbind_delta_index: 0,
+    };
+    let mut rows = BTreeMap::new();
+    // bind at seq 1 is visible at the floor (1); the rename that supersedes
+    // it happens above the floor, so bind, unbind, and replacement all stay.
+    rows.insert(
+        ApiMetadataTableFamily::DirentryBinds,
+        vec![bind(1, 0), bind(2, 1)],
+    );
+    rows.insert(
+        ApiMetadataTableFamily::DirentryChildBinds,
+        vec![bind(1, 0), bind(2, 1)],
+    );
+    rows.insert(
+        ApiMetadataTableFamily::DirentryUnbinds,
+        vec![unbind(1, 0, 2)],
+    );
+
+    drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
+
+    assert_eq!(rows[&ApiMetadataTableFamily::DirentryBinds].len(), 2);
+    assert_eq!(rows[&ApiMetadataTableFamily::DirentryChildBinds].len(), 2);
+    assert_eq!(rows[&ApiMetadataTableFamily::DirentryUnbinds].len(), 1);
+}
+
+#[test]
+fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
+    use std::collections::BTreeMap;
+    let bind = |delta: u32| MetadataRow::DirentryBind {
+        parent_inode_id: InodeId(1),
+        name_key: "docs".to_owned(),
+        display_name: "docs".to_owned(),
+        child_inode_id: InodeId(2),
+        bind_seq: ChangeSeq(1),
+        bind_delta_index: delta,
+    };
+    let unbind = MetadataRow::DirentryUnbind {
+        parent_inode_id: InodeId(1),
+        name_key: "docs".to_owned(),
+        child_inode_id: InodeId(2),
+        bind_seq: ChangeSeq(1),
+        bind_delta_index: 0,
+        unbind_seq: ChangeSeq(1),
+        unbind_delta_index: 1,
+    };
+    let mut rows = BTreeMap::new();
+    rows.insert(
+        ApiMetadataTableFamily::DirentryBinds,
+        vec![bind(0), bind(2)],
+    );
+    rows.insert(
+        ApiMetadataTableFamily::DirentryChildBinds,
+        vec![bind(0), bind(2)],
+    );
+    rows.insert(ApiMetadataTableFamily::DirentryUnbinds, vec![unbind]);
+
+    drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
+
+    // Only the delta-2 rebind (the slot's latest) survives; the superseded
+    // delta-0 bind and its spent unbind marker are gone from both families.
+    for family in [
+        ApiMetadataTableFamily::DirentryBinds,
+        ApiMetadataTableFamily::DirentryChildBinds,
+    ] {
+        let kept = &rows[&family];
+        assert_eq!(kept.len(), 1);
+        assert!(matches!(
+            kept[0],
+            MetadataRow::DirentryBind {
+                bind_delta_index: 2,
+                ..
+            }
+        ));
+    }
+    assert!(rows[&ApiMetadataTableFamily::DirentryUnbinds].is_empty());
+}
+
+#[test]
+fn drop_pass_refuses_superseded_bind_without_unbind() {
+    use std::collections::BTreeMap;
+    let bind = |delta: u32| MetadataRow::DirentryBind {
+        parent_inode_id: InodeId(1),
+        name_key: "docs".to_owned(),
+        display_name: "docs".to_owned(),
+        child_inode_id: InodeId(2),
+        bind_seq: ChangeSeq(1),
+        bind_delta_index: delta,
+    };
+    let mut rows = BTreeMap::new();
+    rows.insert(
+        ApiMetadataTableFamily::DirentryBinds,
+        vec![bind(0), bind(1)],
+    );
+
+    let error = drop_rows_below_retention_floor(&mut rows, ChangeSeq(1))
+        .expect_err("superseded live bind must refuse the drop");
+    assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
+}
+
+#[tokio::test]
+async fn restore_below_the_floor_fails_with_revision_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"one\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write one");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"two\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write two");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance floor");
+    for round in 0..9u32 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{round}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+    }
+
+    let error = restore_file_revision(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        RevisionNo(1),
+        &context,
+        None,
+    )
+    .await
+    .expect_err("restoring a reclaimed revision must fail cleanly");
+    assert_eq!(error.code(), crate::error::ErrorCode::RevisionNotFound);
 }
 
 #[tokio::test]

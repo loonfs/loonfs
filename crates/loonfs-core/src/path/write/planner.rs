@@ -270,6 +270,13 @@ fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Rejects planning through a *visible* path component covered by a subtree
+/// tombstone. The walk observes only visible bindings, so its answer cannot
+/// change when compaction drops rows no retained sequence observes: a deleted
+/// (unbound) name simply ends the walk, and recreating it plans as a fresh
+/// subtree. A visible-but-covered component cannot arise from legal writer
+/// histories; hitting one means corrupt state, and failing the plan is the
+/// safe answer.
 async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
@@ -282,7 +289,7 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
         let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
         let Some(bound_child) = view
             .metadata_state
-            .bound_child(current_inode, name_key.as_str())
+            .visible_child(current_inode, name_key.as_str())
             .await?
         else {
             return Ok(());
@@ -300,20 +307,6 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
                 root_inode: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             });
-        }
-        let Some(latest_binding) = view
-            .metadata_state
-            .current_parent_binding_for_child(bound_child.child_inode_id)
-            .await?
-        else {
-            return Ok(());
-        };
-        if latest_binding.parent_inode_id != bound_child.parent_inode_id
-            || latest_binding.name_key != bound_child.name_key
-            || latest_binding.bind_seq != bound_child.bind_seq
-            || latest_binding.bind_delta_index != bound_child.bind_delta_index
-        {
-            return Ok(());
         }
         current_inode = bound_child.child_inode_id;
         current_path = visible_path;
@@ -1139,7 +1132,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tombstoned_ancestor_blocks_descendant_planning() {
+    async fn recreate_after_delete_succeeds_at_the_same_path() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/tmp.txt",
+            b"first",
+            PutBehavior::NoReplace,
+            &context,
+            Some(&CommitId::parse("recreate-seed").expect("valid commit id")),
+        )
+        .await
+        .expect("seed file");
+        delete_path(
+            &store,
+            &namespace_id,
+            "/docs/tmp.txt",
+            &context,
+            Some(&CommitId::parse("recreate-delete").expect("valid commit id")),
+        )
+        .await
+        .expect("delete file");
+
+        // The tombstone covers the dead inode, not the name: the name is
+        // reusable immediately, with or without an intervening rebuild.
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/tmp.txt",
+            b"second",
+            PutBehavior::NoReplace,
+            &context,
+            Some(&CommitId::parse("recreate-put").expect("valid commit id")),
+        )
+        .await
+        .expect("recreate at the deleted path");
+    }
+
+    #[tokio::test]
+    async fn deleted_subtree_names_replan_as_fresh_state() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let seed_commit_id = CommitId::parse("seed-dead-tree").expect("valid commit id");
         put_file_bytes(
@@ -1166,7 +1198,10 @@ mod tests {
         let staged = store_bytes_as_content(&store, &namespace_id, b"new")
             .await
             .expect("stage");
-        let error = try_plan_against_current_state(
+        // The deleted name is invisible, so planning under it starts a
+        // fresh subtree instead of conflicting with the dead one — the same
+        // answer callers get after compaction drops the dead rows.
+        try_plan_against_current_state(
             &store,
             &namespace_id,
             &PathMutationIntent::PutFile {
@@ -1177,8 +1212,6 @@ mod tests {
             },
         )
         .await
-        .expect_err("tombstoned ancestor");
-
-        assert_eq!(error.code(), ErrorCode::TombstoneConflict);
+        .expect("recreating a deleted subtree plans as fresh state");
     }
 }

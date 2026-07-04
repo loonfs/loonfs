@@ -2096,7 +2096,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn http_put_and_move_under_tombstoned_ancestor_return_tombstone_conflict() {
+    async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let now_ms = now_ms();
@@ -2136,22 +2136,27 @@ mod tests {
 
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
+            // The deleted name is invisible and immediately reusable; the
+            // dead subtree's children stay dead.
             let put_target = NamespacePath::parse("demo:/docs/new.txt").expect("put target");
+            harness
+                .client
+                .write_file_bytes(&put_target, b"new")
+                .expect("put recreates the subtree");
+            let old_child = NamespacePath::parse("demo:/docs/old.txt").expect("old child");
             assert_api_error(
-                harness.client.write_file_bytes(&put_target, b"new"),
-                409,
-                "tombstone_conflict",
+                harness.client.stat_path(&old_child),
+                404,
+                "path_not_found",
                 None,
             );
 
             let from = NamespacePath::parse("demo:/tmp/source.txt").expect("from");
             let to = NamespacePath::parse("demo:/docs/source.txt").expect("to");
-            assert_api_error(
-                harness.client.move_path(&from, &to),
-                409,
-                "tombstone_conflict",
-                None,
-            );
+            harness
+                .client
+                .move_path(&from, &to)
+                .expect("move lands in the recreated subtree");
         })
         .await
         .expect("join blocking task");
