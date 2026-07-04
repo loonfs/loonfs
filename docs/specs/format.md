@@ -121,6 +121,23 @@ The namespace tree's lifecycle can be read off its grammar:
 Names are never authority anywhere — recovery follows the head and its
 references.
 
+The load-bearing invariants of this layout, in one place:
+
+> **Live visibility is defined only by `wal/head.json`.** Everything else is
+> a read accelerator, retention boundary, reachability root, or workflow
+> record.
+
+> **Fencing authority is writer epoch plus CAS.** Wall-clock time never
+> gates commit validity, and fenced sessions never reacquire on their own.
+
+> **Nothing correct depends on listing.** GC and floor advancement alone
+> list — under a grace window, with delete-time re-verification, and with
+> retention winning every ambiguous race.
+
+> **Throughput is group commit; deadlines are local monotonic budgets a
+> writer applies to itself.** No validator ever compares clocks, and
+> accelerators (`recent_segments`, WAL indexes) prefetch but never decide.
+
 ### 1.4 Head update authority
 
 The namespace head is updated by different classes of work, and each class has
