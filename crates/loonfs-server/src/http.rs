@@ -1,4 +1,4 @@
-use crate::config::{ServerConfig, ServerConfigError, StoreConfig};
+use crate::config::{ServerConfig, ServerConfigError};
 use crate::publisher::PublisherRegistry;
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -214,7 +214,7 @@ fn build_fs_with_metrics_jsonl_path(
     store: SharedStore,
     metrics_jsonl_path: Option<OsString>,
 ) -> Result<Fs, ServerConfigError> {
-    let trace_store_kind = trace_store_kind(&config.store);
+    let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let mut builder = Fs::builder(store)
         .writer_id(config.writer_id.clone())
         .writer_version(config.writer_version.clone())
@@ -250,16 +250,6 @@ fn object_store_metrics_recorder(
             field: OBJECT_STORE_METRICS_JSONL_ENV,
             reason: error.to_string(),
         })
-}
-
-fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
-    match store {
-        StoreConfig::LocalFs { .. } => TraceStoreKind::LocalFs,
-        StoreConfig::AwsS3 { .. } => TraceStoreKind::S3,
-        StoreConfig::CloudflareR2 { .. } => TraceStoreKind::R2,
-        StoreConfig::GcpGcs { .. } => TraceStoreKind::Gcs,
-        StoreConfig::AzureAbs { .. } => TraceStoreKind::Abs,
-    }
 }
 
 /// Failure starting or running the HTTP server.
@@ -909,7 +899,7 @@ async fn filesystem_operation(
             "loon.put",
             operation = "put",
             mode = "remote",
-            store_kind = trace_store_kind(&state.config.store).as_str(),
+            store_kind = TraceStoreKind::from(state.config.store.kind()).as_str(),
             payload_class,
         );
         async {
@@ -1506,7 +1496,7 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if actual == format!("Bearer {expected}") {
+    if actual == format!("Bearer {}", expected.expose()) {
         Ok(())
     } else {
         Err(ApiResponseError::new(
@@ -2386,8 +2376,8 @@ mod tests {
     fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
-            auth_token: Some("test-token".to_owned()),
-            content_token_secret: "test-content-token-secret".to_owned(),
+            auth_token: Some("test-token".into()),
+            content_token_secret: "test-content-token-secret".into(),
             writer_id: writer_id.to_owned(),
             writer_version: format!("{writer_id}/0.1.0"),
             runtime_cache: RuntimeCacheConfigOverrides::default(),

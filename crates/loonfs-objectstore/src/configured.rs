@@ -24,6 +24,20 @@ pub enum ConfiguredObjectStoreKind {
     AzureAbs,
 }
 
+impl ConfiguredObjectStoreKind {
+    /// Returns the stable kebab-case label, matching the `kind` tag used in
+    /// config files.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalFs => "local-fs",
+            Self::AwsS3 => "aws-s3",
+            Self::CloudflareR2 => "cloudflare-r2",
+            Self::GcpGcs => "gcp-gcs",
+            Self::AzureAbs => "azure-abs",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ConfiguredObjectStore {
     kind: ConfiguredObjectStoreKind,
@@ -316,8 +330,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
-            access_key_id: "access".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
@@ -330,8 +344,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://example.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "debug-access-key".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "debug-access-key".into(),
+            secret_access_key: "secret".into(),
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");
@@ -352,7 +366,7 @@ mod tests {
         let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
             container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.to_owned(),
+            access_key: AZURITE_ACCOUNT_KEY.into(),
             endpoint_url: None,
             key_prefix: Some("tenant-a".to_owned()),
         })
@@ -367,8 +381,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "access".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");
@@ -397,8 +411,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             account_id: "account".to_owned(),
             endpoint_url: "https://account.r2.cloudflarestorage.com".to_owned(),
-            access_key_id: "access".to_owned(),
-            secret_access_key: "debug-secret".to_owned(),
+            access_key_id: "access".into(),
+            secret_access_key: "debug-secret".into(),
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");

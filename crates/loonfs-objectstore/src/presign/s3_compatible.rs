@@ -3,45 +3,28 @@ use crate::presign::aws_sigv4::{
     aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,
     percent_encode_path, percent_encode_segment,
 };
+use crate::secret::SecretString;
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::{ContentRef, ContentRefKind};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fmt::{self, Write as _};
+use std::fmt::Write as _;
 use std::time::SystemTime;
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3PresignerConfig {
     pub bucket: String,
     pub region: String,
     pub endpoint_url: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: Option<SecretString>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
-}
-
-impl fmt::Debug for S3PresignerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("S3PresignerConfig")
-            .field("bucket", &self.bucket)
-            .field("region", &self.region)
-            .field("endpoint_url", &self.endpoint_url)
-            .field("access_key_id", &"<redacted>")
-            .field("secret_access_key", &"<redacted>")
-            .field(
-                "session_token",
-                &self.session_token.as_ref().map(|_| "<redacted>"),
-            )
-            .field("key_prefix", &self.key_prefix)
-            .field("force_path_style", &self.force_path_style)
-            .finish()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,12 +44,12 @@ impl S3CompatiblePresigner {
                 "region must not be empty".to_owned(),
             ));
         }
-        if config.access_key_id.trim().is_empty() {
+        if config.access_key_id.expose().trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "access key id must not be empty".to_owned(),
             ));
         }
-        if config.secret_access_key.trim().is_empty() {
+        if config.secret_access_key.expose().trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "secret access key must not be empty".to_owned(),
             ));
@@ -159,7 +142,11 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             "{}/{}/s3/aws4_request",
             dates.short_date, self.config.region
         );
-        let credential = format!("{}/{}", self.config.access_key_id, credential_scope);
+        let credential = format!(
+            "{}/{}",
+            self.config.access_key_id.expose(),
+            credential_scope
+        );
 
         let mut headers_to_sign = BTreeMap::from([("host".to_owned(), endpoint.host.clone())]);
         for (name, value) in &required_headers {
@@ -187,7 +174,7 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             ("X-Amz-SignedHeaders".to_owned(), signed_headers.clone()),
         ]);
         if let Some(token) = &self.config.session_token {
-            query.insert("X-Amz-Security-Token".to_owned(), token.clone());
+            query.insert("X-Amz-Security-Token".to_owned(), token.expose().to_owned());
         }
         let canonical_query = canonical_query_string(&query);
         let canonical_request = format!(
@@ -200,7 +187,7 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             dates.amz_date, credential_scope, hashed_request
         );
         let signing_key = signing_key(
-            &self.config.secret_access_key,
+            self.config.secret_access_key.expose(),
             &dates.short_date,
             &self.config.region,
         );
@@ -361,8 +348,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
-            access_key_id: "access".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: false,
@@ -407,8 +394,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
-            access_key_id: "debug-access-key".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "debug-access-key".into(),
+            secret_access_key: "secret".into(),
             session_token: None,
             key_prefix: None,
             force_path_style: false,
@@ -441,8 +428,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-2".to_owned(),
             endpoint_url: Some("https://bucket.s3.us-east-2.amazonaws.com".to_owned()),
-            access_key_id: "access".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: false,
@@ -472,9 +459,9 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
-            access_key_id: "access".to_owned(),
-            secret_access_key: "debug-secret".to_owned(),
-            session_token: Some("debug-session-token".to_owned()),
+            access_key_id: "access".into(),
+            secret_access_key: "debug-secret".into(),
+            session_token: Some("debug-session-token".into()),
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: false,
         };

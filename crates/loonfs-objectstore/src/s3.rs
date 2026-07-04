@@ -1,5 +1,6 @@
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::secret::SecretString;
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -10,9 +11,9 @@ pub struct AwsS3StoreConfig {
     pub bucket: String,
     pub region: String,
     pub endpoint_url: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: Option<SecretString>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
 }

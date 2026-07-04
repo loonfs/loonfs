@@ -3,7 +3,6 @@ auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-gcp"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "gcp-gcs"

@@ -16,6 +16,14 @@ pub(crate) fn prompt_line_default(label: &str, default: &str) -> Result<String, 
         .map_err(|err| CliError::io(std::io::Error::other(err)))
 }
 
+/// Prompts for a new secret with hidden input; empty input re-prompts.
+pub(crate) fn prompt_secret(label: &str) -> Result<String, CliError> {
+    Password::new()
+        .with_prompt(format!("{label} (hidden)"))
+        .interact()
+        .map_err(|err| CliError::io(std::io::Error::other(err)))
+}
+
 pub(crate) fn prompt_secret_keep_current(label: &str, current: &str) -> Result<String, CliError> {
     let value = Password::new()
         .with_prompt(format!("{label} (hidden, enter to keep current)"))
@@ -26,6 +34,28 @@ pub(crate) fn prompt_secret_keep_current(label: &str, current: &str) -> Result<S
         Ok(current.to_owned())
     } else {
         Ok(value)
+    }
+}
+
+/// Prompts for an optional secret with hidden input. Empty input keeps the
+/// current value (or stays unset); the current value is never displayed.
+pub(crate) fn prompt_secret_optional(
+    label: &str,
+    current: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    let prompt = match current {
+        Some(_) => format!("{label} (hidden, enter to keep current)"),
+        None => format!("{label} (optional, hidden, enter to skip)"),
+    };
+    let value = Password::new()
+        .with_prompt(prompt)
+        .allow_empty_password(true)
+        .interact()
+        .map_err(|err| CliError::io(std::io::Error::other(err)))?;
+    if value.is_empty() {
+        Ok(current.map(ToOwned::to_owned))
+    } else {
+        Ok(Some(value))
     }
 }
 

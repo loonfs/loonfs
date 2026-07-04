@@ -1,20 +1,19 @@
 use crate::error::CliError;
 use http::Uri;
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::abs::AzureAbsStoreConfig;
-use loonfs_objectstore::gcs::GcpGcsStoreConfig;
-use loonfs_objectstore::r2::CloudflareR2StoreConfig;
-use loonfs_objectstore::s3::AwsS3StoreConfig;
-use loonfs_objectstore::ConfiguredObjectStore;
+use loonfs_objectstore::{SecretString, StoreConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub(crate) use loonfs_objectstore::StoreConfig;
+
 pub(crate) const CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CliConfig {
     pub config_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,7 +25,7 @@ pub(crate) struct CliConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case")]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum ProfileConfig {
     Embedded {
         store: StoreConfig,
@@ -42,55 +41,7 @@ pub(crate) enum ProfileConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth_token: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub(crate) enum StoreConfig {
-    LocalFs {
-        root: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
-    AwsS3 {
-        bucket: String,
-        region: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint_url: Option<String>,
-        access_key_id: String,
-        secret_access_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_token: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        force_path_style: Option<bool>,
-    },
-    CloudflareR2 {
-        bucket: String,
-        account_id: String,
-        endpoint_url: String,
-        access_key_id: String,
-        secret_access_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
-    GcpGcs {
-        bucket: String,
-        service_account_key_path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
-    AzureAbs {
-        account_name: String,
-        container_name: String,
-        access_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint_url: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
+        auth_token: Option<SecretString>,
     },
 }
 
@@ -154,7 +105,7 @@ impl ProfileConfig {
 
     pub(crate) fn store_kind_str(&self) -> Option<&'static str> {
         match self {
-            ProfileConfig::Embedded { store, .. } => Some(store.kind_str()),
+            ProfileConfig::Embedded { store, .. } => Some(store.kind().as_str()),
             ProfileConfig::Remote { .. } => None,
         }
     }
@@ -172,7 +123,9 @@ impl ProfileConfig {
                         namespace,
                     )?;
                 }
-                store.validate(name)
+                store
+                    .validate()
+                    .map_err(|error| profile_store_error(name, &error))
             }
             ProfileConfig::Remote {
                 server_url,
@@ -188,7 +141,7 @@ impl ProfileConfig {
                 }
                 validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
-                    require_non_empty(&profile_field(name, "auth_token"), token)?;
+                    require_non_empty(&profile_field(name, "auth_token"), token.expose())?;
                 }
                 Ok(())
             }
@@ -215,201 +168,22 @@ impl ProfileConfig {
             } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
                 default_namespace: default_namespace.clone(),
-                auth_token: auth_token.as_ref().map(|_| "REDACTED".to_owned()),
+                auth_token: auth_token.as_ref().map(SecretString::masked),
             },
         }
     }
 }
 
-impl StoreConfig {
-    pub(crate) fn kind_str(&self) -> &'static str {
-        match self {
-            StoreConfig::LocalFs { .. } => "local-fs",
-            StoreConfig::AwsS3 { .. } => "aws-s3",
-            StoreConfig::CloudflareR2 { .. } => "cloudflare-r2",
-            StoreConfig::GcpGcs { .. } => "gcp-gcs",
-            StoreConfig::AzureAbs { .. } => "azure-abs",
+/// Prefixes a shared store-validation error (`store.<field>`-rooted) with the
+/// profile name, preserving the CLI's `missing `<profile>.store.<field>``
+/// message shape.
+fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
+    match error {
+        StoreConfigError::MissingField { field } => {
+            CliError::invalid_config(format!("missing `{profile_name}.{field}`"))
         }
-    }
-
-    pub(crate) fn object_store(&self) -> Result<ConfiguredObjectStore, CliError> {
-        match self {
-            StoreConfig::LocalFs { root, key_prefix } => {
-                ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())
-                    .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))
-            }
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                session_token,
-                key_prefix,
-                force_path_style,
-            } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
-                bucket: bucket.clone(),
-                region: region.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                session_token: session_token.clone(),
-                key_prefix: key_prefix.clone(),
-                force_path_style: force_path_style.unwrap_or(false),
-            })
-            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                key_prefix,
-            } => ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
-                bucket: bucket.clone(),
-                account_id: account_id.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                key_prefix: key_prefix.clone(),
-            })
-            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
-            StoreConfig::GcpGcs {
-                bucket,
-                service_account_key_path,
-                key_prefix,
-            } => ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
-                bucket: bucket.clone(),
-                service_account_key_path: service_account_key_path.clone(),
-                key_prefix: key_prefix.clone(),
-            })
-            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                access_key,
-                endpoint_url,
-                key_prefix,
-            } => ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
-                account_name: account_name.clone(),
-                container_name: container_name.clone(),
-                access_key: access_key.clone(),
-                endpoint_url: endpoint_url.clone(),
-                key_prefix: key_prefix.clone(),
-            })
-            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
-        }
-    }
-
-    fn validate(&self, profile_name: &str) -> Result<(), CliError> {
-        match self {
-            StoreConfig::LocalFs { root, .. } => {
-                require_non_empty(&store_field(profile_name, "root"), root)
-            }
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                access_key_id,
-                secret_access_key,
-                ..
-            } => {
-                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
-                require_non_empty(&store_field(profile_name, "region"), region)?;
-                require_non_empty(&store_field(profile_name, "access_key_id"), access_key_id)?;
-                require_non_empty(
-                    &store_field(profile_name, "secret_access_key"),
-                    secret_access_key,
-                )
-            }
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                ..
-            } => {
-                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
-                require_non_empty(&store_field(profile_name, "account_id"), account_id)?;
-                require_non_empty(&store_field(profile_name, "endpoint_url"), endpoint_url)?;
-                require_non_empty(&store_field(profile_name, "access_key_id"), access_key_id)?;
-                require_non_empty(
-                    &store_field(profile_name, "secret_access_key"),
-                    secret_access_key,
-                )
-            }
-            StoreConfig::GcpGcs {
-                bucket,
-                service_account_key_path,
-                ..
-            } => {
-                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
-                require_non_empty(
-                    &store_field(profile_name, "service_account_key_path"),
-                    service_account_key_path,
-                )
-            }
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                access_key,
-                ..
-            } => {
-                require_non_empty(&store_field(profile_name, "account_name"), account_name)?;
-                require_non_empty(&store_field(profile_name, "container_name"), container_name)?;
-                require_non_empty(&store_field(profile_name, "access_key"), access_key)
-            }
-        }
-    }
-
-    fn redacted(&self) -> Self {
-        match self {
-            StoreConfig::LocalFs { .. } => self.clone(),
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                key_prefix,
-                force_path_style,
-                ..
-            } => StoreConfig::AwsS3 {
-                bucket: bucket.clone(),
-                region: region.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: "REDACTED".to_owned(),
-                secret_access_key: "REDACTED".to_owned(),
-                session_token: None,
-                key_prefix: key_prefix.clone(),
-                force_path_style: *force_path_style,
-            },
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                key_prefix,
-                ..
-            } => StoreConfig::CloudflareR2 {
-                bucket: bucket.clone(),
-                account_id: account_id.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: "REDACTED".to_owned(),
-                secret_access_key: "REDACTED".to_owned(),
-                key_prefix: key_prefix.clone(),
-            },
-            StoreConfig::GcpGcs { .. } => self.clone(),
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                endpoint_url,
-                key_prefix,
-                ..
-            } => StoreConfig::AzureAbs {
-                account_name: account_name.clone(),
-                container_name: container_name.clone(),
-                access_key: "REDACTED".to_owned(),
-                endpoint_url: endpoint_url.clone(),
-                key_prefix: key_prefix.clone(),
-            },
+        StoreConfigError::InvalidField { field, reason } => {
+            CliError::invalid_config(format!("invalid `{profile_name}.{field}`: {reason}"))
         }
     }
 }
@@ -427,10 +201,6 @@ pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
 
 fn profile_field(name: &str, field: &str) -> String {
     format!("{name}.{field}")
-}
-
-fn store_field(profile_name: &str, field: &str) -> String {
-    format!("{profile_name}.store.{field}")
 }
 
 pub(crate) fn load_config(path: &Path) -> Result<CliConfig, CliError> {
@@ -554,4 +324,195 @@ fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+    // Config tests use panic in unexpected match arms for precise diagnostics.
+
+    use super::{CliConfig, ProfileConfig, StoreConfig};
+
+    fn parse(contents: &str) -> Result<CliConfig, toml::de::Error> {
+        toml::from_str(contents)
+    }
+
+    #[test]
+    fn cli_config_debug_redacts_secrets() {
+        let config = parse(
+            r#"
+config_version = 1
+default_profile = "cloud"
+
+[profiles.cloud]
+mode = "embedded"
+
+[profiles.cloud.store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+access_key_id = "debug-access-key-id"
+secret_access_key = "debug-secret-access-key"
+session_token = "debug-session-token"
+
+[profiles.prod]
+mode = "remote"
+server_url = "https://loonfs.example.com"
+auth_token = "debug-auth-token"
+"#,
+        )
+        .expect("parse config");
+        config.validate().expect("valid config");
+
+        let rendered = format!("{config:?}");
+
+        assert!(!rendered.contains("debug-access-key-id"));
+        assert!(!rendered.contains("debug-secret-access-key"));
+        assert!(!rendered.contains("debug-session-token"));
+        assert!(!rendered.contains("debug-auth-token"));
+        assert!(rendered.contains("bucket"));
+    }
+
+    #[test]
+    fn redacted_config_serializes_without_secrets() {
+        let config = parse(
+            r#"
+config_version = 1
+
+[profiles.cloud]
+mode = "embedded"
+
+[profiles.cloud.store]
+kind = "cloudflare-r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://account.r2.cloudflarestorage.com"
+access_key_id = "plain-access-key-id"
+secret_access_key = "plain-secret-access-key"
+
+[profiles.prod]
+mode = "remote"
+server_url = "https://loonfs.example.com"
+auth_token = "plain-auth-token"
+"#,
+        )
+        .expect("parse config");
+
+        let rendered =
+            toml::to_string_pretty(&config.redacted()).expect("serialize redacted config");
+
+        assert!(!rendered.contains("plain-access-key-id"));
+        assert!(!rendered.contains("plain-secret-access-key"));
+        assert!(!rendered.contains("plain-auth-token"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_at_every_level() {
+        let top_level = parse(
+            r#"
+config_version = 1
+default_profil = "typo"
+"#,
+        )
+        .expect_err("typo'd top-level key");
+        assert!(top_level.to_string().contains("default_profil"));
+
+        let profile_level = parse(
+            r#"
+config_version = 1
+
+[profiles.local]
+mode = "embedded"
+default_namespac = "typo"
+
+[profiles.local.store]
+kind = "local-fs"
+root = "/tmp/store"
+"#,
+        )
+        .expect_err("typo'd profile key");
+        assert!(profile_level.to_string().contains("default_namespac"));
+
+        let store_level = parse(
+            r#"
+config_version = 1
+
+[profiles.local]
+mode = "embedded"
+
+[profiles.local.store]
+kind = "local-fs"
+root = "/tmp/store"
+key_prefiks = "typo"
+"#,
+        )
+        .expect_err("typo'd store key");
+        assert!(store_level.to_string().contains("key_prefiks"));
+    }
+
+    #[test]
+    fn validation_reports_profile_prefixed_store_fields() {
+        let config = parse(
+            r#"
+config_version = 1
+
+[profiles.cloud]
+mode = "embedded"
+
+[profiles.cloud.store]
+kind = "aws-s3"
+bucket = " "
+region = "us-east-1"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        )
+        .expect("parse config");
+
+        let error = config.validate().expect_err("blank bucket");
+        assert_eq!(error.message, "missing `cloud.store.bucket`");
+    }
+
+    /// Every CLI example config must keep parsing into [`CliConfig`]
+    /// (including under `deny_unknown_fields`) and passing validation.
+    #[test]
+    fn cli_example_configs_parse_and_validate() {
+        let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs");
+        let mut examples = 0usize;
+        for entry in std::fs::read_dir(configs_dir).expect("read configs directory") {
+            let path = entry.expect("read configs entry").path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("loon.") || !name.ends_with(".example.toml") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path).expect("read example config");
+            let config: CliConfig =
+                toml::from_str(&contents).unwrap_or_else(|err| panic!("{name} must parse: {err}"));
+            config
+                .validate()
+                .unwrap_or_else(|err| panic!("{name} must validate: {}", err.message));
+            examples += 1;
+        }
+        assert!(
+            examples >= 2,
+            "expected at least 2 CLI example configs, found {examples}"
+        );
+    }
+
+    #[test]
+    fn store_kind_str_matches_config_tags() {
+        let profile = ProfileConfig::Embedded {
+            store: StoreConfig::LocalFs {
+                root: "/tmp/store".to_owned(),
+                key_prefix: None,
+            },
+            default_namespace: None,
+            writer_id: None,
+            writer_version: None,
+        };
+        assert_eq!(profile.store_kind_str(), Some("local-fs"));
+    }
 }

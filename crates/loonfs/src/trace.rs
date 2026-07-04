@@ -1,5 +1,7 @@
 //! Low-cardinality labels attached to runtime trace spans and metrics.
 
+use loonfs_objectstore::ConfiguredObjectStoreKind;
+
 /// Runtime deployment mode label used in trace spans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceMode {
@@ -50,6 +52,21 @@ impl TraceStoreKind {
     }
 }
 
+impl From<ConfiguredObjectStoreKind> for TraceStoreKind {
+    /// Derives the trace label from a configured object-store kind, so
+    /// callers wiring a [`ConfiguredObjectStoreKind`]-reporting store into the
+    /// runtime never hand-maintain the mapping.
+    fn from(kind: ConfiguredObjectStoreKind) -> Self {
+        match kind {
+            ConfiguredObjectStoreKind::LocalFs => Self::LocalFs,
+            ConfiguredObjectStoreKind::AwsS3 => Self::S3,
+            ConfiguredObjectStoreKind::CloudflareR2 => Self::R2,
+            ConfiguredObjectStoreKind::GcpGcs => Self::Gcs,
+            ConfiguredObjectStoreKind::AzureAbs => Self::Abs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CachePath {
     MaterializedTables,
@@ -76,6 +93,21 @@ pub fn payload_class(size_bytes: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{payload_class, CachePath, TraceMode, TraceStoreKind};
+    use loonfs_objectstore::ConfiguredObjectStoreKind;
+
+    #[test]
+    fn trace_store_kind_derives_from_configured_kind() {
+        let cases = [
+            (ConfiguredObjectStoreKind::LocalFs, TraceStoreKind::LocalFs),
+            (ConfiguredObjectStoreKind::AwsS3, TraceStoreKind::S3),
+            (ConfiguredObjectStoreKind::CloudflareR2, TraceStoreKind::R2),
+            (ConfiguredObjectStoreKind::GcpGcs, TraceStoreKind::Gcs),
+            (ConfiguredObjectStoreKind::AzureAbs, TraceStoreKind::Abs),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(TraceStoreKind::from(kind), expected);
+        }
+    }
 
     #[test]
     fn trace_labels_are_low_cardinality() {
