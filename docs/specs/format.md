@@ -881,7 +881,7 @@ normalized absolute paths, and the intent's semantic parameters).
 
 The idempotency horizon is the retention floor. Commit receipts below the
 floor are dropped when metadata runs are rebuilt, so a commit retried from
-below the floor is treated as new — the same re-bootstrap contract the change
+below the floor may be treated as new — the same re-bootstrap contract the change
 feed gives sub-floor cursors.
 
 A reused `commit_id` with an equal fingerprint replays the originally

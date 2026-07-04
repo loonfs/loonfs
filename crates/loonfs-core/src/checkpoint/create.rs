@@ -515,7 +515,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
 /// only the newest few so correctly-operated maintenance cannot pin storage
 /// forever. Named records persist until explicitly removed, and fork sources
 /// stay protected by their GC pins independently of any record (format spec,
-/// "Retention management").
+/// "Compaction").
 const RETAINED_UNNAMED_CHECKPOINT_RECORDS: usize = 4;
 
 pub(super) fn retained_checkpoint_records(

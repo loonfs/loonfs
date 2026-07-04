@@ -600,6 +600,22 @@ fn record_retention_keeps_named_and_newest_unnamed_records() {
 
     let kept_seqs: Vec<u64> = kept.iter().map(|r| r.head_seq.0).collect();
     assert_eq!(kept_seqs, vec![1, 4, 5, 6, 7]);
+
+    // A named record interleaved mid-vec is skipped, not counted or dropped.
+    let records = vec![
+        record(1, None),
+        record(2, None),
+        record(3, Some("mid")),
+        record(4, None),
+        record(5, None),
+        record(6, None),
+        record(7, None),
+    ];
+
+    let kept = retained_checkpoint_records(records);
+
+    let kept_seqs: Vec<u64> = kept.iter().map(|r| r.head_seq.0).collect();
+    assert_eq!(kept_seqs, vec![3, 4, 5, 6, 7]);
 }
 
 #[tokio::test]

@@ -1254,7 +1254,7 @@ async fn list_changes_handler(
         path = "/v0/admin/namespaces/{namespace}/checkpoint",
         tag = "admin",
         summary = "Create checkpoint",
-        description = "Pins the current namespace view with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
+        description = "Records a checkpoint of the current namespace view. Unnamed checkpoints are maintenance bookkeeping: a manifest retains only the four newest, so this is not a durable pin with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
