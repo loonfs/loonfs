@@ -3452,15 +3452,17 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .starts_with("chk_"));
     assert_eq!(fork_provenance.source_manifest_id, ManifestId(1));
     assert_eq!(fork_provenance.source_head_seq, ChangeSeq(1));
-    assert_eq!(target_manifest.payload.checkpoints.len(), 1);
-    assert_eq!(
-        target_manifest.payload.checkpoints[0].head_seq,
-        ChangeSeq(1)
-    );
-    assert_eq!(
-        target_manifest.payload.checkpoints[0].manifest_id,
-        ManifestId(1)
-    );
+    let source_record = block_on(
+        loonfs_core::control::load_namespace_checkpoint_record_control(
+            &store,
+            &source_namespace_id,
+            &fork_provenance.source_checkpoint_id,
+        ),
+    )
+    .expect("read source checkpoint record")
+    .expect("source checkpoint record exists");
+    assert_eq!(source_record.manifest_head_seq, ChangeSeq(1));
+    assert_eq!(source_record.manifest_id, ManifestId(1));
     assert!(
         target_manifest
             .payload
@@ -3507,8 +3509,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         pin.state.source_checkpoint_id,
         fork_provenance.source_checkpoint_id
     );
-    assert_eq!(pin.state.source_manifest_id, ManifestId(1));
-    assert_eq!(pin.state.source_head_seq, ChangeSeq(1));
     let referenced_metadata_files = target_manifest
         .payload
         .metadata_files

@@ -69,9 +69,6 @@ pub struct NamespaceStatusResponse {
     /// Current manifest pointer recorded by the head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_manifest_id: Option<ManifestId>,
-    /// Latest checkpoint recorded by the head.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_checkpoint_id: Option<CheckpointId>,
     /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
     /// Oldest sequence still promised for incremental replay.

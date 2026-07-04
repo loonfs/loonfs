@@ -96,19 +96,6 @@ pub struct NamespaceManifestFork {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceCheckpointRecord {
-    pub checkpoint_id: CheckpointId,
-    pub manifest_id: ManifestId,
-    pub head_seq: ChangeSeq,
-    pub head_commit_id: CommitId,
-    pub created_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataPage {
     pub page_index: u32,
     pub min_key: String,
@@ -343,8 +330,6 @@ pub struct NamespaceManifestPayload {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<NamespaceManifestFork>,
-    #[serde(default)]
-    pub checkpoints: Vec<NamespaceCheckpointRecord>,
     /// Per-namespace capabilities materialized on this file-set version,
     /// such as derived indexes (format spec, "Namespace features map").
     /// Values are feature-owned JSON objects; readers ignore unknown keys.
@@ -639,8 +624,8 @@ pub fn decode_metadata_sst_envelope_zstd(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef,
-        MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
-        NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
+        MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
+        NamespaceManifestPayload,
     };
     use crate::{ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
     use std::collections::BTreeMap;
@@ -663,17 +648,6 @@ mod tests {
                 initialized: true,
                 verified: true,
                 fork: None,
-                checkpoints: vec![NamespaceCheckpointRecord {
-                    checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000001")
-                        .expect("checkpoint id"),
-                    manifest_id: ManifestId(10),
-                    head_seq: ChangeSeq(10),
-                    head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
-                        .expect("commit id"),
-                    created_at_ms: 1_000,
-                    expires_at_ms: None,
-                    name: None,
-                }],
                 features: BTreeMap::new(),
                 metadata_files: vec![metadata_file_ref(
                     "demo",
@@ -691,11 +665,6 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
-        assert_eq!(decoded.payload.checkpoints.len(), 1);
-        assert_eq!(
-            decoded.payload.checkpoints[0].checkpoint_id,
-            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id")
-        );
         assert_eq!(decoded.payload.metadata_files.len(), 1);
         assert_eq!(decoded.payload.metadata_files[0].run_seq, ChangeSeq(10));
     }
@@ -727,7 +696,6 @@ mod tests {
                     source_manifest_id: ManifestId(10),
                     source_head_seq: ChangeSeq(12),
                 }),
-                checkpoints: Vec::new(),
                 features: BTreeMap::new(),
                 metadata_files: vec![
                     metadata_file_ref(

@@ -12,6 +12,10 @@ use super::load::{
     validate_revision_by_inode_desc_index,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
+use super::record::{
+    deterministic_checkpoint_id, set_checkpoint_record_state, verify_checkpoint_basis,
+    write_checkpoint_record, CheckpointRecordWrite,
+};
 use super::row::manifest_rows_for_family;
 use super::runs::{
     flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL,
@@ -26,16 +30,17 @@ use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{read_head_and_metadata_root, read_wal_floor_seq_or_zero};
+use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::NamespaceState;
+use loonfs_api::wire::control::{
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
+};
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
-    MetadataRow, MetadataTableFamily, NamespaceCheckpointRecord, NamespaceManifestEnvelope,
-    NamespaceManifestPayload,
+    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{
-    generate_checkpoint_id, ChangeSeq, CreateCheckpointResponse, ManifestId, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,22 +67,42 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     create_checkpoint_with_policy(store, namespace_id, context, MetadataLsmPolicy::default()).await
 }
 
+pub(crate) const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
+
+struct CheckpointBasis {
+    manifest_id: ManifestId,
+    manifest_head_seq: ChangeSeq,
+    manifest_payload_checksum: String,
+}
+
 pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<CreateCheckpointResponse, CoreError> {
-    // Checkpoint creation pins a manifest version. It records the checkpoint in
-    // manifest state, using the current manifest tables plus the visible WAL
-    // tail as the row source.
+    create_checkpoint_with_policy_and_owner(store, namespace_id, context, policy, None).await
+}
+
+pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+    owner: Option<CheckpointOwner>,
+) -> Result<CreateCheckpointResponse, CoreError> {
+    // Checkpoint creation pins a manifest version as a first-class record
+    // under `checkpoints/`, write-then-verify (format spec, "Checkpoints"):
     //
-    // This is distinct from rebuilding a whole namespace state from scratch:
-    // checkpoint creation projects from the current manifest tables plus the
-    // visible WAL tail. It only writes new SSTs when the bootstrap seed, WAL
-    // tail, or L0 policy requires new metadata files.
-    let checkpoint_id = generate_checkpoint_id();
-    let mut saw_head_cas_race = false;
+    // 1. Choose a basis manifest that the metadata root references,
+    //    materializing and publishing one first when the root lags the head.
+    // 2. Write `checkpoints/{id}.json` with state = active.
+    // 3. Verify, after the write is durable, that the floor has not passed
+    //    the basis and the basis manifest still loads, under the verify
+    //    budget.
+    // 4. On verification failure, flip the record to dead and retry against
+    //    a newer basis.
+    let mut saw_root_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
         let projection = load_checkpoint_projection(store, namespace_id)
             .instrument(tracing::info_span!(
@@ -86,151 +111,159 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
             ))
             .await?;
         let head_seq = projection.head.seq;
-        let current_manifest = projection.manifest_tables.manifest();
-        if current_manifest.payload.head_seq == head_seq {
-            if let Some(checkpoint) = checkpoint_record_for_manifest(current_manifest) {
-                return Ok(CreateCheckpointResponse {
-                    namespace_id: namespace_id.clone(),
-                    checkpoint_id: checkpoint.checkpoint_id.clone(),
-                    checkpoint_seq: checkpoint.head_seq,
-                    manifest_id: checkpoint.manifest_id,
-                    current_manifest_id: Some(projection.root.manifest_id),
-                });
+
+        let basis = if projection.root.manifest_head_seq == head_seq {
+            CheckpointBasis {
+                manifest_id: projection.root.manifest_id,
+                manifest_head_seq: projection.root.manifest_head_seq,
+                manifest_payload_checksum: projection.root.manifest_payload_checksum.clone(),
             }
-        }
-
-        let mut manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
-        let mut manifest_ready = false;
-        for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
-            let checkpoint_record = NamespaceCheckpointRecord {
-                checkpoint_id: checkpoint_id.clone(),
-                manifest_id,
-                head_seq,
-                head_commit_id: projection.head.head_commit_id.clone(),
-                created_at_ms: context.now_ms,
-                expires_at_ms: None,
-                name: None,
-            };
-
-            let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
-            match load_namespace_manifest_envelope_if_present(
-                store,
-                namespace_id,
-                manifest_id,
-                &manifest_key,
-            )
-            .await
-            {
-                Ok(Some(existing_manifest)) => {
-                    if checkpoint_record_by_id(&existing_manifest, &checkpoint_id).is_some() {
-                        manifest_ready = true;
+        } else {
+            let mut manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
+            let mut written_manifest = None;
+            for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
+                let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
+                match load_namespace_manifest_envelope_if_present(
+                    store,
+                    namespace_id,
+                    manifest_id,
+                    &manifest_key,
+                )
+                .await
+                {
+                    Ok(Some(_existing)) => {
+                        // Another writer owns this allocation slot.
+                        manifest_id = next_manifest_id_after(manifest_id)?;
+                        continue;
+                    }
+                    Ok(None) => {
+                        let manifest = build_namespace_manifest_for_checkpoint_projection(
+                            store,
+                            namespace_id,
+                            &projection,
+                            &context.writer_version,
+                            policy,
+                            manifest_id,
+                        )
+                        .await?;
+                        // `write_namespace_manifest` owns the idempotent
+                        // "manifest already exists" path. A same-id/
+                        // different-payload conflict means another writer won
+                        // this slot, so try the next manifest id.
+                        match write_namespace_manifest(store, &manifest).await {
+                            Ok(()) => {}
+                            Err(MetadataProjectionLoadError::ManifestLoad(
+                                ManifestLoadError::ManifestConflict { .. },
+                            )) => {
+                                manifest_id = next_manifest_id_after(manifest_id)?;
+                                continue;
+                            }
+                            Err(error) => return Err(CoreError::MetadataProjection(error)),
+                        }
+                        written_manifest = Some(manifest);
                         break;
                     }
-                    manifest_id = next_manifest_id_after(manifest_id)?;
+                    Err(error) => {
+                        return Err(CoreError::MetadataProjection(
+                            MetadataProjectionLoadError::ManifestLoad(error),
+                        ))
+                    }
+                }
+            }
+            let Some(manifest) = written_manifest else {
+                return Err(CoreError::Store(
+                    "manifest id allocation retry exhausted".to_owned(),
+                ));
+            };
+            // Advance the root for readers. A superseded outcome is fine:
+            // the manifest we wrote stays durable and valid as a checkpoint
+            // basis even when a newer root already won.
+            match publish_metadata_root(
+                store,
+                namespace_id,
+                &manifest,
+                context.now_ms,
+                &context.writer_version,
+            )
+            .await?
+            {
+                ManifestPublicationOutcome::Published(_)
+                | ManifestPublicationOutcome::Superseded(_) => {}
+                ManifestPublicationOutcome::RootCasRaceLost => {
+                    saw_root_cas_race = true;
                     continue;
                 }
-                Ok(None) => {
-                    let manifest = build_namespace_manifest_for_checkpoint_projection(
+            }
+            CheckpointBasis {
+                manifest_id: manifest.payload.manifest_id,
+                manifest_head_seq: manifest.payload.head_seq,
+                manifest_payload_checksum: manifest.payload_checksum.clone(),
+            }
+        };
+
+        let checkpoint_id = deterministic_checkpoint_id(
+            namespace_id,
+            basis.manifest_id,
+            &basis.manifest_payload_checksum,
+        );
+        let record = CheckpointRecordState {
+            checkpoint_id: checkpoint_id.clone(),
+            namespace_id: namespace_id.clone(),
+            manifest_id: basis.manifest_id,
+            manifest_head_seq: basis.manifest_head_seq,
+            manifest_payload_checksum: basis.manifest_payload_checksum.clone(),
+            head_commit_id: projection.head.head_commit_id.clone(),
+            created_at_ms: context.now_ms,
+            expires_at_ms: None,
+            owner: owner.clone(),
+            name: None,
+            state: CheckpointRecordLifecycle::Active,
+        };
+        let timer = StdMonotonicTimer::default();
+        let verify_started_ms = timer.monotonic_now_ms();
+        let written = write_checkpoint_record(store, &record, &context.writer_version).await?;
+
+        let verified = verify_checkpoint_basis(store, &record).await?;
+        let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
+            <= CHECKPOINT_VERIFY_BUDGET_MS;
+        if verified && within_budget {
+            if let CheckpointRecordWrite::Existing(existing) = written {
+                // Deterministic ids make re-creation idempotent; a dead
+                // record for the same verified basis is revived rather than
+                // duplicated.
+                if existing.state == CheckpointRecordLifecycle::Dead {
+                    set_checkpoint_record_state(
                         store,
                         namespace_id,
-                        &projection,
+                        &checkpoint_id,
+                        CheckpointRecordLifecycle::Active,
                         &context.writer_version,
-                        policy,
-                        manifest_id,
-                        Some(checkpoint_record),
                     )
                     .await?;
-
-                    // `write_namespace_manifest` owns the idempotent "manifest
-                    // already exists" path. It accepts a conflict only when the
-                    // existing manifest has the same payload checksum. A
-                    // same-id/different-payload conflict means another writer
-                    // won this allocation slot, so try the next manifest id.
-                    let write_result = write_namespace_manifest(store, &manifest).await;
-                    match write_result {
-                        Ok(()) => {}
-                        Err(MetadataProjectionLoadError::ManifestLoad(
-                            ManifestLoadError::ManifestConflict { .. },
-                        )) => {
-                            manifest_id = next_manifest_id_after(manifest_id)?;
-                            continue;
-                        }
-                        Err(error) => return Err(CoreError::MetadataProjection(error)),
-                    }
-                    manifest_ready = true;
-                    break;
-                }
-                Err(error) => {
-                    return Err(CoreError::MetadataProjection(
-                        MetadataProjectionLoadError::ManifestLoad(error),
-                    ))
                 }
             }
-        }
-        if !manifest_ready {
-            return Err(CoreError::Store(
-                "manifest id allocation retry exhausted".to_owned(),
-            ));
+            return Ok(CreateCheckpointResponse {
+                namespace_id: namespace_id.clone(),
+                checkpoint_id,
+                checkpoint_seq: basis.manifest_head_seq,
+                manifest_id: basis.manifest_id,
+                current_manifest_id: Some(basis.manifest_id.max(projection.root.manifest_id)),
+            });
         }
 
-        let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
-        let manifest = load_namespace_manifest_envelope_if_present(
+        // Overrunning the budget counts as verification failure: the record
+        // may have raced the grace window, so it must not stand as a root.
+        set_checkpoint_record_state(
             store,
             namespace_id,
-            manifest_id,
-            &manifest_key,
-        )
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?
-        .ok_or_else(|| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-                ManifestLoadError::MissingManifest {
-                    object_key: manifest_key.clone(),
-                },
-            ))
-        })?;
-        let checkpoint = checkpoint_record_by_id(&manifest, &checkpoint_id).ok_or_else(|| {
-            CoreError::CheckpointUnavailable(format!(
-                "namespace `{}` manifest {:?} has no checkpoint record `{checkpoint_id}`",
-                namespace_id.as_str(),
-                manifest_id
-            ))
-        })?;
-        match publish_metadata_root(
-            store,
-            namespace_id,
-            &manifest,
-            &checkpoint.checkpoint_id,
-            context.now_ms,
+            &checkpoint_id,
+            CheckpointRecordLifecycle::Dead,
             &context.writer_version,
         )
-        .await?
-        {
-            ManifestPublicationOutcome::Published(root) => {
-                return Ok(CreateCheckpointResponse {
-                    namespace_id: namespace_id.clone(),
-                    checkpoint_id: checkpoint.checkpoint_id.clone(),
-                    checkpoint_seq: checkpoint.head_seq,
-                    manifest_id: checkpoint.manifest_id,
-                    current_manifest_id: Some(root.manifest_id),
-                });
-            }
-            ManifestPublicationOutcome::CurrentManifestMissingCheckpoint { .. } => {
-                // Another manifest publisher won first. Rebuild the checkpoint
-                // record on top of the new current manifest using the same
-                // checkpoint id so the operation remains idempotent.
-                continue;
-            }
-            ManifestPublicationOutcome::RootCasRaceLost => {
-                saw_head_cas_race = true;
-                continue;
-            }
-        }
+        .await?;
     }
 
-    if saw_head_cas_race {
+    if saw_root_cas_race {
         Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
     } else {
         Err(CoreError::CheckpointUnavailable(
@@ -416,7 +449,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             initialized: true,
             verified: true,
             fork: None,
-            checkpoints: Vec::new(),
             features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(run_tables),
         },
@@ -438,16 +470,9 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
-    checkpoint_to_add: Option<NamespaceCheckpointRecord>,
 ) -> Result<NamespaceManifestEnvelope, CoreError> {
     let head_seq = projection.head.seq;
     let previous_manifest = projection.manifest_tables.manifest();
-
-    let mut checkpoints = previous_manifest.payload.checkpoints.clone();
-    if let Some(checkpoint) = checkpoint_to_add {
-        checkpoints.push(checkpoint);
-    }
-    let checkpoints = retained_checkpoint_records(checkpoints);
 
     let (base_seq, metadata_files) = if is_bootstrap_seed_manifest(&previous_manifest.payload) {
         let run_tables = build_base_manifest_tables_from_projection(
@@ -506,7 +531,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             initialized: true,
             verified: true,
             fork: None,
-            checkpoints,
             features: BTreeMap::new(),
             metadata_files,
         },
@@ -517,32 +541,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
 /// Unnamed checkpoint records are maintenance bookkeeping; a manifest keeps
 /// only the newest few so correctly-operated maintenance cannot pin storage
 /// forever. Named records persist until explicitly removed, and fork sources
-/// stay protected by their GC pins independently of any record (format spec,
-/// "Compaction").
-const RETAINED_UNNAMED_CHECKPOINT_RECORDS: usize = 4;
-
-pub(super) fn retained_checkpoint_records(
-    mut checkpoints: Vec<NamespaceCheckpointRecord>,
-) -> Vec<NamespaceCheckpointRecord> {
-    let unnamed = checkpoints
-        .iter()
-        .filter(|record| record.name.is_none())
-        .count();
-    let mut drop_remaining = unnamed.saturating_sub(RETAINED_UNNAMED_CHECKPOINT_RECORDS);
-    if drop_remaining == 0 {
-        return checkpoints;
-    }
-    // Records are appended oldest-first, so retention drops from the front.
-    checkpoints.retain(|record| {
-        if record.name.is_some() || drop_remaining == 0 {
-            return true;
-        }
-        drop_remaining -= 1;
-        false
-    });
-    checkpoints
-}
-
 /// Drops rows that no retained sequence can observe (format spec,
 /// "Compaction"). Conservative subset: superseded revisions, superseded or
 /// unbound bindings, and spent unbind markers at or below the retention
@@ -834,7 +832,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
-    checkpoint_to_add: Option<NamespaceCheckpointRecord>,
 ) -> Result<NamespaceManifestEnvelope, CoreError> {
     let head = source.head;
     let metadata_state = source.metadata_state;
@@ -849,15 +846,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         ),
         _ => None,
     };
-
-    let mut checkpoints = previous_manifest
-        .as_ref()
-        .map(|previous| previous.manifest.payload.checkpoints.clone())
-        .unwrap_or_default();
-    if let Some(checkpoint) = checkpoint_to_add {
-        checkpoints.push(checkpoint);
-    }
-    let checkpoints = retained_checkpoint_records(checkpoints);
 
     let (base_seq, metadata_files) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
@@ -935,7 +923,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             initialized: true,
             verified: true,
             fork: None,
-            checkpoints,
             features: BTreeMap::new(),
             metadata_files,
         },
@@ -944,28 +931,5 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 }
 
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
-    payload.head_seq == ChangeSeq(0)
-        && payload.base_seq == ChangeSeq(0)
-        && payload.checkpoints.is_empty()
-        && payload.fork.is_none()
-}
-
-pub(super) fn checkpoint_record_for_manifest(
-    manifest: &NamespaceManifestEnvelope,
-) -> Option<&NamespaceCheckpointRecord> {
-    manifest.payload.checkpoints.iter().find(|checkpoint| {
-        checkpoint.head_seq == manifest.payload.head_seq
-            && checkpoint.manifest_id == manifest.payload.manifest_id
-    })
-}
-
-pub(super) fn checkpoint_record_by_id<'a>(
-    manifest: &'a NamespaceManifestEnvelope,
-    checkpoint_id: &loonfs_api::CheckpointId,
-) -> Option<&'a NamespaceCheckpointRecord> {
-    manifest
-        .payload
-        .checkpoints
-        .iter()
-        .find(|checkpoint| &checkpoint.checkpoint_id == checkpoint_id)
+    payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0) && payload.fork.is_none()
 }

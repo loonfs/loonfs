@@ -19,17 +19,19 @@ pub enum ControlObjectKind {
     WalHead,
     WalFloor,
     MetadataRoot,
+    CheckpointRecord,
     NamespaceGcPinState,
     UploadSession,
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::NamespaceConfig,
         Self::ContentStoreDescriptor,
         Self::WalHead,
         Self::WalFloor,
         Self::MetadataRoot,
+        Self::CheckpointRecord,
         Self::NamespaceGcPinState,
         Self::UploadSession,
     ];
@@ -47,6 +49,7 @@ impl ControlObjectKind {
             Self::WalHead => 1,
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
+            Self::CheckpointRecord => 1,
             Self::NamespaceGcPinState => 1,
             Self::UploadSession => 1,
         }
@@ -59,6 +62,7 @@ impl ControlObjectKind {
             Self::WalHead => "wal_head",
             Self::WalFloor => "wal_floor",
             Self::MetadataRoot => "metadata_root",
+            Self::CheckpointRecord => "checkpoint_record",
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::UploadSession => "upload_session",
         }
@@ -127,17 +131,62 @@ pub struct ContentStoreDescriptorState {
     pub content_store_id: ContentStoreId,
 }
 
+/// Lifecycle of a durable checkpoint record.
+///
+/// Only `active`, non-expired checkpoints are long-term GC roots; `dead`
+/// records are collectable tombstones of failed or released checkpoints.
+/// Any record younger than the GC grace window is a root regardless of
+/// state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointRecordLifecycle {
+    #[default]
+    Active,
+    Dead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointOwner {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// Durable stable-view pin to a metadata manifest.
+///
+/// First-class file under `checkpoints/`; never part of a manifest and never
+/// an input to latest visibility. Created write-then-verify: the record is
+/// written `active`, then the basis manifest is re-verified against the
+/// floor; a failed verification flips the record to `dead`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointRecordState {
+    pub checkpoint_id: CheckpointId,
+    pub namespace_id: NamespaceId,
+    pub manifest_id: ManifestId,
+    pub manifest_head_seq: ChangeSeq,
+    /// Must equal `payload_checksum` in the referenced manifest envelope.
+    pub manifest_payload_checksum: String,
+    pub head_commit_id: CommitId,
+    pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<CheckpointOwner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub state: CheckpointRecordLifecycle,
+}
+
 /// Pin that prevents the source namespace's GC from collecting the metadata
-/// files a fork still shares. Reachability is derived from the pinned
-/// manifest (`source_manifest_id`), not stored here.
+/// files a fork still shares. A pin references its source checkpoint only;
+/// reachability resolves through it (pin -> checkpoint -> manifest ->
+/// tables), so manifest facts are never duplicated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceGcPinState {
     pub pin_id: String,
     pub source_namespace_id: NamespaceId,
     pub target_namespace_id: NamespaceId,
     pub source_checkpoint_id: CheckpointId,
-    pub source_manifest_id: ManifestId,
-    pub source_head_seq: ChangeSeq,
     pub created_at_ms: u64,
 }
 
@@ -304,6 +353,7 @@ pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type NamespaceConfigEnvelope = ControlObjectEnvelope<NamespaceConfigState>;
 pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
 pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
+pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 pub type NamespaceGcPinStateEnvelope = ControlObjectEnvelope<NamespaceGcPinState>;
 

@@ -1,9 +1,8 @@
 //! Durable manifest publication: write manifest objects idempotently and
 //! advance `metadata/root.json` by monotonic compare-and-swap.
 
-use super::create::checkpoint_record_by_id;
 use super::error::ManifestLoadError;
-use super::load::{load_namespace_manifest_envelope, load_namespace_manifest_envelope_if_present};
+use super::load::load_namespace_manifest_envelope_if_present;
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::namespace::control::read_metadata_root_object;
@@ -12,7 +11,7 @@ use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, MetadataRootEnvelope, MetadataRootState,
 };
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{CheckpointId, ManifestId, NamespaceId};
+use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -23,7 +22,9 @@ pub(super) const ROOT_CAS_RETRY_LIMIT: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
     Published(MetadataRootState),
-    CurrentManifestMissingCheckpoint { current_manifest_id: ManifestId },
+    /// Someone already published something at least as new; the caller's
+    /// manifest stays durable and valid, the newer root simply wins.
+    Superseded(MetadataRootState),
     RootCasRaceLost,
 }
 
@@ -102,7 +103,6 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest: &NamespaceManifestEnvelope,
-    checkpoint_id: &CheckpointId,
     updated_at_ms: u64,
     writer_version: &str,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
@@ -125,25 +125,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 && current.manifest_id == manifest_id
                 && current.manifest_payload_checksum == manifest.payload_checksum);
         if superseded {
-            // Someone already published something at least as new. The
-            // checkpoint is durable only if the manifest the root now
-            // references still carries it.
-            let current_manifest =
-                load_namespace_manifest_envelope(store, namespace_id, current.manifest_id)
-                    .await
-                    .map_err(|error| {
-                        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-                            error,
-                        ))
-                    })?;
-            if checkpoint_record_by_id(&current_manifest, checkpoint_id).is_some() {
-                return Ok(ManifestPublicationOutcome::Published(current.clone()));
-            }
-            return Ok(
-                ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
-                    current_manifest_id: current.manifest_id,
-                },
-            );
+            return Ok(ManifestPublicationOutcome::Superseded(current.clone()));
         }
 
         let next = MetadataRootState {

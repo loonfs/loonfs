@@ -429,7 +429,6 @@ code `namespace_not_found`.
   "namespace_id": "demo",
   "head_seq": 418,
   "current_manifest_id": 410,
-  "latest_checkpoint_id": "chk_f3d6b97a7d394ddf84b621ddf36e5071",
   "wal_tail_segments": 3,
   "retention_floor_seq": 120
 }

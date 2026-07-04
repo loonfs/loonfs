@@ -9,9 +9,9 @@ use super::build::{
 };
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::{
-    build_namespace_manifest_from_metadata_state, checkpoint_record_by_id, create_checkpoint,
-    create_checkpoint_with_policy, drop_rows_below_retention_floor,
-    load_checkpoint_projection_metadata_state, retained_checkpoint_records, ManifestMetadataSource,
+    build_namespace_manifest_from_metadata_state, create_checkpoint, create_checkpoint_with_policy,
+    drop_rows_below_retention_floor, load_checkpoint_projection_metadata_state,
+    ManifestMetadataSource,
 };
 use super::error::ManifestLoadError;
 use super::load::{
@@ -19,6 +19,7 @@ use super::load::{
     load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_tables,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
+use super::record::read_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
@@ -45,12 +46,12 @@ use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
-    MetadataTableFamily as ApiMetadataTableFamily, NamespaceCheckpointRecord,
-    NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
+    NamespaceManifestPayload,
 };
 use loonfs_api::{
-    validate_checkpoint_id, ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId,
-    NamespaceId, PutBehavior, RevisionNo,
+    validate_checkpoint_id, ChangeSeq, CommitId, EffectiveLimit, InodeId, ManifestId, NamespaceId,
+    PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{metadata_manifest, metadata_table, wal_head, wal_segment};
@@ -242,35 +243,24 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .await
         .expect("bootstrap");
 
-    create_checkpoint(&store, &namespace_id, &context)
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
+    // The bootstrap manifest already covers the head: pinning writes a
+    // record against it instead of materializing a new manifest.
+    assert_eq!(checkpoint.manifest_id, ManifestId(0));
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_id, ManifestId(1));
-    let current_manifest = load_manifest_materialization_for_inspection(
-        &store,
-        &namespace_id,
-        materialization.root.manifest_id,
-    )
-    .await
-    .expect("load current manifest");
-    assert!(!current_manifest.manifest.payload.checkpoints.is_empty());
-    let bootstrap_manifest =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(0))
-            .await
-            .expect("load bootstrap manifest");
-    assert!(bootstrap_manifest.manifest.payload.checkpoints.is_empty());
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(1))
-            .await
-            .expect("load namespace manifest");
-    assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
-    let checkpoint = &materialized.manifest.payload.checkpoints[0];
-    assert!(validate_checkpoint_id(&checkpoint.checkpoint_id).is_ok());
-    assert_eq!(checkpoint.head_seq, ChangeSeq(0));
-    assert_eq!(checkpoint.manifest_id, ManifestId(1));
+    assert_eq!(materialization.root.manifest_id, ManifestId(0));
+    let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record exists")
+        .state;
+    assert!(validate_checkpoint_id(&record.checkpoint_id).is_ok());
+    assert_eq!(record.manifest_head_seq, ChangeSeq(0));
+    assert_eq!(record.manifest_id, ManifestId(0));
 }
 
 #[tokio::test]
@@ -594,51 +584,104 @@ async fn retention_floor_does_not_advance_past_missing_metadata_segment() {
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
 }
 
-#[test]
-fn record_retention_keeps_named_and_newest_unnamed_records() {
-    let record = |seq: u64, name: Option<&str>| NamespaceCheckpointRecord {
-        checkpoint_id: CheckpointId::parse(format!("chk_{seq:032x}")).expect("checkpoint id"),
-        manifest_id: ManifestId(seq),
-        head_seq: ChangeSeq(seq),
-        head_commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("commit id"),
-        created_at_ms: seq,
-        expires_at_ms: None,
-        name: name.map(str::to_owned),
-    };
-    let records = vec![
-        record(1, Some("release")),
-        record(2, None),
-        record(3, None),
-        record(4, None),
-        record(5, None),
-        record(6, None),
-        record(7, None),
-    ];
+#[tokio::test]
+async fn create_checkpoint_revives_a_dead_record_for_a_verified_basis() {
+    // A record left dead by a failed verification is revived, not
+    // duplicated, when the same basis verifies later.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let first = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    crate::checkpoint::record::set_checkpoint_record_state(
+        &store,
+        &namespace_id,
+        &first.checkpoint_id,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+        &context.writer_version,
+    )
+    .await
+    .expect("mark dead");
 
-    let kept = retained_checkpoint_records(records);
-
-    let kept_seqs: Vec<u64> = kept.iter().map(|r| r.head_seq.0).collect();
-    assert_eq!(kept_seqs, vec![1, 4, 5, 6, 7]);
-
-    // A named record interleaved mid-vec is skipped, not counted or dropped.
-    let records = vec![
-        record(1, None),
-        record(2, None),
-        record(3, Some("mid")),
-        record(4, None),
-        record(5, None),
-        record(6, None),
-        record(7, None),
-    ];
-
-    let kept = retained_checkpoint_records(records);
-
-    let kept_seqs: Vec<u64> = kept.iter().map(|r| r.head_seq.0).collect();
-    assert_eq!(kept_seqs, vec![3, 4, 5, 6, 7]);
+    let revived = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("recreate checkpoint");
+    assert_eq!(revived.checkpoint_id, first.checkpoint_id);
+    let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record exists")
+        .state;
+    assert_eq!(
+        record.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+    );
 }
 
 #[tokio::test]
-async fn manifest_publication_retains_only_newest_unnamed_checkpoint_records() {
+async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance floor");
+
+    // The bootstrap basis (seq 0) now sits below the floor (seq 1): a
+    // record pinned to it must fail post-write verification.
+    let stale = loonfs_api::wire::control::CheckpointRecordState {
+        checkpoint_id: checkpoint.checkpoint_id.clone(),
+        namespace_id: namespace_id.clone(),
+        manifest_id: ManifestId(0),
+        manifest_head_seq: ChangeSeq(0),
+        manifest_payload_checksum: "sha256:stale".to_owned(),
+        head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
+        created_at_ms: context.now_ms,
+        expires_at_ms: None,
+        owner: None,
+        name: None,
+        state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active,
+    };
+    let verified = crate::checkpoint::verify_checkpoint_basis(&store, &stale)
+        .await
+        .expect("verification runs");
+    assert!(!verified, "sub-floor basis must not verify");
+}
+
+#[tokio::test]
+async fn checkpoint_records_are_standalone_files_deduplicated_per_basis() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -647,41 +690,59 @@ async fn manifest_publication_retains_only_newest_unnamed_checkpoint_records() {
         .await
         .expect("bootstrap");
 
-    let mut checkpoint_ids = Vec::new();
-    let mut last_manifest_id = None;
-    for round in 0..6u32 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
-        .await
-        .expect("write");
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context)
-            .await
-            .expect("create checkpoint");
-        checkpoint_ids.push(checkpoint.checkpoint_id.clone());
-        last_manifest_id = Some(checkpoint.manifest_id);
-    }
-
-    let materialized = load_manifest_materialization_for_inspection(
+    write_file_bytes(
         &store,
         &namespace_id,
-        last_manifest_id.expect("manifest id"),
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
     )
     .await
-    .expect("load manifest");
-    let records = &materialized.manifest.payload.checkpoints;
-    assert_eq!(records.len(), 4);
-    let expected: Vec<_> = checkpoint_ids[checkpoint_ids.len() - 4..].to_vec();
-    let actual: Vec<_> = records
-        .iter()
-        .map(|record| record.checkpoint_id.clone())
-        .collect();
-    assert_eq!(actual, expected);
+    .expect("write");
+    let first = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    // Re-creating for the same pinned basis returns the existing record
+    // instead of stacking a duplicate file.
+    let repeated = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("repeat checkpoint");
+    assert_eq!(repeated, first);
+
+    let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record exists")
+        .state;
+    assert_eq!(record.manifest_id, first.manifest_id);
+    assert_eq!(record.manifest_head_seq, first.checkpoint_seq);
+    assert_eq!(
+        record.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+    );
+
+    // A new basis mints a new record; both files exist side by side.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file-2.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write 2");
+    let second = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("second checkpoint");
+    assert_ne!(second.checkpoint_id, first.checkpoint_id);
+    assert!(
+        read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect("read first record")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1499,15 +1560,14 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
     assert_eq!(l0_runs.len(), 1);
     assert_eq!(l0_runs[0].run_seq, second.checkpoint_seq);
     assert_eq!(l0_runs[0].level, CHECKPOINT_L0_RUN_LEVEL);
-    assert_eq!(second_materialized.manifest.payload.checkpoints.len(), 2);
-    assert_eq!(
-        second_materialized.manifest.payload.checkpoints[0].checkpoint_id,
-        first.checkpoint_id
-    );
-    assert_eq!(
-        second_materialized.manifest.payload.checkpoints[1].checkpoint_id,
-        second.checkpoint_id
-    );
+    for response in [&first, &second] {
+        let record = read_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
+            .await
+            .expect("read checkpoint record")
+            .expect("record exists")
+            .state;
+        assert_eq!(record.manifest_id, response.manifest_id);
+    }
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
         &second_materialized.metadata_state
@@ -1729,7 +1789,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             initialized: true,
             verified: true,
             fork: None,
-            checkpoints: Vec::new(),
             features: BTreeMap::new(),
             metadata_files,
         },
@@ -3017,7 +3076,6 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(2),
-        None,
     )
     .await
     .expect("build orphan manifest");
@@ -3064,7 +3122,6 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
-        None,
     )
     .await
     .expect("build manifest");
@@ -3102,7 +3159,6 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
-        None,
     )
     .await
     .expect("build manifest");
@@ -3172,7 +3228,6 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
-        None,
     )
     .await
     .expect("build conflicting manifest");
@@ -3199,11 +3254,12 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
     .expect("create checkpoint should retry allocation");
 
     assert_eq!(checkpoint.manifest_id, ManifestId(2));
-    let retried =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
-            .await
-            .expect("load retried manifest");
-    assert!(checkpoint_record_by_id(&retried.manifest, &checkpoint.checkpoint_id).is_some());
+    let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record exists")
+        .state;
+    assert_eq!(record.manifest_id, ManifestId(2));
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -3211,7 +3267,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
 }
 
 #[tokio::test]
-async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it() {
+async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3245,11 +3301,9 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
-        None,
     )
     .await
     .expect("build manifest");
-    let original_files = manifest_without_checkpoint.payload.metadata_files.clone();
     write_namespace_manifest(&store, &manifest_without_checkpoint)
         .await
         .expect("write manifest");
@@ -3257,12 +3311,11 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
         &store,
         &namespace_id,
         &manifest_without_checkpoint,
-        &CheckpointId::parse("chk_00000000000000000000000000000099").expect("checkpoint id"),
         context.now_ms,
         &context.writer_version,
     )
     .await
-    .expect("publish manifest without checkpoint");
+    .expect("publish manifest");
 
     let checkpoint = create_checkpoint_with_policy(
         &store,
@@ -3273,20 +3326,19 @@ async fn create_checkpoint_adds_record_when_current_manifest_exists_without_it()
     .await
     .expect("create checkpoint");
 
-    assert_eq!(checkpoint.manifest_id, ManifestId(2));
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
-            .await
-            .expect("load new manifest");
-    assert_eq!(materialized.manifest.payload.metadata_files, original_files);
-    assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
+    // With standalone records, pinning a basis that already covers the head
+    // writes a checkpoint file against it instead of building a new
+    // manifest.
+    assert_eq!(checkpoint.manifest_id, ManifestId(1));
+    let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record exists")
+        .state;
+    assert_eq!(record.manifest_id, ManifestId(1));
     assert_eq!(
-        materialized.manifest.payload.checkpoints[0].checkpoint_id,
-        checkpoint.checkpoint_id
-    );
-    assert_eq!(
-        materialized.manifest.payload.checkpoints[0].manifest_id,
-        checkpoint.manifest_id
+        record.manifest_payload_checksum,
+        manifest_without_checkpoint.payload_checksum
     );
 }
 
@@ -3378,11 +3430,9 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
-        None,
     )
     .await
     .expect("build manifest without checkpoint");
-    assert!(manifest.payload.checkpoints.is_empty());
     let mut newer_live_head = materialization.head.clone();
     newer_live_head.head_commit_id =
         CommitId::parse("c_00000000000000000000000000000099").expect("commit id");
@@ -3397,7 +3447,7 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
 }
 
 #[tokio::test]
-async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
+async fn lower_seq_root_publication_yields_to_the_newer_root() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3445,7 +3495,6 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
             initialized: true,
             verified: true,
             fork: None,
-            checkpoints: Vec::new(),
             features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(tables),
         },
@@ -3470,25 +3519,22 @@ async fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         .expect("later checkpoint");
     assert!(later_checkpoint.manifest_id > ManifestId(materialization_before.head.seq.0));
 
-    let checkpoint_id =
-        CheckpointId::parse("chk_00000000000000000000000000000099").expect("checkpoint id");
     let outcome = publish_metadata_root(
         &store,
         &namespace_id,
         &manifest,
-        &checkpoint_id,
         context.now_ms,
         &context.writer_version,
     )
     .await
-    .expect("manifest publication check should classify current manifest");
+    .expect("manifest publication should classify the newer root");
 
-    assert_eq!(
-        outcome,
-        ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
-            current_manifest_id: later_checkpoint.manifest_id
+    match outcome {
+        ManifestPublicationOutcome::Superseded(current) => {
+            assert_eq!(current.manifest_id, later_checkpoint.manifest_id);
         }
-    );
+        other => panic!("expected superseded outcome, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3528,7 +3574,6 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
-        None,
     )
     .await
     .expect("build manifest");
@@ -3541,7 +3586,6 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &store,
         &namespace_id,
         &manifest,
-        &CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
         context.now_ms,
         &context.writer_version,
     )
@@ -3743,7 +3787,6 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(checkpoint.manifest_id.0 + 1),
-        None,
     )
     .await
     .expect("build compacted manifest");
@@ -3759,7 +3802,6 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         &store,
         &namespace_id,
         &compacted,
-        &checkpoint.checkpoint_id,
         context.now_ms,
         &context.writer_version,
     )

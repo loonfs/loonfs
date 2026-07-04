@@ -2,8 +2,8 @@
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, DeleteDirectoryBehavior, ManifestId, MoveBehavior,
-    NamespaceId, PutBehavior,
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, ManifestId, MoveBehavior, NamespaceId,
+    PutBehavior,
 };
 
 /// Current maintenance-related namespace status.
@@ -16,7 +16,6 @@ pub struct NamespaceStatus {
     /// Current manifest pointer recorded by the head.
     pub current_manifest_id: Option<ManifestId>,
     /// Latest checkpoint recorded by the head.
-    pub latest_checkpoint_id: Option<CheckpointId>,
     /// Number of visible WAL segments after the manifest materialization.
     pub wal_tail_segments: u64,
     /// Oldest sequence still promised for incremental replay.

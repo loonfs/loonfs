@@ -333,6 +333,18 @@ pub async fn load_namespace_wal_floor_control<S: ObjectStore + ?Sized>(
     })
 }
 
+pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    checkpoint_id: &loonfs_api::CheckpointId,
+) -> Result<Option<loonfs_api::wire::control::CheckpointRecordState>, crate::error::CoreError> {
+    Ok(
+        crate::checkpoint::read_checkpoint_record(store, expected_namespace, checkpoint_id)
+            .await?
+            .map(|loaded| loaded.state),
+    )
+}
+
 pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
