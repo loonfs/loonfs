@@ -1822,6 +1822,8 @@ fn publish_auto_ticks_maintenance_once_tail_reaches_threshold() {
         .expect("put file");
     }
 
+    // The tick runs on the maintenance worker thread; quiesce, then assert.
+    fs.wait_for_background_maintenance();
     let status = fs
         .namespace_status_blocking(&namespace_id)
         .expect("status after auto tick");

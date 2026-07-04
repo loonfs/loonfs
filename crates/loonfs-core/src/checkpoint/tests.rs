@@ -1087,7 +1087,8 @@ async fn publish_backpressure_rejects_when_wal_tail_outruns_maintenance() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    for round in 0..129u32 {
+    let limit = u32::try_from(crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS).expect("limit");
+    for round in 0..=limit {
         write_file_bytes(
             &store,
             &namespace_id,

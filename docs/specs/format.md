@@ -1178,11 +1178,15 @@ bump.
 Maintenance keeps read cost bounded, retention safe, and durable state clean.
 Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. Two behaviors keep an un-administered
-deployment healthy regardless of scheduling: the reference implementation
-runs a maintenance tick inline after any publish that observes the WAL tail
-at or past the checkpoint threshold, and publishes are rejected with
-`maintenance_required` once the tail exceeds four times that threshold.
-Reads never gate on tail length. An embedded engine where an operator
+deployment's read costs bounded regardless of scheduling: the reference
+implementation schedules a background maintenance tick after any runtime
+publish that observes the WAL tail at or past the checkpoint threshold
+(32 segments at defaults), and every publish surface rejects with
+`maintenance_required` once the tail exceeds four times that threshold
+(128 at defaults). Reads never gate on tail length. Bounded reads are the
+automatic half only: the retention floor never advances on its own, so
+history retention — and the row reclamation that follows it — remains an
+explicit operator decision. An embedded engine where an operator
 triggers maintenance manually and a server that runs the same work invisibly
 are equally conformant (see `api.md` for the optional maintenance plane). The
 invariants below bind every implementation, whoever runs the work: maintenance

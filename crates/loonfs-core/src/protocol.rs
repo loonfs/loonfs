@@ -579,7 +579,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         }
     };
     let publish_tail_options = PublishTailOptions::default();
-    let publish_view = match load_publish_metadata_view(
+    let (publish_view, projection) = match load_publish_metadata_view(
         store,
         namespace_id,
         Some(acquired_writer),
@@ -592,9 +592,25 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     ))
     .await
     {
-        Ok((publish_view, _projection)) => publish_view,
+        Ok(value) => value,
         Err(error) => return (0..candidates.len()).map(|_| Err(error.clone())).collect(),
     };
+    if projection.wal_tail_segments > crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS {
+        // Same backpressure contract as the caching engine: the commit
+        // surface must not outrun maintenance either (format spec,
+        // "Maintenance operations").
+        let error = MetadataViewError::MaintenanceRequired {
+            namespace_id: namespace_id.clone(),
+            reason: format!(
+                "wal tail has {} segments; publishes resume once maintenance brings it back to {} or fewer",
+                projection.wal_tail_segments,
+                crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS
+            ),
+        };
+        return (0..candidates.len())
+            .map(|_| Err(CoreError::from(error.clone())))
+            .collect();
+    }
     publish_namespace_mutations_batch_against_publish_view(
         store,
         namespace_id,
