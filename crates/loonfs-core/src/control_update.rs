@@ -40,6 +40,12 @@ pub(crate) enum ControlUpdateError {
     RetryExhausted { attempts: usize },
 }
 
+/// Reads the head, lets `update` decide `Noop` or `Replace`, and publishes a
+/// replacement by compare-and-swap on the loaded etag, retrying the whole
+/// read-decide-swap cycle on CAS conflict. Closure errors propagate
+/// immediately without retrying — that is the fencing hook: a closure that
+/// observes a disqualifying head (newer writer, changed manifest) must error,
+/// never clobber.
 pub(crate) async fn update_head<S, T, E, F>(
     store: &S,
     namespace_id: &NamespaceId,

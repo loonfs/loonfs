@@ -3,7 +3,7 @@
 use super::load::load_verified_manifest_tables;
 use super::publish::HEAD_CAS_RETRY_LIMIT;
 use crate::context::MutationContext;
-use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
+use crate::control_update::{update_head, HeadUpdate};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::namespace::control::read_head_object;
@@ -17,9 +17,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse, CoreError> {
     // Derive the target floor from the currently published manifest before
-    // entering the head update. If a newer manifest lands while the CAS
-    // below retries, publishing this floor is still safe: floors only move
-    // forward and the newer manifest covers at least this much history.
+    // entering the head update. The closure refuses to publish if the
+    // current manifest changes mid-update: manifest ids do not order
+    // coverage, so a newer id is no promise of newer history. The caller
+    // retries and re-derives from whatever manifest won.
     let loaded_head = read_head_object(store, namespace_id)
         .await
         .map_err(|error| {
@@ -53,6 +54,15 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                 }));
             }
 
+            // The floor above was derived from `current_manifest_id`. Only
+            // publish it while that manifest is still current; any change
+            // aborts so the caller re-derives against the winner.
+            if head.current_manifest_id != Some(current_manifest_id) {
+                return Err(CoreError::CheckpointUnavailable(format!(
+                    "current manifest changed during retention advance (floor was derived from {current_manifest_id:?}); retry"
+                )));
+            }
+
             // Maintenance head update.
             //
             // Advancing retention_floor_seq is a metadata-retention decision. It
@@ -83,10 +93,4 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         },
     )
     .await
-    .map_err(|error: ControlUpdateError| match error {
-        ControlUpdateError::LoadHead(error) => {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        }
-        other => CoreError::Store(other.to_string()),
-    })
 }

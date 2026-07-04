@@ -158,7 +158,6 @@ pub(crate) struct PublishTailProjection {
     pub(crate) manifest_id: ManifestId,
     pub(crate) manifest_head_seq: ChangeSeq,
     pub(crate) manifest_payload_checksum: String,
-    pub(crate) wal_tail_segments: u64,
     pub(crate) tail_state: MetadataState,
 }
 
@@ -734,7 +733,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    let wal_tail_segments = u64::try_from(wal_chain.segments().len()).unwrap_or(u64::MAX);
     let replayed = project_validated_wal_tail(
         manifest_head,
         &MetadataState::default(),
@@ -752,7 +750,6 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         manifest_id,
         manifest_head_seq: manifest_head.seq,
         manifest_payload_checksum,
-        wal_tail_segments,
         tail_state: replayed.resulting_metadata_state,
     };
     Ok(projection)

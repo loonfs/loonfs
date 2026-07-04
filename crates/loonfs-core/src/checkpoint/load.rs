@@ -299,20 +299,20 @@ fn validate_manifest_table_descriptors(
             }
         }
 
-        if direntry_bind_rows > 0 && direntry_child_bind_rows == 0 {
+        if direntry_bind_rows != direntry_child_bind_rows {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: manifest_object_key.to_owned(),
                 message: format!(
-                    "metadata run {:?} has direntry binds without direntry child-bind index descriptors",
+                    "metadata run {:?} has {direntry_bind_rows} direntry bind rows but {direntry_child_bind_rows} child-bind index rows",
                     run.run_seq
                 ),
             });
         }
-        if revision_rows > 0 && revision_by_inode_desc_rows == 0 {
+        if revision_rows != revision_by_inode_desc_rows {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: manifest_object_key.to_owned(),
                 message: format!(
-                    "metadata run {:?} has revisions without revision-by-inode index descriptors",
+                    "metadata run {:?} has {revision_rows} revision rows but {revision_by_inode_desc_rows} revision index rows",
                     run.run_seq
                 ),
             });

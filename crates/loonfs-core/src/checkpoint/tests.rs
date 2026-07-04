@@ -16,7 +16,7 @@ use super::create::{
 use super::error::ManifestLoadError;
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
-    load_manifest_metadata_state_for_inspection_from_manifest,
+    load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_tables,
 };
 use super::publish::{
     publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
@@ -31,6 +31,7 @@ use super::runs::{
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
+use crate::namespace::control::read_head_object;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
 use crate::protocol::list_changes_after;
@@ -502,6 +503,13 @@ async fn maintenance_does_not_make_orphan_wal_visible() {
         .await
         .expect("advance retention");
 
+    let head_after = read_head_object(&store, &namespace_id)
+        .await
+        .expect("read head")
+        .envelope
+        .state;
+    assert_eq!(head_after.seq, ChangeSeq(2));
+
     let changes = list_changes_after(
         &store,
         &namespace_id,
@@ -514,6 +522,185 @@ async fn maintenance_does_not_make_orphan_wal_visible() {
     assert_eq!(changes.through_seq, ChangeSeq(2));
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.changes[0].seq, ChangeSeq(2));
+}
+
+#[tokio::test]
+async fn manifest_load_rejects_unequal_index_descriptor_counts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    // Tamper only the descriptor's row_count for the revision index family;
+    // the per-run count-equality check must reject the manifest at load.
+    let mut manifest =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+            .await
+            .expect("load manifest")
+            .manifest;
+    let descriptor = manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|file| file.family == ApiMetadataTableFamily::RevisionsByInodeDesc)
+        .expect("revision index descriptor");
+    descriptor.row_count += 1;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    match load_verified_manifest_tables(&store, &namespace_id, checkpoint.manifest_id).await {
+        Err(ManifestLoadError::RunManifestMismatch { .. }) => {}
+        Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
+        Ok(_) => panic!("tampered descriptor counts must not load"),
+    }
+}
+
+#[tokio::test]
+async fn retention_advance_aborts_when_current_manifest_changes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let plain = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&plain, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &plain,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&plain, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    // Lose the floor CAS once while a competing maintenance actor installs a
+    // different current manifest; the retry must abort instead of publishing
+    // a floor derived from the replaced manifest.
+    let store = ManifestSwapOnCasConflictStore {
+        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
+        namespace_id: namespace_id.clone(),
+        remaining_conflicts: std::sync::atomic::AtomicUsize::new(1),
+    };
+    let error = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect_err("floor derived from a replaced manifest must not publish");
+    assert!(
+        matches!(error, CoreError::CheckpointUnavailable(_)),
+        "unexpected error: {error:?}"
+    );
+    let head = read_head_object(&store.inner, &namespace_id)
+        .await
+        .expect("read head")
+        .envelope
+        .state;
+    assert_eq!(head.retention_floor_seq, ChangeSeq(0));
+}
+
+#[derive(Debug)]
+struct ManifestSwapOnCasConflictStore {
+    inner: LocalFsStore,
+    namespace_id: NamespaceId,
+    remaining_conflicts: std::sync::atomic::AtomicUsize,
+}
+
+impl ManifestSwapOnCasConflictStore {
+    async fn install_competing_manifest_id(&self) {
+        let loaded = read_head_object(&self.inner, &self.namespace_id)
+            .await
+            .expect("read head for swap");
+        let mut head = loaded.envelope.state;
+        head.current_manifest_id = head.current_manifest_id.map(|id| ManifestId(id.0 + 1));
+        let envelope = loonfs_api::wire::control::HeadStateEnvelope::from_state(
+            loonfs_api::wire::control::ControlObjectKind::NamespaceHead,
+            "test-writer/0.1.0",
+            head,
+        )
+        .expect("head envelope");
+        let bytes =
+            loonfs_api::wire::control::encode_control_object(&envelope).expect("head bytes");
+        self.inner
+            .put(
+                &namespace_head(self.namespace_id.as_str()),
+                Bytes::from(bytes),
+                PutMode::Overwrite,
+            )
+            .await
+            .expect("install competing head");
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ManifestSwapOnCasConflictStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        use std::sync::atomic::Ordering;
+        if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
+            self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
+            self.install_competing_manifest_id().await;
+            return Err(ObjectStoreError::PreconditionFailed);
+        }
+        self.inner.compare_and_swap(key, expected_etag, bytes).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
 }
 
 #[tokio::test]

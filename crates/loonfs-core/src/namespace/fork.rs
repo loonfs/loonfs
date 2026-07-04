@@ -115,37 +115,15 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
     let target_manifest = NamespaceManifestEnvelope::from_payload(
         &context.writer_version,
-        NamespaceManifestPayload {
-            namespace_id: new_namespace_id.clone(),
-            manifest_id: target_manifest_id,
-            head_seq: fork_seq,
-            head_commit_id: source_head_commit_id.clone(),
-            base_seq: source_manifest.payload.base_seq,
-            writer_epoch: WriterEpoch(0),
-            next_inode_id: source_manifest.payload.next_inode_id,
-            name_policy: source_manifest.payload.name_policy,
-            retention_floor_seq: fork_seq,
-            initialized: true,
-            verified: true,
-            fork: Some(NamespaceManifestFork {
-                source_namespace_id: source_namespace_id.clone(),
-                fork_seq,
-                source_checkpoint_id: source_checkpoint_id.clone(),
-                source_manifest_id,
-                source_head_seq,
-            }),
-            checkpoints: vec![NamespaceCheckpointRecord {
-                checkpoint_id: target_checkpoint_id.clone(),
-                manifest_id: target_manifest_id,
-                head_seq: fork_seq,
-                head_commit_id: source_head_commit_id.clone(),
-                created_at_ms: context.now_ms,
-                expires_at_ms: None,
-                name: None,
-            }],
-            features: source_manifest.payload.features.clone(),
-            metadata_files: source_manifest.payload.metadata_files.clone(),
-        },
+        fork_target_manifest_payload(
+            new_namespace_id,
+            target_manifest_id,
+            &target_checkpoint_id,
+            source_namespace_id,
+            source_manifest,
+            source_checkpoint,
+            context.now_ms,
+        ),
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let gc_pin_envelope = NamespaceGcPinStateEnvelope::from_state(
@@ -192,6 +170,53 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
+}
+
+/// Builds the fork target's manifest payload from the pinned source
+/// checkpoint. The target adopts the source's feature declarations and
+/// metadata file references verbatim: it must be readable under exactly the
+/// capabilities the source declared for those tables.
+fn fork_target_manifest_payload(
+    new_namespace_id: &NamespaceId,
+    target_manifest_id: ManifestId,
+    target_checkpoint_id: &CheckpointId,
+    source_namespace_id: &NamespaceId,
+    source_manifest: &NamespaceManifestEnvelope,
+    source_checkpoint: &NamespaceCheckpointRecord,
+    created_at_ms: u64,
+) -> NamespaceManifestPayload {
+    let fork_seq = source_checkpoint.head_seq;
+    NamespaceManifestPayload {
+        namespace_id: new_namespace_id.clone(),
+        manifest_id: target_manifest_id,
+        head_seq: fork_seq,
+        head_commit_id: source_checkpoint.head_commit_id.clone(),
+        base_seq: source_manifest.payload.base_seq,
+        writer_epoch: WriterEpoch(0),
+        next_inode_id: source_manifest.payload.next_inode_id,
+        name_policy: source_manifest.payload.name_policy,
+        retention_floor_seq: fork_seq,
+        initialized: true,
+        verified: true,
+        fork: Some(NamespaceManifestFork {
+            source_namespace_id: source_namespace_id.clone(),
+            fork_seq,
+            source_checkpoint_id: source_checkpoint.checkpoint_id.clone(),
+            source_manifest_id: source_checkpoint.manifest_id,
+            source_head_seq: source_checkpoint.head_seq,
+        }),
+        checkpoints: vec![NamespaceCheckpointRecord {
+            checkpoint_id: target_checkpoint_id.clone(),
+            manifest_id: target_manifest_id,
+            head_seq: fork_seq,
+            head_commit_id: source_checkpoint.head_commit_id.clone(),
+            created_at_ms,
+            expires_at_ms: None,
+            name: None,
+        }],
+        features: source_manifest.payload.features.clone(),
+        metadata_files: source_manifest.payload.metadata_files.clone(),
+    }
 }
 
 async fn write_source_gc_pin<S: ObjectStore + ?Sized>(
@@ -332,7 +357,10 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
 
 #[cfg(test)]
 mod tests {
-    use super::{checkpoint_record_by_id, deterministic_gc_pin_id, write_source_gc_pin};
+    use super::{
+        checkpoint_record_by_id, deterministic_gc_pin_id, fork_target_manifest_payload,
+        write_source_gc_pin,
+    };
     use crate::error::CoreError;
     use bytes::Bytes;
     use loonfs_api::wire::control::{
@@ -515,5 +543,48 @@ mod tests {
             },
         )
         .expect("manifest")
+    }
+
+    #[test]
+    fn fork_target_manifest_preserves_source_features_and_tables() {
+        let base = namespace_manifest_with_checkpoint(
+            "chk_00000000000000000000000000000002",
+            ManifestId(7),
+            ChangeSeq(7),
+            "c_00000000000000000000000000000009",
+        );
+        let mut payload = base.payload.clone();
+        payload
+            .features
+            .insert("core.test-capability".to_owned(), serde_json::json!(true));
+        let source = NamespaceManifestEnvelope::from_payload("test-writer/0.1.0", payload)
+            .expect("source manifest");
+        let source_checkpoint = source
+            .payload
+            .checkpoints
+            .first()
+            .expect("checkpoint record");
+        let target_checkpoint_id =
+            CheckpointId::parse("chk_00000000000000000000000000000003").expect("checkpoint id");
+
+        let target = fork_target_manifest_payload(
+            &NamespaceId::parse("target").expect("target namespace"),
+            ManifestId(7),
+            &target_checkpoint_id,
+            &NamespaceId::parse("source").expect("source namespace"),
+            &source,
+            source_checkpoint,
+            2_000,
+        );
+
+        assert_eq!(target.features, source.payload.features);
+        assert_eq!(target.metadata_files, source.payload.metadata_files);
+        assert_eq!(target.head_seq, source_checkpoint.head_seq);
+        let fork = target.fork.expect("fork provenance");
+        assert_eq!(fork.source_checkpoint_id, source_checkpoint.checkpoint_id);
+        assert_eq!(fork.source_manifest_id, source_checkpoint.manifest_id);
+        let target_record = target.checkpoints.first().expect("target record");
+        assert_eq!(target_record.checkpoint_id, target_checkpoint_id);
+        assert_eq!(target_record.created_at_ms, 2_000);
     }
 }

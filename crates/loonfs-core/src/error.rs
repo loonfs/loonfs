@@ -397,6 +397,18 @@ fn classify_durable_content_error(error: &DurableContentValidationError) -> Erro
     }
 }
 
+impl From<crate::control_update::ControlUpdateError> for CoreError {
+    fn from(value: crate::control_update::ControlUpdateError) -> Self {
+        use crate::control_update::ControlUpdateError;
+        match value {
+            ControlUpdateError::LoadHead(error) => {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+            }
+            other => CoreError::Store(other.to_string()),
+        }
+    }
+}
+
 fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> ErrorCode {
     match error {
         WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),

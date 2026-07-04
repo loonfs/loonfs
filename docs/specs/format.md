@@ -164,8 +164,8 @@ explicit commits — are fenced by `writer_epoch` and then linearized by the hea
 compare-and-swap that makes their WAL visible.
 
 Checkpoint and retention maintenance updates are CAS-linearized metadata
-updates. They preserve `writer_epoch` and `writer_lease`, and must not make
-uncommitted WAL visible. Maintenance may race with semantic writers; on head
+updates. They preserve `writer_epoch` and `writer_lease`, and must not change
+WAL visibility at all. Maintenance may race with semantic writers; on head
 CAS conflict it must reload the latest head and rebase or retry the metadata
 update. It must not bump `writer_epoch` unless its purpose is to intentionally
 fence writers.
