@@ -1,9 +1,9 @@
 use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
-use loonfs_api::wire::control::NamespaceDescriptorState;
+use loonfs_api::wire::control::NamespaceConfigState;
 use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
-use loonfs_objectstore::keys::{namespace_descriptor, namespace_head};
+use loonfs_objectstore::keys::{namespace_config, wal_head};
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
@@ -17,7 +17,7 @@ pub(crate) enum NamespaceCatalogLoadError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedNamespaceCatalogEntry {
-    pub(crate) namespace_descriptor: NamespaceDescriptorState,
+    pub(crate) namespace_config: NamespaceConfigState,
     pub(crate) content_store_id: ContentStoreId,
 }
 
@@ -45,7 +45,7 @@ pub(crate) enum NamespaceInitializationError {
 pub(crate) async fn load_namespace_descriptor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
-) -> Result<NamespaceDescriptorState, NamespaceCatalogLoadError> {
+) -> Result<NamespaceConfigState, NamespaceCatalogLoadError> {
     let loaded_descriptor = read_namespace_descriptor_object(store, expected_namespace)
         .await
         .map_err(NamespaceCatalogLoadError::LoadNamespaceDescriptor)?;
@@ -56,14 +56,14 @@ pub(crate) async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
-    let namespace_descriptor = load_namespace_descriptor(store, expected_namespace).await?;
-    let content_store_id = namespace_descriptor.content_store_id.clone();
+    let namespace_config = load_namespace_descriptor(store, expected_namespace).await?;
+    let content_store_id = namespace_config.content_store_id.clone();
     read_content_store_descriptor_object(store, &content_store_id)
         .await
         .map_err(NamespaceCatalogLoadError::LoadContentStoreDescriptor)?;
 
     Ok(VerifiedNamespaceCatalogEntry {
-        namespace_descriptor,
+        namespace_config,
         content_store_id,
     })
 }
@@ -83,8 +83,8 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
 ) -> Result<NamespaceInitializationState, NamespaceInitializationError> {
     NamespaceId::parse(namespace_id.as_str())?;
 
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
-    let head_key = namespace_head(namespace_id.as_str());
+    let descriptor_key = namespace_config(namespace_id.as_str());
+    let head_key = wal_head(namespace_id.as_str());
 
     let descriptor_exists = store
         .head(&descriptor_key)

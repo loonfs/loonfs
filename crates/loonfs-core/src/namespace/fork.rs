@@ -13,7 +13,7 @@ use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceGcPinState,
+    NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
     NamespaceGcPinStateEnvelope, NamespaceState, WriterLease,
 };
 use loonfs_api::wire::manifest::{
@@ -24,7 +24,7 @@ use loonfs_api::{
     generate_checkpoint_id, sha256_digest, CheckpointId, ManifestId, NamespaceId, NamespaceSummary,
     WriterEpoch,
 };
-use loonfs_objectstore::keys::{gc_pin, namespace_descriptor, namespace_head};
+use loonfs_objectstore::keys::{namespace_config, pin, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -96,23 +96,23 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         visible_wal_tip: None,
         state: NamespaceState::Active,
     };
-    let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
-        ControlObjectKind::NamespaceDescriptor,
+    let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(
+        ControlObjectKind::NamespaceConfig,
         &context.writer_version,
-        NamespaceDescriptorState {
+        NamespaceConfigState {
             namespace_id: new_namespace_id.clone(),
             content_store_id: source_content_store_id,
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let head = HeadStateEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
+        ControlObjectKind::WalHead,
         &context.writer_version,
         initial_head,
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let head_key = namespace_head(new_namespace_id.as_str());
-    let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
+    let head_key = wal_head(new_namespace_id.as_str());
+    let descriptor_key = namespace_config(new_namespace_id.as_str());
     let target_manifest = NamespaceManifestEnvelope::from_payload(
         &context.writer_version,
         fork_target_manifest_payload(
@@ -146,7 +146,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let gc_pin_key = gc_pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
+    let gc_pin_key = pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
     write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope).await?;
     write_namespace_manifest(store, &target_manifest)
         .await
@@ -374,7 +374,7 @@ mod tests {
         NamespaceId, WriterEpoch,
     };
     use loonfs_objectstore::fs::LocalFsStore;
-    use loonfs_objectstore::keys::gc_pin;
+    use loonfs_objectstore::keys::pin;
     use loonfs_objectstore::ObjectStore;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -431,7 +431,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let expected = gc_pin_envelope("source", "target", 1_000);
-        let object_key = gc_pin("source", &expected.state.pin_id);
+        let object_key = pin("source", &expected.state.pin_id);
 
         write_source_gc_pin(&store, &object_key, &expected)
             .await
@@ -454,7 +454,7 @@ mod tests {
             conflicting.state,
         )
         .expect("conflicting envelope");
-        let object_key = gc_pin("source", &expected.state.pin_id);
+        let object_key = pin("source", &expected.state.pin_id);
         store
             .put_if_absent(
                 &object_key,

@@ -6,7 +6,7 @@ use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
 };
 use loonfs_api::ChangeSeq;
-use loonfs_objectstore::keys::namespace_head;
+use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ pub fn prepare_commit_head_publish(
         state: current_head.state,
     };
     let envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
+        ControlObjectKind::WalHead,
         writer_version,
         resulting_head.clone(),
     )
@@ -113,7 +113,7 @@ pub fn prepare_commit_head_publish(
     );
 
     Ok(PreparedCommitHeadPublish {
-        object_key: namespace_head(current_head.namespace_id.as_str()),
+        object_key: wal_head(current_head.namespace_id.as_str()),
         resulting_head,
         envelope,
         encoded_bytes,

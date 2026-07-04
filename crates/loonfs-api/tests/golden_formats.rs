@@ -20,9 +20,8 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState,
-    NamespaceDescriptorState, NamespaceGcPinState, NamespaceState, UploadSessionState,
-    WalSegmentPointer, WriterLease,
+    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, NamespaceConfigState,
+    NamespaceGcPinState, NamespaceState, UploadSessionState, WalSegmentPointer, WriterLease,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -312,7 +311,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 owner_namespace_id: namespace_id(),
                 table_id: "tbl_0123456789abcdef0123456789abcdef".to_owned(),
                 object_key:
-                    "namespaces/demo/tables/metadata/tbl_0123456789abcdef0123456789abcdef.sst.zst"
+                    "namespaces/demo/metadata/tables/tbl_0123456789abcdef0123456789abcdef.sst.zst"
                         .to_owned(),
                 run_seq: ChangeSeq(2),
                 level: 0,
@@ -379,25 +378,26 @@ fn wal_segment_golden_decodes_to_sample() {
 #[test]
 fn metadata_sst_document_matches_golden_bytes() {
     let encoded = encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("encode sst");
-    assert_matches_golden("metadata_sst.v1.cbor", &unzstd(&encoded));
+    assert_matches_golden("metadata_table.v1.cbor", &unzstd(&encoded));
 }
 
 #[test]
 fn metadata_sst_golden_decodes_to_sample() {
-    let decoded = decode_metadata_sst_envelope_zstd(&rezstd(&read_golden("metadata_sst.v1.cbor")))
-        .expect("decode golden metadata sst");
+    let decoded =
+        decode_metadata_sst_envelope_zstd(&rezstd(&read_golden("metadata_table.v1.cbor")))
+            .expect("decode golden metadata sst");
     assert_eq!(decoded, sample_sst_envelope());
 }
 
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v1.json", &encoded);
+    assert_matches_golden("metadata_manifest.v1.json", &encoded);
 }
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("metadata_manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -443,18 +443,18 @@ fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
 fn control_objects_match_golden_bytes() {
     check_control_golden(
         "control_namespace_head.v1.json",
-        ControlObjectKind::NamespaceHead,
+        ControlObjectKind::WalHead,
         sample_head_state(),
     );
     check_control_golden(
         "control_namespace_head.deleted.v1.json",
-        ControlObjectKind::NamespaceHead,
+        ControlObjectKind::WalHead,
         sample_deleted_head_state(),
     );
     check_control_golden(
         "control_namespace_descriptor.v1.json",
-        ControlObjectKind::NamespaceDescriptor,
-        NamespaceDescriptorState {
+        ControlObjectKind::NamespaceConfig,
+        NamespaceConfigState {
             namespace_id: namespace_id(),
             content_store_id: content_store_id(),
         },
@@ -621,7 +621,7 @@ fn wal_decode_tolerates_additive_payload_fields() {
 #[test]
 fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
     let envelope = ControlObjectEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
+        ControlObjectKind::WalHead,
         WRITER_VERSION,
         sample_head_state(),
     )
@@ -632,7 +632,7 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
     document["payload"]["seq"] = serde_json::Value::from(999);
     let tampered = serde_json::to_vec(&document).expect("encode tampered document");
 
-    let err = decode_control_object::<HeadState>(&tampered, ControlObjectKind::NamespaceHead)
+    let err = decode_control_object::<HeadState>(&tampered, ControlObjectKind::WalHead)
         .expect_err("tampered payload must be rejected");
     assert!(
         matches!(err, ControlCodecError::ChecksumMismatch { .. }),

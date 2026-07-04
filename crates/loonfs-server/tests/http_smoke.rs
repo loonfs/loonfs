@@ -17,7 +17,7 @@ use loonfs_api::{
     DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_objectstore::keys::{namespace_head, namespace_manifest};
+use loonfs_objectstore::keys::{metadata_manifest, wal_head};
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -1536,7 +1536,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
         block_on(store.put_overwrite(
-            &namespace_manifest(namespace, ManifestId(1)),
+            &metadata_manifest(namespace, ManifestId(1)),
             Bytes::from_static(br#"{"bad":"json"}"#),
         ))
         .expect("corrupt manifest");
@@ -1779,13 +1779,12 @@ fn force_expire_namespace_writer_lease(
 ) {
     let store =
         ConfiguredObjectStore::local_fs(store_root, key_prefix).expect("construct test store");
-    let head_key = namespace_head(namespace);
+    let head_key = wal_head(namespace);
     let bytes = block_on(store.get(&head_key, None))
         .expect("read namespace head")
         .expect("namespace head exists");
     let mut envelope: HeadStateEnvelope =
-        decode_control_object(&bytes, ControlObjectKind::NamespaceHead)
-            .expect("decode namespace head");
+        decode_control_object(&bytes, ControlObjectKind::WalHead).expect("decode namespace head");
     envelope
         .state
         .writer_lease
@@ -1793,12 +1792,9 @@ fn force_expire_namespace_writer_lease(
         .expect("namespace head has writer lease")
         .lease_expires_at_ms = 0;
     let writer_version = envelope.writer_version;
-    let envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
-        writer_version,
-        envelope.state,
-    )
-    .expect("encode expired namespace head");
+    let envelope =
+        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, writer_version, envelope.state)
+            .expect("encode expired namespace head");
     let bytes = encode_control_object(&envelope).expect("serialize expired namespace head");
     block_on(store.put_overwrite(&head_key, Bytes::from(bytes)))
         .expect("write expired namespace head");

@@ -15,7 +15,7 @@ use loonfs_api::wire::manifest::{
     MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload, MetadataTableFamily,
 };
 use loonfs_api::{generate_metadata_table_id, ChangeSeq, NamespaceId};
-use loonfs_objectstore::keys::metadata_sst;
+use loonfs_objectstore::keys::metadata_table;
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
@@ -128,7 +128,7 @@ where
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
             let table_id = generate_metadata_table_id();
-            let object_key = metadata_sst(namespace_id.as_str(), &table_id);
+            let object_key = metadata_table(namespace_id.as_str(), &table_id);
             requests.push(MetadataSstWriteRequest {
                 namespace_id,
                 table_id,

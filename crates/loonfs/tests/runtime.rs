@@ -17,7 +17,7 @@ use loonfs::{
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::fs::LocalFsStore;
-use loonfs_objectstore::keys::{namespace_descriptor, namespace_head, namespace_manifest};
+use loonfs_objectstore::keys::{metadata_manifest, namespace_config, wal_head};
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -1695,7 +1695,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    block_on(raw_store.delete(&namespace_descriptor(namespace_id.as_str())))
+    block_on(raw_store.delete(&namespace_config(namespace_id.as_str())))
         .expect("delete namespace descriptor");
 
     assert_core_error_kind(
@@ -1718,7 +1718,7 @@ fn begin_upload_rejects_malformed_descriptors() {
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     block_on(raw_store.put_overwrite(
-        &namespace_descriptor(namespace_id.as_str()),
+        &namespace_config(namespace_id.as_str()),
         Bytes::from_static(br#"{"not":"a namespace descriptor"}"#),
     ))
     .expect("corrupt namespace descriptor");
@@ -1762,7 +1762,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
         .expect("create head-bad namespace");
     block_on(raw_store.put_overwrite(
-        &namespace_head(head_bad.as_str()),
+        &wal_head(head_bad.as_str()),
         Bytes::from_static(br#"{"not":"a head"}"#),
     ))
     .expect("corrupt head");
@@ -1923,7 +1923,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    block_on(raw_store.delete(&namespace_descriptor(namespace_id.as_str())))
+    block_on(raw_store.delete(&namespace_config(namespace_id.as_str())))
         .expect("delete namespace descriptor");
 
     assert_core_error_kind(
@@ -2056,7 +2056,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(2));
+    let manifest_key = metadata_manifest(namespace_id.as_str(), ManifestId(2));
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
@@ -2290,9 +2290,9 @@ impl HeadCasFailureStore {
     fn new(root: &Path, namespace: &str) -> Self {
         Self {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
-            head_key: namespace_head(namespace),
-            wal_prefix: format!("namespaces/{namespace}/wal/"),
-            manifest_prefix: format!("namespaces/{namespace}/manifest/"),
+            head_key: wal_head(namespace),
+            wal_prefix: format!("namespaces/{namespace}/wal/segments/"),
+            manifest_prefix: format!("namespaces/{namespace}/metadata/manifests/"),
             fail_head_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
             manifest_get_count: AtomicUsize::new(0),

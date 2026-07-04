@@ -42,24 +42,28 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
         }
         summary.namespace_objects += 1;
         match parsed.family() {
-            DurableObjectFamily::NamespaceHead => {
+            DurableObjectFamily::WalHead => {
                 summary.control_objects += 1;
             }
             DurableObjectFamily::WalSegment => {
                 summary.wal_objects += 1;
             }
-            DurableObjectFamily::NamespaceManifest => {
+            DurableObjectFamily::MetadataManifest => {
                 summary.manifest_objects += 1;
             }
-            DurableObjectFamily::CompactedMetadataSst => {
+            DurableObjectFamily::MetadataTable => {
                 summary.compacted_metadata_objects += 1;
             }
-            DurableObjectFamily::GcPin => {
+            DurableObjectFamily::Pin => {
                 summary.gc_pin_objects += 1;
             }
-            DurableObjectFamily::NamespaceDescriptor
+            DurableObjectFamily::NamespaceConfig
+            | DurableObjectFamily::WalFloor
+            | DurableObjectFamily::WalIndex
+            | DurableObjectFamily::WalIndexRun
+            | DurableObjectFamily::MetadataRoot
+            | DurableObjectFamily::CheckpointRecord
             | DurableObjectFamily::UploadSession
-            | DurableObjectFamily::NamespaceGcBoundary
             | DurableObjectFamily::ContentStoreDescriptor
             | DurableObjectFamily::ContentBlob => {}
         }
@@ -83,7 +87,7 @@ mod tests {
 
         store
             .put_overwrite(
-                layout.namespace_head(namespace_id.as_str()).as_str(),
+                layout.wal_head(namespace_id.as_str()).as_str(),
                 Bytes::from_static(b"head"),
             )
             .await
@@ -102,7 +106,7 @@ mod tests {
             .expect("wal");
         store
             .put_overwrite(
-                layout.gc_pin(namespace_id.as_str(), "pin_abc").as_str(),
+                layout.pin(namespace_id.as_str(), "pin_abc").as_str(),
                 Bytes::from_static(b"pin"),
             )
             .await

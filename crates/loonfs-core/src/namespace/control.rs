@@ -1,10 +1,10 @@
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope,
+    NamespaceConfigState,
 };
 use loonfs_api::{ContentStoreId, NamespaceId};
-use loonfs_objectstore::keys::{content_store_descriptor, namespace_descriptor, namespace_head};
+use loonfs_objectstore::keys::{content_store_descriptor, namespace_config, wal_head};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub(crate) struct LoadedHeadObject {
 pub(crate) struct LoadedNamespaceDescriptorObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
-    pub(crate) envelope: NamespaceDescriptorEnvelope,
+    pub(crate) envelope: NamespaceConfigEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ pub struct ControlObjectIdentity {
 pub struct LoadedNamespaceDescriptorControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
-    pub state: NamespaceDescriptorState,
+    pub state: NamespaceConfigState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,10 +103,10 @@ pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = namespace_descriptor(expected_namespace.as_str());
+    let object_key = namespace_config(expected_namespace.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
-    let envelope: NamespaceDescriptorEnvelope =
-        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceDescriptor)
+    let envelope: NamespaceConfigEnvelope =
+        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceConfig)
             .map_err(|err| map_control_codec_error(&object_key, err))?;
     validate_expected_namespace(
         &object_key,
@@ -150,10 +150,10 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = namespace_head(expected_namespace.as_str());
+    let object_key = wal_head(expected_namespace.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: HeadStateEnvelope =
-        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceHead)
+        decode_control_object(&encoded_bytes, ControlObjectKind::WalHead)
             .map_err(|err| map_control_codec_error(&object_key, err))?;
     validate_expected_namespace(
         &object_key,

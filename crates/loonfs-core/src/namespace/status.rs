@@ -8,7 +8,7 @@ use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::{
-    keys::{namespace_descriptor, namespace_head, wal_segment_id_from_key, wal_segment_prefix},
+    keys::{namespace_config, wal_head, wal_segment_id_from_key, wal_segment_prefix},
     ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             return Err(CoreError::MetadataProjection(
                 MetadataProjectionLoadError::LoadNamespaceDescriptor(
                     ControlObjectLoadError::MissingObject {
-                        object_key: namespace_descriptor(expected_namespace.as_str()),
+                        object_key: namespace_config(expected_namespace.as_str()),
                     },
                 ),
             ));
@@ -132,14 +132,14 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "probe_namespace_head_etag", key_class = "namespace_head")
+    fields(phase = "probe_namespace_head_etag", key_class = "wal_head")
 )]
 pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<NamespaceHeadEtagProbe, CoreError> {
     NamespaceId::parse(expected_namespace.as_str())?;
-    let object_key = namespace_head(expected_namespace.as_str());
+    let object_key = wal_head(expected_namespace.as_str());
     let metadata = store
         .head(&object_key)
         .await

@@ -324,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn provider_store_preserves_put_get_head_and_prefix_scoping() {
         let store = memory_store();
-        let key = "namespaces/demo/control/head.json";
+        let key = "namespaces/demo/wal/head.json";
 
         let metadata = store
             .put_if_absent(key, Bytes::from_static(b"head"))
@@ -349,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn provider_store_enforces_create_and_cas_preconditions() {
         let store = memory_store();
-        let key = "namespaces/demo/control/head.json";
+        let key = "namespaces/demo/wal/head.json";
         let first = store
             .put_if_absent(key, Bytes::from_static(b"one"))
             .await

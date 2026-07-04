@@ -556,7 +556,7 @@ mod tests {
 
     use super::LocalFsStore;
     use super::{ObjectStore, ObjectStoreError, PutMode};
-    use crate::keys::{namespace_head, upload_session};
+    use crate::keys::{upload_session, wal_head};
     use bytes::Bytes;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -566,7 +566,7 @@ mod tests {
     async fn overwrite_refreshes_head_and_visible_bytes() {
         let temp_dir = TestDir::new("overwrite");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = namespace_head("ns-1");
+        let key = wal_head("ns-1");
 
         let first = store
             .put(
@@ -622,7 +622,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compare_and_swap_is_safe_across_store_instances() {
         let temp_dir = TestDir::new("cross-instance-cas");
-        let key = namespace_head("ns-cas");
+        let key = wal_head("ns-cas");
         let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
             .await
@@ -680,7 +680,7 @@ mod tests {
     async fn listings_hide_scratch_files_and_reject_scratch_keys() {
         let temp_dir = TestDir::new("scratch");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = namespace_head("ns-scratch");
+        let key = wal_head("ns-scratch");
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await
@@ -689,8 +689,8 @@ mod tests {
         // The write above created the store lock; fake an in-flight temp
         // write next to the real object as well.
         assert!(temp_dir.path().join(super::STORE_LOCK_FILE_NAME).exists());
-        let control_dir = temp_dir.path().join("namespaces/ns-scratch/control");
-        fs::write(control_dir.join(".head.json.tmp-123-456"), b"partial")
+        let wal_dir = temp_dir.path().join("namespaces/ns-scratch/wal");
+        fs::write(wal_dir.join(".head.json.tmp-123-456"), b"partial")
             .expect("write fake temp file");
 
         let keys = store.list_prefix("").await.expect("list all");

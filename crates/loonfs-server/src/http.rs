@@ -1818,7 +1818,7 @@ mod tests {
     use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
     use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, Settings, WriteOptions};
     use loonfs_objectstore::fs::LocalFsStore;
-    use loonfs_objectstore::keys::namespace_head;
+    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
@@ -1839,7 +1839,7 @@ mod tests {
         fn new(root: impl AsRef<Path>, namespace: &str) -> Self {
             Self {
                 inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
-                head_key: namespace_head(namespace),
+                head_key: wal_head(namespace),
                 armed: AtomicBool::new(true),
             }
         }

@@ -477,14 +477,17 @@ fn classify_key(key: &str) -> KeyClass {
 
     match parsed.family() {
         DurableObjectFamily::ContentBlob => KeyClass::Content,
-        DurableObjectFamily::NamespaceHead => KeyClass::NamespaceHead,
+        DurableObjectFamily::WalHead => KeyClass::NamespaceHead,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
-        DurableObjectFamily::NamespaceManifest => KeyClass::NamespaceManifest,
-        DurableObjectFamily::CompactedMetadataSst => KeyClass::MetadataSst,
-        DurableObjectFamily::NamespaceGcBoundary | DurableObjectFamily::GcPin => {
-            KeyClass::GcControl
-        }
-        DurableObjectFamily::NamespaceDescriptor
+        DurableObjectFamily::MetadataManifest => KeyClass::NamespaceManifest,
+        DurableObjectFamily::MetadataTable => KeyClass::MetadataSst,
+        DurableObjectFamily::Pin
+        | DurableObjectFamily::CheckpointRecord
+        | DurableObjectFamily::WalFloor => KeyClass::GcControl,
+        DurableObjectFamily::MetadataRoot => KeyClass::NamespaceManifest,
+        DurableObjectFamily::NamespaceConfig
+        | DurableObjectFamily::WalIndex
+        | DurableObjectFamily::WalIndexRun
         | DurableObjectFamily::UploadSession
         | DurableObjectFamily::ContentStoreDescriptor => KeyClass::Metadata,
     }

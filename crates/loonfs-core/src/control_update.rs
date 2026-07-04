@@ -137,9 +137,8 @@ where
 }
 
 fn encode_head(writer_version: &str, next: HeadState) -> Result<Vec<u8>, ControlUpdateError> {
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, writer_version, next)
-            .map_err(|err| ControlUpdateError::Codec(err.to_string()))?;
+    let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, writer_version, next)
+        .map_err(|err| ControlUpdateError::Codec(err.to_string()))?;
     encode_control_object(&envelope).map_err(|err| ControlUpdateError::Codec(err.to_string()))
 }
 
@@ -217,7 +216,7 @@ mod tests {
     use loonfs_api::wire::control::{ControlObjectKind, HeadStateEnvelope};
     use loonfs_api::NamespaceId;
     use loonfs_objectstore::fs::LocalFsStore;
-    use loonfs_objectstore::keys::namespace_head;
+    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{ByteRange, ObjectBody, PutMode};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -226,14 +225,14 @@ mod tests {
 
     async fn write_initial_head(store: &LocalFsStore, namespace_id: &NamespaceId) {
         let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::NamespaceHead,
+            ControlObjectKind::WalHead,
             WRITER_VERSION,
             HeadState::initial(namespace_id.clone()),
         )
         .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");
         store
-            .put_if_absent(&namespace_head(namespace_id.as_str()), Bytes::from(bytes))
+            .put_if_absent(&wal_head(namespace_id.as_str()), Bytes::from(bytes))
             .await
             .expect("write head");
     }
@@ -245,7 +244,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         write_initial_head(&store, &namespace_id).await;
         let before = store
-            .head(&namespace_head(namespace_id.as_str()))
+            .head(&wal_head(namespace_id.as_str()))
             .await
             .expect("head")
             .expect("head exists")
@@ -258,7 +257,7 @@ mod tests {
         .expect("noop update");
 
         let after = store
-            .head(&namespace_head(namespace_id.as_str()))
+            .head(&wal_head(namespace_id.as_str()))
             .await
             .expect("head")
             .expect("head exists")
