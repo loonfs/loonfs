@@ -16,7 +16,7 @@ use super::create::{
 use super::error::ManifestLoadError;
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
-    load_manifest_metadata_state_for_inspection_from_manifest,
+    load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_tables,
 };
 use super::publish::{
     publish_current_manifest_id, write_namespace_manifest, ManifestPublicationOutcome,
@@ -522,6 +522,52 @@ async fn maintenance_does_not_make_orphan_wal_visible() {
     assert_eq!(changes.through_seq, ChangeSeq(2));
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.changes[0].seq, ChangeSeq(2));
+}
+
+#[tokio::test]
+async fn manifest_load_rejects_unequal_index_descriptor_counts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+
+    // Tamper only the descriptor's row_count for the revision index family;
+    // the per-run count-equality check must reject the manifest at load.
+    let mut manifest =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
+            .await
+            .expect("load manifest")
+            .manifest;
+    let descriptor = manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|file| file.family == ApiMetadataTableFamily::RevisionsByInodeDesc)
+        .expect("revision index descriptor");
+    descriptor.row_count += 1;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    match load_verified_manifest_tables(&store, &namespace_id, checkpoint.manifest_id).await {
+        Err(ManifestLoadError::RunManifestMismatch { .. }) => {}
+        Err(other) => panic!("expected run manifest mismatch, got {other:?}"),
+        Ok(_) => panic!("tampered descriptor counts must not load"),
+    }
 }
 
 #[tokio::test]

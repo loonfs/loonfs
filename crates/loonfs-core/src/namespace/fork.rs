@@ -117,6 +117,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         &context.writer_version,
         fork_target_manifest_payload(
             new_namespace_id,
+            target_manifest_id,
             &target_checkpoint_id,
             source_namespace_id,
             source_manifest,
@@ -177,6 +178,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 /// capabilities the source declared for those tables.
 fn fork_target_manifest_payload(
     new_namespace_id: &NamespaceId,
+    target_manifest_id: ManifestId,
     target_checkpoint_id: &CheckpointId,
     source_namespace_id: &NamespaceId,
     source_manifest: &NamespaceManifestEnvelope,
@@ -184,7 +186,6 @@ fn fork_target_manifest_payload(
     created_at_ms: u64,
 ) -> NamespaceManifestPayload {
     let fork_seq = source_checkpoint.head_seq;
-    let target_manifest_id = ManifestId(fork_seq.0);
     NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
@@ -568,6 +569,7 @@ mod tests {
 
         let target = fork_target_manifest_payload(
             &NamespaceId::parse("target").expect("target namespace"),
+            ManifestId(7),
             &target_checkpoint_id,
             &NamespaceId::parse("source").expect("source namespace"),
             &source,

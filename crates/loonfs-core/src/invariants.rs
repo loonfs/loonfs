@@ -1,3 +1,10 @@
+//! Registry of invariant identifiers recorded by validation and replay.
+//!
+//! An id exists here iff some production code pushes it into a
+//! `checked_invariants` ledger. Wire names are stable strings, so re-adding
+//! an id later is purely additive; do not reserve ids for machinery that
+//! does not exist yet.
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
@@ -81,8 +88,6 @@ define_invariant_ids! {
     (RestoreRevisionRequiresDurableContent, "restore_revision_requires_durable_content"),
     (SubtreeTombstoneBlocksDescendantMutation, "subtree_tombstone_blocks_descendant_mutation"),
 
-    // Namespace core metadata apply invariants.
-
     // Namespace core WAL replay invariants.
     (WalPayloadChecksumMatchesPayload, "wal_payload_checksum_matches_payload"),
     (WalKeyMatchesSegmentSeqRange, "wal_key_matches_segment_seq_range"),
@@ -92,35 +97,11 @@ define_invariant_ids! {
     (WalTailSeqIsContiguous, "wal_tail_seq_is_contiguous"),
     (WalReplayAppliesMetadataRows, "wal_replay_applies_metadata_rows"),
 
-    // Namespace core manifest replay invariants.
-
-    // Background work progress invariants.
-
-    // Background work queue shard object invariants.
-
-    // Background work queue mutation invariants.
-
-    // Background work checkpoint head publish invariants.
-
     // Content object file invariants.
     (WholeFileContentRefKindIsSupported, "whole_file_content_ref_kind_is_supported"),
     (WholeFileContentObjectKeyMatchesDigest, "whole_file_content_object_key_matches_digest"),
     (WholeFileContentSizeMatchesRef, "whole_file_content_size_matches_ref"),
     (WholeFileContentDigestMatchesRef, "whole_file_content_digest_matches_ref"),
-
-    // Manifest object immutable invariants.
-
-    // Client transfer download invariants.
-
-    // Client transfer inode upload invariants.
-
-    // Client transfer local-only upload invariants.
-
-    // Client reconciliation invariants.
-
-    // Simulation interleaving invariants.
-
-    // Production invariant report IDs that were previously only in the flat catalogue.
 
     // Normalized WAL delta apply invariants.
     (CreateInodeWritesInodeRow, "create_inode_writes_inode_row"),
