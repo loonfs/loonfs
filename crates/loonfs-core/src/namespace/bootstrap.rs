@@ -284,7 +284,7 @@ pub(crate) fn bootstrap_metadata_state() -> MetadataState {
     MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: InodeId(1),
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
         }],
         Vec::new(),

@@ -233,7 +233,7 @@ pub(crate) fn run_namespace_use(
     })
 }
 
-pub(crate) fn run_current(
+pub(crate) fn run_namespace_current(
     kind: CommandKind,
     args: CurrentArgs,
 ) -> Result<CommandOutput, CommandFailure> {

@@ -41,11 +41,11 @@ use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
     MutationContext, NamespaceEngine, WriteOptions,
 };
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, metadata_manifest, namespace_config, pin as pin_key,
     upload_session, upload_session_prefix, wal_head,
 };
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -75,8 +75,8 @@ fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> NamespaceEngine<&'a S> {
     NamespaceEngine::builder(store)
-        .namespace(namespace_id.clone())
-        .writer(context.writer_id.clone())
+        .namespace_id(namespace_id.clone())
+        .writer_id(context.writer_id.clone())
         .writer_session_id(context.writer_session_id.clone())
         .writer_version(context.writer_version.clone())
         .build()
@@ -265,20 +265,23 @@ fn write_file_bytes<S: ObjectStore + ?Sized>(
     )
 }
 
-fn create_dir_path<S: ObjectStore + ?Sized>(
+fn create_directory_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).create_dir(
-        absolute_path,
-        WriteOptions {
-            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            ..WriteOptions::default()
-        },
-    ))
+    block_on(
+        namespace_engine(store, namespace_id, context).create_directory(
+            absolute_path,
+            WriteOptions {
+                commit_id: commit_id
+                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
+                ..WriteOptions::default()
+            },
+        ),
+    )
 }
 
 fn delete_path<S: ObjectStore + ?Sized>(
@@ -516,7 +519,7 @@ fn list_path_latest<S: ObjectStore + ?Sized>(
     block_on(engine.list_path(absolute_path))
 }
 
-fn wal_create_dir(
+fn wal_create_directory(
     delta_index: u32,
     inode_id: InodeId,
     parent_inode_id: InodeId,
@@ -526,7 +529,7 @@ fn wal_create_dir(
         WalDelta::CreateInode {
             delta_index,
             inode_id,
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
         },
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
@@ -597,7 +600,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
-        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -683,7 +686,7 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let metadata_state = metadata_state_after(&[
-        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -752,8 +755,12 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_validation_rejects_missing_inode() {
-    let metadata_state =
-        metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
+    let metadata_state = metadata_state_after(&[wal_create_directory(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "docs".to_owned(),
+    )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
@@ -783,8 +790,12 @@ async fn restore_revision_validation_rejects_missing_inode() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_validation_rejects_non_file_target() {
-    let metadata_state =
-        metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
+    let metadata_state = metadata_state_after(&[wal_create_directory(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "docs".to_owned(),
+    )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
@@ -808,7 +819,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
         error,
         CommitValidationError::RestoreRevisionInodeNotFile {
             inode_id: InodeId(2),
-            actual_kind: InodeKind::Dir,
+            actual_kind: InodeKind::Directory,
         }
     ));
 }
@@ -816,7 +827,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
-        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -887,7 +898,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
-        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -937,7 +948,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
-        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -995,7 +1006,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let metadata_state = metadata_state_after(&[
-        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
             0,
             InodeId(3),
@@ -1056,7 +1067,7 @@ async fn restore_revision_overflow_is_rejected() {
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
             }],
         )
         .expect("bootstrap root")
@@ -1635,7 +1646,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let namespace_id = namespace_id();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    create_dir_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
+    create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
         .expect("create docs");
 
     for index in 0..3 {
@@ -1855,9 +1866,9 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     let namespace_id = namespace_id();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    create_dir_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
+    create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
         .expect("create docs");
-    create_dir_path(
+    create_directory_path(
         &store,
         &namespace_id,
         "/docs/a-dir",
@@ -1924,7 +1935,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         Some("put-d-tail"),
     )
     .expect("put d-tail");
-    create_dir_path(
+    create_directory_path(
         &store,
         &namespace_id,
         "/docs/e-tail-dir",
@@ -2017,7 +2028,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
             .iter()
             .find(|entry| entry.display_name == directory_name)
             .expect("directory entry");
-        assert_eq!(entry.inode_kind, InodeKind::Dir);
+        assert_eq!(entry.inode_kind, InodeKind::Directory);
         assert_eq!(entry.revision_no, None);
         assert_eq!(entry.size_bytes, None);
         assert!(entry.content_ref.is_none());
@@ -2247,7 +2258,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         CommitDelta::CreateInode {
             semantic_op_index: 0,
             delta_index: 0,
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
             ..
         }
     ));
@@ -2270,7 +2281,7 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    create_dir_path(&store, &namespace_id, "/docs", &context, None).expect("create docs");
+    create_directory_path(&store, &namespace_id, "/docs", &context, None).expect("create docs");
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
     let wal_keys = store
@@ -2848,7 +2859,7 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
     let store = StaleHeadGetStore::new(temp_dir.path(), &namespace_id);
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
-    create_dir_path(
+    create_directory_path(
         &store,
         &namespace_id,
         "/parent",
@@ -2884,7 +2895,7 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
     );
 
     store.inject_stale_head_get_after(1);
-    let result = create_dir_path(
+    let result = create_directory_path(
         &store,
         &namespace_id,
         "/parent/child",
@@ -4432,13 +4443,13 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_dir_path_creates_directory_without_auto_parents() {
+async fn create_directory_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
 
-    let created = create_dir_path(
+    let created = create_directory_path(
         &store,
         &namespace_id(),
         "/docs",
@@ -4448,9 +4459,9 @@ async fn create_dir_path_creates_directory_without_auto_parents() {
     .expect("create dir");
     assert_eq!(created.committed_seq, ChangeSeq(1));
     let docs = resolve_path(&store, &namespace_id(), "/docs").expect("resolve docs");
-    assert_eq!(docs.inode_kind, InodeKind::Dir);
+    assert_eq!(docs.inode_kind, InodeKind::Directory);
 
-    let missing_parent = create_dir_path(
+    let missing_parent = create_directory_path(
         &store,
         &namespace_id(),
         "/missing/nested",
@@ -4860,7 +4871,7 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
             }],
         )
         .expect("bootstrap root")

@@ -11,7 +11,7 @@ use crate::prompt;
 
 // --- init ---
 
-pub(crate) fn run_init(
+pub(crate) fn run_config_init(
     kind: CommandKind,
     args: InitArgs,
     runtime: RuntimeBehavior,

@@ -1,10 +1,10 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
-use crate::fs::LocalFsStore;
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
+use crate::local_fs_store::LocalFsStore;
 use crate::presign::{ObjectTransferIssuer, S3CompatiblePresigner, S3PresignerConfig};
 use crate::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
@@ -274,9 +274,9 @@ impl ObjectStore for ConfiguredObjectStore {
 mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
     use crate::abs::AzureAbsStoreConfig;
-    use crate::fs::LocalFsStore;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::wal_head;
+    use crate::local_fs_store::LocalFsStore;
     use crate::presign::PresignedPutRequest;
     use crate::r2::CloudflareR2StoreConfig;
     use crate::s3::AwsS3StoreConfig;

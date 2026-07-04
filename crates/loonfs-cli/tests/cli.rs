@@ -1389,7 +1389,7 @@ fn sorted_object_keys(value: &Value) -> Vec<String> {
 fn embedded_capability_document() -> loonfs::CapabilityDocument {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = std::sync::Arc::new(
-        loonfs_objectstore::fs::LocalFsStore::new(temp_dir.path()).expect("store"),
+        loonfs_objectstore::local_fs_store::LocalFsStore::new(temp_dir.path()).expect("store"),
     ) as loonfs::SharedObjectStore;
     let fs = loonfs::Fs::open(
         store,

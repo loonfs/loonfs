@@ -145,7 +145,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             delta: WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(7),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
             },
         },
         WalCommitDelta {
@@ -215,7 +215,7 @@ fn sample_sst_envelope() -> MetadataSstEnvelope {
     let rows = vec![
         MetadataRow::Inode {
             inode_id: InodeId(7),
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(2),
         },
         MetadataRow::DirentryBind {
@@ -805,7 +805,7 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
             }),
             "create_inode",
         ),

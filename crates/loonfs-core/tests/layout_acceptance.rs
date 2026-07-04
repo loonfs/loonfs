@@ -37,8 +37,8 @@ fn engine<'a, S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> NamespaceEngine<&'a S> {
     NamespaceEngine::builder(store)
-        .namespace(namespace_id.clone())
-        .writer(context.writer_id.clone())
+        .namespace_id(namespace_id.clone())
+        .writer_id(context.writer_id.clone())
         .writer_session_id(context.writer_session_id.clone())
         .writer_version(context.writer_version.clone())
         .build()

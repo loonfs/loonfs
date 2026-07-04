@@ -137,17 +137,17 @@ pub enum ControlObjectLoadError {
 
 pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = namespace_config(expected_namespace.as_str());
+    validate_namespace_id_for_control_key(expected_namespace_id)?;
+    let object_key = namespace_config(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: NamespaceConfigEnvelope =
         decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceConfig)
             .map_err(|err| map_control_codec_error(&object_key, err))?;
     validate_expected_namespace(
         &object_key,
-        expected_namespace,
+        expected_namespace_id,
         &envelope.state.namespace_id,
     )?;
 
@@ -184,17 +184,17 @@ pub(crate) async fn read_content_store_descriptor_object<S: ObjectStore + ?Sized
 
 pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedWalFloorObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = wal_floor(expected_namespace.as_str());
+    validate_namespace_id_for_control_key(expected_namespace_id)?;
+    let object_key = wal_floor(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: WalFloorEnvelope =
         decode_control_object(&encoded_bytes, ControlObjectKind::WalFloor)
             .map_err(|err| map_control_codec_error(&object_key, err))?;
     validate_expected_namespace(
         &object_key,
-        expected_namespace,
+        expected_namespace_id,
         &envelope.state.namespace_id,
     )?;
 
@@ -209,9 +209,9 @@ pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
 /// "retain more history", never less.
 pub(crate) async fn read_wal_floor_seq_or_zero<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<loonfs_api::ChangeSeq, ControlObjectLoadError> {
-    match read_wal_floor_object(store, expected_namespace).await {
+    match read_wal_floor_object(store, expected_namespace_id).await {
         Ok(loaded) => Ok(loaded.envelope.state.floor_seq),
         Err(ControlObjectLoadError::MissingObject { .. }) => Ok(loonfs_api::ChangeSeq(0)),
         Err(error) => Err(error),
@@ -220,17 +220,17 @@ pub(crate) async fn read_wal_floor_seq_or_zero<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataRootObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = metadata_root(expected_namespace.as_str());
+    validate_namespace_id_for_control_key(expected_namespace_id)?;
+    let object_key = metadata_root(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: MetadataRootEnvelope =
         decode_control_object(&encoded_bytes, ControlObjectKind::MetadataRoot)
             .map_err(|err| map_control_codec_error(&object_key, err))?;
     validate_expected_namespace(
         &object_key,
-        expected_namespace,
+        expected_namespace_id,
         &envelope.state.namespace_id,
     )?;
 
@@ -250,12 +250,12 @@ pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
 /// (format spec, "metadata/root.json").
 pub(crate) async fn read_head_and_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadObject, LoadedMetadataRootObject), ControlObjectLoadError> {
     const ROOT_AHEAD_HEAD_RELOADS: usize = 3;
     let (head, root) = futures::join!(
-        read_head_object(store, expected_namespace),
-        read_metadata_root_object(store, expected_namespace)
+        read_head_object(store, expected_namespace_id),
+        read_metadata_root_object(store, expected_namespace_id)
     );
     let mut head = head?;
     let root = root?;
@@ -263,7 +263,7 @@ pub(crate) async fn read_head_and_metadata_root<S: ObjectStore + ?Sized>(
         if root.envelope.state.manifest_head_seq <= head.envelope.state.seq {
             return Ok((head, root));
         }
-        head = read_head_object(store, expected_namespace).await?;
+        head = read_head_object(store, expected_namespace_id).await?;
     }
     Err(ControlObjectLoadError::RootAheadOfHead {
         root_manifest_head_seq: root.envelope.state.manifest_head_seq,
@@ -273,17 +273,17 @@ pub(crate) async fn read_head_and_metadata_root<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace)?;
-    let object_key = wal_head(expected_namespace.as_str());
+    validate_namespace_id_for_control_key(expected_namespace_id)?;
+    let object_key = wal_head(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: HeadStateEnvelope =
         decode_control_object(&encoded_bytes, ControlObjectKind::WalHead)
             .map_err(|err| map_control_codec_error(&object_key, err))?;
     validate_expected_namespace(
         &object_key,
-        expected_namespace,
+        expected_namespace_id,
         &envelope.state.namespace_id,
     )?;
 
@@ -296,9 +296,9 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
 
 pub async fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorControl, ControlObjectLoadError> {
-    let loaded = read_namespace_descriptor_object(store, expected_namespace).await?;
+    let loaded = read_namespace_descriptor_object(store, expected_namespace_id).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedNamespaceDescriptorControl {
         object_key: loaded.object_key,
@@ -322,9 +322,9 @@ pub async fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
 
 pub async fn load_namespace_wal_floor_control<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedWalFloorControl, ControlObjectLoadError> {
-    let loaded = read_wal_floor_object(store, expected_namespace).await?;
+    let loaded = read_wal_floor_object(store, expected_namespace_id).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedWalFloorControl {
         object_key: loaded.object_key,
@@ -335,11 +335,11 @@ pub async fn load_namespace_wal_floor_control<S: ObjectStore + ?Sized>(
 
 pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
     checkpoint_id: &loonfs_api::CheckpointId,
 ) -> Result<Option<loonfs_api::wire::control::CheckpointRecordState>, crate::error::CoreError> {
     Ok(
-        crate::checkpoint::read_checkpoint_record(store, expected_namespace, checkpoint_id)
+        crate::checkpoint::read_checkpoint_record(store, expected_namespace_id, checkpoint_id)
             .await?
             .map(|loaded| loaded.state),
     )
@@ -347,9 +347,9 @@ pub async fn load_namespace_checkpoint_record_control<S: ObjectStore + ?Sized>(
 
 pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataRootControl, ControlObjectLoadError> {
-    let loaded = read_metadata_root_object(store, expected_namespace).await?;
+    let loaded = read_metadata_root_object(store, expected_namespace_id).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedMetadataRootControl {
         object_key: loaded.object_key,
@@ -362,9 +362,9 @@ pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
 /// (see [`read_head_and_metadata_root`] for the race rule).
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<(LoadedHeadControl, LoadedMetadataRootControl), ControlObjectLoadError> {
-    let (head, root) = read_head_and_metadata_root(store, expected_namespace).await?;
+    let (head, root) = read_head_and_metadata_root(store, expected_namespace_id).await?;
     let head_identity = control_identity(&head.object_key, &head.metadata)?;
     let root_identity = control_identity(&root.object_key, &root.metadata)?;
     Ok((
@@ -383,9 +383,9 @@ pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
 
 pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadControl, ControlObjectLoadError> {
-    let loaded = read_head_object(store, expected_namespace).await?;
+    let loaded = read_head_object(store, expected_namespace_id).await?;
     let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
     Ok(LoadedHeadControl {
         object_key: loaded.object_key,

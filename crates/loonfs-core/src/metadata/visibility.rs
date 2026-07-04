@@ -330,7 +330,7 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     let Some(parent) = reads.visible_inode(parent_inode_id).await? else {
         return Ok(None);
     };
-    if parent.inode_kind != InodeKind::Dir {
+    if parent.inode_kind != InodeKind::Directory {
         return Ok(None);
     }
 
@@ -413,7 +413,7 @@ where
             .ok_or_else(|| VisiblePathError::PathNotFound {
                 absolute_path: current_absolute_path.clone(),
             })?;
-        if current_inode.inode_kind != InodeKind::Dir {
+        if current_inode.inode_kind != InodeKind::Directory {
             return Err(VisiblePathError::PathComponentNotDirectory {
                 absolute_path: current_absolute_path,
                 inode_id: current_inode_id,

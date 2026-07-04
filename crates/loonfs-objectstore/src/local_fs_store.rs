@@ -1,3 +1,5 @@
+//! [`LocalFsStore`]: the local-filesystem [`ObjectStore`] provider.
+
 use crate::keyspace::validate_segments;
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;

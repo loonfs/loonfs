@@ -552,12 +552,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Creates a directory at an absolute path.
-    pub async fn create_dir(
+    pub async fn create_directory(
         &self,
         path: impl AsRef<str>,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::create_dir_path(
+        crate::path::write::ops::create_directory_path(
             &self.store,
             &self.namespace_id,
             path.as_ref(),
@@ -812,13 +812,13 @@ pub struct NamespaceEngineBuilder<S> {
 
 impl<S: ObjectStore> NamespaceEngineBuilder<S> {
     /// Sets the namespace this engine will operate on.
-    pub fn namespace(mut self, namespace_id: NamespaceId) -> Self {
+    pub fn namespace_id(mut self, namespace_id: NamespaceId) -> Self {
         self.namespace_id = Some(namespace_id);
         self
     }
 
     /// Sets the writer identity used for epoch acquisition and commits.
-    pub fn writer(mut self, writer_id: impl Into<String>) -> Self {
+    pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
         self.writer_id = Some(writer_id.into());
         self
     }
@@ -895,7 +895,7 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
     #[test]
@@ -905,8 +905,8 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 
         let engine = NamespaceEngine::builder(store)
-            .namespace(namespace_id.clone())
-            .writer("writer-a")
+            .namespace_id(namespace_id.clone())
+            .writer_id("writer-a")
             .build()
             .expect("engine builds");
 
@@ -927,7 +927,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let err = NamespaceEngine::builder(store)
-            .namespace(NamespaceId::parse("demo").expect("valid namespace id"))
+            .namespace_id(NamespaceId::parse("demo").expect("valid namespace id"))
             .build()
             .expect_err("missing writer");
         assert_eq!(err, NamespaceEngineBuildError::MissingWriter);

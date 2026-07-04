@@ -1,7 +1,7 @@
 use loonfs::{
     CreateNamespaceOptions, Fs, NamespaceId, PutBehavior, PutFileOptions, SharedObjectStore,
 };
-use loonfs_objectstore::fs::LocalFsStore;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::sync::Arc;
 
 #[allow(clippy::print_stdout)]

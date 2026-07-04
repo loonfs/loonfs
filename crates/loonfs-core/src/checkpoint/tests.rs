@@ -53,8 +53,8 @@ use loonfs_api::{
     ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId, NameKey, NamespaceId,
     PutBehavior, RevisionNo,
 };
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{metadata_manifest, metadata_table, wal_head, wal_segment};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };

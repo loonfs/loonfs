@@ -306,7 +306,7 @@ impl MetadataState {
         let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
             return Vec::new();
         };
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return Vec::new();
         }
 
@@ -373,7 +373,7 @@ impl MetadataState {
         let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
             return Vec::new();
         };
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return Vec::new();
         }
 
@@ -400,7 +400,7 @@ impl MetadataState {
         let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
             return Vec::new();
         };
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return Vec::new();
         }
 

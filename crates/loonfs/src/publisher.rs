@@ -869,8 +869,8 @@ mod tests {
     use loonfs_api::v0::{CommitOp, CommitRequest};
     use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loonfs_api::{ChangeSeq, InodeId, PutBehavior};
-    use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
@@ -1232,7 +1232,7 @@ mod tests {
             .expect("bootstrap");
     }
 
-    fn create_dir_request(
+    fn create_directory_request(
         commit_id: impl Into<String>,
         display_name: impl Into<String>,
     ) -> CommitRequest {
@@ -1288,8 +1288,10 @@ mod tests {
 
     #[test]
     fn publisher_trace_labels_are_low_cardinality() {
-        let commit =
-            NamespaceMutationCandidate::Commit(create_dir_request("commit-trace", "private-name"));
+        let commit = NamespaceMutationCandidate::Commit(create_directory_request(
+            "commit-trace",
+            "private-name",
+        ));
         let path = NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("path-trace").expect("valid commit id"),
             absolute_path: "/private/path".to_owned(),
@@ -1321,14 +1323,14 @@ mod tests {
         let active = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("active", "active"),
+            create_directory_request("active", "active"),
         );
         store.wait_for_blocked_head_cas().await;
 
         let pending = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("pending", "pending"),
+            create_directory_request("pending", "pending"),
         );
         {
             let state = publisher
@@ -1374,19 +1376,19 @@ mod tests {
         let active = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("active", "active"),
+            create_directory_request("active", "active"),
         );
         store.wait_for_blocked_head_cas().await;
 
         let duplicate = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("active", "active"),
+            create_directory_request("active", "active"),
         );
         let conflict = try_admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("active", "different-active"),
+            create_directory_request("active", "different-active"),
         );
         assert!(matches!(
             conflict,
@@ -1414,7 +1416,7 @@ mod tests {
         let active = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("active", "active"),
+            create_directory_request("active", "active"),
         );
         store.wait_for_blocked_head_cas().await;
 
@@ -1423,19 +1425,19 @@ mod tests {
             pending.push(admit_commit(
                 &publisher,
                 &namespace_id,
-                create_dir_request(format!("pending-{index}"), format!("pending-{index}")),
+                create_directory_request(format!("pending-{index}"), format!("pending-{index}")),
             ));
         }
 
         let duplicate = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("pending-0", "pending-0"),
+            create_directory_request("pending-0", "pending-0"),
         );
         let conflict = try_admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("pending-0", "different-pending"),
+            create_directory_request("pending-0", "different-pending"),
         );
         assert!(matches!(
             conflict,
@@ -1445,7 +1447,7 @@ mod tests {
         let overflow = try_admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("overflow", "overflow"),
+            create_directory_request("overflow", "overflow"),
         );
         assert!(matches!(overflow, Err(CoreError::CommitQueueFull)));
 
@@ -1482,7 +1484,7 @@ mod tests {
             receivers.push(admit_commit(
                 &publisher,
                 &namespace_id,
-                create_dir_request(format!("full-{index}"), format!("full-{index}")),
+                create_directory_request(format!("full-{index}"), format!("full-{index}")),
             ));
         }
 
@@ -1522,7 +1524,7 @@ mod tests {
             admit_commit(
                 &publisher,
                 &namespace_id,
-                create_dir_request("unknown-ack", "unknown-ack"),
+                create_directory_request("unknown-ack", "unknown-ack"),
             ),
             "unknown-ack",
         )
@@ -1544,7 +1546,7 @@ mod tests {
         let doomed = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("doomed", "doomed"),
+            create_directory_request("doomed", "doomed"),
         );
         store.wait_for_blocked_head_cas().await;
 
@@ -1553,7 +1555,7 @@ mod tests {
         let queued = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("queued", "queued"),
+            create_directory_request("queued", "queued"),
         );
 
         store.release_into_panic();
@@ -1573,7 +1575,7 @@ mod tests {
         let after = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("after", "after"),
+            create_directory_request("after", "after"),
         );
         assert_eq!(
             recv_commit(after, "after").await.committed_seq,
@@ -1596,13 +1598,13 @@ mod tests {
         let before_a = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("before-a", "before-a"),
+            create_directory_request("before-a", "before-a"),
         );
         store.wait_for_blocked_head_cas().await;
         let before_b = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("before-b", "before-b"),
+            create_directory_request("before-b", "before-b"),
         );
 
         // The delete arrives: everything above was admitted before it,
@@ -1632,7 +1634,7 @@ mod tests {
         let after = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("after", "after"),
+            create_directory_request("after", "after"),
         );
 
         store.release_head_cas();
@@ -1662,7 +1664,7 @@ mod tests {
         let fast_fail = try_admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("too-late", "too-late"),
+            create_directory_request("too-late", "too-late"),
         );
         assert!(matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. })));
     }

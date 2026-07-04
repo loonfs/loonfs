@@ -1,5 +1,11 @@
+//! Request/response shapes for the v0 HTTP API's operation endpoints:
+//! namespace lifecycle (create/fork/status/delete), path-oriented filesystem
+//! operations, file revisions, maintenance (checkpoint/retention), and the
+//! shared [`ApiError`] body. Explicit commits and the change feed live in
+//! [`super::commits`]; read-result shapes live in [`super::reads`].
+
+use super::{MoveBehavior, ValidatedContentToken};
 use crate::{
-    v0::{MoveBehavior, ValidatedContentToken},
     ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};

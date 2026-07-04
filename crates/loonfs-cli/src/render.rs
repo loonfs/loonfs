@@ -185,7 +185,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     .size_bytes
                     .map(|value: u64| value.to_string())
                     .unwrap_or_else(|| "-".to_owned());
-                format!("{:?}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
+                format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -193,7 +193,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             let mut lines = vec![
                 format!("path: {}", entry.absolute_path),
                 format!("inode: {}", entry.inode_id),
-                format!("kind: {:?}", entry.inode_kind),
+                format!("kind: {}", entry.inode_kind),
                 format!("seq: {}", entry.head_seq.0),
             ];
             if let Some(size) = entry.size_bytes {
