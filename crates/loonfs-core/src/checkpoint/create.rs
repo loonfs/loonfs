@@ -444,6 +444,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     if let Some(checkpoint) = checkpoint_to_add {
         checkpoints.push(checkpoint);
     }
+    let checkpoints = retained_checkpoint_records(checkpoints);
 
     let (base_seq, metadata_files) = if is_bootstrap_seed_manifest(&previous_manifest.payload) {
         let run_tables = build_base_manifest_tables_from_projection(
@@ -510,6 +511,35 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     .map_err(|err| CoreError::Store(err.to_string()))
 }
 
+/// Unnamed checkpoint records are maintenance bookkeeping; a manifest keeps
+/// only the newest few so correctly-operated maintenance cannot pin storage
+/// forever. Named records persist until explicitly removed, and fork sources
+/// stay protected by their GC pins independently of any record (format spec,
+/// "Compaction").
+const RETAINED_UNNAMED_CHECKPOINT_RECORDS: usize = 4;
+
+pub(super) fn retained_checkpoint_records(
+    mut checkpoints: Vec<NamespaceCheckpointRecord>,
+) -> Vec<NamespaceCheckpointRecord> {
+    let unnamed = checkpoints
+        .iter()
+        .filter(|record| record.name.is_none())
+        .count();
+    let mut drop_remaining = unnamed.saturating_sub(RETAINED_UNNAMED_CHECKPOINT_RECORDS);
+    if drop_remaining == 0 {
+        return checkpoints;
+    }
+    // Records are appended oldest-first, so retention drops from the front.
+    checkpoints.retain(|record| {
+        if record.name.is_some() || drop_remaining == 0 {
+            return true;
+        }
+        drop_remaining -= 1;
+        false
+    });
+    checkpoints
+}
+
 async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -528,6 +558,18 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
         rows.extend(manifest_rows_for_family(&projection.tail_state, family));
+        if family == MetadataTableFamily::CommitReceipts {
+            // The idempotency horizon is the retention floor: a commit
+            // retried from below it re-bootstraps like any sub-floor cursor,
+            // so its receipt no longer needs to be carried forward.
+            let retention_floor_seq = projection.head.retention_floor_seq;
+            rows.retain(|row| match row {
+                MetadataRow::CommitReceipt { committed_seq, .. } => {
+                    *committed_seq >= retention_floor_seq
+                }
+                _ => true,
+            });
+        }
         rows.sort_by_key(|row| row.row_key_for_family(family));
         rows_by_family.insert(family, rows);
     }
@@ -625,6 +667,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     if let Some(checkpoint) = checkpoint_to_add {
         checkpoints.push(checkpoint);
     }
+    let checkpoints = retained_checkpoint_records(checkpoints);
 
     let (base_seq, metadata_files) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
