@@ -38,18 +38,40 @@ provider-specific behavior that is not exposed through this contract.
 
 ### 1.2 Durable object families
 
+Namespace objects follow one global grammar — each subsystem owns its local
+control file and its data files; there is no central control directory:
+
+```text
+{subsystem}/{role}.json                    small control/pointer object local to that subsystem
+{subsystem}/{collection}/{id}.json         per-id JSON records
+{subsystem}/{collection}/{id}.{kind}.zst   compressed immutable payloads
+```
+
 The required durable object families and standard key patterns are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
-| **Namespace descriptor** | Immutable | Record namespace identity and its immutable content-store relationship. | `namespaces/{namespace_id}/descriptor.json` |
-| **Namespace head** | Mutable | Record the current visible boundary, writer epoch, writer lease liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/control/head.json` |
+| **Namespace config** | Immutable | Stable namespace identity and immutable configuration, including the content-store binding; written last at creation as the completion marker. | `namespaces/{namespace_id}/namespace.json` |
+| **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
+| **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
+| **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_id:020}.json` |
+| **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
+| **Pins** | Immutable | Protect source checkpoint/manifest references used by forked namespaces; stored under the **source** namespace, whose GC is the consumer. | `namespaces/{source_namespace_id}/pins/{pin_id}.json` |
+| **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
-| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, checkpoint records, and the namespace features map. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
-| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/tables/metadata/{table_id}.sst` |
-| **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+
+The layout additionally reserves these paths for subsystems that land in
+subsequent phases of the namespace layout redesign; the key parser recognizes
+them, and no other family may claim them:
+
+| Reserved path | Future role |
+| --- | --- |
+| `namespaces/{namespace_id}/wal/floor.json` | Cold lower bound of retained WAL/change history. |
+| `namespaces/{namespace_id}/metadata/root.json` | Cold pointer to the best known materialized metadata root. |
+| `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` | First-class durable stable-view pins to a metadata manifest. |
+| `namespaces/{namespace_id}/wal/index.json` | Optional mutable pointer to the newest WAL index run (accelerator, never authority). |
+| `namespaces/{namespace_id}/wal/indexes/{index_id}.json` | Optional immutable runs of visible-chain segment pointers. |
 
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
@@ -58,101 +80,46 @@ private objects must not collide with the spec'd families and are not
 interoperable state.
 
 Namespace object keys are built through the central object layout API in
-`loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`;
-mutable control objects live under `control/`, WAL files live under `wal/`,
-namespace manifests live under `manifest/`, and immutable metadata SSTs live
-under `tables/metadata/`. Forks are copy-on-write: the target manifest may
-reference source-owned metadata SSTs through a source checkpoint-backed
-manifest, and the source records a GC pin for that checkpoint/manifest pair.
+`loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`.
+Forks are copy-on-write: the target manifest may reference source-owned
+metadata tables through a source checkpoint-backed manifest, and the source
+records a pin for that checkpoint/manifest pair.
 
 WAL segment names sort by history position (section 1.3); recovery still
 follows `head.visible_wal_tip` and the predecessor links inside verified WAL
 envelopes. Listing order is an inspection and reclamation convenience, never
-recovery authority.
+recovery authority. `wal/head.json` and `wal/floor.json` live outside the
+`wal/segments/` listing prefix, so a reclamation listing of segments yields
+only segment keys.
 
-The object layout also reserves these namespace-root file families for
-garbage collection:
-
-| Family | Current status | Standard object key pattern |
-| --- | --- | --- |
-| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{wal\|manifest}.boundary` |
-| **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
-
-GC boundary files are sequenced cleanup cursors for WAL and manifest streams.
-WAL and metadata SST deletion is reachability-driven from the live
-manifest, checkpoint records, fork GC pins, and the retention floor.
+WAL and metadata table deletion is reachability-driven from the live
+manifest, checkpoint records, pins, and the retention floor.
 
 ### 1.3 Durable naming conventions
 
 The namespace tree's lifecycle can be read off its grammar:
 
-- **Singular directories are ordered history streams** (`wal/`,
-  `manifest/`). Object names sort by history position, a
-  boundary cursor in `gc/` records reclamation progress, and reclaiming a
-  stream is one algorithm: range-scan below the cursor, check the bounded
-  window for chain, checkpoint, and pin references, sweep what nothing
-  protects, advance the cursor.
-- **Plural directories are unordered collections** (`tables/`, `uploads/`,
-  `gc/pins/`, `content-stores/`, `blobs/`). Object names are opaque, and
-  references — manifests, chains, pins — are
-  the only truth about liveness; collections reclaim by reachability or
-  session expiry, never by name order.
-- **`control/` is the mutable plane**: compare-and-swap singletons such as
-  the namespace head that are never swept.
-- **The root `descriptor.json` is the existence marker**: written last at
-  creation as the publish marker, kept forever after deletion as half of
-  the tombstone pair that retires the namespace id.
+- **`{subsystem}/{role}.json` objects are mutable singletons with one job**:
+  compare-and-swap pointers and proofs (`wal/head.json`, and later
+  `wal/floor.json` and `metadata/root.json`) that are never swept. If a
+  singleton cannot be explained in one sentence, it is too broad.
+- **Collections are never authoritative via enumeration** (`wal/segments/`,
+  `metadata/manifests/`, `metadata/tables/`, `pins/`, `uploads/`,
+  `content-stores/.../blobs/`). A record in a collection matters only when a
+  pointer, chain link, checkpoint, or pin reaches it — except to GC, which
+  lists collections to find garbage and roots. Ordered segment names exist so
+  inspection and reclamation can trust a listing's order; opaque names exist
+  where nothing should ever read meaning into one.
+- **Paths express ownership, not authority.** Envelopes and payloads still
+  validate namespace id, object id, family, checksum, and sequence fields;
+  the same fact is never encoded twice (table family lives in the manifest
+  and table envelope, not the path).
+- **`namespace.json` is the existence marker**: written last at creation as
+  the completion marker, kept forever after deletion as half of the
+  tombstone pair that retires the namespace id.
 
 Names are never authority anywhere — recovery follows the head and its
-references. Ordered names exist so that inspection and reclamation can
-trust a listing's order; opaque names exist where nothing should ever
-read meaning into one.
-
-Within that grammar, LoonFS uses distinct conventions for distinct
-surfaces:
-
-- Fixed object-store path segments use lowercase words or lowercase-kebab,
-  e.g. `content-stores`, `commit-receipts`, and `uploads`.
-- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex
-  characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`,
-  `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`,
-  `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`,
-  `chk_f3d6b97a7d394ddf84b621ddf36e5071`, and
-  `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
-- Stream-positioned IDs order by history position: a 20-digit zero-padded
-  decimal position, optionally followed by `-` and a 16-lowercase-hex
-  uniqueness suffix. WAL segment ids carry the suffix
-  (`00000000000000000412-9f2a6c0e4b7d4a90`) because segments are *proposals*:
-  racing writers may both write one for the same position before the head
-  chooses, so names at the same position must never collide. Manifest ids are
-  bare positions (`00000000000000000412`) because manifests are *derivations*
-  of already-committed history: any two writers at the same position produce
-  semantically equivalent objects, so a deterministic name gives one canonical
-  object per position and idempotent retry. A manifest writer uses
-  create-if-absent and, on `exists`, verifies and adopts the existing object or
-  reloads — it never overwrites.
-  In every case the ordered name is an inspection and reclamation hint;
-  recovery authority is the head and its references, never a listing.
-- JSON enum values use snake_case.
-- Namespace IDs are human/operator slugs. They use the durable slug grammar:
-  1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first
-  character lowercase ASCII letter or digit, and remaining characters
-  lowercase ASCII letters, digits, `.`, `_`, or `-`. Prefer lowercase
-  kebab-case within that grammar. The `loonfs-` prefix is reserved for LoonFS
-  system use (for example, object-store doctor probes write under
-  `loonfs-doctor-*`); implementations must reject it for user namespaces.
-
-
-Implementations must reject invalid namespace IDs before object-key
-construction. Durable objects that deserialize to invalid typed namespace IDs
-must be treated as invalid at load boundaries rather than coerced or
-normalized.
-
-Generated runtime IDs must be unguessable, high-entropy, and never reused
-within the relevant namespace incarnation.
-
-Underscores are reserved for generated opaque ID prefixes and JSON snake_case
-values. Fixed object-store path-family names should not use underscores.
+references.
 
 ### 1.4 Head update authority
 
@@ -1025,7 +992,7 @@ The fork protocol is:
    immutable metadata files for the source checkpoint.
 7. Write the target `head.json` to reserve the namespace and point at the
    target manifest.
-8. Write the target `descriptor.json` last as the publish/list marker.
+8. Write the target `namespace.json` last as the publish/list marker.
 9. Start the new namespace WAL independently at `fork_seq + 1`.
 
 The fork does not copy content-store blobs or source metadata SSTs. If

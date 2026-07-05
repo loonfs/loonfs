@@ -14,7 +14,7 @@ use loonfs_core::control::{
 };
 use loonfs_core::publish::NamespaceCommitEngine;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
-use loonfs_objectstore::keys::{namespace_descriptor, namespace_head};
+use loonfs_objectstore::keys::{namespace_config, wal_head};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -170,7 +170,7 @@ impl RuntimeCacheStatsInner {
 }
 
 impl RuntimeControlCache {
-    fn namespace_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedControl<HeadState>> {
+    fn wal_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedControl<HeadState>> {
         let head = self.namespaces.get(namespace_id)?.head.clone()?;
         self.touch_namespace(namespace_id);
         Some(head)
@@ -238,13 +238,10 @@ impl Fs {
                 .map(cached_head);
         }
 
-        let cached = self.inner.control_cache().namespace_head(namespace_id);
+        let cached = self.inner.control_cache().wal_head(namespace_id);
         if let Some(head) = cached {
             match self
-                .cached_control_identity_matches(
-                    &namespace_head(namespace_id.as_str()),
-                    &head.identity,
-                )
+                .cached_control_identity_matches(&wal_head(namespace_id.as_str()), &head.identity)
                 .await
             {
                 Ok(true) => return Ok(head),
@@ -299,7 +296,7 @@ impl Fs {
         namespace_id: &NamespaceId,
         head_key: String,
     ) -> RuntimeError {
-        let descriptor_key = namespace_descriptor(namespace_id.as_str());
+        let descriptor_key = namespace_config(namespace_id.as_str());
         let descriptor_exists = match self.store().head(&descriptor_key).await {
             Ok(value) => value.is_some(),
             Err(error) => return RuntimeError::Core(CoreError::Store(error.to_string())),

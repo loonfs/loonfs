@@ -48,9 +48,7 @@ use loonfs_api::{
     generate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreId,
     EffectiveLimit, ManifestId, NameKey, NamespaceId,
 };
-use loonfs_objectstore::keys::{
-    content_blob, namespace_descriptor, namespace_head, upload_session,
-};
+use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session, wal_head};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 use tracing::Instrument;
@@ -324,7 +322,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
         Ok(NamespaceInitializationState::Absent) => Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::LoadNamespaceDescriptor(
                 crate::namespace::control::ControlObjectLoadError::MissingObject {
-                    object_key: namespace_descriptor(namespace_id.as_str()),
+                    object_key: namespace_config(namespace_id.as_str()),
                 },
             ),
         )),
@@ -804,7 +802,7 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     loaded_head_etag: &str,
 ) -> Result<(), CoreError> {
-    let object_key = namespace_head(namespace_id.as_str());
+    let object_key = wal_head(namespace_id.as_str());
     let metadata = store
         .head(&object_key)
         .await
@@ -1068,7 +1066,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         phase = "batch_cas_head",
         batch_size,
         accepted_count,
-        key_class = "namespace_head",
+        key_class = "wal_head",
         result = tracing::field::Empty
     );
     let head_metadata_result = {

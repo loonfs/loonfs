@@ -4,9 +4,9 @@ use futures::stream::{self, BoxStream};
 use loonfs_api::ManifestId;
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
-    metadata_sst, namespace_descriptor, namespace_head, namespace_manifest, wal_segment,
+    metadata_manifest, metadata_table, namespace_config, wal_head, wal_segment,
 };
-use loonfs_objectstore::layout::{NamespaceGcBoundaryKind, ObjectLayout};
+use loonfs_objectstore::layout::ObjectLayout;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
@@ -29,11 +29,7 @@ async fn records_put_success() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put(
-            &namespace_head("ns-1"),
-            bytes(b"head"),
-            PutMode::CreateIfAbsent,
-        )
+        .put(&wal_head("ns-1"), bytes(b"head"), PutMode::CreateIfAbsent)
         .await
         .expect("put object");
 
@@ -55,15 +51,15 @@ async fn delegates_convenience_writes_to_inner_store() {
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
-        .put_overwrite(&namespace_head("ns-1"), bytes(b"overwrite"))
+        .put_overwrite(&wal_head("ns-1"), bytes(b"overwrite"))
         .await
         .expect("put overwrite");
     store
-        .put_if_absent(&namespace_head("ns-1"), bytes(b"create"))
+        .put_if_absent(&wal_head("ns-1"), bytes(b"create"))
         .await
         .expect("put if absent");
     store
-        .compare_and_swap(&namespace_head("ns-1"), "etag-old", bytes(b"swap"))
+        .compare_and_swap(&wal_head("ns-1"), "etag-old", bytes(b"swap"))
         .await
         .expect("compare and swap");
 
@@ -120,7 +116,7 @@ async fn records_head_and_head_with_checksum_as_distinct_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let object_key = namespace_descriptor("ns-1");
+    let object_key = namespace_config("ns-1");
 
     store
         .put_overwrite(&object_key, bytes(b"descriptor"))
@@ -197,7 +193,7 @@ async fn records_list_count() {
         .await
         .expect("put descriptor");
     store
-        .put_overwrite(&namespace_head("ns-1"), bytes(b"head"))
+        .put_overwrite(&wal_head("ns-1"), bytes(b"head"))
         .await
         .expect("put head");
     let keys = store
@@ -228,14 +224,14 @@ async fn classifies_wal_and_manifest_key_families() {
         .expect("put wal");
     store
         .put_overwrite(
-            &namespace_manifest("ns-1", ManifestId(2)),
+            &metadata_manifest("ns-1", ManifestId(2)),
             bytes(b"manifest"),
         )
         .await
         .expect("put manifest");
     store
         .put_overwrite(
-            &metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
+            &metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
             bytes(b"table"),
         )
         .await
@@ -257,7 +253,7 @@ async fn classifies_gc_namespace_layout_family() {
     store
         .put_overwrite(
             &layout
-                .namespace_manifest("ns-1", ManifestId(1))
+                .metadata_manifest("ns-1", ManifestId(1))
                 .into_string(),
             bytes(b"manifest"),
         )
@@ -266,7 +262,7 @@ async fn classifies_gc_namespace_layout_family() {
     store
         .put_overwrite(
             &layout
-                .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
+                .metadata_table("ns-1", "tbl_00000000000000000000000000000001")
                 .into_string(),
             bytes(b"metadata"),
         )
@@ -275,7 +271,7 @@ async fn classifies_gc_namespace_layout_family() {
     store
         .put_overwrite(
             &layout
-                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Manifest)
+                .pin("ns-1", "pin_00000000000000000000000000000001")
                 .into_string(),
             bytes(b"boundary"),
         )
@@ -298,7 +294,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     store
-        .put_overwrite(&namespace_head("ns-1"), bytes(b"head"))
+        .put_overwrite(&wal_head("ns-1"), bytes(b"head"))
         .await
         .expect("put object");
     assert!(store

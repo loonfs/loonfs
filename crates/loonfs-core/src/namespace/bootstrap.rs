@@ -10,14 +10,14 @@ use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceDescriptorEnvelope,
-    NamespaceDescriptorState, WriterLease,
+    ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope, NamespaceConfigState,
+    WriterLease,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, InodeId, InodeKind, ManifestId, NamespaceId,
     NamespaceIdValidationError, NamespaceSummary,
 };
-use loonfs_objectstore::keys::{content_store_descriptor, namespace_descriptor, namespace_head};
+use loonfs_objectstore::keys::{content_store_descriptor, namespace_config, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -130,7 +130,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
 
     let head_envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
+        ControlObjectKind::WalHead,
         &context.writer_version,
         initial_head,
     )
@@ -138,17 +138,17 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let head_bytes = encode_control_object(&head_envelope)
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
 
-    let head_key = namespace_head(namespace_id.as_str());
+    let head_key = wal_head(namespace_id.as_str());
     store
         .put_if_absent(&head_key, Bytes::from(head_bytes))
         .await
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
 
     let content_store_id = create_new_content_store(store, context).await?;
-    let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
-        ControlObjectKind::NamespaceDescriptor,
+    let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(
+        ControlObjectKind::NamespaceConfig,
         &context.writer_version,
-        NamespaceDescriptorState {
+        NamespaceConfigState {
             namespace_id: namespace_id.clone(),
             content_store_id,
         },
@@ -157,7 +157,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let namespace_descriptor_bytes = encode_control_object(&namespace_descriptor_envelope)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
 
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let descriptor_key = namespace_config(namespace_id.as_str());
     store
         .put_if_absent(&descriptor_key, Bytes::from(namespace_descriptor_bytes))
         .await

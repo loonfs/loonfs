@@ -38,7 +38,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_api::{
     generate_checkpoint_id, ChangeSeq, CreateCheckpointResponse, ManifestId, NamespaceId,
 };
-use loonfs_objectstore::keys::namespace_manifest;
+use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::Instrument;
@@ -115,7 +115,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                 name: None,
             };
 
-            let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+            let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
             match load_namespace_manifest_envelope_if_present(
                 store,
                 namespace_id,
@@ -176,7 +176,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
             ));
         }
 
-        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+        let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
         let manifest = load_namespace_manifest_envelope_if_present(
             store,
             namespace_id,
@@ -761,7 +761,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     // every family, so cross-check the index families against their
     // canonical tables before compacting them forward (format spec,
     // "Manifest publication and checkpoint verification").
-    let source_manifest_key = namespace_manifest(
+    let source_manifest_key = metadata_manifest(
         namespace_id.as_str(),
         projection.manifest_tables.manifest().payload.manifest_id,
     );

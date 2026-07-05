@@ -14,18 +14,18 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
-    NamespaceDescriptor,
+    NamespaceConfig,
     ContentStoreDescriptor,
-    NamespaceHead,
+    WalHead,
     NamespaceGcPinState,
     UploadSession,
 }
 
 impl ControlObjectKind {
     pub const ALL: [Self; 5] = [
-        Self::NamespaceDescriptor,
+        Self::NamespaceConfig,
         Self::ContentStoreDescriptor,
-        Self::NamespaceHead,
+        Self::WalHead,
         Self::NamespaceGcPinState,
         Self::UploadSession,
     ];
@@ -38,9 +38,9 @@ impl ControlObjectKind {
     /// as a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
-            Self::NamespaceDescriptor => 1,
+            Self::NamespaceConfig => 1,
             Self::ContentStoreDescriptor => 1,
-            Self::NamespaceHead => 1,
+            Self::WalHead => 1,
             Self::NamespaceGcPinState => 1,
             Self::UploadSession => 1,
         }
@@ -48,9 +48,9 @@ impl ControlObjectKind {
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NamespaceDescriptor => "namespace_descriptor",
+            Self::NamespaceConfig => "namespace_config",
             Self::ContentStoreDescriptor => "content_store_descriptor",
-            Self::NamespaceHead => "namespace_head",
+            Self::WalHead => "wal_head",
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::UploadSession => "upload_session",
         }
@@ -62,7 +62,7 @@ impl ControlObjectKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceDescriptorState {
+pub struct NamespaceConfigState {
     pub namespace_id: NamespaceId,
     pub content_store_id: ContentStoreId,
 }
@@ -255,7 +255,7 @@ where
 
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
-pub type NamespaceDescriptorEnvelope = ControlObjectEnvelope<NamespaceDescriptorState>;
+pub type NamespaceConfigEnvelope = ControlObjectEnvelope<NamespaceConfigState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 pub type NamespaceGcPinStateEnvelope = ControlObjectEnvelope<NamespaceGcPinState>;
 
@@ -412,7 +412,7 @@ mod tests {
     fn control_object_codec_round_trips_and_validates() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::NamespaceHead,
+            ControlObjectKind::WalHead,
             "test-writer",
             HeadState::initial(namespace_id),
         )
@@ -420,12 +420,12 @@ mod tests {
 
         let encoded = encode_control_object(&envelope).expect("encode");
         let decoded: HeadStateEnvelope =
-            decode_control_object(&encoded, ControlObjectKind::NamespaceHead).expect("decode");
+            decode_control_object(&encoded, ControlObjectKind::WalHead).expect("decode");
         assert_eq!(decoded, envelope);
 
-        let mismatch = decode_control_object::<NamespaceDescriptorState>(
+        let mismatch = decode_control_object::<NamespaceConfigState>(
             &encoded,
-            ControlObjectKind::NamespaceDescriptor,
+            ControlObjectKind::NamespaceConfig,
         )
         .expect_err("kind mismatch");
         assert!(matches!(mismatch, ControlCodecError::KindMismatch { .. }));
@@ -435,7 +435,7 @@ mod tests {
     fn control_object_decode_tolerates_unknown_payload_fields() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::NamespaceHead,
+            ControlObjectKind::WalHead,
             "test-writer",
             HeadState::initial(namespace_id),
         )
@@ -457,7 +457,7 @@ mod tests {
             .replace(&envelope.payload_checksum, &future_checksum);
 
         let decoded: HeadStateEnvelope =
-            decode_control_object(future_text.as_bytes(), ControlObjectKind::NamespaceHead)
+            decode_control_object(future_text.as_bytes(), ControlObjectKind::WalHead)
                 .expect("additive payload fields must remain readable");
         assert_eq!(decoded.state, envelope.state);
         assert_eq!(decoded.payload_checksum, future_checksum);

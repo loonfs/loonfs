@@ -37,7 +37,7 @@ use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
 };
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
-use loonfs_objectstore::keys::{metadata_sst, namespace_manifest};
+use loonfs_objectstore::keys::{metadata_manifest, metadata_table};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
     load_manifest_materialization_for_inspection_if_present(store, namespace_id, manifest_id)
         .await?
         .ok_or_else(|| ManifestLoadError::MissingManifest {
-            object_key: namespace_manifest(namespace_id.as_str(), manifest_id),
+            object_key: metadata_manifest(namespace_id.as_str(), manifest_id),
         })
 }
 
@@ -65,7 +65,7 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
 ) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
     load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_id, &manifest_key)
         .await?
         .ok_or(ManifestLoadError::MissingManifest {
@@ -89,7 +89,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
     let manifest = {
         let Some(manifest_bytes) = store
             .get(&manifest_key, None)
@@ -158,7 +158,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
 ) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
     let manifest = load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,
@@ -368,7 +368,7 @@ impl MetadataTableLoadContext<'_> {
 }
 
 pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
-    metadata_sst(
+    metadata_table(
         descriptor.owner_namespace_id.as_str(),
         descriptor.table_id.as_str(),
     )

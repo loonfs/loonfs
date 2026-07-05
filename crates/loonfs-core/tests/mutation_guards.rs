@@ -13,8 +13,8 @@ use loonfs_api::{
     },
     wire::control::{
         decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
-        ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceDescriptorEnvelope,
-        NamespaceDescriptorState, NamespaceGcPinStateEnvelope, UploadSessionEnvelope,
+        ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope,
+        NamespaceConfigState, NamespaceGcPinStateEnvelope, UploadSessionEnvelope,
         UploadSessionState, WriterLease,
     },
     wire::manifest::{
@@ -43,8 +43,8 @@ use loonfs_core::{
 };
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_head,
-    namespace_manifest, upload_session, upload_session_prefix,
+    content_blob, content_store_descriptor, metadata_manifest, namespace_config, pin as pin_key,
+    upload_session, upload_session_prefix, wal_head,
 };
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -111,12 +111,12 @@ fn fork_namespace<S: ObjectStore + ?Sized>(
 fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> NamespaceDescriptorState {
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+) -> NamespaceConfigState {
+    let descriptor_key = namespace_config(namespace_id.as_str());
     let descriptor_bytes = block_on(store.get(&descriptor_key, None))
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
-    decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
+    decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
         .expect("decode namespace descriptor")
         .state
 }
@@ -1110,14 +1110,14 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         bootstrap_namespace(&store, &namespace_id, &context, true).expect("allow existing");
     assert_eq!(existing.namespace_id, namespace_id);
 
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let descriptor_key = namespace_config(namespace_id.as_str());
     let descriptor_bytes = store
         .get(&descriptor_key, None)
         .await
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
-    let descriptor: NamespaceDescriptorEnvelope =
-        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
+    let descriptor: NamespaceConfigEnvelope =
+        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
             .expect("decode namespace descriptor");
     assert_eq!(descriptor.state.namespace_id, namespace_id);
     assert!(store
@@ -1133,10 +1133,7 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         .current_manifest_id
         .expect("created namespace manifest");
     let manifest_bytes = store
-        .get(
-            &namespace_manifest(namespace_id.as_str(), manifest_id),
-            None,
-        )
+        .get(&metadata_manifest(namespace_id.as_str(), manifest_id), None)
         .await
         .expect("read manifest")
         .expect("manifest exists");
@@ -1176,7 +1173,7 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
 
     store
         .put_if_absent(
-            &namespace_head("partial"),
+            &wal_head("partial"),
             Bytes::from_static(br#"{"not":"a descriptor"}"#),
         )
         .await
@@ -1202,7 +1199,7 @@ async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(namespace_head(namespace_id.as_str())),
+        KeyMatcher::Exact(wal_head(namespace_id.as_str())),
         InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: true,
             additional_writes: Vec::new(),
@@ -1239,7 +1236,7 @@ async fn begin_upload_rejects_missing_and_partial_namespace() {
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     store
-        .delete(&namespace_descriptor(namespace_id.as_str()))
+        .delete(&namespace_config(namespace_id.as_str()))
         .await
         .expect("delete descriptor");
 
@@ -2200,7 +2197,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(second.committed_seq, ChangeSeq(2));
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -2278,7 +2275,7 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -2621,7 +2618,7 @@ async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     assert!(store.injected_stale_head());
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
@@ -2677,7 +2674,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix("namespaces/demo/wal/".to_owned()),
+        KeyMatcher::Prefix("namespaces/demo/wal/segments/".to_owned()),
         InjectedCreateFailure::Transport {
             message: "injected wal write failure",
         },
@@ -2940,7 +2937,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     assert_eq!(first, duplicate);
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -3042,7 +3039,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     ));
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -3271,7 +3268,7 @@ async fn direct_publisher_uses_durable_path_commit_receipt_index() {
     ));
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -3321,7 +3318,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
     assert_eq!(moved_bytes.bytes, b"hello");
 
     let wal_keys = store
-        .list_prefix("namespaces/demo/wal/")
+        .list_prefix("namespaces/demo/wal/segments/")
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -3343,14 +3340,14 @@ async fn namespace_descriptor_checksum_is_validated() {
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap namespace");
 
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let descriptor_key = namespace_config(namespace_id.as_str());
     let descriptor_bytes = store
         .get(&descriptor_key, None)
         .await
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
-    let descriptor: NamespaceDescriptorEnvelope =
-        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceDescriptor)
+    let descriptor: NamespaceConfigEnvelope =
+        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
             .expect("decode namespace descriptor");
     // Corrupt the durable document at the byte level: swap the stored
     // checksum for a syntactically valid but wrong digest.
@@ -3433,7 +3430,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_head.state.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(clone_head.state.retention_floor_seq, ChangeSeq(1));
 
-    let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), ManifestId(1));
+    let target_manifest_key = metadata_manifest(clone_namespace_id.as_str(), ManifestId(1));
     let target_manifest_bytes = store
         .get(&target_manifest_key, None)
         .await
@@ -3474,7 +3471,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/tables/metadata/",
+                "namespaces/{}/metadata/tables/",
                 clone_namespace_id.as_str()
             ))
             .await
@@ -3485,7 +3482,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     let pin_keys = store
         .list_prefix(&format!(
-            "namespaces/{}/gc/pins/",
+            "namespaces/{}/pins/",
             source_namespace_id.as_str()
         ))
         .await
@@ -3518,7 +3515,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .map(|metadata_file| metadata_file.object_key.clone())
         .collect::<Vec<_>>();
     assert!(store
-        .head(&gc_pin(source_namespace_id.as_str(), &pin.state.pin_id))
+        .head(&pin_key(source_namespace_id.as_str(), &pin.state.pin_id))
         .await
         .expect("head source pin")
         .is_some());
@@ -3591,9 +3588,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
 
     for prefix in [
-        format!("namespaces/{}/control/", source_namespace_id.as_str()),
+        format!("namespaces/{}/wal/head.json", source_namespace_id.as_str()),
         format!("namespaces/{}/wal/", source_namespace_id.as_str()),
-        format!("namespaces/{}/manifest/", source_namespace_id.as_str()),
+        format!(
+            "namespaces/{}/metadata/manifests/",
+            source_namespace_id.as_str()
+        ),
     ] {
         for key in store
             .list_prefix(&prefix)
@@ -3646,7 +3646,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         block_on(namespace_engine(&store, &source_namespace_id, &context).create_checkpoint())
             .expect("create source checkpoint");
 
-    let manifest_key = namespace_manifest(source_namespace_id.as_str(), checkpoint.manifest_id);
+    let manifest_key = metadata_manifest(source_namespace_id.as_str(), checkpoint.manifest_id);
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await
@@ -3673,7 +3673,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(
         store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .head(&namespace_config(clone_namespace_id.as_str()))
             .await
             .expect("head clone descriptor")
             .is_none(),
@@ -3689,7 +3689,7 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(namespace_head(clone_namespace_id.as_str())),
+        KeyMatcher::Exact(wal_head(clone_namespace_id.as_str())),
         InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: true,
             additional_writes: Vec::new(),
@@ -3703,7 +3703,7 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     assert!(
         !store
             .list_prefix(&format!(
-                "namespaces/{}/manifest/",
+                "namespaces/{}/metadata/manifests/",
                 clone_namespace_id.as_str()
             ))
             .await
@@ -3713,7 +3713,7 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .head(&namespace_config(clone_namespace_id.as_str()))
             .await
             .expect("head target descriptor")
             .is_none(),
@@ -3730,10 +3730,7 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix(format!(
-            "namespaces/{}/gc/pins/",
-            source_namespace_id.as_str()
-        )),
+        KeyMatcher::Prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
         InjectedCreateFailure::Transport {
             message: "injected source gc pin failure",
         },
@@ -3745,7 +3742,7 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
-            .head(&namespace_head(clone_namespace_id.as_str()))
+            .head(&wal_head(clone_namespace_id.as_str()))
             .await
             .expect("head target head")
             .is_none(),
@@ -3753,7 +3750,7 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .head(&namespace_config(clone_namespace_id.as_str()))
             .await
             .expect("head target descriptor")
             .is_none(),
@@ -3762,7 +3759,7 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/manifest/",
+                "namespaces/{}/metadata/manifests/",
                 clone_namespace_id.as_str()
             ))
             .await
@@ -3772,7 +3769,7 @@ async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(source_namespace_id.as_str()))
+            .head(&namespace_config(source_namespace_id.as_str()))
             .await
             .expect("head source descriptor")
             .is_some(),
@@ -3789,7 +3786,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyMatcher::Prefix(format!(
-            "namespaces/{}/manifest/",
+            "namespaces/{}/metadata/manifests/",
             clone_namespace_id.as_str()
         )),
         InjectedCreateFailure::Transport {
@@ -3803,7 +3800,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
-            .head(&namespace_head(clone_namespace_id.as_str()))
+            .head(&wal_head(clone_namespace_id.as_str()))
             .await
             .expect("head target head")
             .is_none(),
@@ -3811,7 +3808,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .head(&namespace_config(clone_namespace_id.as_str()))
             .await
             .expect("head target descriptor")
             .is_none(),
@@ -3820,7 +3817,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/manifest/",
+                "namespaces/{}/metadata/manifests/",
                 clone_namespace_id.as_str()
             ))
             .await
@@ -3830,7 +3827,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(source_namespace_id.as_str()))
+            .head(&namespace_config(source_namespace_id.as_str()))
             .await
             .expect("head source descriptor")
             .is_some(),
@@ -3846,7 +3843,7 @@ async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(namespace_descriptor(clone_namespace_id.as_str())),
+        KeyMatcher::Exact(namespace_config(clone_namespace_id.as_str())),
         InjectedCreateFailure::Transport {
             message: "injected target descriptor failure",
         },
@@ -3858,7 +3855,7 @@ async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
-            .head(&namespace_head(clone_namespace_id.as_str()))
+            .head(&wal_head(clone_namespace_id.as_str()))
             .await
             .expect("head target head")
             .is_some(),
@@ -3866,7 +3863,7 @@ async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .head(&namespace_config(clone_namespace_id.as_str()))
             .await
             .expect("head target descriptor")
             .is_none(),
@@ -3874,7 +3871,7 @@ async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
     );
     let target_manifest_keys = store
         .list_prefix(&format!(
-            "namespaces/{}/manifest/",
+            "namespaces/{}/metadata/manifests/",
             clone_namespace_id.as_str()
         ))
         .await
@@ -3896,10 +3893,10 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     seed_source_namespace_for_fork(&inner, &source_namespace_id, &context);
     let content_store_id =
         load_namespace_descriptor_state(&inner, &source_namespace_id).content_store_id;
-    let descriptor = NamespaceDescriptorEnvelope::from_state(
-        ControlObjectKind::NamespaceDescriptor,
+    let descriptor = NamespaceConfigEnvelope::from_state(
+        ControlObjectKind::NamespaceConfig,
         &context.writer_version,
-        NamespaceDescriptorState {
+        NamespaceConfigState {
             namespace_id: clone_namespace_id.clone(),
             content_store_id,
         },
@@ -3907,11 +3904,11 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     .expect("descriptor envelope");
     let store = InjectCreateFailureStore::new(
         inner,
-        KeyMatcher::Exact(namespace_head(clone_namespace_id.as_str())),
+        KeyMatcher::Exact(wal_head(clone_namespace_id.as_str())),
         InjectedCreateFailure::Conflict {
             write_attempted_object: true,
             additional_writes: vec![(
-                namespace_descriptor(clone_namespace_id.as_str()),
+                namespace_config(clone_namespace_id.as_str()),
                 loonfs_api::wire::control::encode_control_object(&descriptor)
                     .expect("descriptor bytes"),
             )],
@@ -3923,7 +3920,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert!(
         store
-            .head(&namespace_descriptor(source_namespace_id.as_str()))
+            .head(&namespace_config(source_namespace_id.as_str()))
             .await
             .expect("head source descriptor")
             .is_some(),
@@ -3931,7 +3928,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     );
     assert!(
         store
-            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .head(&namespace_config(clone_namespace_id.as_str()))
             .await
             .expect("head clone descriptor")
             .is_some(),
@@ -4934,8 +4931,8 @@ impl ReplayReadGuardStore {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
             guarded_prefixes: vec![
-                format!("namespaces/{namespace}/wal/"),
-                format!("namespaces/{namespace}/manifest/"),
+                format!("namespaces/{namespace}/wal/segments/"),
+                format!("namespaces/{namespace}/metadata/manifests/"),
             ],
             guarded_gets: AtomicUsize::new(0),
         }
@@ -5116,7 +5113,7 @@ impl MetadataSstGetCountingStore {
     }
 
     fn record_metadata_sst_get(&self, key: &str) {
-        if key.contains("/tables/metadata/") && key.ends_with(".sst.zst") {
+        if key.contains("/metadata/tables/") && key.ends_with(".sst.zst") {
             self.metadata_sst_gets.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -5265,7 +5262,7 @@ impl StaleHeadGetStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: namespace_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id.as_str()),
             state: Mutex::new(StaleHeadGetState {
                 stale_head_body: None,
                 clean_head_gets_before_injection: None,
@@ -5394,7 +5391,7 @@ impl AckLostHeadCasStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: namespace_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id.as_str()),
             injected_ack_loss: Mutex::new(false),
         }
     }
@@ -5481,7 +5478,7 @@ impl StaleHeadAfterWalWriteStore {
     fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
-            head_key: namespace_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id.as_str()),
             injected_stale_head: Mutex::new(false),
         }
     }
@@ -5562,13 +5559,13 @@ async fn head_cas_advances_seq(
     candidate_bytes: &[u8],
 ) -> Result<bool, ObjectStoreError> {
     let candidate: HeadStateEnvelope =
-        decode_control_object(candidate_bytes, ControlObjectKind::NamespaceHead)
+        decode_control_object(candidate_bytes, ControlObjectKind::WalHead)
             .map_err(|err| ObjectStoreError::Transport(format!("decode candidate head: {err}")))?;
     let Some(existing_bytes) = store.get(key, None).await? else {
         return Ok(true);
     };
     let existing: HeadStateEnvelope =
-        decode_control_object(&existing_bytes, ControlObjectKind::NamespaceHead)
+        decode_control_object(&existing_bytes, ControlObjectKind::WalHead)
             .map_err(|err| ObjectStoreError::Transport(format!("decode existing head: {err}")))?;
     Ok(candidate.state.seq > existing.state.seq)
 }

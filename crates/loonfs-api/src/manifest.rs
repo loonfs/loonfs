@@ -29,7 +29,7 @@ pub enum NamespaceManifestKind {
 impl NamespaceManifestKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NamespaceManifest => "namespace_manifest",
+            Self::NamespaceManifest => "metadata_manifest",
         }
     }
 }
@@ -43,7 +43,7 @@ pub enum MetadataSstKind {
 impl MetadataSstKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::MetadataSst => "metadata_sst",
+            Self::MetadataSst => "metadata_table",
         }
     }
 }
@@ -679,7 +679,7 @@ mod tests {
                     "tbl_00000000000000000000000000000001",
                     ChangeSeq(10),
                     1,
-                    "namespaces/demo/tables/metadata/tbl_00000000000000000000000000000001.sst.zst",
+                    "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
                 )],
             },
         )
@@ -741,7 +741,7 @@ mod tests {
                         "tbl_00000000000000000000000000000002",
                         ChangeSeq(12),
                         0,
-                        "namespaces/demo/tables/metadata/tbl_00000000000000000000000000000002.sst.zst",
+                        "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000002.sst.zst",
                     ),
                 ],
             },

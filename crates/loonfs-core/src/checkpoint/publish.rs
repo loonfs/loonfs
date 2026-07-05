@@ -11,7 +11,7 @@ use bytes::Bytes;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
 use loonfs_api::{CheckpointId, ManifestId, NamespaceId};
-use loonfs_objectstore::keys::namespace_manifest;
+use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 // Mutable head CAS retries are about writer concurrency, not manifest id
@@ -36,7 +36,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), MetadataProjectionLoadError> {
-    let manifest_key = namespace_manifest(
+    let manifest_key = metadata_manifest(
         manifest.payload.namespace_id.as_str(),
         manifest.payload.manifest_id,
     );
@@ -94,7 +94,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     name = "loon.phase",
     err,
     skip_all,
-    fields(phase = "publish_compacted_head", key_class = "namespace_head")
+    fields(phase = "publish_compacted_head", key_class = "wal_head")
 )]
 pub(super) async fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     store: &S,

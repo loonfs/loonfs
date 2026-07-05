@@ -89,7 +89,7 @@ mod tests {
         normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
         validate_segments,
     };
-    use crate::keys::namespace_head;
+    use crate::keys::wal_head;
     use crate::ObjectStoreError;
 
     #[test]
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn scoped_key_helpers_keep_prefix_isolation() {
-        let head_key = namespace_head("ns-1");
+        let head_key = wal_head("ns-1");
         assert!(matches!(
             scope_object_key(Some("tenant-a"), &head_key),
             Ok(scoped) if scoped == format!("tenant-a/{head_key}")

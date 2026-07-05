@@ -90,7 +90,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             ..head.clone()
         };
         let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::NamespaceHead,
+            ControlObjectKind::WalHead,
             &context.writer_version,
             deleted_head,
         )

@@ -53,7 +53,7 @@ use loonfs_api::{
     NamespaceId, PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::fs::LocalFsStore;
-use loonfs_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest, wal_segment};
+use loonfs_objectstore::keys::{metadata_manifest, metadata_table, wal_head, wal_segment};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -271,7 +271,7 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         .await
         .expect("create checkpoint");
 
-    let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
+    let manifest_key = metadata_manifest(namespace_id.as_str(), ManifestId(1));
     store
         .put_overwrite(&manifest_key, Bytes::from_static(br#"{"bad":"json"}"#))
         .await
@@ -290,7 +290,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
+    let manifest_key = metadata_manifest(namespace_id.as_str(), ManifestId(1));
     let store = ConflictOnManifestCreateStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         manifest_key,
@@ -378,14 +378,17 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(materialization.head.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
         store
-            .list_prefix(&format!("namespaces/{}/wal/", namespace_id.as_str()))
+            .list_prefix(&format!(
+                "namespaces/{}/wal/segments/",
+                namespace_id.as_str()
+            ))
             .await
             .expect("list wal")
             .len(),
         1
     );
     assert!(store
-        .head(&namespace_manifest(namespace_id.as_str(), ManifestId(1)))
+        .head(&metadata_manifest(namespace_id.as_str(), ManifestId(1)))
         .await
         .expect("manifest head")
         .is_some());
@@ -1301,7 +1304,7 @@ impl ManifestSwapOnCasConflictStore {
         let mut head = loaded.envelope.state;
         head.current_manifest_id = head.current_manifest_id.map(|id| ManifestId(id.0 + 1));
         let envelope = loonfs_api::wire::control::HeadStateEnvelope::from_state(
-            loonfs_api::wire::control::ControlObjectKind::NamespaceHead,
+            loonfs_api::wire::control::ControlObjectKind::WalHead,
             "test-writer/0.1.0",
             head,
         )
@@ -1310,7 +1313,7 @@ impl ManifestSwapOnCasConflictStore {
             loonfs_api::wire::control::encode_control_object(&envelope).expect("head bytes");
         self.inner
             .put(
-                &namespace_head(self.namespace_id.as_str()),
+                &wal_head(self.namespace_id.as_str()),
                 Bytes::from(bytes),
                 PutMode::Overwrite,
             )
@@ -1572,7 +1575,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id(first))
             .await
             .expect("load first manifest");
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(first));
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id(first));
     let mut bad_base_manifest = first_materialized.manifest.clone();
     let expected_base_key = {
         let base_descriptor = bad_base_manifest
@@ -1584,7 +1587,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
                     && metadata_file.family == ApiMetadataTableFamily::Inodes
             })
             .expect("base metadata file");
-        let expected = metadata_sst(
+        let expected = metadata_table(
             base_descriptor.owner_namespace_id.as_str(),
             base_descriptor.table_id.as_str(),
         );
@@ -1611,7 +1614,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id(second))
             .await
             .expect("load second manifest");
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(second));
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id(second));
     let mut bad_l0_manifest = second_materialized.manifest.clone();
     let expected_l0_key = {
         let l0_descriptor = bad_l0_manifest
@@ -1623,7 +1626,7 @@ async fn manifest_materialization_rejects_off_pattern_table_keys() {
                     && metadata_file.family == ApiMetadataTableFamily::Inodes
             })
             .expect("l0 metadata file");
-        let expected = metadata_sst(
+        let expected = metadata_table(
             l0_descriptor.owner_namespace_id.as_str(),
             l0_descriptor.table_id.as_str(),
         );
@@ -1724,7 +1727,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     match load_manifest_metadata_state_for_inspection_from_manifest(
         &store,
         &namespace_id,
-        &namespace_manifest(namespace_id.as_str(), manifest_id(materialization.head.seq)),
+        &metadata_manifest(namespace_id.as_str(), manifest_id(materialization.head.seq)),
         &manifest,
     )
     .await
@@ -1858,7 +1861,7 @@ async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
         .expect("revision metadata file");
     descriptor.segment_key = MetadataSegmentKey::RowKeyRange { shard: u32::MAX };
 
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
     let writer_version = manifest.writer_version.clone();
     let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
@@ -2219,7 +2222,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("materialization");
     let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
-    let compacted_run_prefix = format!("namespaces/{}/tables/metadata/tbl_", namespace_id.as_str());
+    let compacted_run_prefix = format!("namespaces/{}/metadata/tables/tbl_", namespace_id.as_str());
 
     assert_eq!(
         compacted_materialized.manifest.payload.base_seq,
@@ -2452,7 +2455,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     )
     .await;
 
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
     let writer_version = manifest.writer_version.clone();
     let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
@@ -2819,7 +2822,7 @@ async fn overwrite_manifest(
     namespace_id: &NamespaceId,
     manifest: NamespaceManifestEnvelope,
 ) {
-    let manifest_key = namespace_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
+    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest.payload.manifest_id);
     let updated_manifest =
         NamespaceManifestEnvelope::from_payload(manifest.writer_version, manifest.payload)
             .expect("updated manifest");
@@ -3139,7 +3142,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         encode_namespace_manifest_json(&conflicting).expect("encode conflicting manifest");
     let store = ConflictOnManifestCreateStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        namespace_manifest(namespace_id.as_str(), ManifestId(1)),
+        metadata_manifest(namespace_id.as_str(), ManifestId(1)),
         conflicting_bytes,
     );
 
@@ -3449,7 +3452,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
     let context = test_context();
     let store = HeadCasFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        namespace_head(namespace_id.as_str()),
+        wal_head(namespace_id.as_str()),
     );
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await

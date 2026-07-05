@@ -1,4 +1,4 @@
-use crate::keys::{namespace_head, namespace_manifest, upload_session};
+use crate::keys::{metadata_manifest, upload_session, wal_head};
 use crate::{ObjectStore, ObjectStoreError};
 use bytes::Bytes;
 use loonfs_api::ManifestId;
@@ -57,7 +57,7 @@ async fn probe_create_if_absent<S: ObjectStore + ?Sized>(
     store: &S,
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
-    let key = namespace_head(&probe_namespace(run_id, "create-if-absent"));
+    let key = wal_head(&probe_namespace(run_id, "create-if-absent"));
     let _ = store.delete(&key).await;
 
     store
@@ -93,7 +93,7 @@ async fn probe_get_with_metadata<S: ObjectStore + ?Sized>(
     store: &S,
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
-    let key = namespace_head(&probe_namespace(run_id, "get-with-metadata"));
+    let key = wal_head(&probe_namespace(run_id, "get-with-metadata"));
     let _ = store.delete(&key).await;
     let bytes = br#"{"seq":41,"read":"full"}"#;
 
@@ -137,7 +137,7 @@ async fn probe_compare_and_swap<S: ObjectStore + ?Sized>(
     store: &S,
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
-    let key = namespace_head(&probe_namespace(run_id, "cas"));
+    let key = wal_head(&probe_namespace(run_id, "cas"));
     let _ = store.delete(&key).await;
 
     store
@@ -258,8 +258,8 @@ async fn probe_sorted_listing<S: ObjectStore + ?Sized>(
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "sorted");
     let keys = vec![
-        namespace_head(&namespace),
-        namespace_manifest(&namespace, ManifestId(1)),
+        wal_head(&namespace),
+        metadata_manifest(&namespace, ManifestId(1)),
         upload_session(&namespace, "upl_00000000000000000000000000000001"),
     ];
     for key in &keys {
@@ -304,8 +304,8 @@ async fn probe_scoped_prefix_behavior<S: ObjectStore + ?Sized>(
 ) -> Result<(), ContractProbeError> {
     let left_namespace = probe_namespace(run_id, "scope-a");
     let right_namespace = probe_namespace(run_id, "scope-b");
-    let left_key = namespace_head(&left_namespace);
-    let right_key = namespace_head(&right_namespace);
+    let left_key = wal_head(&left_namespace);
+    let right_key = wal_head(&right_namespace);
     let _ = store.delete(&left_key).await;
     let _ = store.delete(&right_key).await;
 

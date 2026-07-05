@@ -6,8 +6,8 @@ use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, metadata_sst, namespace_descriptor, namespace_head,
-    namespace_manifest, upload_session, wal_segment,
+    content_blob, content_store_descriptor, metadata_manifest, metadata_table, namespace_config,
+    upload_session, wal_head, wal_segment,
 };
 use loonfs_objectstore::probes::run_contract_probes;
 use loonfs_objectstore::provider::{
@@ -198,11 +198,8 @@ fn provider_profiles_exist() {
 
 #[test]
 fn key_builders_cover_locked_object_families() {
-    assert_eq!(
-        namespace_descriptor("ns-1"),
-        "namespaces/ns-1/descriptor.json"
-    );
-    assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/control/head.json");
+    assert_eq!(namespace_config("ns-1"), "namespaces/ns-1/namespace.json");
+    assert_eq!(wal_head("ns-1"), "namespaces/ns-1/wal/head.json");
     assert_eq!(
         content_store_descriptor("cs_00000000000000000000000000000001"),
         "content-stores/cs_00000000000000000000000000000001/descriptor.json"
@@ -217,23 +214,23 @@ fn key_builders_cover_locked_object_families() {
     );
     assert_eq!(
         wal_segment("ns-1", "seg_00000000000000000000000000000001"),
-        "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
+        "namespaces/ns-1/wal/segments/seg_00000000000000000000000000000001.wal.zst"
     );
     assert_eq!(
-        namespace_manifest("ns-1", ManifestId(420)),
-        "namespaces/ns-1/manifest/00000000000000000420.manifest.json"
+        metadata_manifest("ns-1", ManifestId(420)),
+        "namespaces/ns-1/metadata/manifests/00000000000000000420.json"
     );
     assert_eq!(
-        metadata_sst("ns-1", "tbl_00000000000000000000000000000001"),
-        "namespaces/ns-1/tables/metadata/tbl_00000000000000000000000000000001.sst.zst"
+        metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
+        "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
     );
     assert_eq!(
-        metadata_sst("source-ns", "tbl_00000000000000000000000000000002"),
-        "namespaces/source-ns/tables/metadata/tbl_00000000000000000000000000000002.sst.zst"
+        metadata_table("source-ns", "tbl_00000000000000000000000000000002"),
+        "namespaces/source-ns/metadata/tables/tbl_00000000000000000000000000000002.sst.zst"
     );
     assert_eq!(
-        metadata_sst("ns-1", "tbl_ffffffffffffffffffffffffffffffff"),
-        "namespaces/ns-1/tables/metadata/tbl_ffffffffffffffffffffffffffffffff.sst.zst"
+        metadata_table("ns-1", "tbl_ffffffffffffffffffffffffffffffff"),
+        "namespaces/ns-1/metadata/tables/tbl_ffffffffffffffffffffffffffffffff.sst.zst"
     );
 }
 
@@ -413,7 +410,7 @@ async fn assert_provider_conformance<S: ObjectStore>(store: &S) {
 }
 
 async fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-1");
+    let key = wal_head("ns-1");
     let _ = store.delete(&key).await;
 
     let written = store
@@ -440,7 +437,7 @@ async fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(stor
 }
 
 async fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-1");
+    let key = wal_head("ns-1");
     let _ = store.delete(&key).await;
 
     store
@@ -469,7 +466,7 @@ async fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
 }
 
 async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-1");
+    let key = wal_head("ns-1");
     let _ = store.delete(&key).await;
 
     store
@@ -515,7 +512,7 @@ async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S)
 }
 
 async fn assert_compare_and_swap_missing_object_rejects_writer<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-cas-missing");
+    let key = wal_head("ns-cas-missing");
     let _ = store.delete(&key).await;
     assert_precondition_failed(
         store
@@ -525,7 +522,7 @@ async fn assert_compare_and_swap_missing_object_rejects_writer<S: ObjectStore>(s
 }
 
 async fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-overwrite");
+    let key = wal_head("ns-overwrite");
     let _ = store.delete(&key).await;
 
     let first = store
@@ -562,7 +559,7 @@ async fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
 }
 
 async fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-delete-missing");
+    let key = wal_head("ns-delete-missing");
     let _ = store.delete(&key).await;
     store
         .delete(&key)
@@ -597,8 +594,8 @@ async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: 
 
 async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
-        namespace_head("ns-sort"),
-        namespace_manifest("ns-sort", ManifestId(1)),
+        wal_head("ns-sort"),
+        metadata_manifest("ns-sort", ManifestId(1)),
         upload_session("ns-sort", "upl_00000000000000000000000000000001"),
     ];
     for key in &keys {

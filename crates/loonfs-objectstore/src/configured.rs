@@ -262,7 +262,7 @@ mod tests {
     use crate::abs::AzureAbsStoreConfig;
     use crate::fs::LocalFsStore;
     use crate::gcs::GcpGcsStoreConfig;
-    use crate::keys::namespace_head;
+    use crate::keys::wal_head;
     use crate::presign::PresignedPutRequest;
     use crate::r2::CloudflareR2StoreConfig;
     use crate::s3::AwsS3StoreConfig;
@@ -283,7 +283,7 @@ mod tests {
         let temp_dir = unique_temp_dir("configured-store-local");
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
             .expect("construct configured local fs store");
-        let head_key = namespace_head("ns-1");
+        let head_key = wal_head("ns-1");
 
         store
             .put_overwrite(&head_key, Bytes::from_static(br#"{"ok":true}"#))

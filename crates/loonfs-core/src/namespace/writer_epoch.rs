@@ -182,7 +182,7 @@ mod tests {
     };
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId};
     use loonfs_objectstore::fs::LocalFsStore;
-    use loonfs_objectstore::keys::namespace_head;
+    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
@@ -220,18 +220,18 @@ mod tests {
 
     async fn write_head(store: &LocalFsStore, namespace_id: &NamespaceId, head: HeadState) {
         let envelope =
-            HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, WRITER_VERSION, head)
+            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, head)
                 .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");
         store
-            .put_if_absent(&namespace_head(namespace_id.as_str()), Bytes::from(bytes))
+            .put_if_absent(&wal_head(namespace_id.as_str()), Bytes::from(bytes))
             .await
             .expect("write head");
     }
 
     async fn head_etag(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
         store
-            .head(&namespace_head(namespace_id.as_str()))
+            .head(&wal_head(namespace_id.as_str()))
             .await
             .expect("head metadata")
             .expect("head exists")
@@ -467,7 +467,7 @@ mod tests {
         // its epoch (head read #1) — the stalled-deleter interleaving.
         let store = TakeoverBetweenHeadReadsStore {
             inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-            head_key: namespace_head(namespace_id.as_str()),
+            head_key: wal_head(namespace_id.as_str()),
             head_reads: AtomicUsize::new(0),
         };
 
@@ -508,7 +508,7 @@ mod tests {
                 .expect("read head for takeover")
                 .expect("head exists");
             let envelope: HeadStateEnvelope =
-                decode_control_object(&body.bytes, ControlObjectKind::NamespaceHead)
+                decode_control_object(&body.bytes, ControlObjectKind::WalHead)
                     .expect("decode head");
             let mut head = envelope.state;
             head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
@@ -517,12 +517,9 @@ mod tests {
                 writer_session_id: "session-b".to_owned(),
                 lease_expires_at_ms: 100_000,
             });
-            let next = HeadStateEnvelope::from_state(
-                ControlObjectKind::NamespaceHead,
-                WRITER_VERSION,
-                head,
-            )
-            .expect("head envelope");
+            let next =
+                HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, head)
+                    .expect("head envelope");
             let bytes = encode_control_object(&next).expect("head bytes");
             self.inner
                 .put(&self.head_key, Bytes::from(bytes), PutMode::Overwrite)
@@ -641,16 +638,13 @@ mod tests {
                 WriterEpoch(8),
                 99_000,
             );
-            let envelope = HeadStateEnvelope::from_state(
-                ControlObjectKind::NamespaceHead,
-                WRITER_VERSION,
-                winner,
-            )
-            .expect("head envelope");
+            let envelope =
+                HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, winner)
+                    .expect("head envelope");
             let bytes = encode_control_object(&envelope).expect("head bytes");
             self.inner
                 .put(
-                    &namespace_head(self.namespace_id.as_str()),
+                    &wal_head(self.namespace_id.as_str()),
                     Bytes::from(bytes),
                     PutMode::Overwrite,
                 )

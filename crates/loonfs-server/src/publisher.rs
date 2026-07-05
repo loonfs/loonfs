@@ -826,7 +826,7 @@ mod tests {
     use loonfs_core::content::store_bytes_as_content;
     use loonfs_core::publish::PathMutationIntent;
     use loonfs_objectstore::fs::LocalFsStore;
-    use loonfs_objectstore::keys::namespace_head;
+    use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
@@ -859,7 +859,7 @@ mod tests {
         fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
             Self {
                 inner: LocalFsStore::new(root.as_ref()).expect("store"),
-                head_key: namespace_head(namespace_id.as_str()),
+                head_key: wal_head(namespace_id.as_str()),
                 gate: Arc::new(HeadCasGate {
                     state: Mutex::new(HeadCasGateState {
                         blocks_remaining: 0,
@@ -978,7 +978,7 @@ mod tests {
         fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
             Self {
                 inner: LocalFsStore::new(root.as_ref()).expect("store"),
-                head_key: namespace_head(namespace_id.as_str()),
+                head_key: wal_head(namespace_id.as_str()),
                 gate: Arc::new(PanicGate {
                     state: Mutex::new(PanicGateState {
                         armed: false,
@@ -1104,7 +1104,7 @@ mod tests {
         fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
             Self {
                 inner: LocalFsStore::new(root.as_ref()).expect("store"),
-                head_key: namespace_head(namespace_id.as_str()),
+                head_key: wal_head(namespace_id.as_str()),
                 lose_next_head_cas_ack: AtomicBool::new(false),
             }
         }
@@ -1325,7 +1325,7 @@ mod tests {
         assert_eq!(pending_response.committed_seq, ChangeSeq(2));
 
         let wal_keys = shared
-            .list_prefix("namespaces/demo/wal/")
+            .list_prefix("namespaces/demo/wal/segments/")
             .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 2);
@@ -1693,7 +1693,7 @@ mod tests {
         assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(2));
 
         let wal_keys = store
-            .list_prefix("namespaces/demo/wal/")
+            .list_prefix("namespaces/demo/wal/segments/")
             .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 1);
@@ -1754,7 +1754,7 @@ mod tests {
         );
 
         let wal_keys = store
-            .list_prefix("namespaces/demo/wal/")
+            .list_prefix("namespaces/demo/wal/segments/")
             .await
             .expect("list wal");
         assert_eq!(wal_keys.len(), 1);
