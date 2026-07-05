@@ -91,9 +91,6 @@ pub fn prepare_commit_head_publish(
         writer_epoch: current_head.writer_epoch,
         writer: current_head.writer.clone(),
         next_inode_id: plan.resulting_next_inode_id,
-        name_policy: current_head.name_policy,
-        current_manifest_id: current_head.current_manifest_id,
-        latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         recent_segments: next_recent_segments(current_head, new_tip.clone()),
         visible_wal_tip: Some(new_tip),
@@ -200,7 +197,7 @@ mod tests {
     }
     use loonfs_api::wire::control::WriterBlock;
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
-    use loonfs_api::{CheckpointId, CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
+    use loonfs_api::{CommitId, InodeId, NamespaceId, WriterEpoch};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
@@ -215,11 +212,6 @@ mod tests {
                 acquired_at_ms: 1_000,
             }),
             next_inode_id: InodeId(10),
-            name_policy: loonfs_api::NamePolicy::default(),
-            current_manifest_id: Some(ManifestId(0)),
-            latest_checkpoint_id: Some(
-                CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
-            ),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
             recent_segments: Vec::new(),

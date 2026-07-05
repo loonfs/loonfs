@@ -20,11 +20,11 @@ use crate::namespace::catalog::{
     load_namespace_catalog_entry, load_namespace_content_store_id, namespace_initialization_state,
     NamespaceInitializationError, NamespaceInitializationState,
 };
+use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
-    load_namespace_head_control,
+    load_namespace_head_control, read_head_and_metadata_root,
 };
-use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::publisher::NamespaceMutationCandidate;
@@ -48,7 +48,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{
     generate_upload_id, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreId,
-    EffectiveLimit, ManifestId, NameKey, NamespaceId,
+    EffectiveLimit, ManifestId, NameKey, NamePolicy, NamespaceId,
 };
 use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session, wal_head};
 use loonfs_objectstore::ObjectStore;
@@ -105,6 +105,7 @@ impl PublishBatchAgainstViewResult {
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     content_store_id: ContentStoreId,
+    name_policy: NamePolicy,
     head: HeadState,
     head_etag: String,
     acquired_writer: Option<AcquiredWriter>,
@@ -118,7 +119,12 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_tables, &self.tail_state)
+        MetadataView::from_loaded_head(
+            &self.head,
+            self.name_policy,
+            &self.manifest_tables,
+            &self.tail_state,
+        )
     }
 
     async fn find_commit_receipt(
@@ -636,7 +642,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)))?;
-    let loaded_head = read_head_object(store, namespace_id)
+    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -647,6 +653,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         })
     })?;
     let head = loaded_head.envelope.state;
+    let root = loaded_root.envelope.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -657,17 +664,22 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     if let Some(acquired_writer) = &acquired_writer {
         ensure_publish_head_matches_acquired_writer(&head, acquired_writer)?;
     }
-    let manifest_id =
-        head.current_manifest_id
-            .ok_or_else(|| MetadataViewError::MissingManifest {
-                namespace_id: namespace_id.clone(),
-            })?;
+    let manifest_id = root.manifest_id;
     let manifest_tables =
         load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
             .await
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
+    if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "metadata root for `{}` references manifest {:?} with checksum {} but the manifest carries {}",
+            namespace_id.as_str(),
+            root.manifest_id,
+            root.manifest_payload_checksum,
+            manifest_tables.manifest().payload_checksum,
+        )));
+    }
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let manifest_payload_checksum = manifest_tables.manifest().payload_checksum.clone();
     let projection = if let Some(cached) = cached_projection.filter(|cached| {
@@ -700,6 +712,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     Ok((
         PublishMetadataView {
             content_store_id: catalog_entry.content_store_id,
+            name_policy: catalog_entry.namespace_config.name_policy,
             head,
             head_etag,
             acquired_writer,
@@ -785,9 +798,6 @@ fn ensure_publish_reconstructed_head_matches(
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
         || current_head.next_inode_id != reconstructed.next_inode_id
-        || current_head.name_policy != reconstructed.name_policy
-        || current_head.current_manifest_id != reconstructed.current_manifest_id
-        || current_head.latest_checkpoint_id != reconstructed.latest_checkpoint_id
         || current_head.retention_floor_seq != reconstructed.retention_floor_seq
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
@@ -1336,12 +1346,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         return Err(CoreError::NamespaceDeleted {
             namespace_id: namespace_id.clone(),
         });
-    }
-    if head.current_manifest_id.is_none() {
-        return Err(MetadataViewError::MissingManifest {
-            namespace_id: namespace_id.clone(),
-        }
-        .into());
     }
 
     if after_seq < head.retention_floor_seq {

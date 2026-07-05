@@ -1420,10 +1420,6 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
         assert_eq!(first.manifest_id, ManifestId(1));
         assert_eq!(first.current_manifest_id, Some(first.manifest_id));
-        assert_eq!(
-            first.latest_checkpoint_id,
-            Some(first.checkpoint_id.clone())
-        );
 
         let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
         assert_eq!(repeated, first);

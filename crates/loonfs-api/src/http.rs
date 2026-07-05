@@ -241,10 +241,8 @@ pub struct CreateCheckpointResponse {
     pub checkpoint_seq: ChangeSeq,
     /// Manifest pinned by the checkpoint.
     pub manifest_id: ManifestId,
-    /// Head's current manifest pointer after the operation.
+    /// Manifest `metadata/root.json` references after the operation.
     pub current_manifest_id: Option<ManifestId>,
-    /// Latest checkpoint id recorded on the head after the operation.
-    pub latest_checkpoint_id: Option<CheckpointId>,
 }
 
 /// Result of advancing the retention floor.

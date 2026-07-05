@@ -1,10 +1,12 @@
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope,
-    NamespaceConfigState,
+    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
+    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState,
 };
 use loonfs_api::{ContentStoreId, NamespaceId};
-use loonfs_objectstore::keys::{content_store_descriptor, namespace_config, wal_head};
+use loonfs_objectstore::keys::{
+    content_store_descriptor, metadata_root, namespace_config, wal_head,
+};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,13 @@ pub(crate) struct LoadedHeadObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: HeadStateEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LoadedMetadataRootObject {
+    pub(crate) object_key: String,
+    pub(crate) metadata: ObjectMetadata,
+    pub(crate) envelope: MetadataRootEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +60,13 @@ pub struct LoadedContentStoreDescriptorControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedMetadataRootControl {
+    pub object_key: String,
+    pub identity: ControlObjectIdentity,
+    pub state: MetadataRootState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedHeadControl {
     pub object_key: String,
     pub identity: ControlObjectIdentity,
@@ -68,6 +84,13 @@ pub enum ControlObjectLoadError {
     MissingObject { object_key: String },
     #[error("missing control object after head `{object_key}`")]
     MissingObjectAfterHead { object_key: String },
+    #[error(
+        "metadata root references seq {root_manifest_head_seq:?} beyond the reloaded head seq {head_seq:?}"
+    )]
+    RootAheadOfHead {
+        root_manifest_head_seq: loonfs_api::ChangeSeq,
+        head_seq: loonfs_api::ChangeSeq,
+    },
     #[error(
         "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
@@ -145,6 +168,59 @@ pub(crate) async fn read_content_store_descriptor_object<S: ObjectStore + ?Sized
     })
 }
 
+pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedMetadataRootObject, ControlObjectLoadError> {
+    validate_namespace_id_for_control_key(expected_namespace)?;
+    let object_key = metadata_root(expected_namespace.as_str());
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
+    let envelope: MetadataRootEnvelope =
+        decode_control_object(&encoded_bytes, ControlObjectKind::MetadataRoot)
+            .map_err(|err| map_control_codec_error(&object_key, err))?;
+    validate_expected_namespace(
+        &object_key,
+        expected_namespace,
+        &envelope.state.namespace_id,
+    )?;
+
+    Ok(LoadedMetadataRootObject {
+        object_key,
+        metadata,
+        envelope,
+    })
+}
+
+/// Reads the WAL head and metadata root together (concurrently).
+///
+/// The root can only ever reference published state, so observing
+/// `root.manifest_head_seq > head.seq` means the head read raced an
+/// in-flight commit CAS; a fresh head read observes at least the root's
+/// seq. Bounded reloads resolve the race without treating it as corruption
+/// (format spec, "metadata/root.json").
+pub(crate) async fn read_head_and_metadata_root<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<(LoadedHeadObject, LoadedMetadataRootObject), ControlObjectLoadError> {
+    const ROOT_AHEAD_HEAD_RELOADS: usize = 3;
+    let (head, root) = futures::join!(
+        read_head_object(store, expected_namespace),
+        read_metadata_root_object(store, expected_namespace)
+    );
+    let mut head = head?;
+    let root = root?;
+    for _reload in 0..=ROOT_AHEAD_HEAD_RELOADS {
+        if root.envelope.state.manifest_head_seq <= head.envelope.state.seq {
+            return Ok((head, root));
+        }
+        head = read_head_object(store, expected_namespace).await?;
+    }
+    Err(ControlObjectLoadError::RootAheadOfHead {
+        root_manifest_head_seq: root.envelope.state.manifest_head_seq,
+        head_seq: head.envelope.state.seq,
+    })
+}
+
 pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
@@ -192,6 +268,42 @@ pub async fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
         identity,
         state: loaded.envelope.state,
     })
+}
+
+pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedMetadataRootControl, ControlObjectLoadError> {
+    let loaded = read_metadata_root_object(store, expected_namespace).await?;
+    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
+    Ok(LoadedMetadataRootControl {
+        object_key: loaded.object_key,
+        identity,
+        state: loaded.envelope.state,
+    })
+}
+
+/// Loads the head and metadata root together as a consistent read anchor
+/// (see [`read_head_and_metadata_root`] for the race rule).
+pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<(LoadedHeadControl, LoadedMetadataRootControl), ControlObjectLoadError> {
+    let (head, root) = read_head_and_metadata_root(store, expected_namespace).await?;
+    let head_identity = control_identity(&head.object_key, &head.metadata)?;
+    let root_identity = control_identity(&root.object_key, &root.metadata)?;
+    Ok((
+        LoadedHeadControl {
+            object_key: head.object_key,
+            identity: head_identity,
+            state: head.envelope.state,
+        },
+        LoadedMetadataRootControl {
+            object_key: root.object_key,
+            identity: root_identity,
+            state: root.envelope.state,
+        },
+    ))
 }
 
 pub async fn load_namespace_head_control<S: ObjectStore + ?Sized>(

@@ -20,8 +20,9 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, NamespaceConfigState,
-    NamespaceGcPinState, NamespaceState, UploadSessionState, WalSegmentPointer, WriterBlock,
+    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState,
+    NamespaceConfigState, NamespaceGcPinState, NamespaceState, UploadSessionState,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -278,12 +279,12 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         NamespaceManifestPayload {
             namespace_id: namespace_id(),
             manifest_id: ManifestId(2),
+            prev_manifest_id: Some(ManifestId(1)),
             head_seq: ChangeSeq(2),
             head_commit_id: commit_id(),
             base_seq: ChangeSeq(2),
             writer_epoch: WriterEpoch(3),
             next_inode_id: InodeId(10),
-            name_policy: NamePolicy::default(),
             retention_floor_seq: ChangeSeq(0),
             initialized: true,
             verified: true,
@@ -340,9 +341,6 @@ fn sample_head_state() -> HeadState {
             acquired_at_ms: 2_000,
         }),
         next_inode_id: InodeId(10),
-        name_policy: NamePolicy::default(),
-        current_manifest_id: Some(ManifestId(2)),
-        latest_checkpoint_id: Some(checkpoint_id("chk_00000000000000000000000000000002")),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: Some(sample_wal_pointer()),
         recent_segments: vec![sample_wal_pointer()],
@@ -458,6 +456,19 @@ fn control_objects_match_golden_bytes() {
         NamespaceConfigState {
             namespace_id: namespace_id(),
             content_store_id: content_store_id(),
+            name_policy: NamePolicy::default(),
+        },
+    );
+    check_control_golden(
+        "control_metadata_root.v1.json",
+        ControlObjectKind::MetadataRoot,
+        MetadataRootState {
+            namespace_id: namespace_id(),
+            manifest_id: ManifestId(2),
+            manifest_head_seq: ChangeSeq(2),
+            manifest_payload_checksum:
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            updated_at_ms: 3_000,
         },
     );
     check_control_golden(

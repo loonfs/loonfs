@@ -35,7 +35,7 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> PublishCommitValidationContext<'_, S> {
     fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         self.metadata_view
-            .with_overlay(self.accepted_rows, self.head.seq, self.head.name_policy)
+            .with_overlay(self.accepted_rows, self.head.seq)
     }
 }
 
@@ -106,7 +106,7 @@ pub async fn build_commit_plan(
         context.metadata_state,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
-        context.head.name_policy,
+        context.name_policy,
         &mut checked_invariants,
     )
     .await?;
@@ -176,7 +176,7 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
         context.accepted_rows,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
-        context.head.name_policy,
+        context.metadata_view.name_policy(),
         &mut checked_invariants,
     )
     .await?;
@@ -563,7 +563,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
     let mut validated_ops = Vec::with_capacity(request.ops.len());
     let mut next_delta_index = 0u32;
 
-    let metadata_state = base_view.with_overlay(overlay_rows.rows(), committed_seq, name_policy);
+    let metadata_state = base_view.with_overlay(overlay_rows.rows(), committed_seq);
     validate_publish_explicit_preconditions(
         &request.preconditions,
         &metadata_state,
@@ -574,8 +574,7 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
-        let metadata_state =
-            base_view.with_overlay(overlay_rows.rows(), committed_seq, name_policy);
+        let metadata_state = base_view.with_overlay(overlay_rows.rows(), committed_seq);
         let validated_op = match op {
             CommitOp::CreateDirectory {
                 parent_inode,

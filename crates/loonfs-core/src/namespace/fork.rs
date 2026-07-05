@@ -6,15 +6,15 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::namespace::catalog::{
-    load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
+    load_namespace_descriptor, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
-    NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
-    NamespaceGcPinStateEnvelope, NamespaceState, WriterBlock,
+    MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState,
+    NamespaceGcPinState, NamespaceGcPinStateEnvelope, NamespaceState, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
@@ -24,7 +24,7 @@ use loonfs_api::{
     generate_checkpoint_id, sha256_digest, CheckpointId, ManifestId, NamespaceId, NamespaceSummary,
     WriterEpoch,
 };
-use loonfs_objectstore::keys::{namespace_config, pin, wal_head};
+use loonfs_objectstore::keys::{metadata_root, namespace_config, pin, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -72,9 +72,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_head_commit_id = source_checkpoint.head_commit_id.clone();
     let source_manifest_id = source_checkpoint.manifest_id;
     let source_checkpoint_id = source_checkpoint.checkpoint_id.clone();
-    let source_content_store_id = load_namespace_content_store_id(store, source_namespace_id)
+    let source_config = load_namespace_descriptor(store, source_namespace_id)
         .await
         .map_err(MetadataProjectionLoadError::from)?;
+    let source_content_store_id = source_config.content_store_id.clone();
     let target_manifest_id = ManifestId(fork_seq.0);
     let target_checkpoint_id = generate_checkpoint_id();
 
@@ -89,9 +90,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             acquired_at_ms: context.now_ms,
         }),
         next_inode_id: source_manifest.payload.next_inode_id,
-        name_policy: source_manifest.payload.name_policy,
-        current_manifest_id: Some(target_manifest_id),
-        latest_checkpoint_id: Some(target_checkpoint_id.clone()),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
@@ -103,6 +101,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         NamespaceConfigState {
             namespace_id: new_namespace_id.clone(),
             content_store_id: source_content_store_id,
+            name_policy: source_config.name_policy,
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
@@ -152,6 +151,25 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     write_namespace_manifest(store, &target_manifest)
         .await
         .map_err(CoreError::MetadataProjection)?;
+    let target_root = MetadataRootEnvelope::from_state(
+        ControlObjectKind::MetadataRoot,
+        &context.writer_version,
+        MetadataRootState {
+            namespace_id: new_namespace_id.clone(),
+            manifest_id: target_manifest_id,
+            manifest_head_seq: fork_seq,
+            manifest_payload_checksum: target_manifest.payload_checksum.clone(),
+            updated_at_ms: context.now_ms,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &metadata_root(new_namespace_id.as_str()),
+        &encode_control_object(&target_root).map_err(|err| CoreError::Store(err.to_string()))?,
+    )
+    .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
@@ -190,12 +208,12 @@ fn fork_target_manifest_payload(
     NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
+        prev_manifest_id: None,
         head_seq: fork_seq,
         head_commit_id: source_checkpoint.head_commit_id.clone(),
         base_seq: source_manifest.payload.base_seq,
         writer_epoch: WriterEpoch(0),
         next_inode_id: source_manifest.payload.next_inode_id,
-        name_policy: source_manifest.payload.name_policy,
         retention_floor_seq: fork_seq,
         initialized: true,
         verified: true,
@@ -371,8 +389,8 @@ mod tests {
         NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use loonfs_api::{
-        validate_gc_pin_id, ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamePolicy,
-        NamespaceId, WriterEpoch,
+        validate_gc_pin_id, ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId,
+        WriterEpoch,
     };
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::pin;
@@ -520,12 +538,12 @@ mod tests {
             NamespaceManifestPayload {
                 namespace_id,
                 manifest_id,
+                prev_manifest_id: None,
                 head_seq,
                 head_commit_id: commit_id.clone(),
                 base_seq: head_seq,
                 writer_epoch: WriterEpoch(1),
                 next_inode_id: InodeId(2),
-                name_policy: NamePolicy::default(),
                 retention_floor_seq: head_seq,
                 initialized: true,
                 verified: true,

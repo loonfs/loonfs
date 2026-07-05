@@ -8,9 +8,11 @@ use crate::fs::{should_invalidate_after_result, Fs};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
+use loonfs_api::ManifestId;
 use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
-    load_namespace_head_control, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
+    load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
+    LoadedMetadataRootControl,
 };
 use loonfs_core::publish::NamespaceCommitEngine;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
@@ -79,13 +81,23 @@ pub(crate) struct RuntimeControlCache {
 
 #[derive(Debug, Default)]
 struct NamespaceControlCacheEntry {
-    head: Option<CachedControl<HeadState>>,
+    head: Option<CachedNamespaceAnchor>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedControl<T> {
     pub(crate) identity: ControlObjectIdentity,
     pub(crate) state: T,
+}
+
+/// Head snapshot pinned together with the manifest the metadata root
+/// referenced when it was taken. The pair stays consistent even when
+/// compaction moves the live root past this head; reads at the pin replay a
+/// little more WAL until the cache refreshes.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedNamespaceAnchor {
+    pub(crate) head: CachedControl<HeadState>,
+    pub(crate) manifest_id: ManifestId,
 }
 
 /// Snapshot of runtime cache counters.
@@ -170,7 +182,7 @@ impl RuntimeCacheStatsInner {
 }
 
 impl RuntimeControlCache {
-    fn wal_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedControl<HeadState>> {
+    fn wal_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedNamespaceAnchor> {
         let head = self.namespaces.get(namespace_id)?.head.clone()?;
         self.touch_namespace(namespace_id);
         Some(head)
@@ -179,7 +191,7 @@ impl RuntimeControlCache {
     fn insert_namespace_head(
         &mut self,
         namespace_id: &NamespaceId,
-        head: CachedControl<HeadState>,
+        head: CachedNamespaceAnchor,
         max_cached_namespaces: usize,
     ) {
         if max_cached_namespaces == 0 {
@@ -230,18 +242,21 @@ impl Fs {
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedControl<HeadState>, ControlObjectLoadError> {
+    ) -> std::result::Result<CachedNamespaceAnchor, ControlObjectLoadError> {
         let cache_config = &self.inner.config.runtime_cache;
         if !self.control_cache_enabled() {
-            return load_namespace_head_control(self.store(), namespace_id)
+            return load_namespace_read_anchor(self.store(), namespace_id)
                 .await
-                .map(cached_head);
+                .map(cached_anchor);
         }
 
         let cached = self.inner.control_cache().wal_head(namespace_id);
         if let Some(head) = cached {
             match self
-                .cached_control_identity_matches(&wal_head(namespace_id.as_str()), &head.identity)
+                .cached_control_identity_matches(
+                    &wal_head(namespace_id.as_str()),
+                    &head.head.identity,
+                )
                 .await
             {
                 Ok(true) => return Ok(head),
@@ -258,7 +273,7 @@ impl Fs {
             }
         }
 
-        let loaded = match load_namespace_head_control(self.store(), namespace_id).await {
+        let loaded = match load_namespace_read_anchor(self.store(), namespace_id).await {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.inner
@@ -267,7 +282,7 @@ impl Fs {
                 return Err(error);
             }
         };
-        let head = cached_head(loaded);
+        let head = cached_anchor(loaded);
         self.inner.control_cache().insert_namespace_head(
             namespace_id,
             head.clone(),
@@ -279,7 +294,7 @@ impl Fs {
     pub(crate) async fn head_for_metadata_read(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<CachedControl<HeadState>> {
+    ) -> Result<CachedNamespaceAnchor> {
         match self.load_namespace_head_cached(namespace_id).await {
             Ok(head) => Ok(head),
             Err(ControlObjectLoadError::MissingObject { object_key }) => {
@@ -360,15 +375,16 @@ impl Fs {
 
     pub(crate) fn runtime_read_context(
         &self,
-        head: &CachedControl<HeadState>,
+        anchor: &CachedNamespaceAnchor,
     ) -> RuntimeReadContext {
         let cache_config = &self.inner.config.runtime_cache;
         let tail_cache = cache_config
             .wal_tail_projection_cache_enabled
             .then(|| Arc::clone(&self.inner.wal_tail_projection_cache));
         RuntimeReadContext::pinned_head(
-            head.state.clone(),
-            head.identity.etag.clone(),
+            anchor.head.state.clone(),
+            anchor.head.identity.etag.clone(),
+            anchor.manifest_id,
             Some(Arc::clone(&self.inner.metadata_table_cache)),
             tail_cache,
         )
@@ -416,9 +432,14 @@ impl Fs {
     }
 }
 
-fn cached_head(loaded: LoadedHeadControl) -> CachedControl<HeadState> {
-    CachedControl {
-        identity: loaded.identity,
-        state: loaded.state,
+fn cached_anchor(
+    (head, root): (LoadedHeadControl, LoadedMetadataRootControl),
+) -> CachedNamespaceAnchor {
+    CachedNamespaceAnchor {
+        head: CachedControl {
+            identity: head.identity,
+            state: head.state,
+        },
+        manifest_id: root.state.manifest_id,
     }
 }

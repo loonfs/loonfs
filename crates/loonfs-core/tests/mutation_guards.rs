@@ -22,7 +22,7 @@ use loonfs_api::{
         NamespaceManifestEnvelope,
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind,
+    AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
     NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, WriterEpoch,
 };
@@ -1123,11 +1123,13 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         .await
         .expect("content store descriptor head")
         .is_some());
-    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("head");
-    let manifest_id = head
-        .state
-        .current_manifest_id
-        .expect("created namespace manifest");
+    let manifest_id = block_on(loonfs_core::control::load_namespace_metadata_root_control(
+        &store,
+        &namespace_id,
+    ))
+    .expect("metadata root")
+    .state
+    .manifest_id;
     let manifest_bytes = store
         .get(&metadata_manifest(namespace_id.as_str(), manifest_id), None)
         .await
@@ -3416,7 +3418,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let clone_head =
         block_on(load_namespace_head_control(&store, &clone_namespace_id)).expect("clone head");
     assert_eq!(clone_head.state.seq, ChangeSeq(1));
-    assert_eq!(clone_head.state.current_manifest_id, Some(ManifestId(1)));
+    let clone_root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
+        &store,
+        &clone_namespace_id,
+    ))
+    .expect("clone metadata root");
+    assert_eq!(clone_root.state.manifest_id, ManifestId(1));
     assert_eq!(clone_head.state.retention_floor_seq, ChangeSeq(1));
 
     let target_manifest_key = metadata_manifest(clone_namespace_id.as_str(), ManifestId(1));
@@ -3888,6 +3895,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
         NamespaceConfigState {
             namespace_id: clone_namespace_id.clone(),
             content_store_id,
+            name_policy: loonfs_api::NamePolicy::default(),
         },
     )
     .expect("descriptor envelope");
@@ -4870,11 +4878,6 @@ fn validation_context(
             acquired_at_ms: 1_000,
         }),
         next_inode_id,
-        name_policy: loonfs_api::NamePolicy::default(),
-        current_manifest_id: Some(ManifestId(0)),
-        latest_checkpoint_id: Some(
-            CheckpointId::parse("chk_00000000000000000000000000000000").expect("checkpoint id"),
-        ),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
         recent_segments: Vec::new(),
@@ -4882,6 +4885,7 @@ fn validation_context(
     };
     CommitValidationContext {
         head,
+        name_policy: loonfs_api::NamePolicy::default(),
         metadata_state,
     }
 }

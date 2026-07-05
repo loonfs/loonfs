@@ -823,7 +823,7 @@ A conforming server must:
    namespace descriptor;
 6. implement tombstone-first delete;
 7. serve replay from the current verified manifest named by
-   `head.current_manifest_id`, plus the visible WAL segment chain, replayed as
+   `metadata/root.json`, plus the visible WAL segment chain, replayed as
    logical commits; checkpoints pin manifest versions for retention, stable
    reads, restore, and forks;
 8. honor the namespace's `NamePolicy`;
