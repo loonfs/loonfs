@@ -277,7 +277,6 @@ mod tests {
                 default_namespace: Some("demo".to_owned()),
                 writer_id: None,
                 writer_version: None,
-                lease_duration_ms: None,
             }),
         };
         assert_snapshot!(human_success(&output));

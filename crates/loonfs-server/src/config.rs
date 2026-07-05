@@ -19,7 +19,6 @@ pub struct ServerConfig {
     pub content_token_secret: String,
     pub writer_id: String,
     pub writer_version: String,
-    pub lease_duration_ms: u64,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
     pub store: StoreConfig,
@@ -87,7 +86,6 @@ impl fmt::Debug for ServerConfig {
             .field("content_token_secret", &"<redacted>")
             .field("writer_id", &self.writer_id)
             .field("writer_version", &self.writer_version)
-            .field("lease_duration_ms", &self.lease_duration_ms)
             .field("runtime_cache", &self.runtime_cache)
             .field("store", &self.store)
             .finish()
@@ -308,12 +306,6 @@ impl ServerConfig {
         require_non_empty("writer_id", &self.writer_id)?;
         require_non_empty("writer_version", &self.writer_version)?;
 
-        if self.lease_duration_ms == 0 {
-            return Err(ServerConfigError::InvalidField {
-                field: "lease_duration_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {
                 return Err(ServerConfigError::InvalidField {
@@ -488,7 +480,6 @@ bind = "bad-bind"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
@@ -502,27 +493,6 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn load_rejects_zero_lease_duration() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 0
-
-[store]
-kind = "local-fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let error = load_server_config(&path).expect_err("zero lease duration");
-
-        assert_invalid_field(error, "lease_duration_ms");
-    }
-
-    #[test]
     fn load_rejects_blank_writer_id() {
         let path = write_config(
             r#"
@@ -530,7 +500,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "   "
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
@@ -551,7 +520,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "   "
-lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
@@ -572,7 +540,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "cloudflare-r2"
@@ -597,7 +564,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "aws-s3"
@@ -616,7 +582,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "cloudflare-r2"
@@ -634,7 +599,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "azure-abs"
@@ -663,7 +627,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "gcp-gcs"
@@ -686,7 +649,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "azure-abs"
@@ -709,7 +671,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "azure-abs"
@@ -732,7 +693,6 @@ bind = "127.0.0.1:9400"
 auth_token = "   "
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
@@ -754,7 +714,6 @@ auth_token = "debug-auth-token"
 content_token_secret = "debug-content-token-secret"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "aws-s3"
@@ -786,7 +745,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
@@ -809,7 +767,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [runtime_cache]
 wal_tail_projection_cache_enabled = true
@@ -845,7 +802,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [runtime_cache]
 wal_tail_projection_cache_enabled = false
@@ -877,7 +833,6 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
-lease_duration_ms = 60000
 
 [runtime_cache]
 max_cached_wal_tail_projection_rows = -1

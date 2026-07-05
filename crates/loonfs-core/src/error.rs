@@ -111,6 +111,10 @@ pub enum CoreError {
     NonDirectoryPathComponent(String),
     #[error("namespace corrupt: {0}")]
     NamespaceCorrupt(String),
+    /// This writer session's epoch was superseded. Terminal for the session:
+    /// callers surface it without reacquiring.
+    #[error("writer session fenced: {0}")]
+    WriterFenced(String),
     #[error("object store error: {0}")]
     Store(String),
     #[error("namespace `{namespace_id}` already exists")]
@@ -302,6 +306,7 @@ impl CoreError {
             CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
             CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
             CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
+            CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
         }
     }
@@ -417,10 +422,8 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
 fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> ErrorCode {
     match error {
         WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),
-        WriterEpochAcquireError::HeldByOtherWriter { .. } => ErrorCode::LeaseConflict,
         WriterEpochAcquireError::EmptyWriterId
         | WriterEpochAcquireError::EmptyWriterSessionId
-        | WriterEpochAcquireError::ZeroLeaseDuration
         | WriterEpochAcquireError::MissingHeadEtag { .. }
         | WriterEpochAcquireError::WriterEpochOverflow { .. }
         | WriterEpochAcquireError::HeadWrite(_)
@@ -478,11 +481,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         }
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
-        CommitValidationError::StaleWriterEpoch { .. }
-        | CommitValidationError::MissingWriterLease
-        | CommitValidationError::WriterLeaseHolderMismatch { .. }
-        | CommitValidationError::WriterLeaseSessionMismatch { .. }
-        | CommitValidationError::WriterLeaseExpired { .. } => ErrorCode::LeaseConflict,
+        CommitValidationError::StaleWriterEpoch { .. } => ErrorCode::WriterFenced,
         CommitValidationError::EmptyCommit
         | CommitValidationError::NamespaceMismatch
         | CommitValidationError::ValidatedPreviewApplyFailed(_)
@@ -497,7 +496,8 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
 
 fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
     match error {
-        CommitHeadPublishError::StaleHead => ErrorCode::StaleHead,
+        CommitHeadPublishError::StaleHead
+        | CommitHeadPublishError::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
         CommitHeadPublishError::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
         CommitHeadPublishError::EmptyWriterVersion
         | CommitHeadPublishError::EmptyExpectedHeadEtag

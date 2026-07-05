@@ -5,7 +5,6 @@ use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{MetadataTableCacheConfig, Result, RuntimeError};
 
 /// Default lease duration for write operations, in milliseconds.
-pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 /// Default visible WAL-tail length, in segments, at which a maintenance tick
 /// publishes a checkpoint.
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
@@ -19,12 +18,10 @@ pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 10
 /// Configuration for an embedded runtime instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsConfig {
-    /// Writer id used for namespace leases and commits.
+    /// Writer id used for namespace epoch acquisition and commits.
     pub writer_id: String,
     /// Writer version reported in mutation context.
     pub writer_version: String,
-    /// Lease duration used by write operations.
-    pub lease_duration_ms: u64,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
     /// Tracing mode label.
@@ -39,7 +36,6 @@ impl FsConfig {
         Self {
             writer_id: writer_id.into(),
             writer_version: default_writer_version(),
-            lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
             trace_mode: TraceMode::Embedded,
             trace_store_kind: TraceStoreKind::Unknown,
@@ -113,11 +109,6 @@ pub(crate) fn validate_config(config: &FsConfig) -> Result<()> {
     if config.writer_version.trim().is_empty() {
         return Err(RuntimeError::Config(
             "writer_version must not be empty".to_owned(),
-        ));
-    }
-    if config.lease_duration_ms == 0 {
-        return Err(RuntimeError::Config(
-            "lease_duration_ms must be greater than zero".to_owned(),
         ));
     }
     Ok(())

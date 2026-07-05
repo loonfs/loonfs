@@ -28,7 +28,6 @@ struct ValidatedMetadataOps {
 #[derive(Clone, Copy)]
 pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
     pub(crate) head: &'a HeadState,
-    pub(crate) now_ms: u64,
     pub(crate) metadata_view: MetadataView<'a, 'a, S>,
     pub(crate) accepted_rows: &'a MetadataState,
 }
@@ -99,7 +98,6 @@ pub async fn build_commit_plan(
 
     let mut checked_invariants = vec![
         InvariantId::StaleWriterCannotPublish,
-        InvariantId::HeadWriterEpochMatchesLease,
         InvariantId::NextInodeIdIsMonotonic,
     ];
     let shape = compute_commit_shape(request, context)?;
@@ -165,11 +163,10 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
     context: &PublishCommitValidationContext<'_, S>,
 ) -> Result<CommitPlan, CoreError> {
-    validate_commit_request_frame_parts(request, context.head, context.now_ms)?;
+    validate_commit_request_frame_parts(request, context.head)?;
 
     let mut checked_invariants = vec![
         InvariantId::StaleWriterCannotPublish,
-        InvariantId::HeadWriterEpochMatchesLease,
         InvariantId::NextInodeIdIsMonotonic,
     ];
     let shape = compute_commit_shape_from_head(request, context.head)?;

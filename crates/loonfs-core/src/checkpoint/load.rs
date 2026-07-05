@@ -139,13 +139,14 @@ pub(crate) fn head_from_manifest(
         // The manifest records the manifest-time writer epoch. That may lag the
         // live head if writer takeover advanced the epoch without WAL replay.
         writer_epoch: manifest.payload.writer_epoch,
-        writer_lease: current_head.writer_lease.clone(),
+        writer: current_head.writer.clone(),
         next_inode_id: manifest.payload.next_inode_id,
         name_policy: manifest.payload.name_policy,
         current_manifest_id: current_head.current_manifest_id,
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: None,
+        recent_segments: Vec::new(),
         state: current_head.state,
     }
 }

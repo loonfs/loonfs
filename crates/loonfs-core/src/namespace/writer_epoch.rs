@@ -1,7 +1,7 @@
 use crate::context::MutationContext;
 use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
 use crate::namespace::control::ControlObjectLoadError;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState, WriterLease};
+use loonfs_api::wire::control::{AcquiredWriter, HeadState, WriterBlock};
 use loonfs_api::{NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -17,25 +17,30 @@ pub enum WriterEpochAcquireError {
     EmptyWriterId,
     #[error("empty writer session id")]
     EmptyWriterSessionId,
-    #[error("lease duration must be greater than zero")]
-    ZeroLeaseDuration,
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
     #[error("writer epoch overflow from `{active:?}`")]
     WriterEpochOverflow { active: WriterEpoch },
-    #[error(
-        "namespace writer lease is held by another active writer `{writer_id}` until `{lease_expires_at_ms}`"
-    )]
-    HeldByOtherWriter {
-        writer_id: String,
-        lease_expires_at_ms: u64,
-    },
     #[error("failed to write head object during writer epoch acquire: {0}")]
     HeadWrite(String),
     #[error("writer epoch acquire retries exhausted after {attempts} attempts")]
     RetryExhausted { attempts: usize },
 }
 
+/// Acquires the namespace writer epoch for a writer session.
+///
+/// Lazy by design: sessions call this on their first semantic write, not at
+/// open, and cache the result. Acquisition bumps `writer_epoch` and records
+/// the non-authoritative `writer` block, which fences every other session at
+/// its next publish. There is no lease and no expiry: nothing arbitrates
+/// between two live writers except the epoch itself, so acquisition never
+/// refuses a caller and contention resolves as deterministic
+/// last-writer-wins. A session that has been fenced must not call this again
+/// on its own; reacquisition is an explicit caller decision.
+///
+/// The only non-bumping path is idempotent retry: when the head's writer
+/// block already names this exact session, its current epoch is returned
+/// without a CAS.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -47,9 +52,6 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     if params.writer_session_id.trim().is_empty() {
         return Err(WriterEpochAcquireError::EmptyWriterSessionId);
     }
-    if params.lease_duration_ms == 0 {
-        return Err(WriterEpochAcquireError::ZeroLeaseDuration);
-    }
 
     update_head(
         store,
@@ -58,36 +60,26 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
             let head = &loaded_head.envelope.state;
-            if let Some(active_lease) = head
-                .writer_lease
-                .as_ref()
-                .filter(|lease| lease.is_valid_at(params.now_ms))
-            {
-                if active_lease.writer_id != params.writer_id {
-                    return Err(WriterEpochAcquireError::HeldByOtherWriter {
-                        writer_id: active_lease.writer_id.clone(),
-                        lease_expires_at_ms: active_lease.lease_expires_at_ms,
-                    });
-                }
-
-                if active_lease.writer_session_id == params.writer_session_id {
-                    if !lease_needs_renewal(active_lease.lease_expires_at_ms, params) {
-                        return Ok(HeadUpdate::Noop(acquired_writer_from_lease(
-                            head.writer_epoch,
-                            active_lease,
-                        )));
-                    }
-                    return Ok(HeadUpdate::Replace {
-                        next: Box::new(head_with_writer_lease(head, head.writer_epoch, params)),
-                        outcome: acquired_writer(head.writer_epoch, params),
-                    });
+            if let Some(writer) = head.writer.as_ref() {
+                if writer.writer_id == params.writer_id
+                    && writer.writer_session_id == params.writer_session_id
+                {
+                    return Ok(HeadUpdate::Noop(AcquiredWriter {
+                        writer_id: params.writer_id.clone(),
+                        writer_session_id: params.writer_session_id.clone(),
+                        writer_epoch: head.writer_epoch,
+                    }));
                 }
             }
 
             let next_epoch = next_writer_epoch(head.writer_epoch)?;
             Ok(HeadUpdate::Replace {
-                next: Box::new(head_with_writer_lease(head, next_epoch, params)),
-                outcome: acquired_writer(next_epoch, params),
+                next: Box::new(head_with_writer(head, next_epoch, params)),
+                outcome: AcquiredWriter {
+                    writer_id: params.writer_id.clone(),
+                    writer_session_id: params.writer_session_id.clone(),
+                    writer_epoch: next_epoch,
+                },
             })
         },
     )
@@ -102,7 +94,7 @@ fn next_writer_epoch(active: WriterEpoch) -> Result<WriterEpoch, WriterEpochAcqu
         .ok_or(WriterEpochAcquireError::WriterEpochOverflow { active })
 }
 
-fn head_with_writer_lease(
+fn head_with_writer(
     current_head: &HeadState,
     writer_epoch: WriterEpoch,
     params: &MutationContext,
@@ -112,10 +104,10 @@ fn head_with_writer_lease(
         seq: current_head.seq,
         head_commit_id: current_head.head_commit_id.clone(),
         writer_epoch,
-        writer_lease: Some(WriterLease {
+        writer: Some(WriterBlock {
             writer_id: params.writer_id.clone(),
             writer_session_id: params.writer_session_id.clone(),
-            lease_expires_at_ms: params.now_ms.saturating_add(params.lease_duration_ms),
+            acquired_at_ms: params.now_ms,
         }),
         next_inode_id: current_head.next_inode_id,
         name_policy: current_head.name_policy,
@@ -123,31 +115,9 @@ fn head_with_writer_lease(
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
+        recent_segments: current_head.recent_segments.clone(),
         state: current_head.state,
     }
-}
-
-fn acquired_writer(writer_epoch: WriterEpoch, params: &MutationContext) -> AcquiredWriter {
-    AcquiredWriter {
-        writer_id: params.writer_id.clone(),
-        writer_session_id: params.writer_session_id.clone(),
-        writer_epoch,
-        lease_expires_at_ms: params.now_ms.saturating_add(params.lease_duration_ms),
-    }
-}
-
-fn acquired_writer_from_lease(writer_epoch: WriterEpoch, lease: &WriterLease) -> AcquiredWriter {
-    AcquiredWriter {
-        writer_id: lease.writer_id.clone(),
-        writer_session_id: lease.writer_session_id.clone(),
-        writer_epoch,
-        lease_expires_at_ms: lease.lease_expires_at_ms,
-    }
-}
-
-fn lease_needs_renewal(lease_expires_at_ms: u64, params: &MutationContext) -> bool {
-    let renew_after_ms = params.lease_duration_ms / 2;
-    lease_expires_at_ms <= params.now_ms.saturating_add(renew_after_ms)
 }
 
 impl From<ControlUpdateError> for WriterEpochAcquireError {
@@ -197,23 +167,21 @@ mod tests {
             writer_session_id: writer_session_id.to_owned(),
             writer_version: WRITER_VERSION.to_owned(),
             now_ms,
-            lease_duration_ms: 10_000,
         }
     }
 
-    fn leased_head(
+    fn head_with_session(
         namespace_id: &NamespaceId,
         writer_id: &str,
         writer_session_id: &str,
         writer_epoch: WriterEpoch,
-        lease_expires_at_ms: u64,
     ) -> HeadState {
         let mut head = HeadState::initial(namespace_id.clone());
         head.writer_epoch = writer_epoch;
-        head.writer_lease = Some(WriterLease {
+        head.writer = Some(WriterBlock {
             writer_id: writer_id.to_owned(),
             writer_session_id: writer_session_id.to_owned(),
-            lease_expires_at_ms,
+            acquired_at_ms: 500,
         });
         head
     }
@@ -247,7 +215,7 @@ mod tests {
         write_head(
             &store,
             &namespace_id,
-            leased_head(&namespace_id, "writer", "session-a", WriterEpoch(7), 20_000),
+            head_with_session(&namespace_id, "writer", "session-a", WriterEpoch(7)),
         )
         .await;
         let etag_before = head_etag(&store, &namespace_id).await;
@@ -261,45 +229,20 @@ mod tests {
         .expect("acquire writer");
 
         assert_eq!(acquired.writer_epoch, WriterEpoch(7));
-        assert_eq!(acquired.lease_expires_at_ms, 20_000);
         assert_eq!(head_etag(&store, &namespace_id).await, etag_before);
     }
 
     #[tokio::test]
-    async fn same_session_renews_near_expiry_without_bumping_epoch() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_head(
-            &store,
-            &namespace_id,
-            leased_head(&namespace_id, "writer", "session-a", WriterEpoch(7), 6_000),
-        )
-        .await;
-        let etag_before = head_etag(&store, &namespace_id).await;
-
-        let acquired = acquire_writer_epoch(
-            &store,
-            &namespace_id,
-            &context("writer", "session-a", 1_000),
-        )
-        .await
-        .expect("acquire writer");
-
-        assert_eq!(acquired.writer_epoch, WriterEpoch(7));
-        assert_eq!(acquired.lease_expires_at_ms, 11_000);
-        assert_ne!(head_etag(&store, &namespace_id).await, etag_before);
-    }
-
-    #[tokio::test]
     async fn restarted_writer_session_bumps_epoch() {
+        // Same writer id, new session: the restarted process fences its own
+        // predecessor instead of silently sharing its epoch.
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         write_head(
             &store,
             &namespace_id,
-            leased_head(&namespace_id, "writer", "session-a", WriterEpoch(7), 20_000),
+            head_with_session(&namespace_id, "writer", "session-a", WriterEpoch(7)),
         )
         .await;
 
@@ -320,58 +263,20 @@ mod tests {
             .state;
         assert_eq!(head.writer_epoch, WriterEpoch(8));
         assert_eq!(
-            head.writer_lease.expect("writer lease").writer_session_id,
+            head.writer.expect("writer block").writer_session_id,
             "session-b"
         );
     }
 
     #[tokio::test]
-    async fn active_other_writer_is_rejected() {
+    async fn new_writer_takes_over_and_records_writer_block() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         write_head(
             &store,
             &namespace_id,
-            leased_head(
-                &namespace_id,
-                "writer-a",
-                "session-a",
-                WriterEpoch(7),
-                20_000,
-            ),
-        )
-        .await;
-
-        let error = acquire_writer_epoch(
-            &store,
-            &namespace_id,
-            &context("writer-b", "session-b", 1_000),
-        )
-        .await
-        .expect_err("other active writer should be rejected");
-
-        assert!(matches!(
-            error,
-            WriterEpochAcquireError::HeldByOtherWriter { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn expired_lease_takeover_bumps_epoch() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_head(
-            &store,
-            &namespace_id,
-            leased_head(
-                &namespace_id,
-                "writer-a",
-                "session-a",
-                WriterEpoch(7),
-                1_000,
-            ),
+            head_with_session(&namespace_id, "writer-a", "session-a", WriterEpoch(7)),
         )
         .await;
 
@@ -381,10 +286,18 @@ mod tests {
             &context("writer-b", "session-b", 2_000),
         )
         .await
-        .expect("expired lease takeover");
+        .expect("takeover acquire");
 
         assert_eq!(acquired.writer_epoch, WriterEpoch(8));
         assert_eq!(acquired.writer_id, "writer-b");
+        let head = read_head_object(&store, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state;
+        let writer = head.writer.expect("writer block");
+        assert_eq!(writer.writer_id, "writer-b");
+        assert_eq!(writer.acquired_at_ms, 2_000);
     }
 
     fn create_dir_request(commit_id: &str, display_name: &str) -> ApiCommitRequest {
@@ -400,7 +313,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn previous_writer_cannot_publish_after_writer_takeover() {
+    async fn one_shot_commits_reacquire_and_alternate_writers_ping_pong() {
+        // Each one-shot commit is its own acquisition decision, so two
+        // alternating writers fence each other back and forth instead of one
+        // being locked out: deterministic last-writer-wins, every commit
+        // lands exactly once.
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -408,44 +325,43 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &writer_a, false)
             .await
             .expect("bootstrap");
-        let epoch_at_bootstrap = read_head_object(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .envelope
-            .state
-            .writer_epoch;
 
-        // Writer A's lease has expired; writer B takes over and commits.
-        let writer_b = context("writer-b", "session-b", 12_001);
         commit_operations(
             &store,
             &namespace_id,
-            create_dir_request("writer-b-create", "from-b"),
+            create_dir_request("writer-a-first", "from-a"),
+            &writer_a,
+        )
+        .await
+        .expect("writer a first commit");
+
+        let writer_b = context("writer-b", "session-b", 2_000);
+        commit_operations(
+            &store,
+            &namespace_id,
+            create_dir_request("writer-b-first", "from-b"),
             &writer_b,
         )
         .await
         .expect("writer b commit after takeover");
 
-        let writer_a_retry = context("writer-a", "session-a", 12_002);
-        let error = commit_operations(
+        let writer_a_again = context("writer-a", "session-a", 3_000);
+        commit_operations(
             &store,
             &namespace_id,
-            create_dir_request("writer-a-stale", "from-a"),
-            &writer_a_retry,
+            create_dir_request("writer-a-second", "from-a-again"),
+            &writer_a_again,
         )
         .await
-        .expect_err("previous writer should be fenced out");
-        assert_eq!(error.code(), ErrorCode::LeaseConflict);
+        .expect("writer a reacquires on its next one-shot commit");
 
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .envelope
             .state;
-        assert_eq!(head.seq, ChangeSeq(1));
-        assert!(head.writer_epoch > epoch_at_bootstrap);
-        let lease = head.writer_lease.expect("active lease");
-        assert_eq!(lease.writer_id, "writer-b");
+        assert_eq!(head.seq, ChangeSeq(3));
+        assert_eq!(head.writer.expect("writer block").writer_id, "writer-a");
     }
 
     #[tokio::test]
@@ -480,7 +396,7 @@ mod tests {
         )
         .await
         .expect_err("stale-epoch delete must be fenced");
-        assert_eq!(error.code(), ErrorCode::LeaseConflict);
+        assert_eq!(error.code(), ErrorCode::WriterFenced);
 
         let head = read_head_object(&store.inner, &namespace_id)
             .await
@@ -488,8 +404,8 @@ mod tests {
             .envelope
             .state;
         assert_eq!(head.state, NamespaceState::Active);
-        let lease = head.writer_lease.expect("active lease");
-        assert_eq!(lease.writer_id, "writer-b");
+        let writer = head.writer.expect("writer block");
+        assert_eq!(writer.writer_id, "writer-b");
     }
 
     #[derive(Debug)]
@@ -512,10 +428,10 @@ mod tests {
                     .expect("decode head");
             let mut head = envelope.state;
             head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
-            head.writer_lease = Some(WriterLease {
+            head.writer = Some(WriterBlock {
                 writer_id: "writer-b".to_owned(),
                 writer_session_id: "session-b".to_owned(),
-                lease_expires_at_ms: 100_000,
+                acquired_at_ms: 1_500,
             });
             let next =
                 HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, head)
@@ -574,23 +490,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cas_conflict_then_fenced_yields_held_by_other_writer() {
-        // writer-a's lease has expired and writer-c starts a takeover. Its
-        // CAS loses to writer-b, whose fresh lease must fence writer-c out on
-        // the conflict re-read instead of being clobbered by another bump.
+    async fn losing_an_acquire_race_retries_and_takes_the_next_epoch() {
+        // writer-c's first CAS loses to writer-b. With no lease there is
+        // nothing to defer to: the retry observes writer-b's epoch and bumps
+        // past it, so the last acquirer deterministically wins.
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
         write_head(
             &inner,
             &namespace_id,
-            leased_head(
-                &namespace_id,
-                "writer-a",
-                "session-a",
-                WriterEpoch(7),
-                1_000,
-            ),
+            head_with_session(&namespace_id, "writer-a", "session-a", WriterEpoch(7)),
         )
         .await;
         let store = TakeoverOnCasConflictStore {
@@ -599,27 +509,24 @@ mod tests {
             remaining_conflicts: AtomicUsize::new(1),
         };
 
-        let error = acquire_writer_epoch(
+        let acquired = acquire_writer_epoch(
             &store,
             &namespace_id,
             &context("writer-c", "session-c", 2_000),
         )
         .await
-        .expect_err("conflicting takeover must observe the winner's lease");
+        .expect("acquire after losing the race");
 
-        assert!(matches!(
-            error,
-            WriterEpochAcquireError::HeldByOtherWriter { ref writer_id, .. }
-                if writer_id == "writer-b"
-        ));
+        // writer-b installed epoch 8 during the conflict; writer-c retried
+        // and took 9.
+        assert_eq!(acquired.writer_epoch, WriterEpoch(9));
         let head = read_head_object(&store.inner, &namespace_id)
             .await
             .expect("read head")
             .envelope
             .state;
-        assert_eq!(head.writer_epoch, WriterEpoch(8));
-        let lease = head.writer_lease.expect("active lease");
-        assert_eq!(lease.writer_id, "writer-b");
+        assert_eq!(head.writer_epoch, WriterEpoch(9));
+        assert_eq!(head.writer.expect("writer block").writer_id, "writer-c");
     }
 
     #[derive(Debug)]
@@ -631,13 +538,8 @@ mod tests {
 
     impl TakeoverOnCasConflictStore {
         async fn inject_winner(&self) {
-            let winner = leased_head(
-                &self.namespace_id,
-                "writer-b",
-                "session-b",
-                WriterEpoch(8),
-                99_000,
-            );
+            let winner =
+                head_with_session(&self.namespace_id, "writer-b", "session-b", WriterEpoch(8));
             let envelope =
                 HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, winner)
                     .expect("head envelope");

@@ -3,7 +3,7 @@ use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
+    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, WalSegmentPointer,
 };
 use loonfs_api::ChangeSeq;
 use loonfs_objectstore::keys::wal_head;
@@ -83,18 +83,20 @@ pub fn prepare_commit_head_publish(
         });
     }
 
+    let new_tip = wal.envelope.pointer(wal.object_key.clone());
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
         writer_epoch: current_head.writer_epoch,
-        writer_lease: current_head.writer_lease.clone(),
+        writer: current_head.writer.clone(),
         next_inode_id: plan.resulting_next_inode_id,
         name_policy: current_head.name_policy,
         current_manifest_id: current_head.current_manifest_id,
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
-        visible_wal_tip: Some(wal.envelope.pointer(wal.object_key.clone())),
+        recent_segments: next_recent_segments(current_head, new_tip.clone()),
+        visible_wal_tip: Some(new_tip),
         state: current_head.state,
     };
     let envelope = HeadStateEnvelope::from_state(
@@ -119,6 +121,30 @@ pub fn prepare_commit_head_publish(
         encoded_bytes,
         checked_invariants,
     })
+}
+
+/// How many segment pointers the head carries as a replay accelerator.
+///
+/// Newest first, tip included. The bound keeps the head one small object at
+/// any commit rate; readers needing older history walk the chain links,
+/// which remain the only authority.
+const RECENT_SEGMENTS_LIMIT: usize = 32;
+
+fn next_recent_segments(
+    current_head: &HeadState,
+    new_tip: WalSegmentPointer,
+) -> Vec<WalSegmentPointer> {
+    let mut recent = Vec::with_capacity(RECENT_SEGMENTS_LIMIT);
+    recent.push(new_tip);
+    if current_head.recent_segments.is_empty() {
+        // Heads published before the accelerator existed carry only the tip
+        // pointer; seed from it so the hint list stays gap-free.
+        recent.extend(current_head.visible_wal_tip.iter().cloned());
+    } else {
+        recent.extend(current_head.recent_segments.iter().cloned());
+    }
+    recent.truncate(RECENT_SEGMENTS_LIMIT);
+    recent
 }
 
 pub async fn publish_commit_head<S: ObjectStore + ?Sized>(
@@ -172,7 +198,7 @@ mod tests {
             CommitHeadPublishError::Store(_)
         ));
     }
-    use loonfs_api::wire::control::WriterLease;
+    use loonfs_api::wire::control::WriterBlock;
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
     use loonfs_api::{CheckpointId, CommitId, InodeId, ManifestId, NamespaceId, WriterEpoch};
 
@@ -183,10 +209,10 @@ mod tests {
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
                 .expect("commit id"),
             writer_epoch: WriterEpoch(1),
-            writer_lease: Some(WriterLease {
+            writer: Some(WriterBlock {
                 writer_id: "writer-a".to_owned(),
                 writer_session_id: "wrs_test".to_owned(),
-                lease_expires_at_ms: 60_000,
+                acquired_at_ms: 1_000,
             }),
             next_inode_id: InodeId(10),
             name_policy: loonfs_api::NamePolicy::default(),
@@ -196,6 +222,7 @@ mod tests {
             ),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
+            recent_segments: Vec::new(),
             state: Default::default(),
         }
     }
@@ -269,6 +296,73 @@ mod tests {
             prepared.resulting_head.visible_wal_tip,
             Some(wal.envelope.pointer(wal.object_key.clone()))
         );
+    }
+
+    #[test]
+    fn head_publish_seeds_recent_segments_from_the_prior_tip() {
+        // Upgrade path: a head that has only a tip pointer still produces a
+        // gap-free hint list.
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut current_head = head(namespace_id.clone(), ChangeSeq(7));
+        let prior = wal_segment(
+            namespace_id.clone(),
+            ChangeSeq(5),
+            ChangeSeq(6),
+            ChangeSeq(7),
+            2,
+        );
+        let prior_tip = prior.envelope.pointer(prior.object_key.clone());
+        current_head.visible_wal_tip = Some(prior_tip.clone());
+        let plan = plan(namespace_id.clone(), ChangeSeq(9));
+        let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 2);
+
+        let prepared = prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer")
+            .expect("prepare head publish");
+
+        let new_tip = wal.envelope.pointer(wal.object_key.clone());
+        assert_eq!(
+            prepared.resulting_head.recent_segments,
+            vec![new_tip.clone(), prior_tip]
+        );
+        assert_eq!(prepared.resulting_head.visible_wal_tip, Some(new_tip));
+    }
+
+    #[test]
+    fn head_publish_prepends_the_tip_and_truncates_recent_segments() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut current_head = head(namespace_id.clone(), ChangeSeq(100));
+        let filler = |index: u64| {
+            let segment = wal_segment(
+                namespace_id.clone(),
+                ChangeSeq(index),
+                ChangeSeq(index + 1),
+                ChangeSeq(index + 1),
+                1,
+            );
+            segment.envelope.pointer(segment.object_key.clone())
+        };
+        current_head.recent_segments = (0..32).rev().map(filler).collect();
+        let oldest = current_head
+            .recent_segments
+            .last()
+            .cloned()
+            .expect("oldest");
+        let plan = plan(namespace_id.clone(), ChangeSeq(101));
+        let wal = wal_segment(
+            namespace_id,
+            ChangeSeq(100),
+            ChangeSeq(101),
+            ChangeSeq(101),
+            1,
+        );
+
+        let prepared = prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer")
+            .expect("prepare head publish");
+
+        let recent = &prepared.resulting_head.recent_segments;
+        assert_eq!(recent.len(), 32);
+        assert_eq!(recent[0], wal.envelope.pointer(wal.object_key.clone()));
+        assert!(!recent.contains(&oldest), "oldest hint must fall off");
     }
 
     #[test]

@@ -336,7 +336,6 @@ fn build_embedded_profile(
         default_namespace: None,
         writer_id: None,
         writer_version: None,
-        lease_duration_ms: None,
     })
 }
 
@@ -516,7 +515,6 @@ pub(super) fn apply_update_flags(
             default_namespace,
             writer_id,
             writer_version,
-            lease_duration_ms,
         } => {
             let store = match store {
                 StoreConfig::LocalFs { root, key_prefix } => StoreConfig::LocalFs {
@@ -588,7 +586,6 @@ pub(super) fn apply_update_flags(
                 default_namespace,
                 writer_id,
                 writer_version,
-                lease_duration_ms,
             })
         }
         ProfileConfig::Remote {
@@ -619,7 +616,6 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
             default_namespace,
             writer_id,
             writer_version,
-            lease_duration_ms,
         } => {
             let store = match store {
                 StoreConfig::LocalFs { root, key_prefix } => StoreConfig::LocalFs {
@@ -704,7 +700,6 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                 default_namespace,
                 writer_id,
                 writer_version,
-                lease_duration_ms,
             })
         }
         ProfileConfig::Remote {

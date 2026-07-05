@@ -164,6 +164,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 head_seq: head.seq,
                 visible_tip: head.visible_wal_tip.clone(),
                 stop_after_seq: None,
+                recent_segments: &head.recent_segments,
             },
         )
         .await

@@ -21,7 +21,7 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, NamespaceConfigState,
-    NamespaceGcPinState, NamespaceState, UploadSessionState, WalSegmentPointer, WriterLease,
+    NamespaceGcPinState, NamespaceState, UploadSessionState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -334,10 +334,10 @@ fn sample_head_state() -> HeadState {
         seq: ChangeSeq(2),
         head_commit_id: commit_id(),
         writer_epoch: WriterEpoch(3),
-        writer_lease: Some(WriterLease {
+        writer: Some(WriterBlock {
             writer_id: "writer-a".to_owned(),
             writer_session_id: "wrs_00000000000000000000000000000001".to_owned(),
-            lease_expires_at_ms: 2_000,
+            acquired_at_ms: 2_000,
         }),
         next_inode_id: InodeId(10),
         name_policy: NamePolicy::default(),
@@ -345,6 +345,7 @@ fn sample_head_state() -> HeadState {
         latest_checkpoint_id: Some(checkpoint_id("chk_00000000000000000000000000000002")),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: Some(sample_wal_pointer()),
+        recent_segments: vec![sample_wal_pointer()],
         state: NamespaceState::Active,
     }
 }

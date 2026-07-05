@@ -80,7 +80,6 @@ impl<'de> Deserialize<'de> for InvariantId {
 define_invariant_ids! {
     // Namespace core commit frame invariants.
     (StaleWriterCannotPublish, "stale_writer_cannot_publish"),
-    (HeadWriterEpochMatchesLease, "head_writer_epoch_matches_lease"),
     (NextInodeIdIsMonotonic, "next_inode_id_is_monotonic"),
     (CreateMutationConsumesNextInodeId, "create_mutation_consumes_next_inode_id"),
     (CreateFileRequiresDurableContent, "create_file_requires_durable_content"),

@@ -131,8 +131,8 @@ explicit commits — are fenced by `writer_epoch` and then linearized by the hea
 compare-and-swap that makes their WAL visible.
 
 Checkpoint and retention maintenance updates are CAS-linearized metadata
-updates. They preserve `writer_epoch` and `writer_lease`, and must not change
-WAL visibility at all. Maintenance may race with semantic writers; on head
+updates. They preserve `writer_epoch` and the `writer` block, and must not
+change WAL visibility at all. Maintenance may race with semantic writers; on head
 CAS conflict it must reload the latest head and rebase or retry the metadata
 update. It must not bump `writer_epoch` unless its purpose is to intentionally
 fence writers.
@@ -213,13 +213,22 @@ not by itself guarantee freshness; it guarantees self-consistency. A reader
 must not separately load identity metadata and bytes, then use the identity
 from one observation with the payload from another observation.
 
-The namespace head is the only durable writer-fencing authority. Its
-`writer_epoch` is monotonic: the same live writer session can renew the
-head-owned `writer_lease` without changing the epoch, but a new writer
-session or expired takeover advances the epoch with a guarded head rewrite.
-`writer_lease` is liveness metadata inside `head.json`, not a second durable
-fence object. A writer may only publish a WAL segment and head update for the
-writer epoch it acquired from the current head.
+The namespace head is the only durable writer-fencing authority, and
+`writer_epoch` plus the head compare-and-swap is the entire fencing story.
+There is no lease and no expiry: a writer session acquires the epoch lazily on
+its first semantic write (a guarded rewrite that advances the epoch and
+records the non-authoritative `writer` observability block), caches it for the
+session's lifetime, and publishes only for that epoch. Any other session that
+acquires simply advances the epoch — deterministic last-writer-wins — and the
+superseded session is fenced terminally: it must surface `writer_fenced` and
+must never reacquire on its own. Nothing consults the `writer` block or any
+clock for commit validity.
+
+Writers additionally apply a self-enforced publish budget: a local monotonic
+elapsed-time bound between starting a WAL segment PUT and initiating the head
+CAS (60 seconds). Overrunning it abandons the segment as an orphan and
+rebuilds the commit as a fresh segment. The budget gates only the writer's own
+next action; validators never consult time.
 
 Large immutable file data may use multipart upload or another
 provider-specific optimization. Small mutable control objects should not
@@ -665,11 +674,16 @@ This is the success boundary.
    values.
 5. Write one immutable **WAL segment** containing logical commit records for
    the tentatively accepted requests and the segment metadata needed to
-   identify the visible segment chain.
-6. **CAS-update** the namespace head to advance `seq`, `next_inode_id`, and
-   the visible WAL tip.
+   identify the visible segment chain, recording the local monotonic time the
+   PUT began.
+6. If the publish budget has elapsed since step 5 began, abandon the segment
+   as an orphan and rebuild the commit as a fresh segment; otherwise
+   **CAS-update** the namespace head to advance `seq`, `next_inode_id`, the
+   visible WAL tip, and `recent_segments` (the bounded newest-first
+   accelerator over the visible chain, tip included; chain links remain the
+   only history authority).
 7. If step 5 or step 6 fails, the publication fails. A WAL segment written
-   before a failed CAS is orphaned and harmless.
+   before a failed CAS — or abandoned over budget — is orphaned and harmless.
 
 A tentatively accepted request is not yet committed or successful. A request
 becomes committed, successful, and visible only if step 5 durably stores the
@@ -838,9 +852,8 @@ exactly the order shown) of:
 
 where `ops` and `preconditions` appear in request order using their v0 wire
 encoding, and `message` is `null` when absent. The preimage deliberately
-excludes `commit_id`, writer identity, writer epoch, and writer lease state:
-a retry of the same logical commit must fingerprint identically no matter who
-retries it or when.
+excludes `commit_id`, writer identity, and writer epoch: a retry of the same
+logical commit must fingerprint identically no matter who retries it or when.
 
 Path-level mutations fingerprint the same way with domain
 `loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind,

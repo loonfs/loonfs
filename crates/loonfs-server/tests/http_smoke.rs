@@ -7,24 +7,19 @@ use loonfs_api::{
         CommitDelta, CommitOp, CommitRequest as ApiCommitRequest, CompleteUploadRequest,
         ValidatedContentToken,
     },
-    validate_checkpoint_id,
-    wire::control::{
-        decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
-    },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, InodeId,
-    InodeKind, ListPathEntriesResponse, ManifestId, PutBehavior, RevisionNo,
-    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
+    validate_checkpoint_id, AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef,
+    CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
+    PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
+    LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_objectstore::keys::{metadata_manifest, wal_head};
+use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
 use std::future::Future;
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
 use tempfile::tempdir;
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
@@ -42,7 +37,6 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-smoke",
-        60_000,
     ))
     .await;
 
@@ -136,7 +130,6 @@ async fn config_endpoint_advertises_capabilities() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-smoke",
-        60_000,
     ))
     .await;
 
@@ -173,7 +166,6 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-directory-pagination",
-        60_000,
     ))
     .await;
 
@@ -262,7 +254,6 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-smoke",
-        60_000,
     ))
     .await;
 
@@ -326,7 +317,6 @@ async fn http_namespace_listing_route_is_not_exposed() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-no-namespace-list",
-        60_000,
     ))
     .await;
 
@@ -363,7 +353,6 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-invalid-ns",
-        60_000,
     ))
     .await;
 
@@ -396,7 +385,6 @@ async fn http_upload_content_rejects_invalid_upload_id() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-invalid-upload-id",
-        60_000,
     ))
     .await;
 
@@ -431,7 +419,6 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         temp_dir.path().join("store"),
         "loonfs-server-test",
         "http-copy-smoke",
-        60_000,
     ))
     .await;
 
@@ -485,7 +472,6 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         temp_dir.path().join("store"),
         "loonfs-server-fork",
         "http-fork-smoke",
-        60_000,
     ))
     .await;
 
@@ -574,7 +560,6 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         temp_dir.path().join("store"),
         "loonfs-server-current",
         "http-current-smoke",
-        60_000,
     ))
     .await;
 
@@ -715,7 +700,6 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
         temp_dir.path().join("store"),
         "loonfs-server-current",
         "http-bad-content-token",
-        60_000,
     ))
     .await;
 
@@ -786,7 +770,6 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         temp_dir.path().join("store"),
         "loonfs-server-restore",
         "http-restore",
-        60_000,
     ))
     .await;
 
@@ -936,7 +919,6 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         temp_dir.path().join("store"),
         "loonfs-server-revisions",
         "http-revisions",
-        60_000,
     ))
     .await;
 
@@ -1035,7 +1017,6 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
         temp_dir.path().join("store"),
         "loonfs-server-restore-missing-source",
         "http-restore-missing-source",
-        60_000,
     ))
     .await;
 
@@ -1106,7 +1087,6 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
         temp_dir.path().join("store"),
         "loonfs-server-current-conflict",
         "http-current-conflict",
-        60_000,
     ))
     .await;
 
@@ -1170,7 +1150,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         temp_dir.path().join("store"),
         "loonfs-server-put",
         "http-put",
-        60_000,
     ))
     .await;
 
@@ -1224,7 +1203,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         temp_dir.path().join("store"),
         "loonfs-server-ops",
         "http-ops",
-        60_000,
     ))
     .await;
 
@@ -1298,7 +1276,6 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         temp_dir.path().join("store"),
         "loonfs-server-delete-behavior",
         "http-delete-behavior",
-        60_000,
     ))
     .await;
 
@@ -1348,7 +1325,6 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         temp_dir.path().join("store"),
         "loonfs-server-move-behavior",
         "http-move-behavior",
-        60_000,
     ))
     .await;
 
@@ -1424,7 +1400,6 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         temp_dir.path().join("store"),
         "loonfs-server-admin",
         "http-admin",
-        60_000,
     ))
     .await;
     let client = harness.client.clone();
@@ -1486,7 +1461,6 @@ async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
         temp_dir.path().join("store"),
         "loonfs-server-admin-missing-checkpoint",
         "http-admin-missing-checkpoint",
-        60_000,
     ))
     .await;
     let client = harness.client.clone();
@@ -1514,7 +1488,6 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         temp_dir.path().join("store"),
         "loonfs-server-admin-corrupt",
         "http-admin-corrupt",
-        60_000,
     ))
     .await;
     let client = harness.client.clone();
@@ -1553,27 +1526,23 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_servers_share_one_store_and_handoff_the_lease() {
+async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let server_a = start_server(test_config(
         store_root.clone(),
         "loonfs-server-a",
         "two-server-smoke",
-        60_000,
     ))
     .await;
     let server_b = start_server(test_config(
         store_root,
         "loonfs-server-b",
         "two-server-smoke",
-        60_000,
     ))
     .await;
     let client_a = server_a.client.clone();
     let client_b = server_b.client.clone();
-    let store_root = server_a.store_root.clone();
-    let store_key_prefix = server_a.store_key_prefix.clone();
 
     tokio::task::spawn_blocking(move || {
         client_a.create_namespace("demo").expect("create namespace");
@@ -1582,23 +1551,35 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
             .write_file_bytes(&host_a_target, b"host a\n")
             .expect("host a write");
 
+        // Server B's first semantic write acquires the epoch immediately:
+        // there is no lease to wait out, only last-writer-wins fencing.
         let host_b_target = NamespacePath::parse("demo:/docs/host-b.txt").expect("host b target");
-        match client_b.move_path(&host_a_target, &host_b_target) {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "lease_conflict"),
-            other => panic!("expected lease_conflict, got {other:?}"),
-        }
-        force_expire_namespace_writer_lease(&store_root, store_key_prefix.as_deref(), "demo");
-
-        let committed_seq = retry_until_lease_handoff(&client_b, &host_a_target, &host_b_target);
+        let moved = client_b
+            .move_path(&host_a_target, &host_b_target)
+            .expect("host b takes over on first write");
         assert!(
-            committed_seq >= 2,
-            "expected later commit seq, got {committed_seq}"
+            moved.committed_seq.0 >= 2,
+            "expected later commit seq, got {}",
+            moved.committed_seq.0
         );
 
+        // Server A's session is fenced terminally: its writes fail with
+        // `writer_fenced` and keep failing, with no silent reacquisition.
+        let host_c_target = NamespacePath::parse("demo:/docs/host-c.txt").expect("host c target");
+        for attempt in 0..2 {
+            match client_a.write_file_bytes(&host_c_target, b"host a again\n") {
+                Err(ClientError::Api { code, .. }) => {
+                    assert_eq!(code, "writer_fenced", "attempt {attempt}")
+                }
+                other => panic!("expected writer_fenced on attempt {attempt}, got {other:?}"),
+            }
+        }
+
+        // Fencing gates writes only; server A still reads the moved file.
         let host_b_entry = client_a
             .stat_path(&host_b_target)
             .expect("stat host b file");
-        assert_eq!(host_b_entry.head_seq.0, committed_seq);
+        assert_eq!(host_b_entry.head_seq.0, moved.committed_seq.0);
         let host_b_bytes = client_a
             .read_file_bytes(&host_b_target)
             .expect("read host b file");
@@ -1645,19 +1626,13 @@ async fn start_server(config: ServerConfig) -> TestServer {
     }
 }
 
-fn test_config(
-    store_root: std::path::PathBuf,
-    writer_id: &str,
-    key_prefix: &str,
-    lease_duration_ms: u64,
-) -> ServerConfig {
+fn test_config(store_root: std::path::PathBuf, writer_id: &str, key_prefix: &str) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         auth_token: Some("test-token".to_owned()),
         content_token_secret: "test-content-token-secret".to_owned(),
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
-        lease_duration_ms,
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         store: StoreConfig::LocalFs {
             root: store_root.display().to_string(),
@@ -1756,48 +1731,6 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
         }
         other => panic!("expected invalid_namespace_id response, got {other:?}"),
     }
-}
-
-fn retry_until_lease_handoff(client: &Client, from: &NamespacePath, to: &NamespacePath) -> u64 {
-    for _attempt in 0..20 {
-        match client.move_path(from, to) {
-            Ok(result) => return result.committed_seq.0,
-            Err(ClientError::Api { code, .. }) if code == "lease_conflict" => {
-                thread::sleep(Duration::from_millis(50));
-            }
-            other => panic!("expected success or lease_conflict while waiting, got {other:?}"),
-        }
-    }
-
-    panic!("timed out waiting for lease handoff");
-}
-
-fn force_expire_namespace_writer_lease(
-    store_root: &std::path::Path,
-    key_prefix: Option<&str>,
-    namespace: &str,
-) {
-    let store =
-        ConfiguredObjectStore::local_fs(store_root, key_prefix).expect("construct test store");
-    let head_key = wal_head(namespace);
-    let bytes = block_on(store.get(&head_key, None))
-        .expect("read namespace head")
-        .expect("namespace head exists");
-    let mut envelope: HeadStateEnvelope =
-        decode_control_object(&bytes, ControlObjectKind::WalHead).expect("decode namespace head");
-    envelope
-        .state
-        .writer_lease
-        .as_mut()
-        .expect("namespace head has writer lease")
-        .lease_expires_at_ms = 0;
-    let writer_version = envelope.writer_version;
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, writer_version, envelope.state)
-            .expect("encode expired namespace head");
-    let bytes = encode_control_object(&envelope).expect("serialize expired namespace head");
-    block_on(store.put_overwrite(&head_key, Bytes::from(bytes)))
-        .expect("write expired namespace head");
 }
 
 fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {

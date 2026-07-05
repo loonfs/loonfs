@@ -52,7 +52,7 @@ pub use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub use cache::RuntimeCacheStats;
 pub use config::{
-    FsConfig, RuntimeCacheConfig, DEFAULT_LEASE_DURATION_MS, DEFAULT_MAX_CACHED_NAMESPACES,
+    FsConfig, RuntimeCacheConfig, DEFAULT_MAX_CACHED_NAMESPACES,
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS, DEFAULT_MAX_WAL_TAIL_SEGMENTS,
 };

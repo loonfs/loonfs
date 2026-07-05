@@ -33,6 +33,14 @@ pub enum CommitHeadPublishError {
     EmptyWalSegment,
     SeqOverflow,
     StaleHead,
+    /// The self-enforced publish budget elapsed between starting the WAL
+    /// segment PUT and reaching the head CAS. The segment is abandoned as an
+    /// orphan for GC and the commit must be rebuilt as a fresh segment, so
+    /// callers retry exactly as they do for `StaleHead`.
+    PublishBudgetExceeded {
+        elapsed_ms: u64,
+        budget_ms: u64,
+    },
     /// The head compare-and-swap was sent but its outcome was never
     /// observed (for example, a transport failure waiting for the
     /// response). The commit may or may not be visible.

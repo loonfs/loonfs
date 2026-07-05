@@ -44,6 +44,7 @@ mod path;
 mod protocol;
 mod publisher;
 mod storage;
+pub mod timing;
 mod wal;
 
 pub mod cache {
@@ -87,4 +88,5 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
 };
 pub use namespace::BootstrapNamespaceError;
-pub use options::{BootstrapOptions, DeleteNamespaceOptions, Settings, WriteOptions};
+pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
+pub use timing::{MonotonicTimer, StdMonotonicTimer};

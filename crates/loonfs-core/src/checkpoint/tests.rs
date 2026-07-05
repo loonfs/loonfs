@@ -420,7 +420,7 @@ async fn checkpoint_publication_preserves_writer_identity() {
         .head;
 
     assert_eq!(after.writer_epoch, before.writer_epoch);
-    assert_eq!(after.writer_lease, before.writer_lease);
+    assert_eq!(after.writer, before.writer);
 }
 
 #[tokio::test]
@@ -460,7 +460,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
 
     assert_eq!(after.retention_floor_seq, ChangeSeq(1));
     assert_eq!(after.writer_epoch, before.writer_epoch);
-    assert_eq!(after.writer_lease, before.writer_lease);
+    assert_eq!(after.writer, before.writer);
 }
 
 #[tokio::test]
@@ -3478,7 +3478,6 @@ fn test_context() -> MutationContext {
         writer_session_id: "wrs_test".to_owned(),
         writer_version: "test-writer/0.1.0".to_owned(),
         now_ms: 1_000,
-        lease_duration_ms: 60_000,
     }
 }
 

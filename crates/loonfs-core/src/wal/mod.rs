@@ -137,6 +137,7 @@ mod tests {
                 head_seq: ChangeSeq(1),
                 visible_tip: Some(segment.envelope.pointer(segment.object_key.clone())),
                 stop_after_seq: None,
+                recent_segments: &[],
             },
         )
         .await
@@ -288,6 +289,7 @@ mod tests {
                 head_seq: ChangeSeq(2),
                 visible_tip: Some(second.envelope.pointer(second.object_key.clone())),
                 stop_after_seq: Some(ChangeSeq(1)),
+                recent_segments: &[],
             },
         )
         .await
@@ -453,10 +455,100 @@ mod tests {
                 head_seq: pointer.end_seq,
                 visible_tip: Some(pointer),
                 stop_after_seq: None,
+                recent_segments: &[],
             },
         )
         .await
         .expect_err("corrupted WAL chain should be rejected");
+    }
+
+    #[tokio::test]
+    async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let first = write_create_dir_segment(
+            &store,
+            &namespace_id,
+            None,
+            "c_wal_hint_a",
+            "alpha",
+            ChangeSeq(0),
+            ChangeSeq(1),
+        )
+        .await;
+        let second = write_create_dir_segment(
+            &store,
+            &namespace_id,
+            Some(first.envelope.pointer(first.object_key.clone())),
+            "c_wal_hint_b",
+            "beta",
+            ChangeSeq(1),
+            ChangeSeq(2),
+        )
+        .await;
+        let unhinted = load_validated_wal_chain(
+            &store,
+            WalChainLoadRequest {
+                namespace_id: &namespace_id,
+                chain_base_seq: ChangeSeq(0),
+                head_seq: ChangeSeq(2),
+                visible_tip: Some(second.envelope.pointer(second.object_key.clone())),
+                stop_after_seq: None,
+                recent_segments: &[],
+            },
+        )
+        .await
+        .expect("unhinted chain");
+
+        // Accurate hints (newest first, tip included) prefetch the gap.
+        let accurate = [
+            second.envelope.pointer(second.object_key.clone()),
+            first.envelope.pointer(first.object_key.clone()),
+        ];
+        let hinted = load_validated_wal_chain(
+            &store,
+            WalChainLoadRequest {
+                namespace_id: &namespace_id,
+                chain_base_seq: ChangeSeq(0),
+                head_seq: ChangeSeq(2),
+                visible_tip: Some(second.envelope.pointer(second.object_key.clone())),
+                stop_after_seq: None,
+                recent_segments: &accurate,
+            },
+        )
+        .await
+        .expect("hinted chain");
+        assert_eq!(hinted.segments(), unhinted.segments());
+
+        // Garbage hints (missing objects, lying seq ranges) cost fallback
+        // fetches, never correctness: chain links stay the authority.
+        let mut lying_tip = second.envelope.pointer(second.object_key.clone());
+        lying_tip.end_seq = ChangeSeq(999);
+        let garbage = [
+            WalSegmentPointer {
+                object_key: wal_segment(namespace_id.as_str(), "seg_gone"),
+                segment_id: "seg_gone".to_owned(),
+                start_seq: ChangeSeq(1),
+                end_seq: ChangeSeq(1),
+                payload_checksum: "sha256:absent".to_owned(),
+            },
+            lying_tip,
+        ];
+        let survived = load_validated_wal_chain(
+            &store,
+            WalChainLoadRequest {
+                namespace_id: &namespace_id,
+                chain_base_seq: ChangeSeq(0),
+                head_seq: ChangeSeq(2),
+                visible_tip: Some(second.envelope.pointer(second.object_key.clone())),
+                stop_after_seq: None,
+                recent_segments: &garbage,
+            },
+        )
+        .await
+        .expect("chain despite garbage hints");
+        assert_eq!(survived.segments(), unhinted.segments());
     }
 
     async fn write_create_dir_segment(
