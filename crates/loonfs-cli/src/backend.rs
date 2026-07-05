@@ -340,7 +340,7 @@ impl Backend for EmbeddedBackend {
                     cursor: cursor
                         .map(loonfs_api::decode_file_revisions_cursor)
                         .transpose()
-                        .map_err(|error| CliError::new("invalid_cursor", error.to_string()))?,
+                        .map_err(|error| CliError::new("invalid_request", error.to_string()))?,
                 },
             ),
         )
@@ -501,10 +501,7 @@ fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> C
 }
 
 fn map_core_error(error: CoreError) -> CliError {
-    if matches!(
-        error.code(),
-        ErrorCode::InvalidNamespaceId | ErrorCode::InvalidCommitId | ErrorCode::InvalidUploadId
-    ) {
+    if matches!(error.code(), ErrorCode::InvalidRequest) {
         return CliError::invalid_input(error.to_string());
     }
 
@@ -539,7 +536,7 @@ fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {
         BootstrapNamespaceError::EmptyHolderId | BootstrapNamespaceError::EmptyWriterVersion => {
             CliError::invalid_config(error.to_string())
         }
-        _ => CliError::new("bootstrap_failed", error.to_string()),
+        _ => CliError::new("server_error", error.to_string()),
     }
 }
 

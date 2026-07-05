@@ -1,4 +1,3 @@
-use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
@@ -137,9 +136,6 @@ pub enum CommitValidationError {
         parent_inode: InodeId,
         root_inode: InodeId,
         tombstone_seq: ChangeSeq,
-    },
-    UnsupportedMoveBehavior {
-        behavior: MoveBehavior,
     },
     DeleteSubtreeRootMissing {
         root_inode: InodeId,

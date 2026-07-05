@@ -1139,7 +1139,7 @@ fn directory_cursor_after_later_writes_is_rejected() {
                 cursor: Some(cursor),
             },
         )),
-        ErrorCode::InvalidCursor,
+        ErrorCode::RebootstrapRequired,
     );
 }
 
@@ -1190,7 +1190,7 @@ fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
                 cursor: Some(cursor),
             },
         )),
-        ErrorCode::InvalidCursor,
+        ErrorCode::RebootstrapRequired,
     );
 }
 
@@ -1231,7 +1231,7 @@ fn directory_cursor_rejects_path_inode_mismatch() {
                 cursor: Some(cursor),
             },
         )),
-        ErrorCode::InvalidCursor,
+        ErrorCode::InvalidRequest,
     );
 }
 

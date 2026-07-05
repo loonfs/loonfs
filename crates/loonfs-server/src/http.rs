@@ -376,7 +376,7 @@ async fn delete_namespace_handler(
 async fn create_namespace(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateNamespaceRequest>,
+    AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(request.namespace_id)?;
@@ -412,7 +412,7 @@ async fn fork_namespace_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<ForkNamespaceRequest>,
+    AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let source_namespace_id = parse_namespace_id(namespace)?;
@@ -760,7 +760,7 @@ async fn restore_inode_revision(
     State(state): State<AppState>,
     AxumPath((namespace, inode_id, source_revision_no)): AxumPath<(String, String, String)>,
     headers: HeaderMap,
-    Json(request): Json<RestoreFileRevisionRequest>,
+    AppJson(request): AppJson<RestoreFileRevisionRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -812,7 +812,7 @@ async fn filesystem_operation(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<FilesystemOperationRequest>,
+    AppJson(request): AppJson<FilesystemOperationRequest>,
 ) -> Result<Json<FilesystemOperationResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -947,11 +947,11 @@ async fn begin_upload_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    request: Option<Json<BeginUploadRequest>>,
+    OptionalAppJson(request): OptionalAppJson<BeginUploadRequest>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
-    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let request = request.unwrap_or_default();
     if request.mode.unwrap_or_default() == UploadMode::DirectPut {
         return begin_direct_put_upload(state, namespace_id, request).await;
     }
@@ -1019,11 +1019,9 @@ async fn begin_direct_put_upload(
 
 fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
     match error {
-        ObjectStoreError::InvalidContentRef(message) => ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidUploadContent,
-            &message,
-        ),
+        ObjectStoreError::InvalidContentRef(message) => {
+            ApiResponseError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
+        }
         error => ApiResponseError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::ServerError,
@@ -1149,7 +1147,7 @@ async fn complete_upload_handler(
     State(state): State<AppState>,
     AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<CompleteUploadRequest>,
+    AppJson(request): AppJson<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -1195,7 +1193,7 @@ async fn commit_operations_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<ApiCommitRequest>,
+    AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
@@ -1446,7 +1444,7 @@ fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
     value.parse::<u64>().map(InodeId).map_err(|err| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidInodeId,
+            ErrorCode::InvalidRequest,
             &format!("invalid inode_id `{value}`: {err}"),
         )
     })
@@ -1456,7 +1454,7 @@ fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
     value.parse::<u64>().map(RevisionNo).map_err(|err| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRevisionNo,
+            ErrorCode::InvalidRequest,
             &format!("invalid revision_no `{value}`: {err}"),
         )
     })
@@ -1475,7 +1473,7 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
     value.parse::<u32>().map_err(|error| {
         ApiResponseError::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidConfig,
+            ErrorCode::InvalidRequest,
             &format!("invalid limit `{value}`: {error}"),
         )
     })
@@ -1504,7 +1502,7 @@ fn decode_file_revisions_page_cursor(
 fn limit_response_error(error: LimitError) -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidConfig,
+        ErrorCode::InvalidRequest,
         &error.to_string(),
     )
 }
@@ -1512,9 +1510,75 @@ fn limit_response_error(error: LimitError) -> ApiResponseError {
 fn page_cursor_response_error(error: PageCursorError) -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::BAD_REQUEST,
-        ErrorCode::InvalidCursor,
+        ErrorCode::InvalidRequest,
         &error.to_string(),
     )
+}
+
+/// A `Json` extractor whose rejections stay inside the error contract:
+/// malformed bodies answer 400 with an `invalid_request` `ApiError` body
+/// instead of the raw framework rejection.
+struct AppJson<T>(T);
+
+#[axum::async_trait]
+impl<S, T> axum::extract::FromRequest<S> for AppJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(AppJson(value)),
+            Err(rejection) => Err(ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &rejection.body_text(),
+            )),
+        }
+    }
+}
+
+/// Like [`AppJson`], but an absent (empty) body is `None` rather than an
+/// error, while a present-but-malformed body still answers 400 in-envelope.
+struct OptionalAppJson<T>(Option<T>);
+
+const MAX_OPTIONAL_JSON_BODY_BYTES: usize = 1024 * 1024;
+
+#[axum::async_trait]
+impl<S, T> axum::extract::FromRequest<S> for OptionalAppJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let body = axum::body::to_bytes(req.into_body(), MAX_OPTIONAL_JSON_BODY_BYTES)
+            .await
+            .map_err(|error| {
+                ApiResponseError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidRequest,
+                    &format!("request body unreadable: {error}"),
+                )
+            })?;
+        if body.is_empty() {
+            return Ok(OptionalAppJson(None));
+        }
+        let value = serde_json::from_slice(&body).map_err(|error| {
+            ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &format!("request body is not valid JSON for this operation: {error}"),
+            )
+        })?;
+        Ok(OptionalAppJson(Some(value)))
+    }
 }
 
 struct ApiResponseError {
@@ -1548,7 +1612,7 @@ impl ApiResponseError {
     fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidNamespaceId,
+            ErrorCode::InvalidRequest,
             &error.to_string(),
         )
     }
@@ -1574,12 +1638,12 @@ impl ApiResponseError {
             BootstrapNamespaceError::EmptyHolderId
             | BootstrapNamespaceError::EmptyWriterVersion => Self::new(
                 StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidConfig,
+                ErrorCode::InvalidRequest,
                 &error.to_string(),
             ),
             _ => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::BootstrapFailed,
+                ErrorCode::ServerError,
                 &error.to_string(),
             ),
         }
@@ -1590,7 +1654,7 @@ impl ApiResponseError {
             RuntimeError::Core(error) => Self::core(error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
+                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
             }
             error => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1622,7 +1686,7 @@ impl ApiResponseError {
             RuntimeError::Core(error) => Self::core_for_namespace(namespace, error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidConfig, &message)
+                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
             }
             error => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1635,16 +1699,7 @@ impl ApiResponseError {
 
 fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
     match code {
-        ErrorCode::InvalidPath
-        | ErrorCode::InvalidNamespaceId
-        | ErrorCode::InvalidCommitId
-        | ErrorCode::InvalidUploadId
-        | ErrorCode::InvalidInodeId
-        | ErrorCode::InvalidRevisionNo
-        | ErrorCode::InvalidCursor
-        | ErrorCode::InvalidConfig
-        | ErrorCode::UnsupportedMoveBehavior
-        | ErrorCode::InvalidUploadContent => StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorCode::NamespaceNotFound
         | ErrorCode::PathNotFound
         | ErrorCode::RevisionNotFound
@@ -1655,11 +1710,8 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::MaintenanceRequired => StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::NamespaceDeleted => StatusCode::GONE,
         ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-        ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
         ErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,
-        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError | ErrorCode::BootstrapFailed => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::NamespaceExists
         | ErrorCode::NamespacePartial
         | ErrorCode::PathConflict

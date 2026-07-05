@@ -472,13 +472,8 @@ async fn validate_metadata_preconditions(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                behavior,
+                behavior: _,
             } => {
-                if *behavior != loonfs_api::v0::MoveBehavior::NoReplace {
-                    return Err(CommitValidationError::UnsupportedMoveBehavior {
-                        behavior: *behavior,
-                    });
-                }
                 let source_binding =
                     resolve_publish_current_binding_for_mutation(&metadata_view, *inode_id)
                         .await
@@ -725,14 +720,8 @@ async fn validate_publish_metadata_preconditions<S: ObjectStore + ?Sized>(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                behavior,
+                behavior: _,
             } => {
-                if *behavior != loonfs_api::v0::MoveBehavior::NoReplace {
-                    return Err(CommitValidationError::UnsupportedMoveBehavior {
-                        behavior: *behavior,
-                    }
-                    .into());
-                }
                 let source_binding =
                     resolve_publish_current_binding_for_mutation(&metadata_state, *inode_id)
                         .await?;

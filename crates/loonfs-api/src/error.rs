@@ -43,16 +43,8 @@ pub enum ErrorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorCode {
-    InvalidPath,
-    InvalidNamespaceId,
-    InvalidCommitId,
-    InvalidUploadId,
-    InvalidInodeId,
-    InvalidRevisionNo,
-    InvalidCursor,
-    InvalidConfig,
+    InvalidRequest,
     Unauthorized,
-    PermissionDenied,
     NotSupported,
     NamespaceNotFound,
     NamespaceDeleted,
@@ -67,7 +59,6 @@ pub enum ErrorCode {
     TombstoneConflict,
     LeaseConflict,
     WouldCycle,
-    UnsupportedMoveBehavior,
     CommitIdReuseConflict,
     CommitOutcomeUnknown,
     CommitQueueFull,
@@ -76,26 +67,16 @@ pub enum ErrorCode {
     UploadNotFound,
     UploadAlreadyCompleted,
     UploadContentConflict,
-    InvalidUploadContent,
     RebootstrapRequired,
-    BootstrapFailed,
     NamespaceCorrupt,
     ServerError,
 }
 
 impl ErrorCode {
     /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 38] = [
-        ErrorCode::InvalidPath,
-        ErrorCode::InvalidNamespaceId,
-        ErrorCode::InvalidCommitId,
-        ErrorCode::InvalidUploadId,
-        ErrorCode::InvalidInodeId,
-        ErrorCode::InvalidRevisionNo,
-        ErrorCode::InvalidCursor,
-        ErrorCode::InvalidConfig,
+    pub const ALL: [ErrorCode; 27] = [
+        ErrorCode::InvalidRequest,
         ErrorCode::Unauthorized,
-        ErrorCode::PermissionDenied,
         ErrorCode::NotSupported,
         ErrorCode::NamespaceNotFound,
         ErrorCode::NamespaceDeleted,
@@ -110,7 +91,6 @@ impl ErrorCode {
         ErrorCode::TombstoneConflict,
         ErrorCode::LeaseConflict,
         ErrorCode::WouldCycle,
-        ErrorCode::UnsupportedMoveBehavior,
         ErrorCode::CommitIdReuseConflict,
         ErrorCode::CommitOutcomeUnknown,
         ErrorCode::CommitQueueFull,
@@ -119,27 +99,15 @@ impl ErrorCode {
         ErrorCode::UploadNotFound,
         ErrorCode::UploadAlreadyCompleted,
         ErrorCode::UploadContentConflict,
-        ErrorCode::InvalidUploadContent,
         ErrorCode::RebootstrapRequired,
-        ErrorCode::BootstrapFailed,
         ErrorCode::NamespaceCorrupt,
         ErrorCode::ServerError,
     ];
 
     pub fn kind(self) -> ErrorKind {
         match self {
-            ErrorCode::InvalidPath
-            | ErrorCode::InvalidNamespaceId
-            | ErrorCode::InvalidCommitId
-            | ErrorCode::InvalidUploadId
-            | ErrorCode::InvalidInodeId
-            | ErrorCode::InvalidRevisionNo
-            | ErrorCode::InvalidCursor
-            | ErrorCode::InvalidConfig
-            | ErrorCode::UnsupportedMoveBehavior
-            | ErrorCode::InvalidUploadContent => ErrorKind::InvalidRequest,
+            ErrorCode::InvalidRequest => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
-            ErrorCode::PermissionDenied => ErrorKind::PermissionDenied,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
             | ErrorCode::NamespaceDeleted
@@ -153,7 +121,7 @@ impl ErrorCode {
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
-            ErrorCode::ServerError | ErrorCode::BootstrapFailed => ErrorKind::Internal,
+            ErrorCode::ServerError => ErrorKind::Internal,
             ErrorCode::NamespacePartial
             | ErrorCode::PathConflict
             | ErrorCode::DirectoryNotEmpty
@@ -170,16 +138,8 @@ impl ErrorCode {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            ErrorCode::InvalidPath => "invalid_path",
-            ErrorCode::InvalidNamespaceId => "invalid_namespace_id",
-            ErrorCode::InvalidCommitId => "invalid_commit_id",
-            ErrorCode::InvalidUploadId => "invalid_upload_id",
-            ErrorCode::InvalidInodeId => "invalid_inode_id",
-            ErrorCode::InvalidRevisionNo => "invalid_revision_no",
-            ErrorCode::InvalidCursor => "invalid_cursor",
-            ErrorCode::InvalidConfig => "invalid_config",
+            ErrorCode::InvalidRequest => "invalid_request",
             ErrorCode::Unauthorized => "unauthorized",
-            ErrorCode::PermissionDenied => "permission_denied",
             ErrorCode::NotSupported => "not_supported",
             ErrorCode::NamespaceNotFound => "namespace_not_found",
             ErrorCode::NamespaceDeleted => "namespace_deleted",
@@ -194,7 +154,6 @@ impl ErrorCode {
             ErrorCode::TombstoneConflict => "tombstone_conflict",
             ErrorCode::LeaseConflict => "lease_conflict",
             ErrorCode::WouldCycle => "would_cycle",
-            ErrorCode::UnsupportedMoveBehavior => "unsupported_move_behavior",
             ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
             ErrorCode::CommitOutcomeUnknown => "commit_outcome_unknown",
             ErrorCode::CommitQueueFull => "commit_queue_full",
@@ -203,9 +162,7 @@ impl ErrorCode {
             ErrorCode::UploadNotFound => "upload_not_found",
             ErrorCode::UploadAlreadyCompleted => "upload_already_completed",
             ErrorCode::UploadContentConflict => "upload_content_conflict",
-            ErrorCode::InvalidUploadContent => "invalid_upload_content",
             ErrorCode::RebootstrapRequired => "rebootstrap_required",
-            ErrorCode::BootstrapFailed => "bootstrap_failed",
             ErrorCode::NamespaceCorrupt => "namespace_corrupt",
             ErrorCode::ServerError => "server_error",
         }

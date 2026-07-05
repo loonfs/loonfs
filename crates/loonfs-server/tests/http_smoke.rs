@@ -13,7 +13,7 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, InodeId,
-    InodeKind, ListPathEntriesResponse, ManifestId, MoveBehavior, PutBehavior, RevisionNo,
+    InodeKind, ListPathEntriesResponse, ManifestId, PutBehavior, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
@@ -222,9 +222,9 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         match mismatch {
             ClientError::Api { status, code, .. } => {
                 assert_eq!(status, 400);
-                assert_eq!(code, "invalid_cursor");
+                assert_eq!(code, "invalid_request");
             }
-            other => panic!("expected invalid_cursor, got {other:?}"),
+            other => panic!("expected cursor rejection, got {other:?}"),
         }
 
         let raw_first_page: ListPathEntriesResponse = get_json(
@@ -246,7 +246,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
             "test-token",
         );
         let error = nonnumeric_limit.expect_err("nonnumeric limit rejected");
-        assert_eq!(error.code, "invalid_config");
+        assert_eq!(error.code, "invalid_request");
         assert!(error.message.contains("invalid limit"));
     })
     .await
@@ -413,9 +413,9 @@ async fn http_upload_content_rejects_invalid_upload_id() {
         {
             Err(ClientError::Api { status, code, .. }) => {
                 assert_eq!(status, 400);
-                assert_eq!(code, "invalid_upload_id");
+                assert_eq!(code, "invalid_request");
             }
-            other => panic!("expected invalid_upload_id, got {other:?}"),
+            other => panic!("expected upload id rejection, got {other:?}"),
         }
     })
     .await
@@ -627,8 +627,8 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 content_ref: ContentRef::whole_file_v0(b"other bytes"),
             },
         ) {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_upload_content"),
-            other => panic!("expected invalid_upload_content, got {other:?}"),
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_request"),
+            other => panic!("expected upload content rejection, got {other:?}"),
         }
 
         let content_ref = stage_uploaded_content_ref(&harness.client, namespace, file_bytes);
@@ -1342,7 +1342,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_reserved_move_behaviors_return_named_error() {
+async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -1363,19 +1363,18 @@ async fn http_reserved_move_behaviors_return_named_error() {
             .write_file_bytes(&source, b"source")
             .expect("seed source");
 
-        for (commit_id, behavior) in [
-            ("move-replace", MoveBehavior::Replace),
-            ("move-exchange", MoveBehavior::Exchange),
-        ] {
-            let request = FilesystemOperationRequest {
-                commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::MovePath {
-                    from_path: "/docs/source.txt".to_owned(),
-                    to_path: "/docs/target.txt".to_owned(),
-                    behavior,
+        // Unknown behaviors are not wire variants; they fail request
+        // validation inside the error envelope as invalid_request.
+        for (commit_id, behavior) in [("move-replace", "replace"), ("move-exchange", "exchange")] {
+            let request = serde_json::json!({
+                "commit_id": commit_id,
+                "operation": {
+                    "op": "move_path",
+                    "from_path": "/docs/source.txt",
+                    "to_path": "/docs/target.txt",
+                    "behavior": behavior,
                 },
-            };
+            });
             match ureq::post(&format!(
                 "{}/v0/namespaces/demo/filesystem/operations",
                 harness.server_url
@@ -1387,10 +1386,29 @@ async fn http_reserved_move_behaviors_return_named_error() {
                     assert_eq!(status, 400);
                     let error: ApiError =
                         serde_json::from_reader(response.into_reader()).expect("decode api error");
-                    assert_eq!(error.code, "unsupported_move_behavior");
+                    assert_eq!(error.code, "invalid_request");
                 }
-                other => panic!("expected unsupported_move_behavior, got {other:?}"),
+                other => panic!("expected rejected move behavior, got {other:?}"),
             }
+        }
+
+        // Malformed upload bodies must also stay inside the envelope — an
+        // Option-typed body must reject garbage, not default it to a session.
+        match ureq::post(&format!(
+            "{}/v0/namespaces/demo/uploads",
+            harness.server_url
+        ))
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string("{\"mode\": \"direkt_put\"}")
+        {
+            Err(ureq::Error::Status(status, response)) => {
+                assert_eq!(status, 400);
+                let error: ApiError =
+                    serde_json::from_reader(response.into_reader()).expect("decode api error");
+                assert_eq!(error.code, "invalid_request");
+            }
+            other => panic!("expected rejected upload body, got {other:?}"),
         }
     })
     .await
@@ -1733,7 +1751,7 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
             assert_eq!(status, 400);
             let error: ApiError =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
-            assert_eq!(error.code, "invalid_namespace_id");
+            assert_eq!(error.code, "invalid_request");
             assert!(error.message.contains("invalid namespace_id"));
         }
         other => panic!("expected invalid_namespace_id response, got {other:?}"),

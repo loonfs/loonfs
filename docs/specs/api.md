@@ -27,7 +27,7 @@ within a plane is expressed as **named features** (section 2).
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Trigger checkpoint creation; trigger retention-floor advancement. Future maintenance triggers (compaction, GC, index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | — | **Reserved name only.** Materializes only if derived indexes introduce endpoints beyond the core ops; until that decision, no ops are specified and no `query.*` feature keys are registered. |
-| `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. The error contract already carries `permission_denied` so this plane can land without breaking clients. |
+| `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
 
@@ -157,30 +157,18 @@ and names the capability-document key the client should reconcile against.
 Clients must branch on `code`, must tolerate codes they do not recognize, and
 must not parse `message`.
 
-Two codes exist specifically so capability handling is uniform from day one:
+One code exists specifically so capability handling is uniform from day one:
 
 - `not_supported` (HTTP 501): the deployment does not implement the requested
   op or feature. Any op may return it; a client maps the error to its
   `feature` key and disables or degrades that code path.
-- `permission_denied` (HTTP 403): the caller is authenticated but not allowed.
-  This exists **now**, before the authorization plane, so `acl/v0` can land
-  without breaking clients. Deployments may use it today for tenancy denials
-  (for example, refusing namespace enumeration).
 
 The full registry (`ErrorCode` in `loonfs-api`):
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
-| `invalid_path` | 400 | The supplied path is not a valid absolute path. |
-| `invalid_namespace_id` | 400 | The namespace id violates the slug grammar (`format.md`, "Durable naming conventions"). |
-| `invalid_commit_id` | 400 | The commit id violates the id grammar. |
-| `invalid_upload_id` | 400 | The upload id violates the generated-id grammar. |
-| `invalid_inode_id` | 400 | The inode id path parameter is not a valid integer id. |
-| `invalid_revision_no` | 400 | The revision number parameter is not a valid integer. |
-| `invalid_cursor` | 400 | The pagination cursor is malformed, unsupported, expired, wrong-kind, or no longer matches the requested resource. |
-| `invalid_config` | 400 | The request or server configuration is invalid. |
+| `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, or configuration value fails validation. The message names the offending field. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
-| `permission_denied` | 403 | Authenticated, but not allowed to perform this operation. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
 | `namespace_deleted` | 410 | The namespace existed and was deleted. The id is permanently retired. |
 | `path_not_found` | 404 | No visible entry at the path. |
@@ -195,18 +183,15 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
 | `lease_conflict` | 409 | Another writer holds the namespace lease. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
-| `unsupported_move_behavior` | 400 | The requested move behavior is not supported. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
-| `invalid_upload_content` | 400 | The staged or referenced content is invalid. |
-| `rebootstrap_required` | 409 | The change cursor is older than the retention floor. |
+| `rebootstrap_required` | 409 | The resume position — a change cursor or listing snapshot — is no longer available; restart from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
-| `bootstrap_failed` | 500 | Namespace bootstrap failed internally. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
 
@@ -850,7 +835,7 @@ A conforming server must:
     document, never advertising a profile whose required ops are not
     implemented; and
 12. answer unimplemented or disabled surface area with `not_supported` (and
-    its `feature` name) or `permission_denied`, never with undefined behavior.
+    its `feature` name), never with undefined behavior.
 
 ### 7.2 Writer and client requirements
 

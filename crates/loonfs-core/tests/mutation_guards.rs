@@ -1264,7 +1264,7 @@ async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
     let error = begin_direct_put_upload_target(&store, &namespace_id, content_ref, &context)
         .expect_err("unsupported direct_put content ref");
 
-    assert_eq!(error.code(), ErrorCode::InvalidUploadContent);
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         store
             .list_prefix(&upload_session_prefix(namespace_id.as_str()))
@@ -1373,7 +1373,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &context,
     )
     .expect_err("mismatched content ref");
-    assert_eq!(mismatch.code(), ErrorCode::InvalidUploadContent);
+    assert_eq!(mismatch.code(), ErrorCode::InvalidRequest);
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
@@ -1421,7 +1421,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
     )
     .expect_err("direct_put session without target should fail closed");
 
-    assert_eq!(error.code(), ErrorCode::InvalidUploadContent);
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2057,7 +2057,7 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     )
     .expect_err("invalid upload_id should be rejected");
 
-    assert_eq!(error.code(), ErrorCode::InvalidUploadId);
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
         store
             .list_prefix(&upload_session_prefix(namespace_id.as_str()))
@@ -3085,7 +3085,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
         &context,
     )
     .expect_err("invalid create display name");
-    assert_eq!(create_error.code(), ErrorCode::InvalidPath);
+    assert_eq!(create_error.code(), ErrorCode::InvalidRequest);
     assert!(matches!(
         create_error,
         CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
@@ -3121,7 +3121,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
         &context,
     )
     .expect_err("invalid rename display name");
-    assert_eq!(rename_error.code(), ErrorCode::InvalidPath);
+    assert_eq!(rename_error.code(), ErrorCode::InvalidRequest);
     assert!(matches!(
         rename_error,
         CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
@@ -4518,43 +4518,6 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     )
     .expect_err("stale binding should fail");
     assert_eq!(stale_binding.code(), ErrorCode::PathConflict);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_move_behavior_is_named_bad_request_failure() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
-    write_file_bytes(
-        &store,
-        &namespace_id(),
-        "/docs/a.txt",
-        b"hello",
-        &context,
-        Some("seed-rename-mode"),
-    )
-    .expect("seed file");
-    let file = resolve_path(&store, &namespace_id(), "/docs/a.txt").expect("resolve file");
-
-    let error = commit_operations(
-        &store,
-        &namespace_id(),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("unsupported-rename-mode").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::Rename {
-                inode_id: file.inode_id,
-                new_parent_inode: InodeId(1),
-                new_display_name: "b.txt".to_owned(),
-                behavior: loonfs_api::v0::MoveBehavior::Replace,
-            }],
-            message: None,
-        },
-        &context,
-    )
-    .expect_err("unsupported rename mode");
-    assert_eq!(error.code(), ErrorCode::UnsupportedMoveBehavior);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
