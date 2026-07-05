@@ -276,7 +276,6 @@ impl Backend for EmbeddedBackend {
             namespace_id: status.namespace_id,
             head_seq: status.head_seq,
             current_manifest_id: status.current_manifest_id,
-            latest_checkpoint_id: status.latest_checkpoint_id,
             wal_tail_segments: status.wal_tail_segments,
             retention_floor_seq: status.retention_floor_seq,
         })

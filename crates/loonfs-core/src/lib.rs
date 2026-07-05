@@ -61,11 +61,12 @@ pub mod cache {
 
 pub mod control {
     pub use crate::namespace::control::{
-        load_content_store_descriptor_control, load_namespace_descriptor_control,
-        load_namespace_head_control, load_namespace_metadata_root_control,
-        load_namespace_read_anchor, load_namespace_wal_floor_control, ControlObjectIdentity,
-        ControlObjectLoadError, LoadedContentStoreDescriptorControl, LoadedHeadControl,
-        LoadedMetadataRootControl, LoadedNamespaceDescriptorControl, LoadedWalFloorControl,
+        load_content_store_descriptor_control, load_namespace_checkpoint_record_control,
+        load_namespace_descriptor_control, load_namespace_head_control,
+        load_namespace_metadata_root_control, load_namespace_read_anchor,
+        load_namespace_wal_floor_control, ControlObjectIdentity, ControlObjectLoadError,
+        LoadedContentStoreDescriptorControl, LoadedHeadControl, LoadedMetadataRootControl,
+        LoadedNamespaceDescriptorControl, LoadedWalFloorControl,
     };
 }
 

@@ -311,7 +311,6 @@ impl Fs {
             namespace_id: summary.namespace_id,
             head_seq: summary.head_seq,
             current_manifest_id: summary.current_manifest_id,
-            latest_checkpoint_id: summary.latest_checkpoint_id,
             wal_tail_segments: summary.wal_tail_segments,
             retention_floor_seq: summary.retention_floor_seq,
         })

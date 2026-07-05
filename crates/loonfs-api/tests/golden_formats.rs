@@ -19,18 +19,18 @@
 //!   re-encoding.
 
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState,
-    NamespaceConfigState, NamespaceGcPinState, NamespaceState, UploadSessionState, WalFloorBasis,
-    WalFloorState, WalSegmentPointer, WriterBlock,
+    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
+    CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlCodecError,
+    ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState,
+    NamespaceGcPinState, NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
     encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstCodecError, MetadataSstEnvelope,
-    MetadataSstPayload, MetadataTableFamily, NamespaceCheckpointRecord,
-    NamespaceManifestCodecError, NamespaceManifestEnvelope, NamespaceManifestFork,
-    NamespaceManifestPayload,
+    MetadataSstPayload, MetadataTableFamily, NamespaceManifestCodecError,
+    NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCodecError,
@@ -295,15 +295,6 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 source_manifest_id: ManifestId(1),
                 source_head_seq: ChangeSeq(2),
             }),
-            checkpoints: vec![NamespaceCheckpointRecord {
-                checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
-                manifest_id: ManifestId(2),
-                head_seq: ChangeSeq(2),
-                head_commit_id: commit_id(),
-                created_at_ms: 1_000,
-                expires_at_ms: Some(2_000),
-                name: Some("golden".to_owned()),
-            }],
             features: BTreeMap::from([(
                 "index.fulltext".to_owned(),
                 serde_json::json!({ "version": 2 }),
@@ -495,6 +486,27 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        CheckpointRecordState {
+            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
+            namespace_id: namespace_id(),
+            manifest_id: ManifestId(2),
+            manifest_head_seq: ChangeSeq(2),
+            manifest_payload_checksum:
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            head_commit_id: commit_id(),
+            created_at_ms: 3_000,
+            expires_at_ms: None,
+            owner: Some(CheckpointOwner {
+                kind: "fork".to_owned(),
+                id: Some("clone".to_owned()),
+            }),
+            name: None,
+            state: CheckpointRecordLifecycle::Active,
+        },
+    );
+    check_control_golden(
         "control_namespace_gc_pin_state.v1.json",
         ControlObjectKind::NamespaceGcPinState,
         NamespaceGcPinState {
@@ -502,8 +514,6 @@ fn control_objects_match_golden_bytes() {
             source_namespace_id: namespace_id(),
             target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
-            source_manifest_id: ManifestId(2),
-            source_head_seq: ChangeSeq(2),
             created_at_ms: 1_000,
         },
     );

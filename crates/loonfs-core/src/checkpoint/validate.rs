@@ -40,42 +40,6 @@ pub(super) fn validate_namespace_manifest(
             message: "namespace manifest is not initialized".to_owned(),
         });
     }
-    validate_manifest_checkpoint_records(object_key, &manifest.payload)?;
-    Ok(())
-}
-
-pub(super) fn validate_manifest_checkpoint_records(
-    object_key: &str,
-    payload: &NamespaceManifestPayload,
-) -> Result<(), ManifestLoadError> {
-    let mut seen_checkpoint_ids = Vec::new();
-    for checkpoint in &payload.checkpoints {
-        if seen_checkpoint_ids.contains(&checkpoint.checkpoint_id.as_str()) {
-            return Err(ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: format!("duplicate checkpoint id `{}`", checkpoint.checkpoint_id),
-            });
-        }
-        seen_checkpoint_ids.push(checkpoint.checkpoint_id.as_str());
-        if checkpoint.head_seq > payload.head_seq {
-            return Err(ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: format!(
-                    "checkpoint `{}` head seq {:?} is after manifest head seq {:?}",
-                    checkpoint.checkpoint_id, checkpoint.head_seq, payload.head_seq
-                ),
-            });
-        }
-        if checkpoint.manifest_id > payload.manifest_id {
-            return Err(ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: format!(
-                    "checkpoint `{}` references future manifest id {:?}",
-                    checkpoint.checkpoint_id, checkpoint.manifest_id
-                ),
-            });
-        }
-    }
     Ok(())
 }
 

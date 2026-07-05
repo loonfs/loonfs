@@ -8,7 +8,7 @@ use crate::namespace::control::{
     read_head_and_metadata_root, read_wal_floor_seq_or_zero, ControlObjectLoadError,
 };
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, CheckpointId, ManifestId, NamespaceId};
+use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::{
     keys::{namespace_config, wal_head, wal_segment_id_from_key, wal_segment_prefix},
     ObjectStore,
@@ -21,7 +21,6 @@ pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
     pub current_manifest_id: Option<ManifestId>,
-    pub latest_checkpoint_id: Option<CheckpointId>,
     /// WAL segment objects positioned past the loaded manifest.
     ///
     /// Derived from position-ordered object names, not from walking the
@@ -81,11 +80,6 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     let manifest_head_seq = manifest.payload.head_seq;
-    let latest_checkpoint_id = manifest
-        .payload
-        .checkpoints
-        .last()
-        .map(|record| record.checkpoint_id.clone());
     let wal_tail_segments = if head.visible_wal_tip.is_some() {
         count_wal_tail_segments_by_position(store, expected_namespace, manifest_head_seq).await?
     } else {
@@ -100,7 +94,6 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         current_manifest_id: Some(root.manifest_id),
-        latest_checkpoint_id,
         wal_tail_segments,
         retention_floor_seq,
     })

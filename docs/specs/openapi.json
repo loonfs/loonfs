@@ -3252,17 +3252,6 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Current visible namespace sequence."
           },
-          "latest_checkpoint_id": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/CheckpointId",
-                "description": "Latest checkpoint recorded by the head."
-              }
-            ]
-          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace being inspected."
