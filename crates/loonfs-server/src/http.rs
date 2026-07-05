@@ -22,10 +22,10 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
     CreateNamespaceRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, InodeId,
-    LimitError, ListFileRevisionsResponse, NamespaceId, NamespaceIdValidationError,
-    PageCursorError, PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
-    FEATURE_UPLOADS_DIRECT_PUT,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, InodeId, LimitError, ListFileRevisionsResponse, NamespaceId,
+    NamespaceIdValidationError, PageCursorError, PageRequest, PaginationPolicy,
+    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_core::content::{
     mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
@@ -191,6 +191,10 @@ fn app_with_fs(
         .route(
             "/v0/admin/namespaces/:namespace/retention/advance",
             post(advance_retention_handler),
+        )
+        .route(
+            "/v0/admin/namespaces/:namespace/gc",
+            post(gc_namespace_handler),
         )
         .with_state(state)
 }
@@ -1310,6 +1314,56 @@ async fn advance_retention_handler(
     Ok(Json(response))
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/gc",
+        tag = "admin",
+        summary = "Collect garbage",
+        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        request_body(content = GcRequest, description = "Optional window overrides"),
+        responses(
+            (status = 200, description = "Garbage collection pass completed", body = GcResponse),
+            (status = 400, description = "Invalid namespace id or windows", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError)
+        )
+    )
+)]
+async fn gc_namespace_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    OptionalAppJson(request): OptionalAppJson<GcRequest>,
+) -> Result<Json<GcResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = parse_namespace_id(namespace)?;
+    let request = request.unwrap_or_default();
+    let defaults = loonfs_core::GcConfig::default();
+    let config = loonfs_core::GcConfig {
+        grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
+        reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
+    };
+    let report = state
+        .fs
+        .gc_namespace(&namespace_id, &config)
+        .await
+        .map_err(ApiResponseError::runtime)?;
+    Ok(Json(GcResponse {
+        namespace_id,
+        deleted_wal_segments: report.deleted_wal_segments,
+        deleted_metadata_tables: report.deleted_metadata_tables,
+        deleted_manifests: report.deleted_manifests,
+        deleted_checkpoint_records: report.deleted_checkpoint_records,
+        released_pins: report.released_pins,
+        reaped_abandoned_objects: report.reaped_abandoned_objects,
+        retained_candidates: report.retained_candidates,
+        degraded_retention: report.degraded_retention,
+    }))
+}
+
 #[cfg(feature = "openapi")]
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     <LoonfsOpenApi as utoipa::OpenApi>::openapi()
@@ -1349,7 +1403,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         commit_operations_handler,
         list_changes_handler,
         create_checkpoint_handler,
-        advance_retention_handler
+        advance_retention_handler,
+        gc_namespace_handler
     ),
     components(schemas(
         loonfs_api::CapabilityDocument,
@@ -1370,6 +1425,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         RestoreFileRevisionRequest,
         CreateCheckpointResponse,
         AdvanceRetentionResponse,
+        GcRequest,
+        GcResponse,
         ContentRef,
         loonfs_api::NamespaceId,
         loonfs_api::ContentStoreId,

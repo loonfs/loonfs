@@ -97,11 +97,17 @@ impl LocalFsStore {
             )));
         }
 
+        let last_modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
         Ok(ObjectMetadata {
             etag: Some(format!("local-fs-v1:{content_digest}")),
             version: None,
             size_bytes: metadata.len(),
             checksum_sha256,
+            last_modified_ms,
         })
     }
 

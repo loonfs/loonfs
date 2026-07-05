@@ -74,6 +74,7 @@ impl ProviderObjectStore {
             version: meta.version,
             size_bytes: meta.size,
             checksum_sha256,
+            last_modified_ms: u64::try_from(meta.last_modified.timestamp_millis()).ok(),
         }
     }
 
@@ -87,6 +88,7 @@ impl ProviderObjectStore {
             version: result.version,
             size_bytes,
             checksum_sha256,
+            last_modified_ms: None,
         }
     }
 

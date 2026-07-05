@@ -243,6 +243,44 @@ pub struct CreateCheckpointResponse {
 }
 
 /// Result of advancing the retention floor.
+/// Optional overrides for one garbage-collection pass. Absent fields use
+/// the server's conservative defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GcRequest {
+    /// Objects younger than this are never deleted, reachable or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grace_window_ms: Option<u64>,
+    /// Abandoned bootstrap trees older than this may be reaped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reap_window_ms: Option<u64>,
+}
+
+/// Result of one mark-and-sweep garbage-collection pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GcResponse {
+    /// Namespace the pass ran against.
+    pub namespace_id: NamespaceId,
+    /// Unreferenced WAL segments deleted.
+    pub deleted_wal_segments: u64,
+    /// Unreferenced metadata tables deleted.
+    pub deleted_metadata_tables: u64,
+    /// Unreferenced manifests deleted.
+    pub deleted_manifests: u64,
+    /// Dead or expired checkpoint records deleted.
+    pub deleted_checkpoint_records: u64,
+    /// Pins released because their target namespace is terminally deleted.
+    pub released_pins: u64,
+    /// Objects removed while reaping an abandoned bootstrap tree.
+    pub reaped_abandoned_objects: u64,
+    /// Candidates retained at delete time (grace window, missing
+    /// timestamps, or reachable from the fresh root set).
+    pub retained_candidates: u64,
+    /// True when ambiguous roots suppressed manifest/table deletion.
+    pub degraded_retention: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AdvanceRetentionResponse {

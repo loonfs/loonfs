@@ -349,22 +349,26 @@ impl Fs {
         let status_before = self.namespace_status(namespace_id).await?;
         let observed_head_seq = status_before.head_seq;
         if status_before.wal_tail_segments < options.max_wal_tail_segments {
+            let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
             return Ok(MaintenanceTickResult {
                 namespace_id: namespace_id.clone(),
                 status_before,
                 outcome: MaintenanceTickOutcome::NotNeeded,
+                gc,
             });
         }
 
         let checkpoint = match self.create_checkpoint(namespace_id).await {
             Ok(checkpoint) => checkpoint,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
+                let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
                     outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
                         observed_head_seq,
                     },
+                    gc,
                 });
             }
             Err(error) => return Err(error),
@@ -386,11 +390,43 @@ impl Fs {
             }
         };
 
+        let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
         Ok(MaintenanceTickResult {
             namespace_id: namespace_id.clone(),
             status_before,
             outcome,
+            gc,
         })
+    }
+
+    async fn run_tick_gc(
+        &self,
+        namespace_id: &NamespaceId,
+        config: Option<&loonfs_core::GcConfig>,
+    ) -> Result<Option<loonfs_core::GcReport>> {
+        let Some(config) = config else {
+            return Ok(None);
+        };
+        Ok(Some(self.gc_namespace(namespace_id, config).await?))
+    }
+
+    /// Runs the v1 mark-and-sweep garbage collector for one namespace.
+    ///
+    /// Never runs implicitly: callers opt in here or through
+    /// [`MaintenanceTickOptions::gc`].
+    pub async fn gc_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        config: &loonfs_core::GcConfig,
+    ) -> Result<loonfs_core::GcReport> {
+        let report =
+            loonfs_core::gc_namespace(self.store(), namespace_id, config, &self.mutation_context())
+                .await
+                .map_err(RuntimeError::Core)?;
+        // Sweeping can remove objects cached views still reference; drop the
+        // namespace caches rather than trusting them across a collection.
+        self.invalidate_namespace_read_cache(namespace_id);
+        Ok(report)
     }
 
     /// Resolves an absolute path to its authoritative entry at the current
