@@ -4,7 +4,9 @@ use crate::error::MetadataProjectionLoadError;
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
 };
-use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
+use crate::namespace::control::{
+    read_head_and_metadata_root, read_wal_floor_seq_or_zero, ControlObjectLoadError,
+};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, CheckpointId, ManifestId, NamespaceId};
 use loonfs_objectstore::{
@@ -89,13 +91,18 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     } else {
         0
     };
+    let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?;
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         current_manifest_id: Some(root.manifest_id),
         latest_checkpoint_id,
         wal_tail_segments,
-        retention_floor_seq: head.retention_floor_seq,
+        retention_floor_seq,
     })
 }
 

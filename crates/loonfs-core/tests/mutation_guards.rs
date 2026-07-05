@@ -3424,7 +3424,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     ))
     .expect("clone metadata root");
     assert_eq!(clone_root.state.manifest_id, ManifestId(1));
-    assert_eq!(clone_head.state.retention_floor_seq, ChangeSeq(1));
+    let clone_floor = block_on(loonfs_core::control::load_namespace_wal_floor_control(
+        &store,
+        &clone_namespace_id,
+    ))
+    .expect("clone wal floor");
+    assert_eq!(clone_floor.state.floor_seq, ChangeSeq(1));
 
     let target_manifest_key = metadata_manifest(clone_namespace_id.as_str(), ManifestId(1));
     let target_manifest_bytes = store
@@ -4878,7 +4883,6 @@ fn validation_context(
             acquired_at_ms: 1_000,
         }),
         next_inode_id,
-        retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
         recent_segments: Vec::new(),
         state: Default::default(),

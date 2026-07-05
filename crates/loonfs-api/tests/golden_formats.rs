@@ -21,8 +21,8 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CompletedUpload, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState,
-    NamespaceConfigState, NamespaceGcPinState, NamespaceState, UploadSessionState,
-    WalSegmentPointer, WriterBlock,
+    NamespaceConfigState, NamespaceGcPinState, NamespaceState, UploadSessionState, WalFloorBasis,
+    WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
@@ -341,7 +341,6 @@ fn sample_head_state() -> HeadState {
             acquired_at_ms: 2_000,
         }),
         next_inode_id: InodeId(10),
-        retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: Some(sample_wal_pointer()),
         recent_segments: vec![sample_wal_pointer()],
         state: NamespaceState::Active,
@@ -457,6 +456,23 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             content_store_id: content_store_id(),
             name_policy: NamePolicy::default(),
+        },
+    );
+    check_control_golden(
+        "control_wal_floor.v1.json",
+        ControlObjectKind::WalFloor,
+        WalFloorState {
+            namespace_id: namespace_id(),
+            floor_seq: ChangeSeq(1),
+            basis: WalFloorBasis {
+                manifest_id: ManifestId(2),
+                manifest_head_seq: ChangeSeq(2),
+                manifest_payload_checksum:
+                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_owned(),
+            },
+            verified_at_ms: 3_000,
+            updated_at_ms: 3_000,
         },
     );
     check_control_golden(

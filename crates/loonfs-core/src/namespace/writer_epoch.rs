@@ -110,7 +110,6 @@ fn head_with_writer(
             acquired_at_ms: params.now_ms,
         }),
         next_inode_id: current_head.next_inode_id,
-        retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
         recent_segments: current_head.recent_segments.clone(),
         state: current_head.state,

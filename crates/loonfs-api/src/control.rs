@@ -17,16 +17,18 @@ pub enum ControlObjectKind {
     NamespaceConfig,
     ContentStoreDescriptor,
     WalHead,
+    WalFloor,
     MetadataRoot,
     NamespaceGcPinState,
     UploadSession,
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::NamespaceConfig,
         Self::ContentStoreDescriptor,
         Self::WalHead,
+        Self::WalFloor,
         Self::MetadataRoot,
         Self::NamespaceGcPinState,
         Self::UploadSession,
@@ -43,6 +45,7 @@ impl ControlObjectKind {
             Self::NamespaceConfig => 1,
             Self::ContentStoreDescriptor => 1,
             Self::WalHead => 1,
+            Self::WalFloor => 1,
             Self::MetadataRoot => 1,
             Self::NamespaceGcPinState => 1,
             Self::UploadSession => 1,
@@ -54,6 +57,7 @@ impl ControlObjectKind {
             Self::NamespaceConfig => "namespace_config",
             Self::ContentStoreDescriptor => "content_store_descriptor",
             Self::WalHead => "wal_head",
+            Self::WalFloor => "wal_floor",
             Self::MetadataRoot => "metadata_root",
             Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::UploadSession => "upload_session",
@@ -73,6 +77,32 @@ pub struct NamespaceConfigState {
     /// name-key computation on both the write and read paths.
     #[serde(default)]
     pub name_policy: NamePolicy,
+}
+
+/// Manifest basis whose material was verified when the floor advanced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalFloorBasis {
+    pub manifest_id: ManifestId,
+    pub manifest_head_seq: ChangeSeq,
+    pub manifest_payload_checksum: String,
+}
+
+/// Lower bound of retained WAL/change history: the symmetrical pair to
+/// `wal/head.json`.
+///
+/// Updated only by monotonic compare-and-swap on its own etag; never
+/// consulted for live commit visibility. Missing, stale, or unverifiable
+/// floors mean "retain more history", never less. The floor is necessary
+/// but not sufficient for deletion: below-floor objects are candidates,
+/// and actual deletion additionally requires delete-time re-verification
+/// (format spec, "Garbage collection").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalFloorState {
+    pub namespace_id: NamespaceId,
+    pub floor_seq: ChangeSeq,
+    pub basis: WalFloorBasis,
+    pub verified_at_ms: u64,
+    pub updated_at_ms: u64,
 }
 
 /// Cold pointer to the best known materialized metadata root.
@@ -182,7 +212,6 @@ pub struct HeadState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer: Option<WriterBlock>,
     pub next_inode_id: InodeId,
-    pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
     /// Bounded newest-first accelerator over the visible chain, always
@@ -207,7 +236,6 @@ impl HeadState {
             writer_epoch: WriterEpoch(0),
             writer: None,
             next_inode_id: InodeId(2),
-            retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
             recent_segments: Vec::new(),
             state: NamespaceState::Active,
@@ -275,6 +303,7 @@ pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type NamespaceConfigEnvelope = ControlObjectEnvelope<NamespaceConfigState>;
 pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
+pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 pub type NamespaceGcPinStateEnvelope = ControlObjectEnvelope<NamespaceGcPinState>;
 

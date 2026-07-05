@@ -11,14 +11,15 @@ use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
-    NamespaceConfigEnvelope, NamespaceConfigState, WriterBlock,
+    NamespaceConfigEnvelope, NamespaceConfigState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
+    WriterBlock,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, InodeId, InodeKind, NamePolicy, NamespaceId,
     NamespaceIdValidationError, NamespaceSummary,
 };
 use loonfs_objectstore::keys::{
-    content_store_descriptor, metadata_root, namespace_config, wal_head,
+    content_store_descriptor, metadata_root, namespace_config, wal_floor, wal_head,
 };
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
@@ -149,6 +150,29 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             &metadata_root(namespace_id.as_str()),
             Bytes::from(root_bytes),
         )
+        .await
+        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+
+    let floor_envelope = WalFloorEnvelope::from_state(
+        ControlObjectKind::WalFloor,
+        &context.writer_version,
+        WalFloorState {
+            namespace_id: namespace_id.clone(),
+            floor_seq: initial_head.seq,
+            basis: WalFloorBasis {
+                manifest_id: initial_manifest.payload.manifest_id,
+                manifest_head_seq: initial_head.seq,
+                manifest_payload_checksum: initial_manifest.payload_checksum.clone(),
+            },
+            verified_at_ms: context.now_ms,
+            updated_at_ms: context.now_ms,
+        },
+    )
+    .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+    let floor_bytes = encode_control_object(&floor_envelope)
+        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+    store
+        .put_if_absent(&wal_floor(namespace_id.as_str()), Bytes::from(floor_bytes))
         .await
         .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
 

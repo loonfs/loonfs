@@ -140,11 +140,10 @@ pub enum MetadataViewError {
         reason: String,
     },
     #[error(
-        "the cursor's snapshot (seq {requested_seq:?}) is no longer available (retained range {snapshot_floor_seq:?}..={head_seq:?}); restart the listing"
+        "the cursor's snapshot (seq {requested_seq:?}) is no longer available (current head {head_seq:?}); restart the listing"
     )]
     SnapshotUnavailable {
         requested_seq: ChangeSeq,
-        snapshot_floor_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
     #[error(
@@ -579,7 +578,6 @@ mod tests {
             (
                 MetadataViewError::SnapshotUnavailable {
                     requested_seq: ChangeSeq(1),
-                    snapshot_floor_seq: ChangeSeq(2),
                     head_seq,
                 },
                 ErrorCode::RebootstrapRequired,

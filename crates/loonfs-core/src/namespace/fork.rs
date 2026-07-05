@@ -14,7 +14,8 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
     MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState,
-    NamespaceGcPinState, NamespaceGcPinStateEnvelope, NamespaceState, WriterBlock,
+    NamespaceGcPinState, NamespaceGcPinStateEnvelope, NamespaceState, WalFloorBasis,
+    WalFloorEnvelope, WalFloorState, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
@@ -90,7 +91,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             acquired_at_ms: context.now_ms,
         }),
         next_inode_id: source_manifest.payload.next_inode_id,
-        retention_floor_seq: fork_seq,
         visible_wal_tip: None,
         recent_segments: Vec::new(),
         state: NamespaceState::Active,
@@ -168,6 +168,29 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         new_namespace_id,
         &metadata_root(new_namespace_id.as_str()),
         &encode_control_object(&target_root).map_err(|err| CoreError::Store(err.to_string()))?,
+    )
+    .await?;
+    let target_floor = WalFloorEnvelope::from_state(
+        ControlObjectKind::WalFloor,
+        &context.writer_version,
+        WalFloorState {
+            namespace_id: new_namespace_id.clone(),
+            floor_seq: fork_seq,
+            basis: WalFloorBasis {
+                manifest_id: target_manifest_id,
+                manifest_head_seq: fork_seq,
+                manifest_payload_checksum: target_manifest.payload_checksum.clone(),
+            },
+            verified_at_ms: context.now_ms,
+            updated_at_ms: context.now_ms,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &loonfs_objectstore::keys::wal_floor(new_namespace_id.as_str()),
+        &encode_control_object(&target_floor).map_err(|err| CoreError::Store(err.to_string()))?,
     )
     .await?;
     put_target_namespace_control_object(
