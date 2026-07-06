@@ -22,11 +22,9 @@ use loonfs_api::{
 };
 use serde::Deserialize;
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
-use walkdir::WalkDir;
 
 /// Client configuration loaded from TOML or built by the caller.
 #[derive(Debug, Clone, Deserialize)]
@@ -45,19 +43,6 @@ pub struct Client {
     agent: ureq::Agent,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,
-}
-
-/// Result of downloading a remote path to local storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GetPathResult {
-    pub destination: PathBuf,
-    pub bytes_written: u64,
-}
-
-/// Result of uploading a local path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PutPathResult {
-    pub committed_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,113 +819,6 @@ impl Client {
         )
     }
 
-    pub fn get_to_path(
-        &self,
-        spec: &NamespacePath,
-        destination: impl AsRef<Path>,
-    ) -> Result<GetPathResult, ClientError> {
-        let destination = destination.as_ref();
-        let entry = self.stat_path(spec)?;
-        match entry.inode_kind {
-            loonfs_api::InodeKind::File => {
-                let bytes = self.read_file_bytes(spec)?;
-                let target = if destination.is_dir() {
-                    destination.join(file_name_for_path(&spec.absolute_path)?)
-                } else {
-                    destination.to_path_buf()
-                };
-                let bytes_written = write_local_file(&target, &bytes)?;
-                Ok(GetPathResult {
-                    destination: target,
-                    bytes_written,
-                })
-            }
-            loonfs_api::InodeKind::Dir => {
-                let bytes_written = self.get_directory(spec, destination)?;
-                Ok(GetPathResult {
-                    destination: destination.to_path_buf(),
-                    bytes_written,
-                })
-            }
-        }
-    }
-
-    pub fn put_from_path(
-        &self,
-        source: impl AsRef<Path>,
-        spec: &NamespacePath,
-    ) -> Result<PutPathResult, ClientError> {
-        let source = source.as_ref();
-        if source.is_file() {
-            let bytes = fs::read(source).map_err(|err| ClientError::Io(err.to_string()))?;
-            let result = self.write_file_bytes(spec, &bytes)?;
-            return Ok(PutPathResult {
-                committed_seq: result.committed_seq,
-            });
-        }
-        if !source.is_dir() {
-            return Err(ClientError::Io(format!(
-                "local path is neither file nor directory: {}",
-                source.display()
-            )));
-        }
-
-        let mut last_result = None;
-        for entry in WalkDir::new(source).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(source)
-                .map_err(|err| ClientError::Io(err.to_string()))?;
-            let remote_path = join_remote_path(&spec.absolute_path, relative)?;
-            let target = NamespacePath {
-                namespace: spec.namespace.clone(),
-                absolute_path: remote_path,
-            };
-            let bytes = fs::read(entry.path()).map_err(|err| ClientError::Io(err.to_string()))?;
-            last_result = Some(self.write_file_bytes(&target, &bytes)?);
-        }
-
-        let Some(result) = last_result else {
-            return Err(ClientError::Io(format!(
-                "local directory does not contain any files: {}",
-                source.display()
-            )));
-        };
-
-        Ok(PutPathResult {
-            committed_seq: result.committed_seq,
-        })
-    }
-
-    fn get_directory(&self, spec: &NamespacePath, destination: &Path) -> Result<u64, ClientError> {
-        fs::create_dir_all(destination).map_err(|err| ClientError::Io(err.to_string()))?;
-        let mut bytes_written = 0;
-        for entry in self.list_path(spec)?.entries {
-            let child_spec = NamespacePath {
-                namespace: spec.namespace.clone(),
-                absolute_path: entry.absolute_path.clone(),
-            };
-            let child_dest = destination.join(if entry.display_name.is_empty() {
-                file_name_for_path(&entry.absolute_path)?
-            } else {
-                entry.display_name.clone()
-            });
-            match entry.inode_kind {
-                loonfs_api::InodeKind::Dir => {
-                    bytes_written += self.get_directory(&child_spec, &child_dest)?;
-                }
-                loonfs_api::InodeKind::File => {
-                    let bytes = self.read_file_bytes(&child_spec)?;
-                    bytes_written += write_local_file(&child_dest, &bytes)?;
-                }
-            }
-        }
-        Ok(bytes_written)
-    }
-
     fn request_json<Req, Resp>(
         &self,
         request: ureq::Request,
@@ -1051,33 +929,6 @@ fn parse_commit_id(commit_id: &str) -> Result<CommitId, ClientError> {
 
 fn generated_commit_id() -> String {
     CommitId::generate().to_string()
-}
-
-fn file_name_for_path(path: &str) -> Result<String, ClientError> {
-    path.rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| ClientError::InvalidNamespacePath(path.to_owned()))
-}
-
-fn join_remote_path(base: &str, relative: &Path) -> Result<String, ClientError> {
-    let mut path = PathBuf::from(base.trim_end_matches('/'));
-    path.push(relative);
-    let rendered = format!("/{}", path.display().to_string().trim_start_matches('/'));
-    if rendered.contains('\\') {
-        return Err(ClientError::InvalidNamespacePath(rendered));
-    }
-    Ok(rendered)
-}
-
-fn write_local_file(path: &Path, bytes: &[u8]) -> Result<u64, ClientError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| ClientError::Io(err.to_string()))?;
-    }
-    let mut file = fs::File::create(path).map_err(|err| ClientError::Io(err.to_string()))?;
-    file.write_all(bytes)
-        .map_err(|err| ClientError::Io(err.to_string()))?;
-    Ok(bytes.len() as u64)
 }
 
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ClientError> {
