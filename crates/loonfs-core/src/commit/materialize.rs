@@ -93,7 +93,7 @@ pub(super) fn materialize_validated_op(
                 WalDelta::CreateInode {
                     delta_index: *create_inode_delta_index,
                     inode_id: *child_inode_id,
-                    inode_kind: InodeKind::Dir,
+                    inode_kind: InodeKind::Directory,
                 },
             );
             push_delta(

@@ -35,7 +35,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         vec![
             InodeRecord {
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
             },
             InodeRecord {
@@ -72,12 +72,12 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         vec![
             InodeRecord {
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
             },
             InodeRecord {
                 inode_id: InodeId(2),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
             },
             InodeRecord {
@@ -200,7 +200,7 @@ fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
         vec![
             InodeRecord {
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
             },
             InodeRecord {
@@ -247,7 +247,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         vec![
             InodeRecord {
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(0),
             },
             InodeRecord {
@@ -303,7 +303,7 @@ fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
         vec![
             InodeRecord {
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
                 created_seq: ChangeSeq(1),
             },
             InodeRecord {
@@ -344,7 +344,7 @@ fn metadata_state_serialized_shape_preserves_row_field_names() {
     let metadata_state = MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: InodeId(1),
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
         }],
         Vec::new(),
@@ -377,7 +377,7 @@ fn metadata_state_accessors_expose_rows_read_only() {
     let metadata_state = MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: InodeId(1),
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
         }],
         Vec::new(),
@@ -535,7 +535,7 @@ fn churned_binding_state() -> MetadataState {
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
             }],
         )
         .expect("seed root");
@@ -546,7 +546,7 @@ fn churned_binding_state() -> MetadataState {
                 WalDelta::CreateInode {
                     delta_index: 0,
                     inode_id: InodeId(2),
-                    inode_kind: InodeKind::Dir,
+                    inode_kind: InodeKind::Directory,
                 },
                 WalDelta::BindDirentry {
                     delta_index: 1,
@@ -558,7 +558,7 @@ fn churned_binding_state() -> MetadataState {
                 WalDelta::CreateInode {
                     delta_index: 2,
                     inode_id: InodeId(4),
-                    inode_kind: InodeKind::Dir,
+                    inode_kind: InodeKind::Directory,
                 },
                 WalDelta::BindDirentry {
                     delta_index: 3,
@@ -607,7 +607,7 @@ fn churned_binding_state() -> MetadataState {
                 WalDelta::CreateInode {
                     delta_index: 0,
                     inode_id: InodeId(3),
-                    inode_kind: InodeKind::Dir,
+                    inode_kind: InodeKind::Directory,
                 },
                 WalDelta::BindDirentry {
                     delta_index: 1,

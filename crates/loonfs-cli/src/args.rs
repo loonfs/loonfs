@@ -34,8 +34,8 @@ pub(crate) enum Command {
     Restore(FilesystemRestoreArgs),
     Mkdir(FilesystemPathArgs),
     Rm(FilesystemPathArgs),
-    Mv(FilesystemMoveArgs),
-    Cp(FilesystemMoveArgs),
+    Mv(FilesystemTransferArgs),
+    Cp(FilesystemTransferArgs),
     Changes(ChangesArgs),
     Admin {
         #[command(subcommand)]
@@ -292,7 +292,7 @@ pub(crate) struct FilesystemPutArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct FilesystemMoveArgs {
+pub(crate) struct FilesystemTransferArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub source_path: String,

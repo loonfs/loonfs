@@ -48,9 +48,9 @@ pub(crate) enum NamespaceInitializationError {
 
 pub(crate) async fn load_namespace_descriptor<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceConfigState, NamespaceCatalogLoadError> {
-    let loaded_descriptor = read_namespace_descriptor_object(store, expected_namespace)
+    let loaded_descriptor = read_namespace_descriptor_object(store, expected_namespace_id)
         .await
         .map_err(NamespaceCatalogLoadError::LoadNamespaceDescriptor)?;
     Ok(loaded_descriptor.envelope.state)
@@ -58,9 +58,9 @@ pub(crate) async fn load_namespace_descriptor<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {
-    let namespace_config = load_namespace_descriptor(store, expected_namespace).await?;
+    let namespace_config = load_namespace_descriptor(store, expected_namespace_id).await?;
     let content_store_id = namespace_config.content_store_id.clone();
     read_content_store_descriptor_object(store, &content_store_id)
         .await
@@ -74,9 +74,9 @@ pub(crate) async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<ContentStoreId, NamespaceCatalogLoadError> {
-    Ok(load_namespace_catalog_entry(store, expected_namespace)
+    Ok(load_namespace_catalog_entry(store, expected_namespace_id)
         .await?
         .content_store_id)
 }

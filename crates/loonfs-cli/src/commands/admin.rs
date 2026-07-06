@@ -67,7 +67,7 @@ fn run_admin_retention_advance(
     })
 }
 
-pub(crate) fn run_changes(
+pub(crate) fn run_admin_changes(
     kind: CommandKind,
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {

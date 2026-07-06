@@ -336,8 +336,8 @@ mod tests {
     use bytes::Bytes;
     use futures::stream::BoxStream;
     use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId};
-    use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::content_blob;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };

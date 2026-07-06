@@ -108,7 +108,7 @@ fn validate_replay_record(
 }
 
 pub(super) fn validate_wal_segment_for_replay(
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
     expected_base_head_seq: ChangeSeq,
     object_key: &str,
     envelope: &WalSegmentEnvelope,
@@ -127,9 +127,9 @@ pub(super) fn validate_wal_segment_for_replay(
         });
     }
 
-    if &envelope.payload.namespace_id != expected_namespace {
+    if &envelope.payload.namespace_id != expected_namespace_id {
         return Err(WalReplayError::NamespaceMismatch {
-            expected: expected_namespace.clone(),
+            expected: expected_namespace_id.clone(),
             actual: envelope.payload.namespace_id.clone(),
         });
     }

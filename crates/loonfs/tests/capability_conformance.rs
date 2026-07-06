@@ -8,7 +8,7 @@ use loonfs::{
     CapabilityDocument, Fs, FsConfig, RuntimeCacheConfig, SharedObjectStore, TraceMode,
     TraceStoreKind,
 };
-use loonfs_objectstore::fs::LocalFsStore;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;

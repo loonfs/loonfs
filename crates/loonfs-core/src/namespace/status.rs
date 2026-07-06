@@ -41,51 +41,51 @@ pub struct NamespaceHeadEtagProbe {
 
 pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceHeadSummary> {
-    match namespace_initialization_state(store, expected_namespace).await {
+    match namespace_initialization_state(store, expected_namespace_id).await {
         Ok(NamespaceInitializationState::Complete) => {}
         Ok(NamespaceInitializationState::Absent) => {
             return Err(CoreError::MetadataProjection(
                 MetadataProjectionLoadError::LoadNamespaceDescriptor(
                     ControlObjectLoadError::MissingObject {
-                        object_key: namespace_config(expected_namespace.as_str()),
+                        object_key: namespace_config(expected_namespace_id.as_str()),
                     },
                 ),
             ));
         }
         Ok(NamespaceInitializationState::Partial) => {
             return Err(CoreError::NamespacePartiallyInitialized {
-                namespace_id: expected_namespace.clone(),
+                namespace_id: expected_namespace_id.clone(),
             });
         }
         Err(error) => return Err(map_namespace_initialization_error_to_core(error)),
     }
 
-    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, expected_namespace)
+    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, expected_namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     if loaded_head.envelope.state.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
-            namespace_id: expected_namespace.clone(),
+            namespace_id: expected_namespace_id.clone(),
         });
     }
     let head = loaded_head.envelope.state;
     let root = loaded_root.envelope.state;
-    let manifest = load_namespace_manifest_envelope(store, expected_namespace, root.manifest_id)
+    let manifest = load_namespace_manifest_envelope(store, expected_namespace_id, root.manifest_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     let manifest_head_seq = manifest.payload.head_seq;
     let wal_tail_segments = if head.visible_wal_tip.is_some() {
-        count_wal_tail_segments_by_position(store, expected_namespace, manifest_head_seq).await?
+        count_wal_tail_segments_by_position(store, expected_namespace_id, manifest_head_seq).await?
     } else {
         0
     };
-    let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace)
+    let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -136,10 +136,10 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
 )]
 pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
-    expected_namespace: &NamespaceId,
+    expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceHeadEtagProbe> {
-    NamespaceId::parse(expected_namespace.as_str())?;
-    let object_key = wal_head(expected_namespace.as_str());
+    NamespaceId::parse(expected_namespace_id.as_str())?;
+    let object_key = wal_head(expected_namespace_id.as_str());
     let metadata = store
         .head(&object_key)
         .await

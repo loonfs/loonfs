@@ -212,7 +212,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let Some(parent) = self.visible_inode(parent_inode_id).await? else {
             return Ok(Vec::new());
         };
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return Ok(Vec::new());
         }
 
@@ -740,7 +740,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let Some(parent) = self.visible_inode(parent_inode_id).await? else {
             return Ok(Vec::new());
         };
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return Ok(Vec::new());
         }
 

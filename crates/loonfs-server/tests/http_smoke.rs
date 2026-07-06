@@ -176,8 +176,14 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
             .expect("create namespace");
         let docs = NamespacePath::parse("demo:/docs").expect("docs path");
         let other = NamespacePath::parse("demo:/other").expect("other path");
-        harness.client.create_dir(&docs).expect("create docs dir");
-        harness.client.create_dir(&other).expect("create other dir");
+        harness
+            .client
+            .create_directory(&docs)
+            .expect("create docs dir");
+        harness
+            .client
+            .create_directory(&other)
+            .expect("create other dir");
         for name in ["a.txt", "b.txt", "c.txt"] {
             let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
             harness
@@ -266,7 +272,10 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
             .create_namespace("demo")
             .expect("create namespace");
         let docs = NamespacePath::parse("demo:/docs").expect("docs path");
-        harness.client.create_dir(&docs).expect("create docs dir");
+        harness
+            .client
+            .create_directory(&docs)
+            .expect("create docs dir");
         for name in ["B.txt", "a.txt", "c.txt"] {
             let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
             harness
@@ -302,13 +311,13 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         let directory = NamespacePath::parse("demo:/notes").expect("parse directory path");
         harness
             .client
-            .create_dir(&directory)
+            .create_directory(&directory)
             .expect("create directory");
         let directory_entry = harness
             .client
             .stat_path(&directory)
             .expect("stat directory");
-        assert_eq!(directory_entry.inode_kind, InodeKind::Dir);
+        assert_eq!(directory_entry.inode_kind, InodeKind::Directory);
 
         let target = NamespacePath::parse("demo:/notes/hello.txt").expect("parse namespace path");
         harness

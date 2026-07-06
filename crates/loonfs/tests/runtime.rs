@@ -8,7 +8,7 @@ use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
+    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
     DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
     MutationResult, NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy,
@@ -16,8 +16,8 @@ use loonfs::{
     TraceStoreKind, UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{metadata_manifest, namespace_config, wal_head};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -39,7 +39,7 @@ fn runtime(root: &Path, writer_id: &str) -> Fs {
         .expect("build runtime")
 }
 
-fn namespace() -> NamespaceId {
+fn namespace_id() -> NamespaceId {
     NamespaceId::parse("demo").expect("valid namespace id")
 }
 
@@ -115,11 +115,11 @@ trait FsTestExt {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<MutationResult>;
-    fn create_dir_blocking(
+    fn create_directory_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: CreateDirOptions,
+        options: CreateDirectoryOptions,
     ) -> loonfs::Result<MutationResult>;
     fn delete_path_blocking(
         &self,
@@ -248,13 +248,13 @@ impl FsTestExt for Fs {
         block_on(self.put_file_bytes(namespace_id, absolute_path, bytes, options))
     }
 
-    fn create_dir_blocking(
+    fn create_directory_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: CreateDirOptions,
+        options: CreateDirectoryOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.create_dir(namespace_id, absolute_path, options))
+        block_on(self.create_directory(namespace_id, absolute_path, options))
     }
 
     fn delete_path_blocking(
@@ -410,11 +410,11 @@ fn builder_metrics_recorder_instruments_object_store() {
     let fs = Fs::builder(store(temp_dir.path()))
         .writer_id("metrics-test")
         .trace_store_kind(TraceStoreKind::LocalFs)
-        .with_metrics_recorder(recorder.clone())
+        .metrics_recorder(recorder.clone())
         .build()
         .expect("build runtime");
 
-    fs.create_namespace_blocking(&namespace(), CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id(), CreateNamespaceOptions::default())
         .expect("create namespace");
 
     let samples = recorder.samples();
@@ -431,7 +431,7 @@ fn builder_metrics_recorder_instruments_object_store() {
 fn filesystem_operations_match_core_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "filesystem-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -501,7 +501,7 @@ fn filesystem_operations_match_core_semantics() {
 async fn async_runtime_methods_are_the_engine_boundary() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "async-runtime-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     Fs::create_namespace(&fs, &namespace_id, CreateNamespaceOptions::default())
         .await
@@ -527,7 +527,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
 #[test]
 fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -585,7 +585,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 #[test]
 fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -604,15 +604,19 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     setup
-        .create_dir_blocking(&namespace_id, "/seed-a", CreateDirOptions::default())
+        .create_directory_blocking(&namespace_id, "/seed-a", CreateDirectoryOptions::default())
         .expect("seed first WAL segment");
     setup
-        .create_dir_blocking(&namespace_id, "/seed-b", CreateDirOptions::default())
+        .create_directory_blocking(&namespace_id, "/seed-b", CreateDirectoryOptions::default())
         .expect("seed second WAL segment");
 
     raw_store.reset_wal_get_count();
     measured
-        .create_dir_blocking(&namespace_id, "/measured-a", CreateDirOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/measured-a",
+            CreateDirectoryOptions::default(),
+        )
         .expect("first measured write loads existing tail");
     assert!(
         raw_store.wal_get_count() > 0,
@@ -621,7 +625,11 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 
     raw_store.reset_wal_get_count();
     measured
-        .create_dir_blocking(&namespace_id, "/measured-b", CreateDirOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/measured-b",
+            CreateDirectoryOptions::default(),
+        )
         .expect("second measured write advances cached publish tail");
     assert_eq!(
         raw_store.wal_get_count(),
@@ -633,7 +641,7 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 #[test]
 fn runtime_publish_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -652,17 +660,17 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     setup
-        .create_dir_blocking(&namespace_id, "/seed-a", CreateDirOptions::default())
+        .create_directory_blocking(&namespace_id, "/seed-a", CreateDirectoryOptions::default())
         .expect("seed first WAL segment");
     setup
-        .create_dir_blocking(&namespace_id, "/seed-b", CreateDirOptions::default())
+        .create_directory_blocking(&namespace_id, "/seed-b", CreateDirectoryOptions::default())
         .expect("seed second WAL segment");
 
     measured
-        .create_dir_blocking(
+        .create_directory_blocking(
             &namespace_id,
             "/should-succeed",
-            CreateDirOptions::default(),
+            CreateDirectoryOptions::default(),
         )
         .expect("publish projects the visible WAL tail without a segment limit");
 }
@@ -670,7 +678,7 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
 #[test]
 fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -689,7 +697,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+        .create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
 
     reader
@@ -697,7 +705,11 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .expect("prime reader cache");
 
     writer
-        .create_dir_blocking(&namespace_id, "/docs/new", CreateDirOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/docs/new",
+            CreateDirectoryOptions::default(),
+        )
         .expect("advance head from another runtime");
 
     raw_store.reset_wal_get_count();
@@ -712,7 +724,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
 #[test]
 fn runtime_cache_can_be_disabled() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -796,7 +808,7 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
 #[test]
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -837,7 +849,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 #[test]
 fn runtime_read_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let fs = Fs::builder(store(temp_dir.path()))
         .writer_id("tail-read-test")
         .build()
@@ -845,9 +857,9 @@ fn runtime_read_allows_multi_segment_wal_tail() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
-    fs.create_dir_blocking(&namespace_id, "/more", CreateDirOptions::default())
+    fs.create_directory_blocking(&namespace_id, "/more", CreateDirectoryOptions::default())
         .expect("create another WAL segment");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
@@ -857,7 +869,7 @@ fn runtime_read_allows_multi_segment_wal_tail() {
 #[test]
 fn stale_head_write_error_invalidates_runtime_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -870,21 +882,25 @@ fn stale_head_write_error_invalidates_runtime_cache() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("prime read cache");
 
     raw_store.fail_head_cas();
     assert_core_error_kind(
-        fs.create_dir_blocking(&namespace_id, "/stale", CreateDirOptions::default()),
+        fs.create_directory_blocking(&namespace_id, "/stale", CreateDirectoryOptions::default()),
         ErrorCode::StaleHead,
     );
 
     raw_store.allow_head_cas();
     raw_store.reset_wal_get_count();
-    fs.create_dir_blocking(&namespace_id, "/after-stale", CreateDirOptions::default())
-        .expect("write after stale head should reload publish tail");
+    fs.create_directory_blocking(
+        &namespace_id,
+        "/after-stale",
+        CreateDirectoryOptions::default(),
+    )
+    .expect("write after stale head should reload publish tail");
     assert!(
         raw_store.wal_get_count() > 0,
         "failed publish attempt should invalidate cached publish tail"
@@ -900,7 +916,7 @@ fn stale_head_write_error_invalidates_runtime_cache() {
 fn delete_options_select_recursive_behavior() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "delete-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -942,7 +958,7 @@ fn delete_options_select_recursive_behavior() {
 fn directory_pages_use_canonical_name_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-order-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in [
@@ -998,7 +1014,7 @@ fn directory_pages_use_canonical_name_key_order() {
 fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "file-revision-page-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
@@ -1080,7 +1096,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
 fn directory_cursor_after_later_writes_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
@@ -1131,7 +1147,7 @@ fn directory_cursor_after_later_writes_is_rejected() {
 fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-floor-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
@@ -1182,7 +1198,7 @@ fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
 fn directory_cursor_rejects_path_inode_mismatch() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-mismatch-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt"] {
@@ -1223,7 +1239,7 @@ fn directory_cursor_rejects_path_inode_mismatch() {
 fn forked_namespace_shares_content_then_diverges() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "fork-test");
-    let source = namespace();
+    let source = namespace_id();
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
 
     fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
@@ -1275,7 +1291,7 @@ fn forked_namespace_shares_content_then_diverges() {
 fn upload_flow_is_available_from_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "upload-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1306,7 +1322,7 @@ fn upload_flow_is_available_from_runtime() {
 fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "direct-put-upload-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let bytes = b"direct uploaded";
     let content_ref = ContentRef::whole_file_v0(bytes);
 
@@ -1350,12 +1366,12 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 #[test]
 fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let fs = runtime(temp_dir.path(), "read-fallback-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
@@ -1370,7 +1386,7 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
 #[test]
 fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
@@ -1405,7 +1421,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_materialized_stat_and_list_share_async_store() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let fs = runtime(temp_dir.path(), "concurrent-materialized-read-test");
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1442,7 +1458,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
 #[test]
 fn repeated_materialized_stat_uses_metadata_table_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let fs = runtime(temp_dir.path(), "metadata-table-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -1472,7 +1488,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 #[test]
 fn put_file_bytes_validates_content_ref_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
@@ -1499,7 +1515,7 @@ fn put_file_bytes_validates_content_ref_before_publish() {
 #[test]
 fn begin_upload_validates_controls_without_replay_reads() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -1545,7 +1561,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
 #[test]
 fn runtime_control_cache_reuses_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -1558,7 +1574,7 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
@@ -1576,7 +1592,7 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
 #[test]
 fn control_cache_eviction_reloads_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
@@ -1594,11 +1610,11 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    fs.create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+    fs.create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
     fs.create_namespace_blocking(&other_namespace, CreateNamespaceOptions::default())
         .expect("create other namespace");
-    fs.create_dir_blocking(&other_namespace, "/docs", CreateDirOptions::default())
+    fs.create_directory_blocking(&other_namespace, "/docs", CreateDirectoryOptions::default())
         .expect("create other docs");
 
     fs.stat_path_blocking(&namespace_id, "/docs")
@@ -1618,7 +1634,7 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
 #[test]
 fn runtime_control_cache_reloads_head_after_external_change() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -1637,7 +1653,7 @@ fn runtime_control_cache_reloads_head_after_external_change() {
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     writer
-        .create_dir_blocking(&namespace_id, "/docs", CreateDirOptions::default())
+        .create_directory_blocking(&namespace_id, "/docs", CreateDirectoryOptions::default())
         .expect("create docs");
     reader
         .stat_path_blocking(&namespace_id, "/docs")
@@ -1652,7 +1668,11 @@ fn runtime_control_cache_reloads_head_after_external_change() {
     assert_eq!(raw_store.head_get_count(), 0);
 
     writer
-        .create_dir_blocking(&namespace_id, "/docs/new", CreateDirOptions::default())
+        .create_directory_blocking(
+            &namespace_id,
+            "/docs/new",
+            CreateDirectoryOptions::default(),
+        )
         .expect("advance head");
     raw_store.reset_control_get_counts();
     reader
@@ -1670,7 +1690,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
         .writer_id("begin-upload-missing-partial-test")
         .build()
         .expect("build runtime");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
@@ -1697,7 +1717,7 @@ fn begin_upload_rejects_malformed_descriptors() {
         .writer_id("begin-upload-malformed-test")
         .build()
         .expect("build runtime");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1760,7 +1780,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
 fn explicit_commit_appears_in_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "commit-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1792,7 +1812,7 @@ fn explicit_commit_appears_in_change_feed() {
 fn publish_auto_ticks_maintenance_once_tail_reaches_threshold() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "auto-tick-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
@@ -1825,7 +1845,7 @@ fn publish_auto_ticks_maintenance_once_tail_reaches_threshold() {
 fn namespace_status_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "status-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1859,7 +1879,7 @@ fn namespace_status_reports_wal_tail_segments() {
 fn root_stat_and_list_work_immediately_after_namespace_create() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "initial-manifest-read-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1869,7 +1889,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
         .expect("stat root after create");
     assert_eq!(root.absolute_path, "/");
     assert_eq!(root.inode_id, InodeId(1));
-    assert_eq!(root.inode_kind, InodeKind::Dir);
+    assert_eq!(root.inode_kind, InodeKind::Directory);
     assert_eq!(root.head_seq, ChangeSeq(0));
 
     let entries = fs
@@ -1882,7 +1902,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
 fn namespace_status_and_tick_reject_missing_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "missing-status-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     assert_core_error_kind(
         fs.namespace_status_blocking(&namespace_id),
@@ -1903,7 +1923,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
         .writer_id("partial-status-test")
         .build()
         .expect("build runtime");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1924,7 +1944,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
 fn maintenance_tick_below_threshold_is_not_needed() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-not-needed-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1954,7 +1974,7 @@ fn maintenance_tick_below_threshold_is_not_needed() {
 fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-publish-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1994,7 +2014,7 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
 fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2066,7 +2086,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
 fn maintenance_tick_counts_segments_not_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-segment-count-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2149,7 +2169,7 @@ fn maintenance_tick_counts_segments_not_commits() {
 fn maintenance_tick_rejects_zero_threshold() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-config-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2171,7 +2191,7 @@ fn maintenance_tick_rejects_zero_threshold() {
 #[test]
 fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
         temp_dir.path(),
         namespace_id.as_str(),
@@ -2220,7 +2240,7 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
 fn checkpoint_and_retention_hooks_are_available() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "maintenance-test");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2246,7 +2266,7 @@ fn separate_runtime_instances_share_object_store_state() {
     let temp_dir = tempdir().expect("tempdir");
     let writer = runtime(temp_dir.path(), "writer");
     let reader = runtime(temp_dir.path(), "reader");
-    let namespace_id = namespace();
+    let namespace_id = namespace_id();
 
     writer
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())

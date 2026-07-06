@@ -13,14 +13,14 @@
 //! ```no_run
 //! use loonfs_api::NamespaceId;
 //! use loonfs_core::{BootstrapOptions, NamespaceEngine, WriteOptions};
-//! use loonfs_objectstore::fs::LocalFsStore;
+//! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //!
 //! let store = LocalFsStore::new(std::env::temp_dir()).expect("store");
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
 //! let engine = NamespaceEngine::builder(store)
-//!     .namespace(namespace)
-//!     .writer("example-writer")
+//!     .namespace_id(namespace)
+//!     .writer_id("example-writer")
 //!     .build()
 //!     .expect("engine");
 //!

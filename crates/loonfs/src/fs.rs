@@ -12,9 +12,9 @@ use crate::{
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
     ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
-    CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId, ListChangesOptions,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
+    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
+    ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder,
     PutFileOptions, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
@@ -134,11 +134,11 @@ impl FsBuilder {
         self
     }
 
-    /// Install object-store metrics collection for this runtime.
+    /// Installs object-store metrics collection for this runtime.
     ///
     /// The runtime wraps the provided object store before opening `Fs`; callers do not need to
     /// manually construct an instrumented store.
-    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
         self.metrics_recorder = Some(recorder);
         self
     }
@@ -152,7 +152,7 @@ impl FsBuilder {
         let store = match self.metrics_recorder {
             Some(recorder) => Arc::new(
                 InstrumentedObjectStore::new(self.store, recorder)
-                    .with_store_kind(trace_store_kind.as_str()),
+                    .store_kind(trace_store_kind.as_str()),
             ) as SharedObjectStore,
             None => self.store,
         };
@@ -795,11 +795,11 @@ impl Fs {
     }
 
     /// Creates a directory at an absolute path.
-    pub async fn create_dir(
+    pub async fn create_directory(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        options: CreateDirOptions,
+        options: CreateDirectoryOptions,
     ) -> Result<MutationResult> {
         self.publish_path_intent(
             namespace_id,
@@ -1308,8 +1308,8 @@ impl Fs {
         store: S,
     ) -> NamespaceEngine<S> {
         NamespaceEngine::builder(store)
-            .namespace(namespace_id.clone())
-            .writer(self.inner.config.writer_id.clone())
+            .namespace_id(namespace_id.clone())
+            .writer_id(self.inner.config.writer_id.clone())
             .writer_session_id(self.inner.writer_session_id.clone())
             .writer_version(self.inner.config.writer_version.clone())
             .build()

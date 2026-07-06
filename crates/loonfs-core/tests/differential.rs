@@ -24,7 +24,7 @@ fn content_ref(seed: &str) -> ContentRef {
     }
 }
 
-fn create_dir(
+fn create_directory(
     delta_index: u32,
     inode_id: InodeId,
     parent_inode_id: InodeId,
@@ -34,7 +34,7 @@ fn create_dir(
         WalDelta::CreateInode {
             delta_index,
             inode_id,
-            inode_kind: InodeKind::Dir,
+            inode_kind: InodeKind::Directory,
         },
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
@@ -125,7 +125,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let core_state = core_bootstrap_state();
     let model_state = model_bootstrap_state();
 
-    let create_dir = create_dir(0, InodeId(2), InodeId(1), "docs");
+    let create_directory = create_directory(0, InodeId(2), InodeId(1), "docs");
     let create_file = create_file(
         0,
         InodeId(3),
@@ -136,7 +136,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let replace_file = append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2"));
 
     let core_state = core_state
-        .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
+        .apply_committed_wal_deltas(ChangeSeq(1), &create_directory)
         .expect("core applies create-dir delta")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
@@ -147,7 +147,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
         .metadata_state;
 
     let model_state = model_state
-        .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
+        .apply_committed_wal_deltas(ChangeSeq(1), &create_directory)
         .expect("model applies create-dir delta")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
@@ -163,7 +163,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
 #[test]
 fn metadata_apply_matches_model_for_rename() {
     assert_states_match(&[
-        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
         create_file(
             0,
             InodeId(3),
@@ -178,7 +178,7 @@ fn metadata_apply_matches_model_for_rename() {
 #[test]
 fn metadata_apply_matches_model_for_restore_revision() {
     assert_states_match(&[
-        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
         create_file(
             0,
             InodeId(3),
@@ -194,7 +194,7 @@ fn metadata_apply_matches_model_for_restore_revision() {
 #[test]
 fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
     assert_states_match(&[
-        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
         create_file(
             0,
             InodeId(3),
@@ -209,7 +209,7 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
 #[test]
 fn metadata_apply_matches_model_for_delete_file() {
     assert_states_match(&[
-        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
         create_file(
             0,
             InodeId(3),
@@ -224,8 +224,8 @@ fn metadata_apply_matches_model_for_delete_file() {
 #[test]
 fn metadata_apply_matches_model_for_delete_subtree() {
     assert_states_match(&[
-        create_dir(0, InodeId(2), InodeId(1), "docs"),
-        create_dir(0, InodeId(3), InodeId(2), "nested"),
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
+        create_directory(0, InodeId(3), InodeId(2), "nested"),
         tombstone(0, InodeId(2)),
     ]);
 }
@@ -237,7 +237,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
+                inode_kind: InodeKind::Directory,
             }],
         )
         .expect("bootstrap core root")
@@ -372,7 +372,7 @@ fn normalize_inode(
     (
         inode_id,
         match inode_kind {
-            InodeKind::Dir => "dir",
+            InodeKind::Directory => "dir",
             InodeKind::File => "file",
         },
         created_seq,

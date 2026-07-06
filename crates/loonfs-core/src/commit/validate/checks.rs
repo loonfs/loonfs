@@ -243,7 +243,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 validate_inode_kind(
                     &metadata_state,
                     *root_inode_id,
-                    InodeKind::Dir,
+                    InodeKind::Directory,
                     || CommitValidationError::DeleteSubtreeRootMissing {
                         root_inode_id: *root_inode_id,
                     },
@@ -456,7 +456,7 @@ async fn validate_name_absent<V: CommitValidationView>(
     validate_inode_kind(
         metadata_state,
         parent_inode_id,
-        InodeKind::Dir,
+        InodeKind::Directory,
         parent_missing,
         parent_not_directory,
     )
@@ -596,7 +596,7 @@ async fn validate_name_precondition_parent<V: CommitValidationView>(
     validate_inode_kind(
         metadata_state,
         parent_inode_id,
-        InodeKind::Dir,
+        InodeKind::Directory,
         || CommitValidationError::NamePreconditionParentMissing { parent_inode_id },
         |actual_kind| CommitValidationError::NamePreconditionParentNotDirectory {
             parent_inode_id,
@@ -615,7 +615,7 @@ async fn validate_directory_empty_precondition<V: CommitValidationView>(
         .visible_inode(inode_id)
         .await?
         .ok_or(CommitValidationError::DirectoryEmptyPreconditionInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::Dir {
+    if inode.inode_kind != InodeKind::Directory {
         return Err(
             CommitValidationError::DirectoryEmptyPreconditionInodeNotDirectory {
                 inode_id,
@@ -765,7 +765,7 @@ async fn validate_rename_does_not_cycle<V: CommitValidationView>(
         .inode_at_seq(inode_id)
         .await?
         .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::Dir {
+    if inode.inode_kind != InodeKind::Directory {
         return Ok(());
     }
     if metadata_state
