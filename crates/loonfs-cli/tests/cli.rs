@@ -616,7 +616,7 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
 
     let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
     assert_failure(&create);
-    assert_eq!(json_error(&create)["code"], "invalid_input");
+    assert_eq!(json_error(&create)["code"], "invalid_request");
     assert!(json_error(&create)["message"]
         .as_str()
         .unwrap()
@@ -625,11 +625,11 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
     assert_failure(&fork);
-    assert_eq!(json_error(&fork)["code"], "invalid_input");
+    assert_eq!(json_error(&fork)["code"], "invalid_request");
 
     let use_namespace = harness.run(&["--json", "use", "bad/name"]);
     assert_failure(&use_namespace);
-    assert_eq!(json_error(&use_namespace)["code"], "invalid_input");
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_request");
 }
 
 #[test]
@@ -649,15 +649,15 @@ fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
 
     let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
     assert_failure(&create);
-    assert_eq!(json_error(&create)["code"], "invalid_input");
+    assert_eq!(json_error(&create)["code"], "invalid_request");
 
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
     assert_failure(&fork);
-    assert_eq!(json_error(&fork)["code"], "invalid_input");
+    assert_eq!(json_error(&fork)["code"], "invalid_request");
 
     let use_namespace = harness.run(&["--json", "use", "bad/name"]);
     assert_failure(&use_namespace);
-    assert_eq!(json_error(&use_namespace)["code"], "invalid_input");
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_request");
 }
 
 #[test]
@@ -726,6 +726,78 @@ fn external_remote_profile_executes_through_http() {
     let use_clone = harness.run(&["--json", "use", "clone"]);
     assert_success(&use_clone);
     assert_eq!(json_data(&use_clone)["namespace"], "clone");
+}
+
+/// Embedded and remote profiles must report the same `code` for the same
+/// failure: registry codes pass through verbatim in both modes instead of
+/// being rewritten to CLI-local codes on one side.
+#[test]
+fn embedded_and_remote_profiles_emit_the_same_error_codes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "error-parity"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+    }
+
+    // Creating a namespace that already exists.
+    let embedded = harness.run(&[
+        "--json",
+        "namespace",
+        "create",
+        "--profile",
+        "embedded",
+        "demo",
+    ]);
+    let remote = harness.run(&[
+        "--json",
+        "namespace",
+        "create",
+        "--profile",
+        "remote",
+        "demo",
+    ]);
+    assert_failure(&embedded);
+    assert_failure(&remote);
+    assert_eq!(json_error(&embedded)["code"], "namespace_exists");
+    assert_eq!(json_error(&embedded)["code"], json_error(&remote)["code"]);
+
+    // A malformed namespace id.
+    let embedded = harness.run(&[
+        "--json",
+        "namespace",
+        "create",
+        "--profile",
+        "embedded",
+        "bad/name",
+    ]);
+    let remote = harness.run(&[
+        "--json",
+        "namespace",
+        "create",
+        "--profile",
+        "remote",
+        "bad/name",
+    ]);
+    assert_failure(&embedded);
+    assert_failure(&remote);
+    assert_eq!(json_error(&embedded)["code"], "invalid_request");
+    assert_eq!(json_error(&embedded)["code"], json_error(&remote)["code"]);
 }
 
 #[test]
