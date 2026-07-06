@@ -6,7 +6,8 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{ChangeSeq, NamespaceId};
+use loonfs_api::v0::BeginUploadRequest;
+use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_core::gc::{gc_namespace, GcConfig};
 use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
 use loonfs_objectstore::fs::LocalFsStore;
@@ -16,6 +17,10 @@ use loonfs_objectstore::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
+
+fn page_limit() -> EffectiveLimit {
+    EffectiveLimit::new(std::num::NonZeroU32::new(1024).expect("nonzero limit"))
+}
 
 fn context() -> MutationContext {
     MutationContext {
@@ -122,7 +127,10 @@ async fn reads_commits_and_change_feed_never_list() {
         .expect("write junk");
 
     let baseline = store.list_count();
-    let staged = engine.begin_upload().await.expect("begin upload");
+    let staged = engine
+        .begin_upload(BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
     let uploaded = engine
         .upload_content(&staged.upload_id, b"uploaded\n")
         .await
@@ -146,7 +154,7 @@ async fn reads_commits_and_change_feed_never_list() {
     let bytes = engine.read_file("/docs/hello.txt").await.expect("read");
     assert_eq!(bytes.bytes, b"hello\n");
     let changes = engine
-        .list_changes_after(ChangeSeq(0))
+        .list_changes_after(ChangeSeq(0), page_limit())
         .await
         .expect("change feed");
     assert!(!changes.changes.is_empty());
@@ -192,7 +200,10 @@ async fn maintenance_never_touches_the_wal_head() {
     gc_namespace(&store, &namespace_id, &GcConfig::default(), &context)
         .await
         .expect("gc pass");
-    let staged = engine.begin_upload().await.expect("second upload");
+    let staged = engine
+        .begin_upload(BeginUploadRequest::default())
+        .await
+        .expect("second upload");
     let uploaded = engine
         .upload_content(&staged.upload_id, b"more\n")
         .await

@@ -5,14 +5,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadResponse,
-    ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest,
+    CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
-    DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
-    NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, ListChangesOptions,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
+    MutationResult, NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutBehavior,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
     UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
@@ -290,7 +290,7 @@ impl FsTestExt for Fs {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<BeginUploadResponse> {
-        block_on(self.begin_upload(namespace_id))
+        block_on(self.begin_upload(namespace_id, BeginUploadRequest::default()))
     }
 
     fn upload_content_blocking(
@@ -332,7 +332,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ChangesResponse> {
-        block_on(self.list_changes_after(namespace_id, after_seq))
+        block_on(self.list_changes_after(namespace_id, after_seq, ListChangesOptions::default()))
     }
 
     fn create_checkpoint_blocking(

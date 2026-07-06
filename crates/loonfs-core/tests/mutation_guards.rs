@@ -166,7 +166,10 @@ fn begin_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).begin_upload())
+    block_on(
+        namespace_engine(store, namespace_id, context)
+            .begin_upload(loonfs_api::v0::BeginUploadRequest::default()),
+    )
 }
 
 fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
@@ -206,7 +209,8 @@ fn list_changes_after<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
 ) -> Result<loonfs_api::v0::ChangesResponse, CoreError> {
     block_on(
-        namespace_engine(store, namespace_id, &mutation_context()).list_changes_after(after_seq),
+        namespace_engine(store, namespace_id, &mutation_context())
+            .list_changes_after(after_seq, page_limit(loonfs_api::DEFAULT_PAGE_LIMIT)),
     )
 }
 
