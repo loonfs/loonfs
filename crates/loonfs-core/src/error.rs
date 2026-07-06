@@ -41,14 +41,14 @@ pub enum CoreError {
     DurableContent(#[from] DurableContentValidationError),
     #[error(transparent)]
     WriterEpoch(#[from] WriterEpochAcquireError),
-    #[error("commit validation failed: {0:?}")]
-    CommitValidation(CommitValidationError),
-    #[error("wal build failed: {0:?}")]
-    WalBuild(WalBuildError),
-    #[error("metadata apply failed: {0:?}")]
-    MetadataApply(MetadataApplyError),
-    #[error("head publish failed: {0:?}")]
-    HeadPublish(CommitHeadPublishError),
+    #[error("commit validation failed: {0}")]
+    CommitValidation(#[from] CommitValidationError),
+    #[error("wal build failed: {0}")]
+    WalBuild(#[from] WalBuildError),
+    #[error("metadata apply failed: {0}")]
+    MetadataApply(#[from] MetadataApplyError),
+    #[error("head publish failed: {0}")]
+    HeadPublish(#[from] CommitHeadPublishError),
     #[error("failed to write wal object: {0}")]
     WalWrite(String),
     #[error("invalid absolute path `{0}`")]
@@ -61,14 +61,14 @@ pub enum CoreError {
     InvalidUploadId(GeneratedIdValidationError),
     #[error("path not found `{0}`")]
     MissingPath(String),
-    #[error("revision `{revision_no:?}` not found for inode `{inode_id}`")]
+    #[error("revision `{revision_no}` not found for inode `{inode_id}`")]
     MissingRevision {
         inode_id: InodeId,
         revision_no: loonfs_api::RevisionNo,
     },
-    #[error("expected file at `{path}` but found `{kind:?}`")]
+    #[error("expected file at `{path}` but found `{kind}`")]
     ExpectedFile { path: String, kind: InodeKind },
-    #[error("expected directory at `{path}` but found `{kind:?}`")]
+    #[error("expected directory at `{path}` but found `{kind}`")]
     ExpectedDirectory { path: String, kind: InodeKind },
     #[error("directory not empty `{0}`")]
     DirectoryNotEmpty(String),
@@ -93,14 +93,14 @@ pub enum CoreError {
     #[error("invalid cursor: {0}")]
     InvalidCursor(String),
     #[error(
-        "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
+        "change feed cursor `{after_seq}` is older than retention floor `{retention_floor_seq}`"
     )]
     RebootstrapRequired {
         after_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
     #[error(
-        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq:?}`"
+        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
     )]
     TombstoneConflict {
         path: String,
@@ -140,21 +140,21 @@ pub enum MetadataViewError {
         reason: String,
     },
     #[error(
-        "the cursor's snapshot (seq {requested_seq:?}) is no longer available (current head {head_seq:?}); restart the listing"
+        "the cursor's snapshot (seq `{requested_seq}`) is no longer available (current head `{head_seq}`); restart the listing"
     )]
     SnapshotUnavailable {
         requested_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
     #[error(
-        "metadata view only supports the loaded head `{head_seq:?}`, not historical snapshot `{requested_seq:?}`"
+        "metadata view only supports the loaded head `{head_seq}`, not historical snapshot `{requested_seq}`"
     )]
     UnsupportedHistoricalRead {
         requested_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
     #[error(
-        "namespace `{namespace_id}` current manifest changed during metadata view load: expected `{expected_manifest_id:?}`, found `{actual_manifest_id:?}`"
+        "namespace `{namespace_id}` current manifest changed during metadata view load: expected `{expected_manifest_id}`, found `{actual_manifest_id:?}`"
     )]
     ManifestChangedDuringViewLoad {
         namespace_id: NamespaceId,
@@ -193,8 +193,8 @@ pub enum MetadataProjectionLoadError {
     WalChainLoad(#[from] WalChainLoadError),
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
-    #[error("wal replay failed: {0:?}")]
-    WalReplay(WalReplayError),
+    #[error("wal replay failed: {0}")]
+    WalReplay(#[from] WalReplayError),
     #[error(
         "metadata projection head mismatch: expected current head `{expected:?}`, replayed `{actual:?}`"
     )]
@@ -214,30 +214,6 @@ impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
                 Self::LoadContentStoreDescriptor(error)
             }
         }
-    }
-}
-
-impl From<CommitValidationError> for CoreError {
-    fn from(value: CommitValidationError) -> Self {
-        Self::CommitValidation(value)
-    }
-}
-
-impl From<WalBuildError> for CoreError {
-    fn from(value: WalBuildError) -> Self {
-        Self::WalBuild(value)
-    }
-}
-
-impl From<MetadataApplyError> for CoreError {
-    fn from(value: MetadataApplyError) -> Self {
-        Self::MetadataApply(value)
-    }
-}
-
-impl From<CommitHeadPublishError> for CoreError {
-    fn from(value: CommitHeadPublishError) -> Self {
-        Self::HeadPublish(value)
     }
 }
 

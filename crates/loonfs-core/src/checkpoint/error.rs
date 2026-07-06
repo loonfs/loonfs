@@ -28,7 +28,7 @@ pub enum ManifestLoadError {
         actual: NamespaceId,
     },
     #[error(
-        "namespace manifest id mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+        "namespace manifest id mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     ManifestIdMismatch {
         object_key: String,
@@ -36,7 +36,7 @@ pub enum ManifestLoadError {
         actual: ManifestId,
     },
     #[error(
-        "namespace manifest conflict for `{object_key}` manifest `{manifest_id:?}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
+        "namespace manifest conflict for `{object_key}` manifest `{manifest_id}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"
     )]
     ManifestConflict {
         object_key: String,
@@ -73,7 +73,7 @@ pub enum ManifestLoadError {
         actual: NamespaceId,
     },
     #[error(
-        "metadata SST seq mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+        "metadata SST seq mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
     SegmentSeqMismatch {
         object_key: String,

@@ -29,7 +29,7 @@ pub struct PreparedCommit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CommitPrepareError {
-    #[error("prepared commit namespace mismatch: request={request:?}, plan={plan:?}")]
+    #[error("prepared commit namespace mismatch: request `{request}`, plan `{plan}`")]
     NamespaceMismatch {
         request: NamespaceId,
         plan: NamespaceId,

@@ -1144,6 +1144,82 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_commit_name_collision_reports_readable_error_message() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-collision-message",
+        "http-collision-message",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+
+        let content_ref = stage_uploaded_content_ref(&harness.client, namespace, b"taken bytes\n");
+        harness
+            .client
+            .commit_operations(
+                namespace,
+                &ApiCommitRequest {
+                    commit_id: CommitId::parse("req-collision-create").expect("valid commit id"),
+                    preconditions: Vec::new(),
+                    ops: vec![CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "taken.txt".to_owned(),
+                        content_ref: content_ref.clone(),
+                    }],
+                    message: None,
+                },
+            )
+            .expect("create file");
+
+        match harness.client.commit_operations(
+            namespace,
+            &ApiCommitRequest {
+                commit_id: CommitId::parse("req-collision-repeat").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "taken.txt".to_owned(),
+                    content_ref,
+                }],
+                message: None,
+            },
+        ) {
+            Err(ClientError::Api {
+                status,
+                code,
+                message,
+                ..
+            }) => {
+                assert_eq!(status, 409);
+                assert_eq!(code, "path_conflict");
+                // The error body carries the human-readable Display message,
+                // not Rust Debug syntax.
+                assert!(
+                    message.contains("collides with existing name `taken.txt`"),
+                    "expected readable collision message, got {message:?}"
+                );
+                assert!(
+                    !message.contains("InodeId(") && !message.contains('{'),
+                    "expected no Debug formatting in message, got {message:?}"
+                );
+            }
+            other => panic!("expected path_conflict, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
