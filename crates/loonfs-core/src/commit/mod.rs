@@ -32,6 +32,7 @@ pub use self::plan::{CommitPlan, CommitValidationContext};
 pub use self::precondition::{Precondition, ResolvedBinding};
 pub(crate) use self::prepared::CommitIdentitySource;
 pub use self::prepared::{CommitExecutionContext, CommitPrepareError, PreparedCommit};
+pub(crate) use self::publish::PreparedCommitHeadPublish;
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 pub use self::publish_error::CommitHeadPublishError;
 pub use self::request::CommitRequest;
