@@ -12,11 +12,11 @@ use crate::commit::{
     wal_payload_from_materialized_commit, CommitHeadPublishError, MaterializedCommit,
     PreparedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
 };
+use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::PublishPlanningSession;
-use crate::publisher::NamespaceMutationCandidate;
 use crate::storage::content::ContentValidationTracker;
 use crate::timing::MonotonicTimer;
 use crate::wal::{prepare_wal_segment, PreparedWalSegment};
@@ -159,7 +159,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         Ok(value) => value,
         Err(error) => return (0..candidates.len()).map(|_| Err(error.clone())).collect(),
     };
-    if projection.wal_tail_segments > crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS {
+    if projection.wal_tail_segments > crate::commit_engine::WAL_TAIL_BACKPRESSURE_SEGMENTS {
         // Same backpressure contract as the caching engine: the commit
         // surface must not outrun maintenance either (format spec,
         // "Maintenance operations").
@@ -168,7 +168,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             reason: format!(
                 "wal tail has {} segments; publishes resume once maintenance brings it back to {} or fewer",
                 projection.wal_tail_segments,
-                crate::publisher::WAL_TAIL_BACKPRESSURE_SEGMENTS
+                crate::commit_engine::WAL_TAIL_BACKPRESSURE_SEGMENTS
             ),
         };
         return (0..candidates.len())

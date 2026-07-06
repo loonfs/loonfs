@@ -7,7 +7,6 @@
 
 mod config;
 mod http;
-mod publisher;
 mod trace;
 
 pub use config::{

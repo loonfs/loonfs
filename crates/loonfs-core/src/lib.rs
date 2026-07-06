@@ -31,6 +31,7 @@
 
 mod checkpoint;
 pub mod commit;
+mod commit_engine;
 pub mod content;
 mod context;
 mod control_update;
@@ -43,7 +44,6 @@ pub mod namespace;
 mod options;
 pub mod path;
 mod protocol;
-mod publisher;
 mod storage;
 pub mod timing;
 mod wal;
@@ -73,11 +73,11 @@ pub mod control {
 
 pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
-    pub use crate::path::write::PathMutationIntent;
-    pub use crate::publisher::{
+    pub use crate::commit_engine::{
         DirectObjectStorePublisher, FlushPolicy, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, NamespaceMutationCandidate, PublishOptions,
     };
+    pub use crate::path::write::PathMutationIntent;
 }
 
 #[cfg(any(test, feature = "inspection"))]

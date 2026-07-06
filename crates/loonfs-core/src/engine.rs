@@ -1,10 +1,10 @@
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
+use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
-use crate::publisher::NamespaceMutationCandidate;
 use loonfs_api::generated_id;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
@@ -685,7 +685,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<CoreResult<CommitResponse>> {
-        crate::publisher::publish_namespace_mutations_batch(
+        crate::commit_engine::publish_namespace_mutations_batch(
             &self.store,
             &self.namespace_id,
             candidates,
