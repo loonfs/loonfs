@@ -9,6 +9,7 @@ mod cache;
 mod config;
 mod fs;
 mod options;
+pub mod publisher;
 mod time;
 mod trace;
 
@@ -37,10 +38,13 @@ pub use loonfs_core::{
     DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, GcConfig, GcReport,
 };
 
-/// Server-integration seam: the vocabulary a batching publisher uses to
-/// submit work to the runtime. Most embedded users never need this module.
+/// Integration seam: the vocabulary for handing classified mutation work to
+/// the runtime's batch publication surface. The server's filesystem
+/// handlers build [`publish::PathMutationIntent`]s for the [`publisher`]
+/// front-end, and [`Fs::publish_namespace_mutations_batch`] accepts
+/// [`publish::NamespaceMutationCandidate`]s directly. Most embedded users
+/// never need this module.
 pub mod publish {
-    pub use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
 }
 

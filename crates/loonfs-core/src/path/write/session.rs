@@ -63,11 +63,11 @@ impl PublishPlanningSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::context::MutationContext;
     use crate::engine::NamespaceEngine;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
-    use crate::publisher::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
     use loonfs_objectstore::fs::LocalFsStore;

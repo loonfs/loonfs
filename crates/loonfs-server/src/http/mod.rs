@@ -38,7 +38,6 @@ use self::handlers_namespace::{
 };
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
-use crate::publisher::PublisherRegistry;
 use axum::async_trait;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath};
@@ -46,6 +45,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use loonfs::publisher::PublisherRegistry;
 use loonfs::{
     ErrorCode, Fs, JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, SharedObjectStore,
     TraceMode, TraceStoreKind,
