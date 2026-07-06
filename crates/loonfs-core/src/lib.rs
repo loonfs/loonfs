@@ -41,7 +41,7 @@ mod invariants;
 pub mod metadata;
 pub mod namespace;
 mod options;
-mod path;
+pub mod path;
 mod protocol;
 mod publisher;
 mod storage;
