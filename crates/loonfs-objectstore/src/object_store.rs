@@ -59,25 +59,79 @@ pub struct ByteRange {
     pub end_exclusive: u64,
 }
 
+/// Failure of one object-store operation.
+///
+/// Every object-scoped variant names the object it is about via `object_key`
+/// (for list operations, the listed prefix). The exceptions are deliberate:
+/// `InvalidContentRef` fails before a key exists, `Unsupported` is about a
+/// store capability, and `Configuration` is about store construction.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ObjectStoreError {
-    #[error("object not found")]
-    NotFound,
-    #[error("invalid object key: {0}")]
-    InvalidKey(String),
+    #[error("object not found `{object_key}`")]
+    NotFound { object_key: String },
+    #[error("invalid object key `{object_key}`: {message}")]
+    InvalidKey { object_key: String, message: String },
+    /// Not object-scoped: the content ref never resolved to an object key.
     #[error("invalid content ref: {0}")]
     InvalidContentRef(String),
-    #[error("invalid byte range")]
-    InvalidRange,
-    #[error("precondition failed")]
-    PreconditionFailed,
-    #[error("conflict")]
-    Conflict,
+    #[error("invalid byte range for `{object_key}`")]
+    InvalidRange { object_key: String },
+    #[error("precondition failed for `{object_key}`")]
+    PreconditionFailed { object_key: String },
+    #[error("conflict for `{object_key}`")]
+    Conflict { object_key: String },
+    /// Not object-scoped: the store lacks a required capability.
     #[error("unsupported capability: {0}")]
     Unsupported(&'static str),
-    #[error("transport error: {0}")]
-    Transport(String),
+    /// Not object-scoped: store construction or configuration failed before
+    /// any object was addressed.
+    #[error("invalid object store configuration: {0}")]
+    Configuration(String),
+    #[error("transport error for `{object_key}`: {message}")]
+    Transport { object_key: String, message: String },
+}
+
+impl ObjectStoreError {
+    /// Builds a [`ObjectStoreError::Transport`] for an operation on `object_key`.
+    pub fn transport(object_key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Transport {
+            object_key: object_key.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Key of the object (or listed prefix) the failing operation targeted,
+    /// when the failure is object-scoped.
+    pub fn object_key(&self) -> Option<&str> {
+        match self {
+            Self::NotFound { object_key }
+            | Self::InvalidKey { object_key, .. }
+            | Self::InvalidRange { object_key }
+            | Self::PreconditionFailed { object_key }
+            | Self::Conflict { object_key }
+            | Self::Transport { object_key, .. } => Some(object_key),
+            Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
+        }
+    }
+
+    /// Failure text without the object key, for wrappers that record the key
+    /// as their own structured field.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotFound { .. } => "object not found".to_owned(),
+            Self::InvalidKey { message, .. } => format!("invalid object key: {message}"),
+            Self::InvalidContentRef(message) => format!("invalid content ref: {message}"),
+            Self::InvalidRange { .. } => "invalid byte range".to_owned(),
+            Self::PreconditionFailed { .. } => "precondition failed".to_owned(),
+            Self::Conflict { .. } => "conflict".to_owned(),
+            Self::Unsupported(capability) => format!("unsupported capability: {capability}"),
+            Self::Configuration(message) => {
+                format!("invalid object store configuration: {message}")
+            }
+            Self::Transport { message, .. } => message.clone(),
+        }
+    }
 }
 
 #[async_trait]

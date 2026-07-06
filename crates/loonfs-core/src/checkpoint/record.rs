@@ -60,24 +60,27 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
         writer_version,
         record.clone(),
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
-    let encoded =
-        encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| {
+        CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
+    })?;
+    let encoded = encode_control_object(&envelope).map_err(|err| {
+        CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
+    })?;
     let object_key = checkpoint_record(record.namespace_id.as_str(), record.checkpoint_id.as_str());
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
         Ok(_) => Ok(CheckpointRecordWrite::Created),
-        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             let existing =
                 read_checkpoint_record(store, &record.namespace_id, &record.checkpoint_id)
                     .await?
                     .ok_or_else(|| {
-                        CoreError::Store(format!(
+                        CoreError::Internal(format!(
                             "checkpoint record `{object_key}` conflicted but cannot be read back"
                         ))
                     })?;
             Ok(CheckpointRecordWrite::Existing(Box::new(existing.state)))
         }
-        Err(error) => Err(CoreError::Store(error.to_string())),
+        Err(error) => Err(CoreError::store(&object_key, &error)),
     }
 }
 
@@ -95,7 +98,7 @@ pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
     let Some(body) = store
         .get_with_metadata(&object_key)
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))?
+        .map_err(|error| CoreError::store(&object_key, &error))?
     else {
         return Ok(None);
     };
@@ -127,7 +130,7 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
     for _attempt in 0..STATE_CAS_ATTEMPTS {
         let Some(loaded) = read_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
-            return Err(CoreError::Store(format!(
+            return Err(CoreError::Internal(format!(
                 "checkpoint record `{object_key}` disappeared during a state change"
             )));
         };
@@ -141,9 +144,12 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
             writer_version,
             next,
         )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded =
-            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| {
+            CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
+        })?;
+        let encoded = encode_control_object(&envelope).map_err(|err| {
+            CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
+        })?;
         let Some(etag) = loaded.etag.as_deref() else {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "missing etag for checkpoint record `{object_key}`"
@@ -154,11 +160,13 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
             .await
         {
             Ok(_) => return Ok(()),
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-            Err(error) => return Err(CoreError::Store(error.to_string())),
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+            ) => continue,
+            Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
     }
-    Err(CoreError::Store(format!(
+    Err(CoreError::Internal(format!(
         "checkpoint record `{object_key}` state change retries exhausted"
     )))
 }

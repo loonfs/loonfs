@@ -51,7 +51,10 @@ impl ProviderObjectStore {
 
     fn to_path(&self, key: &str) -> Result<Path, ObjectStoreError> {
         let scoped = scope_object_key(self.key_prefix.as_deref(), key)?;
-        Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey(err.to_string()))
+        Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey {
+            object_key: key.to_owned(),
+            message: err.to_string(),
+        })
     }
 
     pub(crate) fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
@@ -65,7 +68,10 @@ impl ProviderObjectStore {
         }
         Path::parse(scoped)
             .map(Some)
-            .map_err(|err| ObjectStoreError::InvalidKey(err.to_string()))
+            .map_err(|err| ObjectStoreError::InvalidKey {
+                object_key: prefix.to_owned(),
+                message: err.to_string(),
+            })
     }
 
     fn from_meta(meta: ObjectMeta, checksum_sha256: Option<String>) -> ObjectMetadata {
@@ -102,12 +108,18 @@ impl ProviderObjectStore {
         };
         let metadata = match self.head(key).await? {
             Some(metadata) => metadata,
-            None => return Err(ObjectStoreError::NotFound),
+            None => {
+                return Err(ObjectStoreError::NotFound {
+                    object_key: key.to_owned(),
+                })
+            }
         };
         if range.end_exclusive < range.start_inclusive
             || range.start_inclusive > metadata.size_bytes
         {
-            return Err(ObjectStoreError::InvalidRange);
+            return Err(ObjectStoreError::InvalidRange {
+                object_key: key.to_owned(),
+            });
         }
 
         let bounded_end = range.end_exclusive.min(metadata.size_bytes);
@@ -128,7 +140,7 @@ impl ObjectStore for ProviderObjectStore {
         match self.inner.head(&path).await {
             Ok(meta) => Ok(Some(Self::from_meta(meta, None))),
             Err(err) if provider_not_found(&err) => Ok(None),
-            Err(err) => Err(map_provider_error(err)),
+            Err(err) => Err(map_provider_error(key, err)),
         }
     }
 
@@ -144,14 +156,17 @@ impl ObjectStore for ProviderObjectStore {
         match self.inner.get(&path).await {
             Ok(result) => {
                 let metadata = Self::from_meta(result.meta.clone(), None);
-                let bytes = result.bytes().await.map_err(map_provider_error)?;
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|err| map_provider_error(key, err))?;
                 Ok(Some(ObjectBody {
                     metadata,
                     bytes: bytes.to_vec(),
                 }))
             }
             Err(err) if provider_not_found(&err) => Ok(None),
-            Err(err) => Err(map_provider_error(err)),
+            Err(err) => Err(map_provider_error(key, err)),
         }
     }
 
@@ -163,9 +178,13 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         let Some(provider_range) = self.provider_range(key, range).await? else {
             return match self.inner.get(&path).await {
-                Ok(result) => result.bytes().await.map(Some).map_err(map_provider_error),
+                Ok(result) => result
+                    .bytes()
+                    .await
+                    .map(Some)
+                    .map_err(|err| map_provider_error(key, err)),
                 Err(err) if provider_not_found(&err) => Ok(None),
-                Err(err) => Err(map_provider_error(err)),
+                Err(err) => Err(map_provider_error(key, err)),
             };
         };
 
@@ -178,9 +197,13 @@ impl ObjectStore for ProviderObjectStore {
             ..Default::default()
         };
         match self.inner.get_opts(&path, options).await {
-            Ok(result) => result.bytes().await.map(Some).map_err(map_provider_error),
+            Ok(result) => result
+                .bytes()
+                .await
+                .map(Some)
+                .map_err(|err| map_provider_error(key, err)),
             Err(err) if provider_not_found(&err) => Ok(None),
-            Err(err) => Err(map_provider_error(err)),
+            Err(err) => Err(map_provider_error(key, err)),
         }
     }
 
@@ -206,9 +229,11 @@ impl ObjectStore for ProviderObjectStore {
         {
             Ok(result) => Ok(Self::from_put_result(result, size_bytes, checksum_sha256)),
             Err(err) if compare_and_swap && provider_not_found(&err) => {
-                Err(ObjectStoreError::PreconditionFailed)
+                Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                })
             }
-            Err(err) => Err(map_provider_error(err)),
+            Err(err) => Err(map_provider_error(key, err)),
         }
     }
 
@@ -217,7 +242,7 @@ impl ObjectStore for ProviderObjectStore {
         match self.inner.delete(&path).await {
             Ok(()) => Ok(()),
             Err(err) if provider_not_found(&err) => Ok(()),
-            Err(err) => Err(map_provider_error(err)),
+            Err(err) => Err(map_provider_error(key, err)),
         }
     }
 
@@ -230,10 +255,12 @@ impl ObjectStore for ProviderObjectStore {
             Err(err) => return stream::once(async { Err(err) }).boxed(),
         };
         let key_prefix = self.key_prefix.clone();
+        let listed_prefix = prefix.to_owned();
         self.inner
             .list(prefix_path.as_ref())
             .filter_map(move |result| {
                 let key_prefix = key_prefix.clone();
+                let listed_prefix = listed_prefix.clone();
                 async move {
                     match result {
                         Ok(meta) => {
@@ -243,7 +270,7 @@ impl ObjectStore for ProviderObjectStore {
                                 None => Some(Ok(key.to_owned())),
                             }
                         }
-                        Err(err) => Some(Err(map_provider_error(err))),
+                        Err(err) => Some(Err(map_provider_error(&listed_prefix, err))),
                     }
                 }
             })
@@ -277,32 +304,40 @@ fn provider_not_found(err: &provider_store::Error) -> bool {
     matches!(err, provider_store::Error::NotFound { .. })
 }
 
-fn map_provider_error(err: provider_store::Error) -> ObjectStoreError {
+fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
     match err {
-        provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound,
+        provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound {
+            object_key: object_key.to_owned(),
+        },
         provider_store::Error::AlreadyExists { .. }
         | provider_store::Error::Precondition { .. }
-        | provider_store::Error::NotModified { .. } => ObjectStoreError::PreconditionFailed,
-        provider_store::Error::InvalidPath { source } => {
-            ObjectStoreError::InvalidKey(source.to_string())
-        }
+        | provider_store::Error::NotModified { .. } => ObjectStoreError::PreconditionFailed {
+            object_key: object_key.to_owned(),
+        },
+        provider_store::Error::InvalidPath { source } => ObjectStoreError::InvalidKey {
+            object_key: object_key.to_owned(),
+            message: source.to_string(),
+        },
         provider_store::Error::NotSupported { .. } | provider_store::Error::NotImplemented => {
             ObjectStoreError::Unsupported("provider object store operation")
         }
+        provider_store::Error::UnknownConfigurationKey { key, store } => {
+            ObjectStoreError::transport(
+                object_key,
+                format!("unknown {store} configuration key `{key}`"),
+            )
+        }
         provider_store::Error::Generic { source, .. } => {
-            ObjectStoreError::Transport(source.to_string())
+            ObjectStoreError::transport(object_key, source.to_string())
         }
         provider_store::Error::JoinError { source } => {
-            ObjectStoreError::Transport(source.to_string())
+            ObjectStoreError::transport(object_key, source.to_string())
         }
         provider_store::Error::PermissionDenied { source, .. }
         | provider_store::Error::Unauthenticated { source, .. } => {
-            ObjectStoreError::Transport(source.to_string())
+            ObjectStoreError::transport(object_key, source.to_string())
         }
-        provider_store::Error::UnknownConfigurationKey { key, store } => {
-            ObjectStoreError::Transport(format!("unknown {store} configuration key `{key}`"))
-        }
-        other => ObjectStoreError::Transport(other.to_string()),
+        other => ObjectStoreError::transport(object_key, other.to_string()),
     }
 }
 
@@ -359,13 +394,13 @@ mod tests {
 
         assert!(matches!(
             store.put_if_absent(key, Bytes::from_static(b"two")).await,
-            Err(ObjectStoreError::PreconditionFailed)
+            Err(ObjectStoreError::PreconditionFailed { .. })
         ));
         assert!(matches!(
             store
                 .compare_and_swap(key, "stale", Bytes::from_static(b"two"))
                 .await,
-            Err(ObjectStoreError::PreconditionFailed)
+            Err(ObjectStoreError::PreconditionFailed { .. })
         ));
         assert!(matches!(
             store
@@ -375,7 +410,7 @@ mod tests {
                     Bytes::from_static(b"two")
                 )
                 .await,
-            Err(ObjectStoreError::PreconditionFailed)
+            Err(ObjectStoreError::PreconditionFailed { .. })
         ));
         let etag = first.etag.expect("etag");
         store
@@ -433,7 +468,7 @@ mod tests {
                     }),
                 )
                 .await,
-            Err(ObjectStoreError::InvalidRange)
+            Err(ObjectStoreError::InvalidRange { .. })
         ));
     }
 
@@ -443,7 +478,7 @@ mod tests {
         let mut stream = store.list_prefix_stream("../");
         assert!(matches!(
             stream.next().await,
-            Some(Err(ObjectStoreError::InvalidKey(_)))
+            Some(Err(ObjectStoreError::InvalidKey { .. }))
         ));
     }
 }

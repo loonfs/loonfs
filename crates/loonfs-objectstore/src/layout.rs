@@ -325,16 +325,25 @@ fn parsed(
 
 pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
-        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
+        return Err(ObjectStoreError::InvalidKey {
+            object_key: digest.to_owned(),
+            message: "digest must start with `sha256:`".to_owned(),
+        });
     };
     if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
+        return Err(ObjectStoreError::InvalidKey {
+            object_key: digest.to_owned(),
+            message: "digest must be 64 hex characters".to_owned(),
+        });
     }
     if !hex
         .bytes()
         .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
     {
-        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
+        return Err(ObjectStoreError::InvalidKey {
+            object_key: digest.to_owned(),
+            message: "digest hex must be lowercase".to_owned(),
+        });
     }
     Ok(hex)
 }

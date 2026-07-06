@@ -293,7 +293,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let content_ref = entry
             .content_ref
             .clone()
-            .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
+            .ok_or_else(|| CoreError::PathNotFound(absolute_path.to_owned()))?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
         Ok(AuthoritativeFileBytes {
             entry,
@@ -373,7 +373,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .metadata_view()
             .inode_at_seq(inode_id)
             .await?
-            .ok_or_else(|| CoreError::MissingPath(inode_id.to_string()))?;
+            .ok_or_else(|| CoreError::PathNotFound(inode_id.to_string()))?;
         if inode.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: inode_id.to_string(),

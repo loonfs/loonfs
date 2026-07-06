@@ -164,12 +164,14 @@ pub async fn publish_commit_head<S: ObjectStore + ?Sized>(
 
 fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
     match err {
-        ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict => {
+        ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. } => {
             CommitHeadPublishError::StaleHead
         }
         // A transport failure after the CAS was sent leaves the outcome
         // unobserved: the head may already reference the new segment.
-        ObjectStoreError::Transport(message) => CommitHeadPublishError::OutcomeUnknown(message),
+        ObjectStoreError::Transport { message, .. } => {
+            CommitHeadPublishError::OutcomeUnknown(message)
+        }
         other => CommitHeadPublishError::Store(other.to_string()),
     }
 }
@@ -182,15 +184,22 @@ mod tests {
     #[test]
     fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {
         assert_eq!(
-            map_object_store_error(ObjectStoreError::Transport("timeout".to_owned())),
+            map_object_store_error(ObjectStoreError::transport(
+                "namespaces/demo/control/head.json",
+                "timeout",
+            )),
             CommitHeadPublishError::OutcomeUnknown("timeout".to_owned())
         );
         assert_eq!(
-            map_object_store_error(ObjectStoreError::PreconditionFailed),
+            map_object_store_error(ObjectStoreError::PreconditionFailed {
+                object_key: "namespaces/demo/control/head.json".to_owned(),
+            }),
             CommitHeadPublishError::StaleHead
         );
         assert!(matches!(
-            map_object_store_error(ObjectStoreError::NotFound),
+            map_object_store_error(ObjectStoreError::NotFound {
+                object_key: "namespaces/demo/control/head.json".to_owned(),
+            }),
             CommitHeadPublishError::Store(_)
         ));
     }

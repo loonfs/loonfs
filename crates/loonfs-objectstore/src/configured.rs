@@ -419,7 +419,10 @@ mod tests {
             .put_overwrite("../head.json", Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect_err("traversal key should be rejected");
-        assert!(matches!(error, ObjectStoreError::InvalidKey(_)));
+        assert!(matches!(
+            error,
+            ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../head.json"
+        ));
     }
 
     #[allow(clippy::disallowed_methods)]

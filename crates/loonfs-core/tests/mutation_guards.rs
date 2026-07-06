@@ -2718,10 +2718,10 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         .expect_err("materialization-decided rejection");
     assert_eq!(materialization_rejection.code(), ErrorCode::PathNotFound);
     let accepted = failed[1].as_ref().expect_err("accepted candidate fails");
-    assert!(matches!(accepted, CoreError::WalWrite(_)));
+    assert!(matches!(accepted, CoreError::WalWrite { .. }));
     let speculative = failed[2].as_ref().expect_err("speculative rejection");
     assert!(
-        matches!(speculative, CoreError::WalWrite(_)),
+        matches!(speculative, CoreError::WalWrite { .. }),
         "rejection decided against unpublished in-batch state must take the \
          batch error, got {speculative:?}"
     );
@@ -4774,11 +4774,17 @@ impl InjectedCreateFailure {
         }
     }
 
-    fn error(&self) -> ObjectStoreError {
+    fn error(&self, attempted_key: &str) -> ObjectStoreError {
         match self {
-            Self::Transport { message } => ObjectStoreError::Transport((*message).to_owned()),
-            Self::Conflict { .. } => ObjectStoreError::Conflict,
-            Self::PreconditionFailed { .. } => ObjectStoreError::PreconditionFailed,
+            Self::Transport { message } => {
+                ObjectStoreError::transport(attempted_key, (*message).to_owned())
+            }
+            Self::Conflict { .. } => ObjectStoreError::Conflict {
+                object_key: attempted_key.to_owned(),
+            },
+            Self::PreconditionFailed { .. } => ObjectStoreError::PreconditionFailed {
+                object_key: attempted_key.to_owned(),
+            },
         }
     }
 }
@@ -4824,7 +4830,7 @@ impl ObjectStore for InjectCreateFailureStore {
                 self.failure
                     .apply_before_error(&self.inner, key, bytes.clone())
                     .await?;
-                return Err(self.failure.error());
+                return Err(self.failure.error(key));
             }
         }
 
@@ -4945,9 +4951,10 @@ impl ReplayReadGuardStore {
             .any(|prefix| key.starts_with(prefix))
         {
             self.guarded_gets.fetch_add(1, Ordering::SeqCst);
-            return Err(ObjectStoreError::Transport(format!(
-                "begin_upload unexpectedly read replay object `{key}`"
-            )));
+            return Err(ObjectStoreError::transport(
+                key,
+                "begin_upload unexpectedly read replay object",
+            ));
         }
         Ok(())
     }
@@ -5190,9 +5197,10 @@ impl ContentStoreAccessLimitStore {
 
         let previous = self.content_store_accesses.fetch_add(1, Ordering::SeqCst);
         if previous >= self.max_content_store_accesses {
-            return Err(ObjectStoreError::Transport(format!(
-                "unexpected content-store descriptor access: {key}",
-            )));
+            return Err(ObjectStoreError::transport(
+                key,
+                "unexpected content-store descriptor access",
+            ));
         }
         Ok(())
     }
@@ -5443,8 +5451,9 @@ impl ObjectStore for AckLostHeadCasStore {
             if should_inject {
                 // Apply the CAS, then lose the acknowledgment.
                 self.inner.put(key, bytes, mode).await?;
-                return Err(ObjectStoreError::Transport(
-                    "response lost after head compare-and-swap".to_owned(),
+                return Err(ObjectStoreError::transport(
+                    key,
+                    "response lost after head compare-and-swap",
                 ));
             }
         }
@@ -5531,7 +5540,9 @@ impl ObjectStore for StaleHeadAfterWalWriteStore {
                 if let Some(existing) = self.inner.get(key, None).await? {
                     self.inner.put_overwrite(key, existing).await?;
                 }
-                return Err(ObjectStoreError::PreconditionFailed);
+                return Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                });
             }
         }
         self.inner.put(key, bytes, mode).await
@@ -5555,13 +5566,15 @@ async fn head_cas_advances_seq(
     candidate_bytes: &[u8],
 ) -> Result<bool, ObjectStoreError> {
     let candidate: HeadStateEnvelope =
-        decode_control_object(candidate_bytes, ControlObjectKind::WalHead)
-            .map_err(|err| ObjectStoreError::Transport(format!("decode candidate head: {err}")))?;
+        decode_control_object(candidate_bytes, ControlObjectKind::WalHead).map_err(|err| {
+            ObjectStoreError::transport(key, format!("decode candidate head: {err}"))
+        })?;
     let Some(existing_bytes) = store.get(key, None).await? else {
         return Ok(true);
     };
     let existing: HeadStateEnvelope =
-        decode_control_object(&existing_bytes, ControlObjectKind::WalHead)
-            .map_err(|err| ObjectStoreError::Transport(format!("decode existing head: {err}")))?;
+        decode_control_object(&existing_bytes, ControlObjectKind::WalHead).map_err(|err| {
+            ObjectStoreError::transport(key, format!("decode existing head: {err}"))
+        })?;
     Ok(candidate.state.seq > existing.state.seq)
 }

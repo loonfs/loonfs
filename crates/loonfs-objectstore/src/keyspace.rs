@@ -18,11 +18,17 @@ pub(crate) fn validate_segments(
                 continue;
             }
 
-            return Err(ObjectStoreError::InvalidKey(key.to_owned()));
+            return Err(ObjectStoreError::InvalidKey {
+                object_key: key.to_owned(),
+                message: "key must not contain empty segments".to_owned(),
+            });
         }
 
         if *segment == "." || *segment == ".." {
-            return Err(ObjectStoreError::InvalidKey(key.to_owned()));
+            return Err(ObjectStoreError::InvalidKey {
+                object_key: key.to_owned(),
+                message: "key must not contain `.` or `..` segments".to_owned(),
+            });
         }
 
         segments.push(*segment);
@@ -96,11 +102,11 @@ mod tests {
     fn normalize_key_prefix_rejects_traversal_and_empty_segments() {
         assert!(matches!(
             normalize_key_prefix(Some("tenant-a//bad")),
-            Err(ObjectStoreError::InvalidKey(key)) if key == "tenant-a//bad"
+            Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == "tenant-a//bad"
         ));
         assert!(matches!(
             normalize_key_prefix(Some("../escape")),
-            Err(ObjectStoreError::InvalidKey(key)) if key == "../escape"
+            Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == "../escape"
         ));
     }
 
@@ -142,7 +148,7 @@ mod tests {
         assert!(validate_segments("namespaces/ns-1/", true).is_ok());
         assert!(matches!(
             validate_segments("namespaces/ns-1/", false),
-            Err(ObjectStoreError::InvalidKey(_))
+            Err(ObjectStoreError::InvalidKey { .. })
         ));
     }
 }

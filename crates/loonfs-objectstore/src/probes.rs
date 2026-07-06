@@ -353,7 +353,7 @@ fn assert_precondition_failed<T>(
     result: Result<T, ObjectStoreError>,
 ) -> Result<(), ContractProbeError> {
     match result {
-        Err(ObjectStoreError::PreconditionFailed) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
         Err(err) => Err(probe_error(probe, err)),
         Ok(_) => Err(ContractProbeError::Probe {
             probe,

@@ -135,8 +135,9 @@ impl<S> FaultInjectingObjectStore<S> {
                         class: "transport".to_owned(),
                     },
                 );
-                Err(ObjectStoreError::Transport(
-                    "simulated transient put failure".to_owned(),
+                Err(ObjectStoreError::transport(
+                    key,
+                    "simulated transient put failure",
                 ))
             }
             Some(ObjectStoreFault::PutSucceedsButResponseLost) => {
@@ -152,8 +153,9 @@ impl<S> FaultInjectingObjectStore<S> {
                             class: "transport".to_owned(),
                         },
                     );
-                    Err(ObjectStoreError::Transport(
-                        "simulated lost put response".to_owned(),
+                    Err(ObjectStoreError::transport(
+                        key,
+                        "simulated lost put response",
                     ))
                 } else {
                     self.push_trace(
@@ -174,7 +176,9 @@ impl<S> FaultInjectingObjectStore<S> {
                         class: "precondition_failed".to_owned(),
                     },
                 );
-                Err(ObjectStoreError::PreconditionFailed)
+                Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                })
             }
             Some(incompatible) => {
                 let fault = incompatible.clone();
@@ -244,7 +248,7 @@ where
                         Some(ObjectStoreFault::GetReturnsStaleValue),
                         SimEventResult::Ok,
                     );
-                    return Ok(Some(apply_range(body.bytes, range)?));
+                    return Ok(Some(apply_range(key, body.bytes, range)?));
                 }
                 let result = self.inner.get(key, range).await;
                 self.push_trace(
@@ -377,8 +381,9 @@ where
                         class: "transport".to_owned(),
                     },
                 );
-                Err(ObjectStoreError::Transport(
-                    "simulated transient delete failure".to_owned(),
+                Err(ObjectStoreError::transport(
+                    key,
+                    "simulated transient delete failure",
                 ))
             }
             Some(incompatible) => {
@@ -504,15 +509,21 @@ fn put_mode_kind(mode: &PutMode) -> ObjectOpKind {
     }
 }
 
-fn apply_range(bytes: Vec<u8>, range: Option<ByteRange>) -> Result<Bytes, ObjectStoreError> {
+fn apply_range(
+    key: &str,
+    bytes: Vec<u8>,
+    range: Option<ByteRange>,
+) -> Result<Bytes, ObjectStoreError> {
     let Some(range) = range else {
         return Ok(Bytes::from(bytes));
     };
-    let start =
-        usize::try_from(range.start_inclusive).map_err(|_| ObjectStoreError::InvalidRange)?;
-    let end = usize::try_from(range.end_exclusive).map_err(|_| ObjectStoreError::InvalidRange)?;
+    let invalid_range = || ObjectStoreError::InvalidRange {
+        object_key: key.to_owned(),
+    };
+    let start = usize::try_from(range.start_inclusive).map_err(|_| invalid_range())?;
+    let end = usize::try_from(range.end_exclusive).map_err(|_| invalid_range())?;
     if start > end || end > bytes.len() {
-        return Err(ObjectStoreError::InvalidRange);
+        return Err(invalid_range());
     }
     Ok(Bytes::copy_from_slice(&bytes[start..end]))
 }
@@ -528,25 +539,25 @@ fn recent_key_to_omit(keys: &[String], prefix: &str, recent_writes: &[String]) -
 fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventResult {
     match result {
         Ok(_) => SimEventResult::Ok,
-        Err(ObjectStoreError::NotFound) => SimEventResult::Error {
+        Err(ObjectStoreError::NotFound { .. }) => SimEventResult::Error {
             class: "not_found".to_owned(),
         },
-        Err(ObjectStoreError::InvalidKey(_)) => SimEventResult::Error {
+        Err(ObjectStoreError::InvalidKey { .. }) => SimEventResult::Error {
             class: "invalid_key".to_owned(),
         },
-        Err(ObjectStoreError::InvalidRange) => SimEventResult::Error {
+        Err(ObjectStoreError::InvalidRange { .. }) => SimEventResult::Error {
             class: "invalid_range".to_owned(),
         },
-        Err(ObjectStoreError::PreconditionFailed) => SimEventResult::Error {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => SimEventResult::Error {
             class: "precondition_failed".to_owned(),
         },
-        Err(ObjectStoreError::Conflict) => SimEventResult::Error {
+        Err(ObjectStoreError::Conflict { .. }) => SimEventResult::Error {
             class: "conflict".to_owned(),
         },
         Err(ObjectStoreError::Unsupported(_)) => SimEventResult::Error {
             class: "unsupported".to_owned(),
         },
-        Err(ObjectStoreError::Transport(_)) => SimEventResult::Error {
+        Err(ObjectStoreError::Transport { .. }) => SimEventResult::Error {
             class: "transport".to_owned(),
         },
         // Keep the label set low-cardinality for error kinds this build
@@ -610,7 +621,7 @@ mod tests {
 
         assert!(matches!(
             store.put_overwrite("a", Bytes::from_static(b"abc")).await,
-            Err(ObjectStoreError::Transport(_))
+            Err(ObjectStoreError::Transport { .. })
         ));
         assert_eq!(
             store.inner().get("a", None).await.expect("inner get"),
@@ -634,7 +645,7 @@ mod tests {
 
         assert!(matches!(
             store.put_overwrite("a", Bytes::from_static(b"abc")).await,
-            Err(ObjectStoreError::Transport(_))
+            Err(ObjectStoreError::Transport { .. })
         ));
         assert_eq!(store.inner().get("a", None).await.expect("inner get"), None);
     }

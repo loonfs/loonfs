@@ -24,6 +24,8 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
+// Descriptor and Head both wrap ControlObjectLoadError; conversion stays
+// explicit so `?` cannot pick a variant silently.
 #[derive(Debug, Error)]
 pub enum BootstrapNamespaceError {
     #[error(transparent)]
@@ -84,10 +86,14 @@ impl From<NamespaceInitializationError> for BootstrapNamespaceError {
             NamespaceInitializationError::InvalidNamespaceId(error) => {
                 Self::InvalidNamespaceId(error)
             }
-            NamespaceInitializationError::InspectNamespaceDescriptor(message) => {
-                Self::DescriptorWrite(message)
-            }
-            NamespaceInitializationError::InspectNamespaceHead(message) => Self::HeadWrite(message),
+            NamespaceInitializationError::InspectNamespaceDescriptor {
+                object_key,
+                message,
+            } => Self::DescriptorWrite(format!("failed to inspect `{object_key}`: {message}")),
+            NamespaceInitializationError::InspectNamespaceHead {
+                object_key,
+                message,
+            } => Self::HeadWrite(format!("failed to inspect `{object_key}`: {message}")),
             NamespaceInitializationError::LoadNamespaceDescriptor(error)
             | NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
                 Self::Descriptor(error)
@@ -262,7 +268,9 @@ async fn create_new_content_store<S: ObjectStore + ?Sized>(
         let key = content_store_descriptor(content_store_id.as_str());
         match store.put_if_absent(&key, Bytes::from(bytes)).await {
             Ok(_) => return Ok(content_store_id),
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+            ) => continue,
             Err(err) => return Err(BootstrapNamespaceError::ContentStoreWrite(err.to_string())),
         }
     }

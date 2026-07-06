@@ -4,8 +4,8 @@ use crate::checkpoint::{
     write_namespace_manifest,
 };
 use crate::context::MutationContext;
-use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
     load_namespace_descriptor, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
@@ -33,7 +33,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<NamespaceSummary, CoreError> {
+) -> Result<NamespaceSummary> {
     match namespace_initialization_state(store, new_namespace_id)
         .await
         .map_err(map_namespace_initialization_error_to_core)?
@@ -122,13 +122,13 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             name_policy: source_config.name_policy,
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
     let head = HeadStateEnvelope::from_state(
         ControlObjectKind::WalHead,
         &context.writer_version,
         initial_head,
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
     let head_key = wal_head(new_namespace_id.as_str());
     let descriptor_key = namespace_config(new_namespace_id.as_str());
     let target_manifest = NamespaceManifestEnvelope::from_payload(
@@ -141,7 +141,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             &source_record,
         ),
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
     let gc_pin_envelope = NamespaceGcPinStateEnvelope::from_state(
         ControlObjectKind::NamespaceGcPinState,
         &context.writer_version,
@@ -157,7 +157,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             created_at_ms: context.now_ms,
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
     let gc_pin_key = pin(
         source_namespace_id.as_str(),
         gc_pin_envelope.state.pin_id.as_str(),
@@ -184,12 +184,14 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             updated_at_ms: context.now_ms,
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build metadata root envelope: {err}")))?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &metadata_root(new_namespace_id.as_str()),
-        &encode_control_object(&target_root).map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&target_root).map_err(|err| {
+            CoreError::Internal(format!("failed to encode metadata root object: {err}"))
+        })?,
     )
     .await?;
     let target_floor = WalFloorEnvelope::from_state(
@@ -207,27 +209,33 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             updated_at_ms: context.now_ms,
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build wal floor envelope: {err}")))?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &loonfs_objectstore::keys::wal_floor(new_namespace_id.as_str()),
-        &encode_control_object(&target_floor).map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&target_floor).map_err(|err| {
+            CoreError::Internal(format!("failed to encode wal floor object: {err}"))
+        })?,
     )
     .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &head_key,
-        &encode_control_object(&head).map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&head)
+            .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?,
     )
     .await?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &descriptor_key,
-        &encode_control_object(&namespace_descriptor_envelope)
-            .map_err(|err| CoreError::Store(err.to_string()))?,
+        &encode_control_object(&namespace_descriptor_envelope).map_err(|err| {
+            CoreError::Internal(format!(
+                "failed to encode namespace descriptor object: {err}"
+            ))
+        })?,
     )
     .await?;
 
@@ -276,14 +284,15 @@ async fn write_source_gc_pin<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected: &NamespaceGcPinStateEnvelope,
-) -> Result<(), CoreError> {
-    let bytes = encode_control_object(expected).map_err(|err| CoreError::Store(err.to_string()))?;
+) -> Result<()> {
+    let bytes = encode_control_object(expected)
+        .map_err(|err| CoreError::Internal(format!("failed to encode GC pin object: {err}")))?;
     match store.put_if_absent(object_key, Bytes::from(bytes)).await {
         Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             verify_existing_gc_pin(store, object_key, expected).await
         }
-        Err(err) => Err(CoreError::Store(err.to_string())),
+        Err(err) => Err(CoreError::store(object_key, &err)),
     }
 }
 
@@ -315,7 +324,7 @@ async fn verify_written_gc_pin<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     pin_key: &str,
     pin: &NamespaceGcPinState,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     let verified = match crate::checkpoint::read_checkpoint_record(
         store,
         source_namespace_id,
@@ -334,7 +343,7 @@ async fn verify_written_gc_pin<S: ObjectStore + ?Sized>(
     store
         .delete(pin_key)
         .await
-        .map_err(|error| CoreError::Store(error.to_string()))?;
+        .map_err(|error| CoreError::store(pin_key, &error))?;
     Err(CoreError::CheckpointUnavailable(format!(
         "fork pin `{}` failed verification against source checkpoint `{}`",
         pin.pin_id, pin.source_checkpoint_id
@@ -345,15 +354,16 @@ async fn verify_existing_gc_pin<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected: &NamespaceGcPinStateEnvelope,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     let Some(bytes) = store
         .get(object_key, None)
         .await
-        .map_err(|err| CoreError::Store(err.to_string()))?
+        .map_err(|err| CoreError::store(object_key, &err))?
     else {
-        return Err(CoreError::Store(format!(
-            "GC pin `{object_key}` write conflicted, but the existing object is missing"
-        )));
+        return Err(CoreError::Store {
+            object_key: object_key.to_owned(),
+            message: "GC pin write conflicted, but the existing object is missing".to_owned(),
+        });
     };
     let existing: NamespaceGcPinStateEnvelope =
         decode_control_object(&bytes, ControlObjectKind::NamespaceGcPinState).map_err(|err| {
@@ -384,13 +394,13 @@ async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     object_key: &str,
     bytes: &[u8],
-) -> Result<(), CoreError> {
+) -> Result<()> {
     match store
         .put_if_absent(object_key, Bytes::copy_from_slice(bytes))
         .await
     {
         Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             match namespace_initialization_state(store, namespace_id)
                 .await
                 .map_err(map_namespace_initialization_error_to_core)?
@@ -403,12 +413,13 @@ async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
                         namespace_id: namespace_id.clone(),
                     })
                 }
-                NamespaceInitializationState::Absent => Err(CoreError::Store(format!(
-                    "target namespace control object `{object_key}` write failed, but namespace remains absent"
-                ))),
+                NamespaceInitializationState::Absent => Err(CoreError::Store {
+                    object_key: object_key.to_owned(),
+                    message: "control object write failed, but namespace remains absent".to_owned(),
+                }),
             }
         }
-        Err(err) => Err(CoreError::Store(err.to_string())),
+        Err(err) => Err(CoreError::store(object_key, &err)),
     }
 }
 
@@ -417,7 +428,7 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
         NamespaceInitializationError::InvalidNamespaceId(error) => {
             CoreError::InvalidNamespaceId(error)
         }
-        other => CoreError::Store(BootstrapNamespaceError::from(other).to_string()),
+        other => CoreError::Internal(BootstrapNamespaceError::from(other).to_string()),
     }
 }
 

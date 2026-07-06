@@ -50,7 +50,7 @@ mod wal;
 
 pub mod cache {
     pub use crate::checkpoint::{
-        ManifestLoadError, ManifestLoadErrorKind, MetadataLsmPolicy, MetadataTableCache,
+        ManifestLoadError, ManifestLoadFailureClass, MetadataLsmPolicy, MetadataTableCache,
         MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
         WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
     };

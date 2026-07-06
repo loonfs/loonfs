@@ -14,7 +14,7 @@ use crate::context::MutationContext;
 use crate::control_update::{update_upload_session, UploadSessionUpdate};
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, MetadataViewError};
+use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::catalog::{
     load_namespace_catalog_entry, load_namespace_content_store_id, namespace_initialization_state,
@@ -59,7 +59,7 @@ const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstViewResult {
-    pub(crate) results: Vec<Result<ApiCommitResponse, CoreError>>,
+    pub(crate) results: Vec<Result<ApiCommitResponse>>,
     pub(crate) published_records: Vec<WalCommitPayload>,
     pub(crate) resulting_head: Option<HeadState>,
     pub(crate) resulting_head_etag: Option<String>,
@@ -67,7 +67,7 @@ pub(crate) struct PublishBatchAgainstViewResult {
 }
 
 impl PublishBatchAgainstViewResult {
-    fn new(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
+    fn new(results: Vec<Result<ApiCommitResponse>>) -> Self {
         Self {
             results,
             published_records: Vec::new(),
@@ -77,7 +77,7 @@ impl PublishBatchAgainstViewResult {
         }
     }
 
-    fn invalidate_projection(results: Vec<Result<ApiCommitResponse, CoreError>>) -> Self {
+    fn invalidate_projection(results: Vec<Result<ApiCommitResponse>>) -> Self {
         Self {
             results,
             published_records: Vec::new(),
@@ -88,7 +88,7 @@ impl PublishBatchAgainstViewResult {
     }
 
     fn published(
-        results: Vec<Result<ApiCommitResponse, CoreError>>,
+        results: Vec<Result<ApiCommitResponse>>,
         published_records: Vec<WalCommitPayload>,
         resulting_head: HeadState,
         resulting_head_etag: Option<String>,
@@ -130,7 +130,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     async fn find_commit_receipt(
         &self,
         commit_id: &CommitId,
-    ) -> Result<Option<CommitReceiptRecord>, CoreError> {
+    ) -> Result<Option<CommitReceiptRecord>> {
         self.metadata_view().find_commit_receipt(commit_id).await
     }
 }
@@ -205,7 +205,7 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: BeginUploadRequest,
     context: &MutationContext,
-) -> Result<BeginUploadResponse, CoreError> {
+) -> Result<BeginUploadResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
     let mode = request.mode.unwrap_or_default();
     if mode == UploadMode::DirectPut {
@@ -234,7 +234,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_ref: ContentRef,
     context: &MutationContext,
-) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
+) -> Result<BeginDirectPutUploadTargetResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
     ensure_direct_put_content_ref_supported(&content_ref)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
@@ -258,7 +258,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     })
 }
 
-fn ensure_direct_put_content_ref_supported(content_ref: &ContentRef) -> Result<(), CoreError> {
+fn ensure_direct_put_content_ref_supported(content_ref: &ContentRef) -> Result<()> {
     if content_ref.kind != ContentRefKind::WholeFileV0 {
         return Err(CoreError::InvalidUploadContent(
             "direct_put only supports whole_file_v0 content refs".to_owned(),
@@ -273,7 +273,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     mode: UploadMode,
     direct_put_content_ref: Option<ContentRef>,
     context: &MutationContext,
-) -> Result<UploadId, CoreError> {
+) -> Result<UploadId> {
     let upload_id = UploadId::generate();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
@@ -289,21 +289,24 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         &context.writer_version,
         state,
     )
-    .map_err(|err| CoreError::Store(err.to_string()))?;
-    let encoded =
-        encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+    .map_err(|err| {
+        CoreError::Internal(format!("failed to build upload session envelope: {err}"))
+    })?;
+    let encoded = encode_control_object(&envelope).map_err(|err| {
+        CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
+    })?;
     let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
     store
         .put_if_absent(&object_key, Bytes::from(encoded))
         .await
-        .map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| CoreError::store(&object_key, &err))?;
     Ok(upload_id)
 }
 
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     match namespace_initialization_state(store, namespace_id).await {
         Ok(NamespaceInitializationState::Complete) => {
             let descriptor = load_namespace_descriptor_control(store, namespace_id)
@@ -358,10 +361,17 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
                 error,
             ))
         }
-        NamespaceInitializationError::InspectNamespaceDescriptor(_)
-        | NamespaceInitializationError::InspectNamespaceHead(_) => {
-            CoreError::Store(error.to_string())
+        NamespaceInitializationError::InspectNamespaceDescriptor {
+            object_key,
+            message,
         }
+        | NamespaceInitializationError::InspectNamespaceHead {
+            object_key,
+            message,
+        } => CoreError::Store {
+            object_key,
+            message,
+        },
     }
 }
 
@@ -371,11 +381,11 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     bytes: &[u8],
     context: &MutationContext,
-) -> Result<UploadContentResponse, CoreError> {
+) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
-        .map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| CoreError::Internal(format!("failed to derive content blob key: {err}")))?;
 
     update_upload_session(
         store,
@@ -433,7 +443,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     request: &CompleteUploadRequest,
     context: &MutationContext,
-) -> Result<CompleteUploadResponse, CoreError> {
+) -> Result<CompleteUploadResponse> {
     update_upload_session(
         store,
         namespace_id,
@@ -496,7 +506,7 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     state: &UploadSessionState,
     request: &CompleteUploadRequest,
-) -> Result<ContentRef, CoreError> {
+) -> Result<ContentRef> {
     if state.mode != UploadMode::DirectPut {
         return Err(CoreError::InvalidUploadContent(
             "upload content has not been staged".to_owned(),
@@ -528,7 +538,7 @@ pub(crate) async fn commit_operations<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: ApiCommitRequest,
     context: &MutationContext,
-) -> Result<ApiCommitResponse, CoreError> {
+) -> Result<ApiCommitResponse> {
     publish_namespace_mutations_batch(
         store,
         namespace_id,
@@ -537,7 +547,7 @@ pub(crate) async fn commit_operations<S: ObjectStore + ?Sized>(
     )
     .await
     .pop()
-    .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
+    .unwrap_or_else(|| Err(CoreError::Internal("empty commit batch".to_owned())))
 }
 
 pub(crate) async fn commit_operations_batch<S: ObjectStore + ?Sized>(
@@ -545,7 +555,7 @@ pub(crate) async fn commit_operations_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     requests: Vec<ApiCommitRequest>,
     context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
+) -> Vec<Result<ApiCommitResponse>> {
     publish_namespace_mutations_batch(
         store,
         namespace_id,
@@ -563,7 +573,7 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
+) -> Vec<Result<ApiCommitResponse>> {
     commit_namespace_mutations_batch(store, namespace_id, candidates, context).await
 }
 
@@ -572,7 +582,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
+) -> Vec<Result<ApiCommitResponse>> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -638,7 +648,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     acquired_writer: Option<AcquiredWriter>,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
-) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection), CoreError> {
+) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)))?;
@@ -726,7 +736,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 fn ensure_publish_head_matches_acquired_writer(
     head: &HeadState,
     acquired_writer: &AcquiredWriter,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if head.writer_epoch != acquired_writer.writer_epoch {
         let winner = head
             .writer
@@ -750,7 +760,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     manifest_id: ManifestId,
     manifest_head: &HeadState,
     manifest_payload_checksum: String,
-) -> Result<PublishTailProjection, CoreError> {
+) -> Result<PublishTailProjection> {
     let wal_chain = load_validated_wal_chain(
         store,
         WalChainLoadRequest {
@@ -793,7 +803,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
 fn ensure_publish_reconstructed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if current_head.namespace_id != reconstructed.namespace_id
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
@@ -815,14 +825,17 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     loaded_head_etag: &str,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     let object_key = wal_head(namespace_id.as_str());
     let metadata = store
         .head(&object_key)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                ControlObjectLoadError::Store(error.to_string()),
+                ControlObjectLoadError::Store {
+                    object_key: object_key.clone(),
+                    message: error.message(),
+                },
             ))
         })?
         .ok_or_else(|| {
@@ -874,14 +887,14 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         return PublishBatchAgainstViewResult::new(
             (0..candidates.len())
                 .map(|_| {
-                    Err(CoreError::Store(
+                    Err(CoreError::Internal(
                         "publish view namespace mismatch".to_owned(),
                     ))
                 })
                 .collect(),
         );
     }
-    let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
+    let mut outcomes: Vec<Option<Result<ApiCommitResponse>>> =
         (0..candidates.len()).map(|_| None).collect();
     let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
@@ -967,7 +980,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 ) {
                     Ok(value) => value,
                     Err(error) => {
-                        outcomes[index] = Some(Err(CoreError::Store(format!(
+                        outcomes[index] = Some(Err(CoreError::Internal(format!(
                             "commit preparation failed: {error}"
                         ))));
                         continue;
@@ -1032,7 +1045,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         result = tracing::field::Empty
     );
     let put_started_ms = timer.monotonic_now_ms();
-    let wal_result: Result<_, CoreError> = {
+    let wal_result: Result<_> = {
         let _span = wal_span.enter();
         match prepare_wal_segment(
             namespace_id.clone(),
@@ -1049,9 +1062,12 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 .await
             {
                 Ok(_) => Ok(wal),
-                Err(error) => Err(CoreError::WalWrite(error.to_string())),
+                Err(error) => Err(CoreError::WalWrite {
+                    object_key: wal.object_key.clone(),
+                    message: error.message(),
+                }),
             },
-            Err(error) => Err(CoreError::Store(format!("wal build failed: {error}"))),
+            Err(error) => Err(CoreError::Internal(format!("wal build failed: {error}"))),
         }
     };
     wal_span.record("result", if wal_result.is_ok() { "ok" } else { "error" });
@@ -1076,7 +1092,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     let head_publish = match head_publish {
         Ok(value) => value,
         Err(error) => {
-            let error = CoreError::Store(format!("head publish preparation failed: {error}"));
+            let error = CoreError::Internal(format!("head publish preparation failed: {error}"));
             fail_outcomes_contingent_on_unpublished_batch(&mut outcomes, &accepted, &error);
             return PublishBatchAgainstViewResult::invalidate_projection(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
@@ -1149,7 +1165,7 @@ async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     session: &PublishPlanningSession,
     candidate: &NamespaceMutationCandidate,
     index: usize,
-    outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
+    outcomes: &mut [Option<Result<ApiCommitResponse>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
     aliases: &mut Vec<(usize, usize)>,
 ) -> Option<CandidateCoreRequest> {
@@ -1189,7 +1205,9 @@ async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             let semantic_identity = match core_commit_fingerprint(&request) {
                 Ok(value) => value,
                 Err(error) => {
-                    outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
+                    outcomes[index] = Some(Err(CoreError::Internal(format!(
+                        "failed to fingerprint commit request: {error}"
+                    ))));
                     return None;
                 }
             };
@@ -1283,7 +1301,7 @@ async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     }
 }
 
-fn validate_commit_id(commit_id: &CommitId) -> Result<(), CoreError> {
+fn validate_commit_id(commit_id: &CommitId) -> Result<()> {
     CommitId::parse(commit_id.as_str())
         .map(|_| ())
         .map_err(CoreError::InvalidCommitId)
@@ -1293,13 +1311,13 @@ fn validate_commit_id(commit_id: &CommitId) -> Result<(), CoreError> {
 async fn record_primary_request_or_complete_idempotent<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
-    outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
+    outcomes: &mut [Option<Result<ApiCommitResponse>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
     aliases: &mut Vec<(usize, usize)>,
     index: usize,
     commit_id: &CommitId,
     semantic_identity: &SemanticMutationIdentity,
-) -> Result<bool, CoreError> {
+) -> Result<bool> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         outcomes[index] = Some(
             if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
@@ -1333,7 +1351,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
-) -> Result<ChangesResponse, CoreError> {
+) -> Result<ChangesResponse> {
     load_namespace_catalog_entry(store, namespace_id).await?;
     let head = load_namespace_head_control(store, namespace_id)
         .await
@@ -1398,7 +1416,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                         .deltas
                         .iter()
                         .map(commit_delta_from_wal)
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
                 });
                 if changes.len() == limit.as_usize() {
                     through_seq = seq;
@@ -1420,7 +1438,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     })
 }
 
-fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreError> {
+fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
     let semantic_op_index = delta.semantic_op_index;
     Ok(match &delta.delta {
         WalDelta::CreateInode {
@@ -1511,7 +1529,7 @@ async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     resolved_restore_content_refs: &[Option<ContentRef>],
     admissions: CommitContentAdmissions<'_>,
     content_validation: &mut ContentValidationTracker,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     let mut content_refs = Vec::new();
     for (index, op) in request.ops.iter().enumerate() {
         match op {
@@ -1580,7 +1598,7 @@ fn commit_response_from_commit_receipt(
 /// commit receipts and stand. Alias slots stay unfilled here and inherit
 /// their primary's final outcome.
 fn fail_outcomes_contingent_on_unpublished_batch(
-    outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
+    outcomes: &mut [Option<Result<ApiCommitResponse>>],
     accepted: &[(usize, MaterializedCommit)],
     error: &CoreError,
 ) {
@@ -1598,20 +1616,24 @@ fn fail_outcomes_contingent_on_unpublished_batch(
 }
 
 fn finish_batch_outcomes_with_aliases(
-    mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>>,
+    mut outcomes: Vec<Option<Result<ApiCommitResponse>>>,
     aliases: &[(usize, usize)],
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
+) -> Vec<Result<ApiCommitResponse>> {
     for (alias_index, primary_index) in aliases {
         let primary_outcome = outcomes
             .get(*primary_index)
             .and_then(Clone::clone)
-            .unwrap_or_else(|| Err(CoreError::Store("missing primary batch outcome".to_owned())));
+            .unwrap_or_else(|| {
+                Err(CoreError::Internal(
+                    "missing primary batch outcome".to_owned(),
+                ))
+            });
         outcomes[*alias_index] = Some(primary_outcome);
     }
     outcomes
         .into_iter()
         .map(|outcome| {
-            outcome.unwrap_or_else(|| Err(CoreError::Store("missing batch outcome".to_owned())))
+            outcome.unwrap_or_else(|| Err(CoreError::Internal("missing batch outcome".to_owned())))
         })
         .collect()
 }

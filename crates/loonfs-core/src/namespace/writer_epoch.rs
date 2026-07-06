@@ -590,7 +590,9 @@ mod tests {
             if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
                 self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
                 self.inject_winner().await;
-                return Err(ObjectStoreError::PreconditionFailed);
+                return Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                });
             }
             self.inner.compare_and_swap(key, expected_etag, bytes).await
         }

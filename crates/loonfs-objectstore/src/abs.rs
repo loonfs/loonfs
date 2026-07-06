@@ -29,17 +29,17 @@ pub struct AzureAbsStore {
 impl AzureAbsStore {
     pub fn new(config: AzureAbsStoreConfig) -> Result<Self, ObjectStoreError> {
         if config.account_name.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "account name must not be empty".to_owned(),
             ));
         }
         if config.container_name.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "container name must not be empty".to_owned(),
             ));
         }
         if config.access_key.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "access key must not be empty".to_owned(),
             ));
         }
@@ -51,7 +51,7 @@ impl AzureAbsStore {
         if let Some(endpoint_url) = config.endpoint_url {
             let endpoint_url = endpoint_url.trim();
             if endpoint_url.is_empty() {
-                return Err(ObjectStoreError::Transport(
+                return Err(ObjectStoreError::Configuration(
                     "endpoint url must not be empty".to_owned(),
                 ));
             }
@@ -64,7 +64,7 @@ impl AzureAbsStore {
 
         let provider = builder
             .build()
-            .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
+            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
         let inner = ProviderObjectStore::new(
             Arc::new(provider),
             ProviderObjectStoreConfig {
@@ -151,7 +151,7 @@ mod tests {
         .expect_err("blank access key should be rejected");
 
         assert!(
-            matches!(error, ObjectStoreError::Transport(message) if message.contains("access key"))
+            matches!(error, ObjectStoreError::Configuration(message) if message.contains("access key"))
         );
     }
 
@@ -199,6 +199,9 @@ mod tests {
             .await
             .expect_err("invalid key should be rejected before provider request");
 
-        assert!(matches!(error, ObjectStoreError::InvalidKey(_)));
+        assert!(matches!(
+            error,
+            ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../escape"
+        ));
     }
 }

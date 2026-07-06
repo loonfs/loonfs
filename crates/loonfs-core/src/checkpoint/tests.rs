@@ -1432,7 +1432,9 @@ impl ObjectStore for ManifestSwapOnCasConflictStore {
         if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
             self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
             self.install_competing_manifest_id().await;
-            return Err(ObjectStoreError::PreconditionFailed);
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
         }
         self.inner.compare_and_swap(key, expected_etag, bytes).await
     }
@@ -3708,7 +3710,9 @@ impl ObjectStore for FloorRaiseOnCasConflictStore {
         {
             self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
             self.install_higher_floor().await;
-            return Err(ObjectStoreError::PreconditionFailed);
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
         }
         self.inner.compare_and_swap(key, expected_etag, bytes).await
     }
@@ -4030,7 +4034,9 @@ impl ObjectStore for HeadCasFailureStore {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
         {
-            return Err(ObjectStoreError::PreconditionFailed);
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
         }
         self.inner.put(key, bytes, mode).await
     }
@@ -4185,7 +4191,9 @@ impl ObjectStore for ConflictOnManifestCreateStore {
                 self.inner
                     .put_overwrite(key, Bytes::copy_from_slice(&self.replacement_bytes))
                     .await?;
-                return Err(ObjectStoreError::Conflict);
+                return Err(ObjectStoreError::Conflict {
+                    object_key: key.to_owned(),
+                });
             }
         }
         self.inner.put(key, bytes, mode).await

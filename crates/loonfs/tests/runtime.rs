@@ -2377,13 +2377,17 @@ impl ObjectStore for HeadCasFailureStore {
             && matches!(&mode, PutMode::CompareAndSwap { .. })
             && self.fail_head_cas.load(Ordering::SeqCst)
         {
-            return Err(ObjectStoreError::PreconditionFailed);
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
         }
         if key == self.root_key
             && matches!(&mode, PutMode::CompareAndSwap { .. })
             && self.fail_root_cas.load(Ordering::SeqCst)
         {
-            return Err(ObjectStoreError::PreconditionFailed);
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
         }
         self.inner.put(key, bytes, mode).await
     }

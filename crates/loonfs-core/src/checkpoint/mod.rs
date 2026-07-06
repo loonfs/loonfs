@@ -37,7 +37,7 @@ pub use self::cache::{
     MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
     WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
 };
-pub use self::error::{ManifestLoadError, ManifestLoadErrorKind};
+pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{

@@ -410,7 +410,7 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         let inode = self
             .inode_at_seq(inode_id)
             .await?
-            .ok_or_else(|| CoreError::MissingPath(inode_id.to_string()))?;
+            .ok_or_else(|| CoreError::PathNotFound(inode_id.to_string()))?;
         if inode.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
                 path: inode_id.to_string(),
@@ -419,7 +419,7 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         }
         self.revision_at_head(inode_id, revision_no)
             .await?
-            .ok_or(CoreError::MissingRevision {
+            .ok_or(CoreError::RevisionNotFound {
                 inode_id,
                 revision_no,
             })

@@ -1,3 +1,10 @@
+//! Core error types and their wire-code classification.
+//!
+//! Stringification rule: core errors are `Clone`/serde-constrained, so foreign
+//! causes (object-store, codec, io) are captured as prefixed message strings
+//! next to the object key they are about, not as `#[source]` chains. Crates
+//! without those constraints (server, CLI) prefer `#[source]` chains instead.
+
 use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
 use crate::metadata::{MetadataApplyError, VisiblePathError};
@@ -11,13 +18,14 @@ use loonfs_api::{
     ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind, ManifestId,
     NamespaceId, NamespaceIdValidationError, UploadId,
 };
+use loonfs_objectstore::ObjectStoreError;
 use thiserror::Error;
 
 /// Public error type returned by `loonfs-core`.
 ///
 /// Use [`Error::kind`] for broad caller action and [`Error::code`] for a stable
 /// machine-readable reason.
-pub type Error = CoreError;
+pub use self::CoreError as Error;
 
 /// Result type used by `loonfs-core` entrypoints.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -49,8 +57,8 @@ pub enum CoreError {
     MetadataApply(#[from] MetadataApplyError),
     #[error("head publish failed: {0}")]
     HeadPublish(#[from] CommitHeadPublishError),
-    #[error("failed to write wal object: {0}")]
-    WalWrite(String),
+    #[error("failed to write wal object `{object_key}`: {message}")]
+    WalWrite { object_key: String, message: String },
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
     #[error(transparent)]
@@ -58,11 +66,11 @@ pub enum CoreError {
     #[error(transparent)]
     InvalidCommitId(#[from] CommitIdValidationError),
     #[error(transparent)]
-    InvalidUploadId(GeneratedIdValidationError),
+    InvalidUploadId(#[from] GeneratedIdValidationError),
     #[error("path not found `{0}`")]
-    MissingPath(String),
+    PathNotFound(String),
     #[error("revision `{revision_no}` not found for inode `{inode_id}`")]
-    MissingRevision {
+    RevisionNotFound {
         inode_id: InodeId,
         revision_no: loonfs_api::RevisionNo,
     },
@@ -80,7 +88,7 @@ pub enum CoreError {
     CommitIdReuseConflict(String),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
-    #[error("{0}")]
+    #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
@@ -115,8 +123,12 @@ pub enum CoreError {
     /// callers surface it without reacquiring.
     #[error("writer session fenced: {0}")]
     WriterFenced(String),
-    #[error("object store error: {0}")]
-    Store(String),
+    #[error("object store error for `{object_key}`: {message}")]
+    Store { object_key: String, message: String },
+    /// Non-store internal failure (codec, overflow, invariant breach). Same
+    /// wire code as [`ErrorCode::ServerError`]; the message is the detail.
+    #[error("internal error: {0}")]
+    Internal(String),
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceAlreadyExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
@@ -167,6 +179,8 @@ pub enum MetadataViewError {
 ///
 /// These variants name durable/control failure cases without implying that a
 /// full namespace state was reconstructed.
+// Four Load* variants share ControlObjectLoadError; only the head load (the
+// dominant path) gets `#[from]`, the others stay explicit conversions.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MetadataProjectionLoadError {
     #[error("failed to load namespace descriptor: {0}")]
@@ -233,11 +247,28 @@ impl From<NamespaceCatalogLoadError> for CoreError {
 
 impl From<ImmutableObjectWriteError> for CoreError {
     fn from(value: ImmutableObjectWriteError) -> Self {
-        Self::Store(value.to_string())
+        match value {
+            ImmutableObjectWriteError::Store {
+                object_key,
+                message,
+            } => Self::Store {
+                object_key,
+                message,
+            },
+        }
     }
 }
 
 impl CoreError {
+    /// Builds [`CoreError::Store`] for a failed object-store operation on
+    /// `object_key`.
+    pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
+        Self::Store {
+            object_key: object_key.into(),
+            message: error.message(),
+        }
+    }
+
     pub fn kind(&self) -> ErrorKind {
         self.code().kind()
     }
@@ -252,8 +283,9 @@ impl CoreError {
             CoreError::CommitValidation(error) => classify_commit_validation_error(error),
             CoreError::WalBuild(_)
             | CoreError::MetadataApply(_)
-            | CoreError::WalWrite(_)
-            | CoreError::Store(_) => ErrorCode::ServerError,
+            | CoreError::WalWrite { .. }
+            | CoreError::Store { .. }
+            | CoreError::Internal(_) => ErrorCode::ServerError,
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
             CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
                 ErrorCode::InvalidRequest
@@ -261,8 +293,8 @@ impl CoreError {
             CoreError::InvalidNamespaceId(_) => ErrorCode::InvalidRequest,
             CoreError::InvalidCommitId(_) => ErrorCode::InvalidRequest,
             CoreError::InvalidUploadId(_) => ErrorCode::InvalidRequest,
-            CoreError::MissingPath(_) => ErrorCode::PathNotFound,
-            CoreError::MissingRevision { .. } => ErrorCode::RevisionNotFound,
+            CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
+            CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
             CoreError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
@@ -313,7 +345,7 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
         }
         MetadataProjectionLoadError::LoadContentStoreDescriptor(error) => match error {
             ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidRequest,
-            ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
+            ControlObjectLoadError::Store { .. } => ErrorCode::ServerError,
             _ => ErrorCode::NamespaceCorrupt,
         },
         MetadataProjectionLoadError::LoadHead(error) => match error {
@@ -324,9 +356,9 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
         MetadataProjectionLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
         MetadataProjectionLoadError::WalReplay(_)
         | MetadataProjectionLoadError::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
-        MetadataProjectionLoadError::ManifestLoad(error) => match error.kind() {
-            crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
-            crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
+        MetadataProjectionLoadError::ManifestLoad(error) => match error.failure_class() {
+            crate::checkpoint::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
+            crate::checkpoint::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
         },
         MetadataProjectionLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
         MetadataProjectionLoadError::HeadChangedDuringLoad { .. } => ErrorCode::StaleHead,
@@ -343,7 +375,7 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCo
         | ControlObjectLoadError::ContentStoreMismatch { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
-        ControlObjectLoadError::Store(_) => ErrorCode::ServerError,
+        ControlObjectLoadError::Store { .. } => ErrorCode::ServerError,
     }
 }
 
@@ -390,7 +422,12 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
             ControlUpdateError::LoadHead(error) => {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             }
-            other => CoreError::Store(other.to_string()),
+            // The remaining variants (missing etag, codec, control store error,
+            // retries exhausted) are control-plane plumbing failures with no
+            // single object key in scope at this blanket conversion. They share
+            // the ServerError wire code with `Store`; keep the detail as a
+            // prefixed message.
+            other => CoreError::Internal(other.to_string()),
         }
     }
 }
