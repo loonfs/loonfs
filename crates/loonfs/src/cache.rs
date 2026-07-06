@@ -8,7 +8,7 @@ use crate::fs::{should_invalidate_after_result, Fs};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::ManifestId;
+use loonfs_api::{ManifestId, ManifestObjectId};
 use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
     load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
@@ -98,6 +98,7 @@ pub(crate) struct CachedControl<T> {
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: CachedControl<HeadState>,
     pub(crate) manifest_id: ManifestId,
+    pub(crate) manifest_object_id: ManifestObjectId,
 }
 
 /// Snapshot of runtime cache counters.
@@ -394,6 +395,7 @@ impl Fs {
             anchor.head.state.clone(),
             anchor.head.identity.etag.clone(),
             anchor.manifest_id,
+            anchor.manifest_object_id.clone(),
             Some(Arc::clone(&self.inner.metadata_table_cache)),
             tail_cache,
         )
@@ -450,5 +452,6 @@ fn cached_anchor(
             state: head.state,
         },
         manifest_id: root.state.manifest_id,
+        manifest_object_id: root.state.manifest_object_id,
     }
 }

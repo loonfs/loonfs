@@ -19,7 +19,7 @@ use loonfs_api::wire::control::{
     decode_control_object, CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
     NamespaceGcPinState, NamespaceState,
 };
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, namespace_config,
     pin_prefix, wal_segment_prefix,
@@ -84,7 +84,7 @@ pub struct GcReport {
 
 /// Everything reachable from the fresh root set (rule 4).
 struct LiveSet {
-    manifests: BTreeSet<ManifestId>,
+    manifests: BTreeSet<ManifestObjectId>,
     tables: BTreeSet<String>,
     wal_segments: BTreeSet<String>,
     checkpoint_keys: BTreeSet<String>,
@@ -135,7 +135,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .collect();
     let manifest_candidates: Vec<String> = candidate_manifests
         .into_iter()
-        .filter(|key| manifest_id_of(key).is_none_or(|id| !mark.manifests.contains(&id)))
+        .filter(|key| manifest_object_id_of(key).is_none_or(|id| !mark.manifests.contains(&id)))
         .collect();
     let checkpoint_candidates: Vec<String> = candidate_checkpoints
         .into_iter()
@@ -176,7 +176,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
             }
         }
         for key in manifest_candidates {
-            if manifest_id_of(&key).is_some_and(|id| sweep.manifests.contains(&id)) {
+            if manifest_object_id_of(&key).is_some_and(|id| sweep.manifests.contains(&id)) {
                 report.retained_candidates += 1;
                 continue;
             }
@@ -236,7 +236,7 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         pin_keys: BTreeSet::new(),
         degraded: false,
     };
-    live.manifests.insert(root.manifest_id);
+    live.manifests.insert(root.manifest_object_id);
 
     // Active, non-expired checkpoints are roots. Records inside the grace
     // window are roots regardless of state, which the age check at delete
@@ -260,7 +260,7 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
                     .expires_at_ms
                     .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);
                 if record.state == CheckpointRecordLifecycle::Active && !expired {
-                    live.manifests.insert(record.manifest_id);
+                    live.manifests.insert(record.manifest_object_id);
                     live.checkpoint_keys.insert(key);
                 }
             }
@@ -300,7 +300,7 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
             Ok(Some(record)) => {
                 // Pinned checkpoints protect their basis regardless of the
                 // record's lifecycle: the pin is the reachability fact.
-                live.manifests.insert(record.state.manifest_id);
+                live.manifests.insert(record.state.manifest_object_id);
                 live.checkpoint_keys
                     .insert(loonfs_objectstore::keys::checkpoint_record(
                         namespace_id.as_str(),
@@ -318,8 +318,8 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
     // Live manifests protect their tables (rule 6: only validated manifests
     // are trusted to protect data — the envelope loader checks the payload
     // checksum).
-    for manifest_id in live.manifests.clone() {
-        match load_namespace_manifest_envelope(store, namespace_id, manifest_id).await {
+    for manifest_object_id in live.manifests.clone() {
+        match load_namespace_manifest_envelope(store, namespace_id, &manifest_object_id).await {
             Ok(manifest) => {
                 for file in &manifest.payload.metadata_files {
                     live.tables.insert(file.object_key.clone());
@@ -468,10 +468,10 @@ async fn list_prefix<S: ObjectStore + ?Sized>(
         .map_err(|error| CoreError::store(prefix, &error))
 }
 
-fn manifest_id_of(key: &str) -> Option<ManifestId> {
+fn manifest_object_id_of(key: &str) -> Option<ManifestObjectId> {
     let name = key.rsplit('/').next()?;
-    let digits = name.strip_suffix(".json")?;
-    digits.parse::<u64>().ok().map(ManifestId)
+    let object_id = name.strip_suffix(".manifest.json")?;
+    ManifestObjectId::parse(object_id).ok()
 }
 
 fn load_error(error: ControlObjectLoadError) -> CoreError {
@@ -737,10 +737,16 @@ mod tests {
         // checkpoint bases stay.
         assert!(report.deleted_manifests <= 1);
         assert_eq!(report.deleted_checkpoint_records, 0);
+        let first_record =
+            crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+                .await
+                .expect("read first checkpoint")
+                .expect("first checkpoint exists")
+                .state;
         assert!(crate::checkpoint::load_namespace_manifest_envelope(
             &store,
             &namespace_id,
-            first.manifest_id
+            &first_record.manifest_object_id,
         )
         .await
         .is_ok());

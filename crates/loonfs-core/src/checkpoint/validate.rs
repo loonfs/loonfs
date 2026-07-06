@@ -7,11 +7,14 @@ use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataPage, MetadataRow, MetadataSstEnvelope, MetadataTableFamily,
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{
+    manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId, NamespaceId,
+};
 
 pub(super) fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
     object_key: &str,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), ManifestLoadError> {
@@ -27,6 +30,24 @@ pub(super) fn validate_namespace_manifest(
             object_key: object_key.to_owned(),
             expected: manifest_id,
             actual: manifest.payload.manifest_id,
+        });
+    }
+    if manifest_object_id_manifest_id(manifest.payload.manifest_object_id.as_str())
+        != Some(manifest.payload.manifest_id)
+    {
+        return Err(ManifestLoadError::RunManifestMismatch {
+            object_key: object_key.to_owned(),
+            message: format!(
+                "manifest object id `{}` does not encode manifest id `{}`",
+                manifest.payload.manifest_object_id, manifest.payload.manifest_id
+            ),
+        });
+    }
+    if manifest.payload.manifest_object_id != *manifest_object_id {
+        return Err(ManifestLoadError::ManifestObjectIdMismatch {
+            object_key: object_key.to_owned(),
+            expected: manifest_object_id.clone(),
+            actual: manifest.payload.manifest_object_id.clone(),
         });
     }
     if !manifest.payload.verified {

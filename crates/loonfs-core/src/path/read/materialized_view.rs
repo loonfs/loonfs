@@ -15,6 +15,7 @@ use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core}
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
+use loonfs_api::ManifestObjectId;
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ContentStoreId,
     DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
@@ -36,6 +37,7 @@ pub(crate) enum ReadViewContext<'a> {
         /// pinned pair stays consistent (any manifest at or below the
         /// pinned seq serves it, with WAL replay covering the rest).
         manifest_id: ManifestId,
+        manifest_object_id: &'a ManifestObjectId,
     },
 }
 
@@ -59,6 +61,7 @@ impl<'a> ReadLoadContext<'a> {
         head: &'a HeadState,
         head_etag: Option<&'a str>,
         manifest_id: ManifestId,
+        manifest_object_id: &'a ManifestObjectId,
         table_cache: Option<&'a MetadataTableCache>,
         tail_cache: Option<&'a WalTailProjectionCache>,
     ) -> Self {
@@ -67,6 +70,7 @@ impl<'a> ReadLoadContext<'a> {
                 head,
                 head_etag,
                 manifest_id,
+                manifest_object_id,
             },
             table_cache,
             tail_cache,
@@ -89,18 +93,23 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
                 namespace_id,
                 loaded_head.envelope.state,
                 loaded_root.envelope.state.manifest_id,
+                loaded_root.envelope.state.manifest_object_id,
                 context,
             )
             .await
         }
         ReadViewContext::PinnedHead {
-            head, manifest_id, ..
+            head,
+            manifest_id,
+            manifest_object_id,
+            ..
         } => {
             LoadedMetadataView::load_at_head(
                 store,
                 namespace_id,
                 head.clone(),
                 manifest_id,
+                manifest_object_id.clone(),
                 context,
             )
             .await
@@ -123,6 +132,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         namespace_id: &NamespaceId,
         head: HeadState,
         manifest_id: ManifestId,
+        manifest_object_id: ManifestObjectId,
         load_context: ReadLoadContext<'a>,
     ) -> Result<Self, CoreError> {
         if &head.namespace_id != namespace_id {
@@ -143,7 +153,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             store,
             load_context.table_cache,
             namespace_id,
-            manifest_id,
+            &manifest_object_id,
         )
         .await
         .map_err(|error| {

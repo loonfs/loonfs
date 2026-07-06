@@ -134,13 +134,16 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     if let Some(acquired_writer) = &acquired_writer {
         ensure_publish_head_matches_acquired_writer(&head, acquired_writer)?;
     }
-    let manifest_id = root.manifest_id;
-    let manifest_tables =
-        load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+    let manifest_tables = load_verified_manifest_tables_with_cache(
+        store,
+        None,
+        namespace_id,
+        &root.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
             "metadata root for `{}` references manifest {:?} with checksum {} but the manifest carries {}",
@@ -150,6 +153,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             manifest_tables.manifest().payload_checksum,
         )));
     }
+    let manifest_id = root.manifest_id;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let manifest_payload_checksum = manifest_tables.manifest().payload_checksum.clone();
     let projection = if let Some(cached) = cached_projection.filter(|cached| {

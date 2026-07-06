@@ -42,8 +42,8 @@ use loonfs_core::{
     MutationContext, NamespaceEngine, WriteOptions,
 };
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, metadata_manifest, namespace_config, pin as pin_key,
-    upload_session, upload_session_prefix, wal_head,
+    content_blob, content_store_descriptor, metadata_manifest_object, namespace_config,
+    pin as pin_key, upload_session, upload_session_prefix, wal_head,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -1138,15 +1138,19 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         .await
         .expect("content store descriptor head")
         .is_some());
-    let manifest_id = block_on(loonfs_core::control::load_namespace_metadata_root_control(
+    let manifest_root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
         &store,
         &namespace_id,
     ))
-    .expect("metadata root")
-    .state
-    .manifest_id;
+    .expect("metadata root");
     let manifest_bytes = store
-        .get(&metadata_manifest(namespace_id.as_str(), manifest_id), None)
+        .get(
+            &metadata_manifest_object(
+                namespace_id.as_str(),
+                &manifest_root.state.manifest_object_id,
+            ),
+            None,
+        )
         .await
         .expect("read manifest")
         .expect("manifest exists");
@@ -3443,7 +3447,10 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     .expect("clone wal floor");
     assert_eq!(clone_floor.state.floor_seq, ChangeSeq(1));
 
-    let target_manifest_key = metadata_manifest(clone_namespace_id.as_str(), ManifestId(1));
+    let target_manifest_key = metadata_manifest_object(
+        clone_namespace_id.as_str(),
+        &clone_root.state.manifest_object_id,
+    );
     let target_manifest_bytes = store
         .get(&target_manifest_key, None)
         .await
@@ -3662,7 +3669,19 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         block_on(namespace_engine(&store, &source_namespace_id, &context).create_checkpoint())
             .expect("create source checkpoint");
 
-    let manifest_key = metadata_manifest(source_namespace_id.as_str(), checkpoint.manifest_id);
+    let source_record = block_on(
+        loonfs_core::control::load_namespace_checkpoint_record_control(
+            &store,
+            &source_namespace_id,
+            &checkpoint.checkpoint_id,
+        ),
+    )
+    .expect("read source checkpoint record")
+    .expect("source checkpoint record exists");
+    let manifest_key = metadata_manifest_object(
+        source_namespace_id.as_str(),
+        &source_record.manifest_object_id,
+    );
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await

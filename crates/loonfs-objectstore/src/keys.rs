@@ -200,6 +200,10 @@ mod tests {
                 .replace("{start_seq:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
                 .replace("{manifest_id:020}", &format!("{:020}", 400))
+                .replace(
+                    "{manifest_object_id}",
+                    "00000000000000000400-0123456789abcdef",
+                )
                 .replace("{checkpoint_id}", "chk-1")
                 .replace("{table_id}", "tbl-1")
                 .replace("{pin_id}", "pin-1")
@@ -218,7 +222,11 @@ mod tests {
             ),
             (
                 "Metadata manifests",
-                metadata_manifest("ns-1", ManifestId(400)),
+                metadata_manifest_object(
+                    "ns-1",
+                    &ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
+                        .expect("valid manifest object id"),
+                ),
             ),
             ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
