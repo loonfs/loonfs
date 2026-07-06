@@ -448,7 +448,10 @@ fn run_filesystem_path_lookup<F>(
     op: F,
 ) -> Result<CommandOutput, CommandFailure>
 where
-    F: FnOnce(&dyn crate::backend::Backend, &NamespacePath) -> Result<CommandData, CliError>,
+    F: FnOnce(
+        &dyn crate::backend::Backend,
+        &NamespacePath,
+    ) -> Result<CommandData, crate::backend::BackendError>,
 {
     let context = resolve_command_context(kind, &args.target)?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {

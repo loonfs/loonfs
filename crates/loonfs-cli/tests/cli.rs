@@ -926,6 +926,209 @@ fn help_omits_legacy_commands_and_config_flag() {
     assert!(stdout.contains("use"));
 }
 
+/// Pins the capability registry to the CLI surface: every profile and every
+/// feature key advertised by the embedded runtime must map to a CLI command
+/// path that exercises it, so no advertised capability is unreachable from
+/// this surface.
+///
+/// When `Fs::capabilities()` (crates/loonfs/src/fs.rs) grows a profile or a
+/// feature key, this test fails until the tables below either name the CLI
+/// command path that covers the new capability, or record a deliberately
+/// deferred CLI gap with a comment (none today).
+#[test]
+fn every_advertised_capability_maps_to_a_cli_command_path() {
+    // Advertised profile -> the CLI command paths exercising that plane.
+    const PROFILE_COMMAND_PATHS: &[(&str, &[&[&str]])] = &[
+        (
+            "core/v0",
+            &[
+                &["namespace", "create"],
+                &["namespace", "delete"],
+                &["namespace", "fork"],
+                &["use"],
+                &["ls"],
+                &["stat"],
+                &["cat"],
+                &["get"],
+                &["put"],
+                &["mkdir"],
+                &["rm"],
+                &["mv"],
+                &["cp"],
+                &["revisions"],
+                &["restore"],
+                &["changes"],
+            ],
+        ),
+        (
+            "admin/v0",
+            &[&["admin", "checkpoint"], &["admin", "retention-advance"]],
+        ),
+    ];
+    // Advertised feature key -> the CLI command path exercising it. Keys are
+    // listed whether the embedded build advertises them `true` or `false`;
+    // gating is the backend's job, reachability is this surface's job.
+    const FEATURE_COMMAND_PATHS: &[(&str, &[&str])] = &[
+        ("core.namespaces.create", &["namespace", "create"]),
+        ("core.namespaces.delete", &["namespace", "delete"]),
+        ("core.namespaces.fork", &["namespace", "fork"]),
+        // Direct-put is a transfer mode negotiated inside the same upload
+        // staging flow `put` drives; it needs no separate verb.
+        ("core.uploads.direct_put", &["put"]),
+    ];
+
+    let harness = Harness::new();
+    let document = embedded_capability_document();
+
+    for profile in &document.profiles {
+        let (_, command_paths) = PROFILE_COMMAND_PATHS
+            .iter()
+            .find(|(advertised, _)| *advertised == profile.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "capability profile `{profile}` has no CLI command mapping; \
+                     add its command paths to PROFILE_COMMAND_PATHS"
+                )
+            });
+        for command_path in *command_paths {
+            assert_cli_command_path_exists(&harness, command_path);
+        }
+    }
+
+    for feature in document.features.keys() {
+        let (_, command_path) = FEATURE_COMMAND_PATHS
+            .iter()
+            .find(|(advertised, _)| *advertised == feature.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "capability feature `{feature}` has no CLI command mapping; \
+                     add its command path to FEATURE_COMMAND_PATHS"
+                )
+            });
+        assert_cli_command_path_exists(&harness, command_path);
+    }
+}
+
+/// The admin plane and the change feed work end to end, and both profile
+/// modes emit the same `--json` shapes and error codes for them.
+#[test]
+fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "admin-parity"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let first_payload = harness.temp_dir.path().join("first.txt");
+    let second_payload = harness.temp_dir.path().join("second.txt");
+    fs::write(&first_payload, b"first change\n").expect("first payload");
+    fs::write(&second_payload, b"second change\n").expect("second payload");
+
+    let mut shapes_by_mode = Vec::new();
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            first_payload.to_str().unwrap(),
+            "/first.txt",
+        ]));
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            second_payload.to_str().unwrap(),
+            "/second.txt",
+        ]));
+
+        let changes = harness.run(&["--json", "changes", "--profile", profile]);
+        assert_success(&changes);
+        let changes_data = json_data(&changes);
+        assert_eq!(changes_data["kind"], "changes");
+        assert_eq!(changes_data["namespace_id"], "demo");
+        assert_eq!(changes_data["after_seq"], 0);
+        assert_eq!(changes_data["through_seq"], 2);
+        assert!(changes_data["next_after_seq"].is_null());
+        let listed = changes_data["changes"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0]["seq"], 1);
+        assert_eq!(listed[1]["seq"], 2);
+        assert!(listed[0]["commit_id"].as_str().unwrap().starts_with("c_"));
+        assert!(!listed[1]["deltas"].as_array().unwrap().is_empty());
+
+        let paged = harness.run(&["--json", "changes", "--profile", profile, "--limit", "1"]);
+        assert_success(&paged);
+        let paged_data = json_data(&paged);
+        assert_eq!(paged_data["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(paged_data["changes"][0]["seq"], 1);
+        assert_eq!(paged_data["next_after_seq"], 1);
+
+        let resumed = harness.run(&["--json", "changes", "--profile", profile, "--after", "1"]);
+        assert_success(&resumed);
+        let resumed_data = json_data(&resumed);
+        assert_eq!(resumed_data["after_seq"], 1);
+        assert_eq!(resumed_data["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(resumed_data["changes"][0]["seq"], 2);
+
+        let checkpoint = harness.run(&["--json", "admin", "checkpoint", "--profile", profile]);
+        assert_success(&checkpoint);
+        let checkpoint_data = json_data(&checkpoint);
+        assert_eq!(checkpoint_data["kind"], "checkpoint_created");
+        assert_eq!(checkpoint_data["namespace_id"], "demo");
+        assert_eq!(checkpoint_data["checkpoint_seq"], 2);
+        assert!(checkpoint_data["checkpoint_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("chk_"));
+
+        let retention =
+            harness.run(&["--json", "admin", "retention-advance", "--profile", profile]);
+        assert_success(&retention);
+        let retention_data = json_data(&retention);
+        assert_eq!(retention_data["kind"], "retention_advanced");
+        assert_eq!(retention_data["namespace_id"], "demo");
+        assert_eq!(retention_data["retention_floor_seq"], 2);
+
+        // Admin failures surface the registry code in both modes.
+        let missing = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint",
+            "--profile",
+            profile,
+            "--namespace",
+            "missing",
+        ]);
+        assert_failure(&missing);
+        assert_eq!(json_error(&missing)["code"], "namespace_not_found");
+
+        shapes_by_mode.push((
+            sorted_object_keys(&changes_data),
+            sorted_object_keys(&checkpoint_data),
+            sorted_object_keys(&retention_data),
+        ));
+    }
+
+    assert_eq!(
+        shapes_by_mode[0], shapes_by_mode[1],
+        "embedded and remote --json payloads diverged in shape"
+    );
+}
+
 struct Harness {
     temp_dir: TempDir,
     home_dir: PathBuf,
@@ -1167,4 +1370,49 @@ fn json_data(output: &Output) -> Value {
 
 fn json_error(output: &Output) -> Value {
     parse_json(&output.stderr)["error"].clone()
+}
+
+fn sorted_object_keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("json object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The embedded capability document: the registry of advertised profiles and
+/// feature keys (`crates/loonfs/tests/capability_conformance.rs` pins it to
+/// the spec text).
+fn embedded_capability_document() -> loonfs::CapabilityDocument {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let store = std::sync::Arc::new(
+        loonfs_objectstore::fs::LocalFsStore::new(temp_dir.path()).expect("store"),
+    ) as loonfs::SharedObjectStore;
+    let fs = loonfs::Fs::open(
+        store,
+        loonfs::FsConfig {
+            writer_id: "cli-capability-conformance".to_owned(),
+            writer_version: "test".to_owned(),
+            runtime_cache: loonfs::RuntimeCacheConfig::default(),
+            trace_mode: loonfs::TraceMode::Embedded,
+            trace_store_kind: loonfs::TraceStoreKind::LocalFs,
+        },
+    )
+    .expect("open runtime");
+    fs.capabilities()
+}
+
+fn assert_cli_command_path_exists(harness: &Harness, command_path: &[&str]) {
+    let mut args = command_path.to_vec();
+    args.push("--help");
+    let output = harness.run(&args);
+    assert!(
+        output.status.success(),
+        "no CLI command path `loon {}`:\n{}",
+        command_path.join(" "),
+        stderr_string(&output)
+    );
 }

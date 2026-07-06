@@ -4,6 +4,11 @@
 //! instead of embedding the runtime directly. The client keeps paths simple:
 //! pass a [`NamespacePath`] for filesystem operations and use explicit commit
 //! helpers when you need retry control.
+//!
+//! Hosts that want to stay transport-agnostic should program against the
+//! [`backend::Backend`] trait instead of [`Client`] directly.
+
+pub mod backend;
 
 use http::Uri;
 use loonfs_api::{
@@ -13,12 +18,12 @@ use loonfs_api::{
         CompleteUploadRequest, CompleteUploadResponse, MoveBehavior, ObjectTransferAccess,
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
-    ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId, ContentRef,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    ForkNamespaceRequest, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
-    RestoreFileRevisionRequest, RevisionNo,
+    AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
+    CommitId, ContentRef, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MutationResult, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -521,6 +526,36 @@ impl Client {
             url.push_str(&format!("&limit={limit}"));
         }
         self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
+    }
+
+    /// Creates or reuses a checkpoint pinning the namespace's current view
+    /// (admin plane). This is a maintenance operation, not a file mutation;
+    /// the request carries no body.
+    pub fn create_checkpoint(
+        &self,
+        namespace: &str,
+    ) -> Result<CreateCheckpointResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/checkpoint",
+            self.base_url
+        );
+        self.request_json::<(), CreateCheckpointResponse>(self.agent.post(&url), None)
+    }
+
+    /// Advances the namespace retention floor to what checkpoint state allows
+    /// (admin plane). Irreversible: WAL history before the floor stops being
+    /// replayable. The request carries no body.
+    pub fn advance_retention(
+        &self,
+        namespace: &str,
+    ) -> Result<AdvanceRetentionResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/retention/advance",
+            self.base_url
+        );
+        self.request_json::<(), AdvanceRetentionResponse>(self.agent.post(&url), None)
     }
 
     fn apply_filesystem_operation(
@@ -1108,6 +1143,8 @@ auth_token = "   "
             client
                 .begin_upload("bad/name", &BeginUploadRequest::default())
                 .map(|_| ()),
+            client.create_checkpoint("bad/name").map(|_| ()),
+            client.advance_retention("bad/name").map(|_| ()),
         ] {
             assert!(matches!(result, Err(ClientError::InvalidNamespacePath(_))));
         }

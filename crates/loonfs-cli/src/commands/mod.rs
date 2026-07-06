@@ -1,3 +1,4 @@
+mod admin;
 mod config;
 mod context;
 mod fs;
@@ -47,5 +48,7 @@ pub(crate) fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, C
         Command::Rm(args) => fs::run_filesystem_rm(kind, args),
         Command::Mv(args) => fs::run_filesystem_mv(kind, args),
         Command::Cp(args) => fs::run_filesystem_cp(kind, args),
+        Command::Changes(args) => admin::run_changes(kind, args),
+        Command::Admin { command } => admin::run_admin_command(kind, command),
     }
 }
