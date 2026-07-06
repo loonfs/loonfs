@@ -1,3 +1,4 @@
+use super::visibility::unbind_matches_binding;
 use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
@@ -78,7 +79,7 @@ impl MetadataIndexes {
             let Some(latest_child_bind) = latest_by_child.get(&bind.child_inode_id) else {
                 continue;
             };
-            if !same_binding(bind, latest_child_bind) {
+            if !bind.same_binding(latest_child_bind) {
                 continue;
             }
             indexes
@@ -237,7 +238,7 @@ impl MetadataIndexes {
         if self
             .active_child_by_parent_name
             .get(&parent_name_key)
-            .map(|active| unbind_matches_bind(record, active))
+            .map(|active| unbind_matches_binding(record, active))
             .unwrap_or(false)
         {
             self.active_child_by_parent_name.remove(&parent_name_key);
@@ -245,7 +246,7 @@ impl MetadataIndexes {
         if self
             .active_parent_by_child
             .get(&record.child_inode_id)
-            .map(|active| unbind_matches_bind(record, active))
+            .map(|active| unbind_matches_binding(record, active))
             .unwrap_or(false)
         {
             self.active_parent_by_child.remove(&record.child_inode_id);
@@ -285,6 +286,10 @@ impl MetadataIndexes {
     }
 }
 
+/// Owned hash-key twin of [`super::visibility::BindingIdentity`]: the same
+/// five identity fields, owned so unbound binding events can live in a
+/// `HashSet`. Not a comparison rule of its own — membership tests through it
+/// are identity comparisons by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BindingKey {
     parent_inode_id: InodeId,
@@ -382,7 +387,7 @@ fn remove_active_parent_if_same(
 ) {
     if active_parent_by_child
         .get(&record.child_inode_id)
-        .map(|active| same_binding(active, record))
+        .map(|active| active.same_binding(record))
         .unwrap_or(false)
     {
         active_parent_by_child.remove(&record.child_inode_id);
@@ -396,27 +401,11 @@ fn remove_active_child_if_same(
     let key = (record.parent_inode_id, record.name_key.clone());
     if active_child_by_parent_name
         .get(&key)
-        .map(|active| same_binding(active, record))
+        .map(|active| active.same_binding(record))
         .unwrap_or(false)
     {
         active_child_by_parent_name.remove(&key);
     }
-}
-
-fn same_binding(left: &DirentryBindRecord, right: &DirentryBindRecord) -> bool {
-    left.parent_inode_id == right.parent_inode_id
-        && left.name_key == right.name_key
-        && left.child_inode_id == right.child_inode_id
-        && left.bind_seq == right.bind_seq
-        && left.bind_delta_index == right.bind_delta_index
-}
-
-fn unbind_matches_bind(unbind: &DirentryUnbindRecord, bind: &DirentryBindRecord) -> bool {
-    unbind.parent_inode_id == bind.parent_inode_id
-        && unbind.name_key == bind.name_key
-        && unbind.child_inode_id == bind.child_inode_id
-        && unbind.bind_seq == bind.bind_seq
-        && unbind.bind_delta_index == bind.bind_delta_index
 }
 
 fn bind_order_key(record: &DirentryBindRecord) -> (ChangeSeq, u32) {

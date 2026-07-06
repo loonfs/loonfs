@@ -16,6 +16,10 @@
 //!   row scans below it.
 //! - `indexes` maintains the at-head lookup structures behind those fast
 //!   paths.
+//! - `visibility` holds the single authoritative statement of the
+//!   direntry-visibility rules (binding identity, active bindings, tombstone
+//!   coverage, path resolution) that every storage shape above decides
+//!   through.
 
 mod apply;
 mod indexes;
@@ -26,6 +30,7 @@ mod rows;
 #[cfg(test)]
 mod tests;
 mod view;
+mod visibility;
 
 pub use self::apply::{AppliedMetadataState, MetadataApplyError};
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
@@ -38,6 +43,7 @@ pub(crate) use self::rows::record_name_key;
 pub(crate) use self::view::{
     InMemoryMetadataView, MetadataView, MetadataViewSession, VisibleChildEntry,
 };
+pub(crate) use self::visibility::{unbind_matches_binding, BindingIdentity};
 
 #[cfg(test)]
 pub(crate) use self::rows::MetadataStateBuilder;

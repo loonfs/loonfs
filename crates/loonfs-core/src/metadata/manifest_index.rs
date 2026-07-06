@@ -1,14 +1,14 @@
 use super::row_decode::{
     commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
     direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
-    tombstone_from_manifest_row, unbind_matches_binding,
+    tombstone_from_manifest_row,
 };
 use crate::checkpoint::{string_prefix_upper_bound, ManifestLoadError, VerifiedMetadataTables};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    unbind_matches_binding, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::{hex_encode_row_key_component, MetadataRow, MetadataTableFamily};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
