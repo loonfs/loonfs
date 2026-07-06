@@ -37,7 +37,7 @@ async fn visit_visible_tree<S: ObjectStore + ?Sized>(
     let mut pending = vec![absolute_path.to_owned()];
     while let Some(path) = pending.pop() {
         for entry in view.list_path(&path).await? {
-            let is_dir = entry.inode_kind == InodeKind::Dir;
+            let is_dir = entry.inode_kind == InodeKind::Directory;
             let child_path = entry.absolute_path.clone();
             entries.push(entry);
             if is_dir {
@@ -52,7 +52,7 @@ async fn visit_visible_tree<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use crate::{BootstrapOptions, NamespaceEngine, WriteOptions};
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -86,8 +86,8 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
         let namespace = NamespaceId::parse("inspection").expect("valid namespace id");
         let engine = NamespaceEngine::builder(store.clone())
-            .namespace(namespace.clone())
-            .writer("inspection-test")
+            .namespace_id(namespace.clone())
+            .writer_id("inspection-test")
             .build()
             .expect("engine");
 
@@ -96,11 +96,11 @@ mod tests {
             .await
             .expect("bootstrap");
         engine
-            .create_dir("/z", WriteOptions::default())
+            .create_directory("/z", WriteOptions::default())
             .await
             .expect("create z");
         engine
-            .create_dir("/a", WriteOptions::default())
+            .create_directory("/a", WriteOptions::default())
             .await
             .expect("create a");
         engine

@@ -652,11 +652,11 @@ impl Client {
         self.put_file_bytes_with_commit_id(spec, bytes, true, commit_id)
     }
 
-    pub fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
-        self.create_dir_with_commit_id(spec, &generated_commit_id())
+    pub fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
+        self.create_directory_with_commit_id(spec, &generated_commit_id())
     }
 
-    pub fn create_dir_with_commit_id(
+    pub fn create_directory_with_commit_id(
         &self,
         spec: &NamespacePath,
         commit_id: &str,

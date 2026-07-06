@@ -31,12 +31,12 @@ pub(crate) fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, C
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
         }),
-        Command::Init(args) => config::run_init(kind, args, runtime),
+        Command::Init(args) => config::run_config_init(kind, args, runtime),
         Command::Config { command } => config::run_config_command(kind, command),
         Command::Profile { command } => profile::run_profile_command(kind, command, runtime),
         Command::Namespace { command } => namespace::run_namespace_command(kind, command),
         Command::Use(args) => namespace::run_namespace_use(kind, args),
-        Command::Current(args) => namespace::run_current(kind, args),
+        Command::Current(args) => namespace::run_namespace_current(kind, args),
         Command::Ls(args) => fs::run_filesystem_ls(kind, args),
         Command::Stat(args) => fs::run_filesystem_stat(kind, args),
         Command::Cat(args) => fs::run_filesystem_cat(kind, args),
@@ -48,7 +48,7 @@ pub(crate) fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, C
         Command::Rm(args) => fs::run_filesystem_rm(kind, args),
         Command::Mv(args) => fs::run_filesystem_mv(kind, args),
         Command::Cp(args) => fs::run_filesystem_cp(kind, args),
-        Command::Changes(args) => admin::run_changes(kind, args),
+        Command::Changes(args) => admin::run_admin_changes(kind, args),
         Command::Admin { command } => admin::run_admin_command(kind, command),
     }
 }

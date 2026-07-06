@@ -573,14 +573,18 @@ pub enum InodeKind {
     /// File with revision history.
     File,
     /// Directory with child bindings.
-    Dir,
+    ///
+    /// The wire value is pinned to `"dir"`; only the Rust name spells the
+    /// word out.
+    #[serde(rename = "dir")]
+    Directory,
 }
 
 impl fmt::Display for InodeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::File => f.write_str("file"),
-            Self::Dir => f.write_str("dir"),
+            Self::Directory => f.write_str("dir"),
         }
     }
 }

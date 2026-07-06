@@ -53,7 +53,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) async fn create_dir_path<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_directory_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,

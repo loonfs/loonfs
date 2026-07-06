@@ -155,7 +155,7 @@ pub trait Backend {
         force: bool,
     ) -> Result<MutationResult, BackendError>;
     /// Creates a directory.
-    fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
+    fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
     /// Deletes a file or empty directory.
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
     /// Moves a path within a namespace.
@@ -298,8 +298,10 @@ impl Backend for RemoteBackend {
             .map_err(BackendError::from)
     }
 
-    fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
-        self.client.create_dir(spec).map_err(BackendError::from)
+    fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+        self.client
+            .create_directory(spec)
+            .map_err(BackendError::from)
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {

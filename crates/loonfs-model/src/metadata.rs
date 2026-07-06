@@ -362,7 +362,7 @@ impl MetadataState {
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
         let parent = self.visible_inode(parent_inode_id, base_seq)?;
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return None;
         }
 
@@ -379,7 +379,7 @@ impl MetadataState {
         let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
             return Vec::new();
         };
-        if parent.inode_kind != InodeKind::Dir {
+        if parent.inode_kind != InodeKind::Directory {
             return Vec::new();
         }
 
@@ -443,7 +443,7 @@ impl MetadataState {
                     absolute_path: current_absolute_path.clone(),
                 },
             )?;
-            if current_inode.inode_kind != InodeKind::Dir {
+            if current_inode.inode_kind != InodeKind::Directory {
                 return Err(VisiblePathError::PathComponentNotDirectory {
                     absolute_path: current_absolute_path,
                     inode_id: current_inode_id,

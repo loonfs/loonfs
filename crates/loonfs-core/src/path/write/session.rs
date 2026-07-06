@@ -70,7 +70,7 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
@@ -117,8 +117,8 @@ mod tests {
         context: &MutationContext,
     ) -> NamespaceEngine<&'a LocalFsStore> {
         NamespaceEngine::builder(store)
-            .namespace(namespace_id.clone())
-            .writer(context.writer_id.clone())
+            .namespace_id(namespace_id.clone())
+            .writer_id(context.writer_id.clone())
             .writer_version(context.writer_version.clone())
             .build()
             .expect("test engine")

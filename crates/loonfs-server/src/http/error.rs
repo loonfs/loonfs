@@ -68,21 +68,21 @@ impl ApiResponseError {
         Self::new(status, error.code(), &error.to_string())
     }
 
-    pub(super) fn core_for_namespace(namespace: &NamespaceId, error: CoreError) -> Self {
+    pub(super) fn core_for_namespace(namespace_id: &NamespaceId, error: CoreError) -> Self {
         if matches!(error.code(), ErrorCode::NamespaceNotFound) {
             return Self::new(
                 StatusCode::NOT_FOUND,
                 ErrorCode::NamespaceNotFound,
-                &format!("namespace `{}` does not exist", namespace.as_str()),
+                &format!("namespace `{}` does not exist", namespace_id.as_str()),
             );
         }
 
         Self::core(error)
     }
 
-    pub(super) fn runtime_for_namespace(namespace: &NamespaceId, error: RuntimeError) -> Self {
+    pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: RuntimeError) -> Self {
         match error {
-            RuntimeError::Core(error) => Self::core_for_namespace(namespace, error),
+            RuntimeError::Core(error) => Self::core_for_namespace(namespace_id, error),
             RuntimeError::Bootstrap(error) => Self::bootstrap(error),
             RuntimeError::Config(message) => {
                 Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)

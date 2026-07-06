@@ -3,12 +3,12 @@ mod provider_env;
 use bytes::Bytes;
 use loonfs_api::ManifestId;
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, metadata_manifest, metadata_table, namespace_config,
     upload_session, wal_head, wal_segment,
 };
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probes::run_contract_probes;
 use loonfs_objectstore::provider::{
     Expectation, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS,

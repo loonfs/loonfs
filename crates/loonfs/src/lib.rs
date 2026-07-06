@@ -70,7 +70,7 @@ pub use config::{
 };
 pub use fs::{Fs, FsBuilder};
 pub use options::{
-    CopyOptions, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
+    CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
     PutFileOptions, RestoreRevisionOptions,
 };

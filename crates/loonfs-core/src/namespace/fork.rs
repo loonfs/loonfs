@@ -445,8 +445,8 @@ mod tests {
     use loonfs_api::{
         ChangeSeq, CheckpointId, CommitId, GcPinId, InodeId, ManifestId, NamespaceId, WriterEpoch,
     };
-    use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::pin;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use std::collections::BTreeMap;
     use tempfile::tempdir;

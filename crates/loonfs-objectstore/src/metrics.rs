@@ -182,7 +182,7 @@ impl<S> InstrumentedObjectStore<S> {
         }
     }
 
-    pub fn with_store_kind(mut self, store_kind: impl Into<String>) -> Self {
+    pub fn store_kind(mut self, store_kind: impl Into<String>) -> Self {
         self.store_kind = Some(store_kind.into());
         self
     }

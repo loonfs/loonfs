@@ -62,10 +62,11 @@ pub struct MaintenanceTickResult {
     pub gc: Option<crate::GcReport>,
 }
 
-/// Options for creating a namespace.
+/// Options for creating a namespace; feeds core's
+/// [`loonfs_core::BootstrapOptions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CreateNamespaceOptions {
-    /// Treat an existing namespace as success.
+    /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
 }
 
@@ -89,7 +90,7 @@ impl Default for PutFileOptions {
 
 /// Options for creating a directory.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CreateDirOptions {
+pub struct CreateDirectoryOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }

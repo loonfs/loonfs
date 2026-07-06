@@ -187,7 +187,7 @@ fn build_fs_with_metrics_jsonl_path(
         .trace_store_kind(trace_store_kind);
 
     if let Some(recorder) = object_store_metrics_recorder(metrics_jsonl_path)? {
-        builder = builder.with_metrics_recorder(recorder);
+        builder = builder.metrics_recorder(recorder);
     }
 
     builder

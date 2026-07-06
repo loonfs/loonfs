@@ -6,6 +6,10 @@
 //! (WAL segments, metadata SSTs, namespace manifests, and control objects).
 //! Other LoonFS crates depend on this one for vocabulary; it depends on none
 //! of them.
+//!
+//! Module rule: v0 HTTP shapes live in [`v0`]; the crate root keeps the
+//! ids/paths/errors/wire-format modules and re-exports the common v0
+//! surface as a curated explicit list below.
 
 mod capability;
 mod content;
@@ -13,13 +17,11 @@ mod control;
 mod digest;
 mod envelope;
 mod error;
-mod http;
 mod ids;
 mod manifest;
 mod name_policy;
 mod pagination;
 mod path;
-mod server;
 pub mod v0;
 mod wal;
 
@@ -45,13 +47,6 @@ pub use capability::{
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
-pub use http::{
-    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, ListFileRevisionsResponse, MutationResult, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, RestoreFileRevisionRequest,
-};
 pub use ids::{
     generated_id, wal_segment_id_start_seq, ChangeSeq, CheckpointId, CommitId,
     CommitIdValidationError, ContentStoreId, GcPinId, GeneratedIdValidationError, InodeId,
@@ -67,8 +62,17 @@ pub use pagination::{
     PAGE_CURSOR_VERSION,
 };
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
-pub use server::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
-pub use v0::MoveBehavior;
+
+// Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
+// in `v0`; add here only what most consumers touch.
+pub use v0::{
+    AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
+    DeleteNamespaceResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, ForkNamespaceRequest, GcRequest, GcResponse,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MoveBehavior, MutationResult,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest,
+};
 
 #[cfg(test)]
 mod tests {

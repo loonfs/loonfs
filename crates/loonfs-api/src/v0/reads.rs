@@ -1,3 +1,7 @@
+//! Authoritative read-result shapes for the v0 HTTP API: the stat/list
+//! entry, the directory-listing envelope, and the file-bytes read result.
+//! The mutating operation shapes live in [`super::operations`].
+
 use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 

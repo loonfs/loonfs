@@ -172,7 +172,7 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
     };
     let commit_request = match intent {
         PathMutationIntent::CreateDir { absolute_path, .. } => {
-            plan_publish_create_dir(absolute_path, &commit_id, &view).await?
+            plan_publish_create_directory(absolute_path, &commit_id, &view).await?
         }
         PathMutationIntent::PutFile {
             absolute_path,
@@ -314,7 +314,7 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
+async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
@@ -455,10 +455,10 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
         InodeKind::File => ApiCommitOp::DeleteFile {
             inode_id: resolved.inode_id,
         },
-        InodeKind::Dir if recursive => ApiCommitOp::DeleteSubtree {
+        InodeKind::Directory if recursive => ApiCommitOp::DeleteSubtree {
             root_inode_id: resolved.inode_id,
         },
-        InodeKind::Dir => {
+        InodeKind::Directory => {
             let children = view
                 .metadata_state
                 .visible_children(resolved.inode_id)
@@ -474,7 +474,7 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
         }
     };
     let mut preconditions = vec![publish_binding_is_precondition(view, &resolved).await?];
-    if !recursive && resolved.inode_kind == InodeKind::Dir {
+    if !recursive && resolved.inode_kind == InodeKind::Directory {
         preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
             inode_id: resolved.inode_id,
         });
@@ -658,7 +658,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
                     .visible_inode(child.child_inode_id)
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(component.as_str().to_owned()))?;
-                if inode.inode_kind != InodeKind::Dir {
+                if inode.inode_kind != InodeKind::Directory {
                     return Err(CoreError::NonDirectoryPathComponent(
                         component.as_str().to_owned(),
                     ));
@@ -694,7 +694,7 @@ async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
         .metadata_state
         .resolve_visible_path(&parent_path)
         .await?;
-    if resolved.inode_kind != InodeKind::Dir {
+    if resolved.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
             path: parent_path.as_str().to_owned(),
             kind: resolved.inode_kind,
@@ -742,7 +742,7 @@ mod tests {
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loonfs_api::RevisionNo;
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
@@ -900,7 +900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_dir_plan_contains_semantic_op_and_target_absence_precondition() {
+    async fn create_directory_plan_contains_semantic_op_and_target_absence_precondition() {
         let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
         let planned = plan_against_current_state(
             &store,
@@ -1032,7 +1032,7 @@ mod tests {
             vec![
                 InodeRecord {
                     inode_id: InodeId(1),
-                    inode_kind: InodeKind::Dir,
+                    inode_kind: InodeKind::Directory,
                     created_seq: ChangeSeq(0),
                 },
                 InodeRecord {

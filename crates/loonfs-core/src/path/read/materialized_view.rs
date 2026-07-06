@@ -248,7 +248,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         if resolved.inode_kind == InodeKind::File {
             return Ok(vec![self.build_authoritative_path_entry(&resolved).await?]);
         }
-        if resolved.inode_kind != InodeKind::Dir {
+        if resolved.inode_kind != InodeKind::Directory {
             return Err(CoreError::ExpectedDirectory {
                 path: resolved.absolute_path,
                 kind: resolved.inode_kind,
@@ -509,7 +509,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 next_cursor: None,
             });
         }
-        if resolved.inode_kind != InodeKind::Dir {
+        if resolved.inode_kind != InodeKind::Directory {
             return Err(CoreError::ExpectedDirectory {
                 path: resolved.absolute_path,
                 kind: resolved.inode_kind,

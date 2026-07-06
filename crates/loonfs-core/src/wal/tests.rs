@@ -9,8 +9,8 @@ use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch};
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::wal_segment;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use std::borrow::Cow;
 use tempfile::tempdir;
@@ -67,7 +67,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
 #[tokio::test]
 async fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let record = materialized_create_dir(
+    let record = materialized_create_directory(
         &namespace_id,
         "c_wal_unique",
         "docs",
@@ -103,7 +103,7 @@ async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let segment = write_create_dir_segment(
+    let segment = write_create_directory_segment(
         &store,
         &namespace_id,
         None,
@@ -135,7 +135,7 @@ async fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
 #[test]
 fn canonical_replay_advances_head_and_applies_metadata_rows() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let commit = materialized_create_dir(
+    let commit = materialized_create_directory(
         &namespace_id,
         "c_wal_replay",
         "docs",
@@ -191,7 +191,7 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
 #[test]
 fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let commit = materialized_create_dir(
+    let commit = materialized_create_directory(
         &namespace_id,
         "c_wal_replay_epoch",
         "docs",
@@ -245,7 +245,7 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let first = write_create_dir_segment(
+    let first = write_create_directory_segment(
         &store,
         &namespace_id,
         None,
@@ -255,7 +255,7 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
         ChangeSeq(1),
     )
     .await;
-    let second = write_create_dir_segment(
+    let second = write_create_directory_segment(
         &store,
         &namespace_id,
         Some(first.envelope.pointer(first.object_key.clone())),
@@ -355,7 +355,7 @@ async fn validated_wal_chain_rejects_corrupt_visible_segments() {
     .await;
 }
 
-fn materialized_create_dir(
+fn materialized_create_directory(
     namespace_id: &NamespaceId,
     commit_id: &str,
     display_name: &str,
@@ -409,7 +409,7 @@ async fn assert_wal_chain_corruption_rejected(
         namespace_id.clone(),
         WriterEpoch(1),
         None,
-        &[materialized_create_dir(
+        &[materialized_create_directory(
             &namespace_id,
             "c_wal_corrupt",
             "docs",
@@ -451,7 +451,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let first = write_create_dir_segment(
+    let first = write_create_directory_segment(
         &store,
         &namespace_id,
         None,
@@ -461,7 +461,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
         ChangeSeq(1),
     )
     .await;
-    let second = write_create_dir_segment(
+    let second = write_create_directory_segment(
         &store,
         &namespace_id,
         Some(first.envelope.pointer(first.object_key.clone())),
@@ -537,7 +537,7 @@ async fn chain_load_with_recent_segment_hints_matches_the_unhinted_chain() {
     assert_eq!(survived.segments(), unhinted.segments());
 }
 
-async fn write_create_dir_segment(
+async fn write_create_directory_segment(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     prev_visible_segment: Option<WalSegmentPointer>,
@@ -550,7 +550,7 @@ async fn write_create_dir_segment(
         namespace_id.clone(),
         WriterEpoch(1),
         prev_visible_segment,
-        &[materialized_create_dir(
+        &[materialized_create_directory(
             namespace_id,
             commit_id,
             display_name,

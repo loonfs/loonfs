@@ -8,7 +8,7 @@
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use loonfs::{
-    BootstrapNamespaceError, ChangesResponse, CopyOptions, CoreError, CreateDirOptions,
+    BootstrapNamespaceError, ChangesResponse, CopyOptions, CoreError, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     ErrorCode, Fs, FsConfig, ListChangesOptions, MoveOptions, PutFileOptions,
     RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
@@ -200,15 +200,15 @@ impl Backend for EmbeddedBackend {
         )
     }
 
-    fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+    fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
         self.block_on_scoped(
             &spec.namespace,
-            self.fs.create_dir(
+            self.fs.create_directory(
                 &namespace_id,
                 &spec.absolute_path,
-                CreateDirOptions {
+                CreateDirectoryOptions {
                     commit_id: Some(commit_id),
                 },
             ),

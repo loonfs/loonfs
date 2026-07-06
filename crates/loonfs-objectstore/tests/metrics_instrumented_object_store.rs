@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::ManifestId;
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{
     metadata_manifest, metadata_table, namespace_config, wal_head, wal_segment,
 };
 use loonfs_objectstore::layout::ObjectLayout;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
@@ -326,7 +326,7 @@ where
     R: ObjectStoreMetricsRecorder,
 {
     InstrumentedObjectStore::new(LocalFsStore::new(root).expect("local fs store"), recorder)
-        .with_store_kind("local-fs")
+        .store_kind("local-fs")
 }
 
 #[derive(Debug, Default)]

@@ -4,8 +4,8 @@ use super::context::{
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
-    CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemLsArgs, FilesystemMoveArgs,
-    FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs,
+    CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemLsArgs, FilesystemPathArgs,
+    FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemTransferArgs,
     RuntimeBehavior,
 };
 use crate::error::CliError;
@@ -128,7 +128,7 @@ pub(crate) fn run_filesystem_get(
             error,
         )
     })?;
-    if entry.inode_kind == InodeKind::Dir {
+    if entry.inode_kind == InodeKind::Directory {
         return Err(fail(
             kind,
             Some(context.profile_name.clone()),
@@ -407,7 +407,7 @@ pub(crate) fn run_filesystem_mkdir(
     let result = context
         .target
         .backend()
-        .create_dir(&spec)
+        .create_directory(&spec)
         .map_err(|error| {
             fail(
                 kind,
@@ -430,16 +430,16 @@ pub(crate) fn run_filesystem_mkdir(
 
 pub(crate) fn run_filesystem_mv(
     kind: CommandKind,
-    args: FilesystemMoveArgs,
+    args: FilesystemTransferArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_move(kind, args, false)
+    run_filesystem_transfer(kind, args, false)
 }
 
 pub(crate) fn run_filesystem_cp(
     kind: CommandKind,
-    args: FilesystemMoveArgs,
+    args: FilesystemTransferArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_move(kind, args, true)
+    run_filesystem_transfer(kind, args, true)
 }
 
 fn run_filesystem_path_lookup<F>(
@@ -479,9 +479,9 @@ where
     })
 }
 
-fn run_filesystem_move(
+fn run_filesystem_transfer(
     kind: CommandKind,
-    args: FilesystemMoveArgs,
+    args: FilesystemTransferArgs,
     copy: bool,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target)?;
@@ -511,7 +511,7 @@ fn run_filesystem_move(
                 error,
             )
         })?;
-        if entry.inode_kind == InodeKind::Dir {
+        if entry.inode_kind == InodeKind::Directory {
             return Err(fail(
                 kind,
                 Some(context.profile_name.clone()),

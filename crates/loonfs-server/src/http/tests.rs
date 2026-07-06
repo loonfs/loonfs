@@ -74,8 +74,8 @@ use loonfs::{
 };
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::wal_head;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };

@@ -23,7 +23,7 @@ pub(super) fn validate_directory_cursor(
     cursor: &DirectoryPageCursor,
     resolved: &ResolvedVisiblePath,
 ) -> Result<()> {
-    if resolved.inode_kind != InodeKind::Dir {
+    if resolved.inode_kind != InodeKind::Directory {
         return Err(invalid_cursor(
             "directory cursor resolved to a non-directory path",
         ));
