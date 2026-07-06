@@ -1,15 +1,7 @@
 //! Commit validation and plan building.
 //!
-//! One generic implementation serves both commit entry points:
-//! [`build_commit_plan`] validates against the in-memory
-//! [`InMemoryValidationView`] and [`build_commit_plan_for_publish`] against
-//! the publish [`PublishValidationView`]. The split keeps every precondition
-//! rule in exactly one place:
-//!
-//! - [`view`] defines the [`CommitValidationView`] lookup contract both
-//!   metadata views implement.
-//! - [`checks`] holds the single op-validation loop and its check helpers,
-//!   parameterized by error constructor instead of cloned per error variant.
+//! Both in-memory and publish-path validation use the same checks; only the
+//! metadata view and error type differ.
 
 mod checks;
 mod view;
@@ -129,9 +121,7 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// The single commit plan builder behind [`build_commit_plan`] and
-/// [`build_commit_plan_for_publish`]; only the metadata view (and with it
-/// the error surface) differs between the two entry points.
+/// Shared plan builder for both validation entry points.
 async fn build_commit_plan_with_view<V: CommitValidationView>(
     request: &CommitRequest,
     head: &HeadState,

@@ -1,22 +1,7 @@
 //! Checkpoints, namespace manifests, and metadata SSTs.
 //!
-//! A namespace manifest names the immutable metadata SST runs that
-//! materialize one namespace file-set version; a checkpoint pins one manifest
-//! version for retention, forks, stable reads, and restore. Submodules follow
-//! the manifest lifecycle:
-//!
-//! - [`create`] orchestrates checkpoint creation: project a manifest from the
-//!   current materialization, then publish it.
-//! - [`build`] segments metadata rows and writes the immutable SST objects.
-//! - [`publish`] writes manifest objects and advances `current_manifest_id`
-//!   on the head by compare-and-swap.
-//! - [`load`] and [`validate`] provide envelope-only loading, descriptor-only
-//!   table verification, and explicit inspection materialization when callers
-//!   truly need every metadata row.
-//! - [`scan`] answers verified row scans over loaded manifest tables.
-//! - [`retention`] advances the retention floor behind verified progress.
-//! - [`runs`] models the LSM run layout shared by all of the above, and
-//!   [`cache`] holds decoded SST blocks keyed by content digest.
+//! Manifests name immutable metadata files. Checkpoints pin manifest versions
+//! for retention, forks, stable reads, and restore.
 
 mod build;
 mod cache;

@@ -1,14 +1,7 @@
 use loonfs_api::{ChangeSeq, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
-/// Core form of a commit precondition.
-///
-/// The serde representation deliberately mirrors the v0 wire encoding of
-/// [`loonfs_api::v0::CommitPrecondition`]: this type is part of the commit
-/// fingerprint preimage (format spec, "Commit identity fingerprints"), so its
-/// serialization is durable
-/// contract, not an implementation detail. `identity::tests` pins the
-/// encoding.
+/// Core form of a commit precondition used in commit fingerprint preimages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Precondition {

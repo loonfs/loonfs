@@ -1,12 +1,5 @@
-//! Read-side manifest loading.
-//!
-//! There are three intentionally separate levels here:
-//!
-//! 1. `load_namespace_manifest_envelope` validates only the manifest envelope.
-//! 2. `load_verified_manifest_tables` validates the manifest and table
-//!    descriptors without fetching SST row payloads.
-//! 3. `load_manifest_materialization_for_inspection` is the expensive
-//!    inspection/debug path that loads every referenced row into `MetadataState`.
+//! Manifest loading at three depths: envelope only, verified table descriptors,
+//! and full row materialization for inspection/debug tests.
 
 use super::cache::{
     DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
@@ -57,9 +50,7 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
         })
 }
 
-/// Loads and validates only the manifest envelope, without fetching its
-/// metadata tables. This is enough for callers that need manifest framing,
-/// not table descriptors or rows.
+/// Loads and validates one manifest envelope without fetching metadata tables.
 pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -73,8 +64,7 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
         })
 }
 
-/// Loads the current manifest's verified table descriptors without fetching
-/// metadata SST row payloads or constructing `MetadataState`.
+/// Loads verified table descriptors without fetching SST row payloads.
 pub(crate) async fn load_verified_manifest_tables<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,

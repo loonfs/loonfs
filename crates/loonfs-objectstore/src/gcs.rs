@@ -15,11 +15,7 @@ pub struct GcpGcsStoreConfig {
 
 /// Google Cloud Storage through its native API.
 ///
-/// GCS conditions writes on object generations, not ETags, and silently
-/// ignores HTTP `If-Match`/`If-None-Match` on its S3-interoperability
-/// surface — conformance proved interop overwrites instead of failing
-/// preconditions. The native API is therefore the only correct backend, and
-/// this adapter hands out the generation as the opaque compare token.
+/// Conditional writes use object generations, exposed as opaque compare tokens.
 #[derive(Debug)]
 pub struct GcpGcsStore {
     inner: ProviderObjectStore,

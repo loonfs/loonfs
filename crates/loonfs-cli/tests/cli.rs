@@ -926,18 +926,9 @@ fn help_omits_legacy_commands_and_config_flag() {
     assert!(stdout.contains("use"));
 }
 
-/// Pins the capability registry to the CLI surface: every profile and every
-/// feature key advertised by the embedded runtime must map to a CLI command
-/// path that exercises it, so no advertised capability is unreachable from
-/// this surface.
-///
-/// When `Fs::capabilities()` (crates/loonfs/src/fs.rs) grows a profile or a
-/// feature key, this test fails until the tables below either name the CLI
-/// command path that covers the new capability, or record a deliberately
-/// deferred CLI gap with a comment (none today).
+/// Ensures every advertised embedded capability has a CLI command path.
 #[test]
 fn every_advertised_capability_maps_to_a_cli_command_path() {
-    // Advertised profile -> the CLI command paths exercising that plane.
     const PROFILE_COMMAND_PATHS: &[(&str, &[&[&str]])] = &[
         (
             "core/v0",
@@ -965,15 +956,10 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
             &[&["admin", "checkpoint"], &["admin", "retention-advance"]],
         ),
     ];
-    // Advertised feature key -> the CLI command path exercising it. Keys are
-    // listed whether the embedded build advertises them `true` or `false`;
-    // gating is the backend's job, reachability is this surface's job.
     const FEATURE_COMMAND_PATHS: &[(&str, &[&str])] = &[
         ("core.namespaces.create", &["namespace", "create"]),
         ("core.namespaces.delete", &["namespace", "delete"]),
         ("core.namespaces.fork", &["namespace", "fork"]),
-        // Direct-put is a transfer mode negotiated inside the same upload
-        // staging flow `put` drives; it needs no separate verb.
         ("core.uploads.direct_put", &["put"]),
     ];
 

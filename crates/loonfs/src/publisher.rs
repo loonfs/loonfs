@@ -1,31 +1,8 @@
-//! Opt-in concurrent-write front-end for the embedded runtime.
+//! Concurrent-write front-end for the embedded runtime.
 //!
-//! [`PublisherRegistry`] funnels every mutation for a namespace through one
-//! per-namespace publisher that:
-//!
-//! - coalesces concurrent requests into a single batched publication (one
-//!   WAL segment, one head compare-and-swap),
-//! - deduplicates resubmissions by commit id — a duplicate joins the
-//!   in-flight request, while reusing a commit id for semantically
-//!   different contents is rejected,
-//! - sequences namespace deletion as a barrier: work admitted before the
-//!   delete publishes first, work admitted after it fails once the delete
-//!   succeeds,
-//! - retries stale-head and unknown-outcome compare-and-swap results with
-//!   the same commit ids, so durable receipts replay instead of surfacing
-//!   ambiguity, and
-//! - paces successive head compare-and-swap attempts per namespace.
-//!
-//! Use it when one process hosts many concurrent writers to the same
-//! namespaces: the reference server constructs a registry over its shared
-//! [`Fs`], and an embedded host with many in-process writer agents can do
-//! exactly the same. A solo writer does not need it — the direct [`Fs`]
-//! mutation methods publish immediately, while this front-end deliberately
-//! trades latency for batching: every submission waits out a 100ms
-//! coalescing window (`COALESCING_DELAY`) so concurrent requests share one
-//! publication, and publications for one namespace are paced at least 1s
-//! apart (`MIN_NAMESPACE_CAS_INTERVAL`) so hot namespaces amortize work
-//! into larger batches instead of thrashing head compare-and-swaps.
+//! Each namespace gets one publisher that batches mutations, deduplicates
+//! in-flight commit ids, sequences deletes as barriers, and retries ambiguous
+//! head updates with the same commit ids.
 
 use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
@@ -712,15 +689,7 @@ impl NamespacePublisher {
     }
 }
 
-/// Keeps a namespace publisher serviceable if its publish task dies.
-///
-/// The publish task owns the taken batch: if it panics mid-publish, the
-/// taken requests' waiters would otherwise wait forever, and the stuck
-/// `publishing` flag would stop every future submit from spawning a new
-/// task. On abnormal exit this guard fails the taken waiters with an
-/// unknown outcome (the panic may have struck before or after the head
-/// compare-and-swap), clears the flag, and restarts publication for any
-/// batch that queued up behind the dead task.
+/// Cleans up a namespace publisher if its publish task exits unexpectedly.
 struct PublishAbortGuard {
     publisher: NamespacePublisher,
     taken_commit_ids: Vec<CommitId>,

@@ -91,15 +91,10 @@ pub struct WalFloorBasis {
     pub manifest_payload_checksum: String,
 }
 
-/// Lower bound of retained WAL/change history: the symmetrical pair to
-/// `wal/head.json`.
+/// Lower bound of retained WAL/change history.
 ///
-/// Updated only by monotonic compare-and-swap on its own etag; never
-/// consulted for live commit visibility. Missing, stale, or unverifiable
-/// floors mean "retain more history", never less. The floor is necessary
-/// but not sufficient for deletion: below-floor objects are candidates,
-/// and actual deletion additionally requires delete-time re-verification
-/// (format spec, "Garbage collection").
+/// Missing, stale, or unverifiable floors mean "retain more history", never
+/// less. Live commit visibility never consults this object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalFloorState {
     pub namespace_id: NamespaceId,
@@ -111,11 +106,8 @@ pub struct WalFloorState {
 
 /// Cold pointer to the best known materialized metadata root.
 ///
-/// Replaces the head's `current_manifest_id`: manifest publication CASes
-/// this object, never the WAL head, so head watchers see only commits.
-/// Updates are monotonic in `manifest_head_seq`; a same-seq replacement may
-/// reference a different manifest (pure compaction), and a lower-seq
-/// replacement no-ops. This object never defines live visibility.
+/// Manifest publication CASes this object, not the WAL head. It is a read
+/// accelerator and never defines live commit visibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRootState {
     pub namespace_id: NamespaceId,
@@ -133,10 +125,8 @@ pub struct ContentStoreDescriptorState {
 
 /// Lifecycle of a durable checkpoint record.
 ///
-/// Only `active`, non-expired checkpoints are long-term GC roots; `dead`
-/// records are collectable tombstones of failed or released checkpoints.
-/// Any record younger than the GC grace window is a root regardless of
-/// state.
+/// Active records are GC roots; dead records are tombstones retained only for
+/// the grace window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointRecordLifecycle {
@@ -154,10 +144,8 @@ pub struct CheckpointOwner {
 
 /// Durable stable-view pin to a metadata manifest.
 ///
-/// First-class file under `checkpoints/`; never part of a manifest and never
-/// an input to latest visibility. Created write-then-verify: the record is
-/// written `active`, then the basis manifest is re-verified against the
-/// floor; a failed verification flips the record to `dead`.
+/// Checkpoints are not live-visibility inputs; they retain manifest versions
+/// for stable reads, forks, restore, and GC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordState {
     pub checkpoint_id: CheckpointId,
@@ -201,12 +189,9 @@ pub struct WalSegmentPointer {
     pub payload_checksum: String,
 }
 
-/// Who most recently acquired the writer epoch, and when.
+/// Observability record for the latest writer-epoch acquisition.
 ///
-/// Observability only, written during the epoch-acquisition CAS. Fencing
-/// authority is `writer_epoch` + CAS; nothing may consult this block for
-/// commit validity, takeover permission, or expiry, and no wall-clock
-/// comparison may gate a publish.
+/// Fencing authority is the epoch value plus CAS, not wall-clock time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterBlock {
     pub writer_id: String,
@@ -223,15 +208,8 @@ pub struct AcquiredWriter {
 
 /// Lifecycle state recorded in the namespace head.
 ///
-/// Initialization progress is not recorded here: it stays derived from
-/// object presence (the descriptor is the completion marker). This field
-/// records the one transition object presence cannot express, because a
-/// deleted namespace keeps its head and descriptor forever as the id-reuse
-/// tombstone.
-///
-/// Decoding is fail-closed: a reader presented with a state it does not
-/// recognize fails with a typed decode error instead of serving the
-/// namespace.
+/// Initialization is derived from object presence; this records terminal
+/// deletion, which keeps the id reserved.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceState {

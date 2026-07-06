@@ -92,17 +92,8 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
     policy: MetadataLsmPolicy,
     owner: Option<CheckpointOwner>,
 ) -> Result<CreateCheckpointResponse> {
-    // Checkpoint creation pins a manifest version as a first-class record
-    // under `checkpoints/`, write-then-verify (format spec, "Checkpoints"):
-    //
-    // 1. Choose a basis manifest that the metadata root references,
-    //    materializing and publishing one first when the root lags the head.
-    // 2. Write `checkpoints/{id}.json` with state = active.
-    // 3. Verify, after the write is durable, that the floor has not passed
-    //    the basis and the basis manifest still loads, under the verify
-    //    budget.
-    // 4. On verification failure, flip the record to dead and retry against
-    //    a newer basis.
+    // Checkpoint creation writes an active record, verifies its manifest is
+    // still retained, and marks the record dead before retrying on failure.
     let mut saw_root_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
         let projection = load_checkpoint_projection(store, namespace_id)
@@ -547,14 +538,11 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     })
 }
 
-/// Unnamed checkpoint records are maintenance bookkeeping; a manifest keeps
-/// only the newest few so correctly-operated maintenance cannot pin storage
-/// forever. Named records persist until explicitly removed, and fork sources
-/// Drops rows that no retained sequence can observe (format spec,
-/// "Compaction"). Conservative subset: superseded revisions, superseded or
-/// unbound bindings, and spent unbind markers at or below the retention
-/// floor. Tombstone and inode rows are always retained until
-/// reachability-based dropping is designed.
+/// Drops rows that no retained sequence can observe.
+///
+/// This conservative pass drops superseded revisions, inactive bindings, and
+/// spent unbind markers at or below the retention floor. Tombstone and inode
+/// rows are kept.
 pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,

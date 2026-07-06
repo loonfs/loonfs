@@ -1,15 +1,8 @@
 //! Wire types and durable-format codecs for LoonFS.
 //!
-//! Everything that crosses a process or storage boundary is defined here:
-//! validated identifier and path types at the crate root, the versioned HTTP
-//! protocol shapes in [`v0`], and the durable storage formats in [`wire`]
-//! (WAL segments, metadata SSTs, namespace manifests, and control objects).
-//! Other LoonFS crates depend on this one for vocabulary; it depends on none
-//! of them.
-//!
-//! Module rule: v0 HTTP shapes live in [`v0`]; the crate root keeps the
-//! ids/paths/errors/wire-format modules and re-exports the common v0
-//! surface as a curated explicit list below.
+//! This crate owns the vocabulary that crosses process or storage boundaries:
+//! ids, paths, HTTP DTOs, WAL segments, metadata SSTs, manifests, and control
+//! objects.
 
 mod capability;
 mod content;

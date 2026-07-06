@@ -1,10 +1,6 @@
-//! Local monotonic elapsed-time boundary for self-enforced publish budgets.
+//! Local monotonic timer used only for self-enforced publish budgets.
 //!
-//! This module is the one place writer code observes time. Budgets bound a
-//! writer's own segment-write-to-CAS window so the GC grace window is
-//! deterministically safe; they gate only the writer's next action
-//! (abandon-and-rebuild). No validator compares timestamps, nothing on the
-//! wire carries these readings, and commit validity never consults time.
+//! Commit validity never depends on wall-clock or monotonic time.
 
 use std::sync::OnceLock;
 use std::time::Instant;

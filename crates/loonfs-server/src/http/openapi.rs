@@ -1,10 +1,4 @@
 //! Static OpenAPI document assembly for the v0 HTTP API.
-//!
-//! The `#[utoipa::path]` operation metadata lives on the handlers
-//! themselves; this module registers those operations and the schema set
-//! into one document. utoipa derives each operation id from the handler fn
-//! name, so renaming a handler changes the published id — regenerate
-//! `docs/specs/openapi.json` deliberately when that happens.
 
 use loonfs::ChangeSeq;
 use loonfs_api::{

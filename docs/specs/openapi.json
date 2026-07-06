@@ -2098,7 +2098,7 @@
       },
       "CapabilityDocument": {
         "type": "object",
-        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nA remote client fetches this from `GET /v0/config` and caches it; an\nembedded engine exposes the same document as a constant. SDK gating logic\nis therefore identical for both backends: check [`supports`] or\n[`has_profile`], and treat a `not_supported` error as authoritative when\nthe two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
+        "description": "A deployment's self-description.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
         "required": [
           "protocol_version",
           "profiles"
@@ -3373,7 +3373,7 @@
       "ManifestId": {
         "type": "integer",
         "format": "int64",
-        "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
+        "description": "Monotonically increasing namespace manifest identity.",
         "minimum": 0
       },
       "MoveBehavior": {

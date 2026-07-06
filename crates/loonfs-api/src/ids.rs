@@ -81,24 +81,8 @@ impl NameKeyValidationError {
 // Id macros
 // ---------------------------------------------------------------------------
 
-/// Defines a validated string-id newtype.
-///
-/// Every string id gets the same surface: `parse` (the only fallible
-/// constructor), `as_str`, `TryFrom<&str>`/`TryFrom<String>`/`FromStr`
-/// (all delegating to `parse`), `AsRef<str>`, `Borrow<str>`, `Display`
-/// (the plain inner string), and serde as a plain string with validation
-/// on deserialize.
-///
-/// Two forms:
-/// - `string_id!(Name, error = ErrType, validate = validator)` uses a custom
-///   `fn(&str) -> Result<(), ErrType>` validator.
-/// - `string_id!(Name, prefix = "xyz")` validates the project-standard
-///   server-generated shape `xyz_<32 lowercase hex>` and adds a
-///   `generate()` constructor.
-///
-/// Type-specific constructors that the macro cannot express (for example
-/// `CommitId::generate` or `NameKey::for_display_name`) live in a separate
-/// `impl` block next to the invocation.
+/// Defines a validated string-id newtype with parsing, string access,
+/// conversions, display, and serde validation.
 macro_rules! string_id {
     (
         $(#[$meta:meta])*
@@ -245,14 +229,7 @@ pub(crate) use string_id;
 // Shared validators and generators
 // ---------------------------------------------------------------------------
 
-/// Generates a project-standard opaque durable identifier.
-///
-/// Generated server-side IDs use an underscore prefix plus a 32-character
-/// lowercase UUID-simple body, such as `cs_<32hex>` or `chk_<32hex>`.
-///
-/// Ids in the id inventory generate through their newtype `generate()`
-/// constructors; this helper stays public for free-form generated labels
-/// (for example writer-session ids) that have no validated id type.
+/// Generates a project-standard opaque id: `<prefix>_<32 lowercase hex>`.
 pub fn generated_id(prefix: &'static str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
@@ -477,14 +454,7 @@ string_id! {
 }
 
 impl WalSegmentId {
-    /// WAL segment ids order by history position and stay unique under races.
-    ///
-    /// The 20-digit prefix is the segment's `start_seq`, so listings sort by
-    /// position and reclamation can range-scan below a boundary cursor. The
-    /// 16-hex suffix keeps speculative writes unique: racing writers proposing
-    /// different segments for the same position never collide, and the head
-    /// compare-and-swap chooses among them. The name is an inspection and
-    /// reclamation hint only — recovery authority is the head and chain.
+    /// WAL segment ids sort by start sequence and stay unique under races.
     pub fn generate(start_seq: ChangeSeq) -> Self {
         let suffix = Uuid::new_v4().simple().to_string();
         Self(format!("{:020}-{}", start_seq.0, &suffix[..16]))
@@ -548,11 +518,6 @@ numeric_id! {
 
 numeric_id! {
     /// Monotonically increasing namespace manifest identity.
-    ///
-    /// This is the durable file-set version identity for namespace manifests.
-    /// Initial/fork manifests may be seeded from the current head sequence, but
-    /// later manifest ids can advance for checkpoint metadata, compaction, or
-    /// fork/index metadata without a new namespace commit.
     ManifestId
 }
 

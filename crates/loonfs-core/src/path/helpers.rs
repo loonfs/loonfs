@@ -1,14 +1,7 @@
 use crate::error::{CoreError, Result};
 use loonfs_api::{AbsolutePath, PathError};
 
-/// Checks the mutation-path invariant without keeping the parsed path: the
-/// path must parse as an absolute path and must not be the root.
-///
-/// This is the one named home for the invariant. Core mutation planning
-/// enforces it through [`parse_mutation_path`], and callers that stage
-/// content before planning (for example the runtime facade's `put` pre-flight)
-/// call this directly so the same rule rejects the request before any bytes
-/// are written.
+/// Checks that a mutation path is absolute and not the root.
 pub fn validate_path_for_mutation(absolute_path: &str) -> Result<()> {
     parse_mutation_path(absolute_path).map(|_| ())
 }

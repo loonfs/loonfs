@@ -16,13 +16,8 @@ const CONTENT_TOKEN_SECRET_ENV: &str = "LOONFS_CONTENT_TOKEN_SECRET";
 
 /// The server config file.
 ///
-/// # Secret precedence
-///
-/// `auth_token` and `content_token_secret` may be supplied through the
-/// `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET` environment
-/// variables instead of the file. A non-blank value in the file always takes
-/// precedence; the environment variable fills the field only when the file
-/// leaves it unset (blank environment values are ignored).
+/// File-provided secrets win over environment variables; blank environment
+/// values are ignored.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {

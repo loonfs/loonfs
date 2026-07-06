@@ -9,15 +9,8 @@ const REDACTED: &str = "<redacted>";
 
 /// A secret string such as an access key, token, or signing secret.
 ///
-/// `Debug` and `Display` both print `<redacted>` so secrets never leak
-/// through logging, tracing, or error formatting. Call [`SecretString::expose`]
-/// at the sites that genuinely need the raw value (request signing, provider
-/// builders, config persistence).
-///
-/// Serde serialization is transparent and **writes the actual secret** —
-/// config files need the real value round-tripped — so never serialize a
-/// secret-bearing struct into logs or display output; use a redacted copy
-/// (see [`SecretString::masked`]) instead.
+/// `Debug` and `Display` redact. Serde intentionally preserves the real value
+/// for config round-trips, so do not serialize secret-bearing structs into logs.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SecretString(String);

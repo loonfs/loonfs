@@ -4,12 +4,8 @@ use std::fmt;
 
 /// Kind of content reference.
 ///
-/// Serializes as a plain string (`"whole_file_v0"`). Kinds unknown to this
-/// build decode as [`ContentRefKind::Unsupported`] carrying the original
-/// string, and re-serialize to that same string — so a reader that merely
-/// relays or rewrites rows it does not fully understand can never destroy a
-/// newer kind. Writers must not *create* references with an unsupported
-/// kind; commit validation rejects them (format spec, "Validation and logical commits").
+/// Unknown kinds round-trip as [`ContentRefKind::Unsupported`], but writers
+/// reject them when creating new metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentRefKind {
     /// Whole-file v0 content addressed by SHA-256.

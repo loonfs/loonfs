@@ -258,11 +258,10 @@ impl Fs {
         result
     }
 
-    /// Deletes a namespace: a fenced, terminal head transition (format
-    /// spec, "Tombstones and deletion"). Commits acknowledged before the
-    /// swap stay committed; reads, writes, forks, and re-creation of the id
-    /// fail with `namespace_deleted` afterward. Deletion does not reclaim
-    /// storage; reclamation is future maintenance work.
+    /// Deletes a namespace with a fenced terminal head transition.
+    ///
+    /// Acknowledged commits remain committed. Later reads, writes, forks, and
+    /// id reuse fail with `namespace_deleted`; storage reclamation is separate.
     pub async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -282,13 +281,7 @@ impl Fs {
         result
     }
 
-    /// Returns the capability document for this embedded build (API spec,
-    /// "Capability discovery").
-    ///
-    /// The embedded runtime implements every v0 plane, so the answer is a
-    /// constant. Callers should still gate on the document rather than on
-    /// the backend kind, so the same logic works against remote deployments
-    /// that implement less.
+    /// Returns the capability document for this embedded build.
     pub fn capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -320,11 +313,6 @@ impl Fs {
     }
 
     /// Runs one bounded maintenance step against a namespace.
-    ///
-    /// Publishes a checkpoint once the visible WAL tail reaches
-    /// `options.max_wal_tail_segments`. Losing the head race or being
-    /// superseded by another checkpoint is reported as an outcome, not an
-    /// error.
     #[tracing::instrument(
         level = "info",
         name = "loon.compaction",
@@ -1109,16 +1097,9 @@ impl Fs {
         results
     }
 
-    /// Queues a maintenance tick after a publish that observed the WAL tail
-    /// at or past the checkpoint threshold. Ticks run on a dedicated worker
-    /// thread with its own runtime, so no writer (and no server batch
-    /// pipeline) ever waits behind a checkpoint or base rebuild, and the
-    /// mechanism works under any caller executor — including per-call
-    /// `block_on` embedders whose ambient runtime dies between calls. The
-    /// per-namespace in-flight marker dedupes concurrent publishers and is
-    /// cleared by the worker on every outcome, including tick panics. The
-    /// cache-disabled diagnostic mode never reaches this, as it tracks no
-    /// tail projection to observe.
+    /// Queues one background maintenance tick when the WAL tail crosses the
+    /// checkpoint threshold. The per-namespace marker dedupes concurrent
+    /// publishers.
     fn maybe_auto_tick_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
         let options = MaintenanceTickOptions::default();
         if wal_tail_segments < options.max_wal_tail_segments {

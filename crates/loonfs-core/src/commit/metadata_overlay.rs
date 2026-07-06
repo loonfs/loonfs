@@ -22,18 +22,7 @@ impl CommitOverlayRows {
         &self.rows
     }
 
-    /// Applies one validated op's effects to the overlay rows by
-    /// materializing its WAL deltas and appending each through the same row
-    /// mapping durable replay uses
-    /// ([`MetadataState::apply_committed_wal_delta_mut`]).
-    ///
-    /// The overlay is derived from the WAL encoding instead of mapping
-    /// [`ValidatedOp`] to rows directly, so the state later ops in a batch
-    /// validate against cannot disagree with what replay persists for the
-    /// earlier ops. The plan is materialized once more by
-    /// `materialize_commit` after validation; reusing these deltas there
-    /// would mean carrying them inside the serialized [`ValidatedOp`]s,
-    /// which is not worth the wire churn for a few small per-op clones.
+    /// Applies one validated op's replay-equivalent row effects to the overlay.
     pub(super) fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp) {
         let (deltas, _result) = materialize_validated_op(op);
         for delta in &deltas {

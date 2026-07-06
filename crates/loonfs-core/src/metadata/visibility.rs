@@ -1,29 +1,7 @@
-//! The single authoritative implementation of direntry visibility.
+//! Canonical direntry visibility rules.
 //!
-//! "Which binding is visible/active" is the most safety-critical rule in the
-//! system, and it must be decided identically no matter which storage shape
-//! answers the underlying lookups (in-memory rows, at-head indexes, paged
-//! manifest tables merged with a WAL tail, or commit-preview overlays). This
-//! module expresses each composite rule exactly once:
-//!
-//! - [`BindingIdentity`] is the identity key of a binding event; every
-//!   binding-identity comparison in the crate goes through it (via
-//!   [`DirentryBindRecord::same_binding`] or [`unbind_matches_binding`]).
-//! - [`MetadataVisibilityReads`] is the storage contract: five primitive
-//!   lookups a storage shape must answer, plus provided composite methods
-//!   that implementors may override only to reuse a cache or an index fast
-//!   path — never to re-derive the rules.
-//! - The free functions ([`active_child_binding`],
-//!   [`current_parent_binding_for_child`], [`covering_subtree_tombstone`],
-//!   [`visible_inode`], [`visible_child`], [`is_visible_child_direntry`],
-//!   [`would_create_directory_cycle`], [`resolve_visible_path`]) are the
-//!   canonical rule bodies that both the provided trait methods and every
-//!   caching/gating override delegate to.
-//!
-//! The at-head indexes ([`super::MetadataState`]'s `indexes`) remain a
-//! materialization of these same rules maintained incrementally; their
-//! congruence with the scan implementations is pinned by the metadata unit
-//! tests and the mutation-guard suite.
+//! In-memory rows, indexes, manifest tables, WAL overlays, and commit previews
+//! all delegate here so active bindings are decided the same way everywhere.
 
 use super::queries::{ResolvedVisiblePath, VisiblePathError};
 use super::{
@@ -88,16 +66,10 @@ pub(crate) fn unbind_matches_binding(
     BindingIdentity::from(unbind) == BindingIdentity::from(direntry)
 }
 
-/// The storage lookups the visibility rules are decided over, all scoped to
-/// one read sequence chosen by the implementor (a `base_seq`, a head, or a
-/// preview overlay's view of either).
+/// Raw row lookups scoped to one read sequence.
 ///
-/// The `find_*` primitives are required and answer raw questions about the
-/// stored rows; they apply no visibility policy beyond "latest at the read
-/// seq". The provided methods are the composite rules; implementors override
-/// them only to route through a cache or an equivalent index fast path, and
-/// every such override must delegate back to the canonical free functions in
-/// this module on the slow path.
+/// The provided methods implement the composite visibility rules. Overrides
+/// may use caches or indexes, but must preserve these rule bodies.
 pub(crate) trait MetadataVisibilityReads {
     type Error;
 
@@ -207,19 +179,8 @@ pub(crate) async fn current_parent_binding_for_child<R: MetadataVisibilityReads>
     Ok(Some(direntry))
 }
 
-/// The ACTIVE binding for `(parent, name_key)`: the latest bind under that
-/// name that (1) has not been unbound and (2) is also the child inode's
-/// current binding — a child renamed elsewhere leaves its old name bound in
-/// the rows but inactive.
-///
-/// Equivalent formulation note: condition (2) is checked by comparing
-/// identities against [`current_parent_binding_for_child`] (which already
-/// folds the unbound check). Historical copies of this rule instead compared
-/// against the raw latest binding and re-checked `is_binding_unbound` on it;
-/// the two factorings decide identically because unbound-ness is a function
-/// of the binding identity alone — if the latest binding for the child IS
-/// this binding event, its unbound-ness equals the one already checked in
-/// condition (1).
+/// Active binding for `(parent, name_key)`: latest under that name, not
+/// unbound, and still the child's current parent binding.
 pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
     reads: &mut R,
     parent_inode_id: InodeId,

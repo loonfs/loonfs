@@ -1,22 +1,10 @@
 #![allow(clippy::panic)]
 // These integration tests use panic for precise fixture-divergence diagnostics.
 
-//! Golden-byte fixtures for every durable LoonFS encoding.
+//! Golden-byte fixtures for durable LoonFS encodings.
 //!
-//! These tests pin the exact bytes each format version writes. They exist to
-//! make wire-format changes impossible to ship by accident:
-//!
-//! - If an encoder's output diverges from its fixture, a Rust-side change
-//!   (field rename, reorder, serde attribute, removed field) silently changed
-//!   the durable format. Either revert it, or bump the family's format
-//!   version and regenerate the fixture with `UPDATE_GOLDEN=1 cargo test`.
-//! - If a fixture stops decoding, the current reader can no longer read
-//!   bytes an earlier build of the same format version wrote — a
-//!   compatibility break with deployed data.
-//! - Additive payload fields must keep decoding (`*_tolerates_additive_*`):
-//!   that is the format's only same-version evolution mechanism, made
-//!   possible by checksumming the stored payload bytes rather than a
-//!   re-encoding.
+//! Encoder drift means a format change. Either revert it, or bump the format
+//! version and regenerate with `UPDATE_GOLDEN=1 cargo test`.
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,

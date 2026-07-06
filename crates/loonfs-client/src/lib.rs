@@ -1,12 +1,4 @@
 //! Blocking HTTP client for a LoonFS server.
-//!
-//! Use this crate when your process should talk to a hosted LoonFS runtime
-//! instead of embedding the runtime directly. The client keeps paths simple:
-//! pass a [`NamespacePath`] for filesystem operations and use explicit commit
-//! helpers when you need retry control.
-//!
-//! Hosts that want to stay transport-agnostic should program against the
-//! [`backend::Backend`] trait instead of [`Client`] directly.
 
 pub mod backend;
 

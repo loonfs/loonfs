@@ -1,15 +1,7 @@
-//! The backend seam: one logical LoonFS API over interchangeable transports.
+//! Transport-neutral backend API plus the HTTP implementation.
 //!
-//! [`Backend`] is the host-facing abstraction every LoonFS surface programs
-//! against: the `loon` CLI today, and future hosts (SDKs, FUSE adapters,
-//! agents) tomorrow. A host writes its features once against this trait and
-//! lets the selected profile decide whether calls travel over HTTP or run
-//! against an embedded runtime.
-//!
-//! This crate ships the trait and its HTTP implementation, [`RemoteBackend`].
-//! The embedded implementation lives with the host that embeds the `loonfs`
-//! runtime (currently `loonfs-cli`), which keeps this crate's dependency
-//! surface wire-only (`loonfs-api`).
+//! Hosts can program against [`Backend`] and choose whether calls go over HTTP
+//! or to an embedded runtime.
 
 use crate::{Client, ClientError, NamespacePath};
 use loonfs_api::{
@@ -19,20 +11,10 @@ use loonfs_api::{
 };
 use thiserror::Error;
 
-/// Failure surfaced by a [`Backend`], as a `(code, message)` pair.
+/// Failure surfaced by a [`Backend`], as a stable `(code, message)` pair.
 ///
-/// `code` draws from exactly two namespaces:
-///
-/// - **Registry codes** ([`loonfs_api::ErrorCode`]) pass through verbatim
-///   from whichever transport produced them, so embedded and remote backends
-///   surface the same code for the same failure. Never restate a registry
-///   code as a string literal; use `ErrorCode::X.as_str()` or an error's
-///   `code()`.
-/// - **Backend-local codes** cover failures that never produce a registry
-///   code. The complete list, each owned by a constructor below, is:
-///   `invalid_config` (deliberately the same string as the registry code of
-///   the same meaning), `invalid_input`, `client_error`, `io_error`, and
-///   `runtime_error`.
+/// Registry codes pass through verbatim; backend-local codes cover config,
+/// input, transport, IO, and embedded-runtime failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
 pub struct BackendError {
@@ -103,12 +85,7 @@ impl From<ClientError> for BackendError {
     }
 }
 
-/// One logical LoonFS API over two transports.
-///
-/// Implementations must report the same registry error code for the same
-/// failure, so a host renders identical outcomes regardless of which
-/// transport a profile selects (`loonfs-cli`'s two-mode parity tests hold
-/// this line).
+/// One logical LoonFS API over embedded and remote transports.
 pub trait Backend {
     /// Creates a new empty namespace.
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError>;

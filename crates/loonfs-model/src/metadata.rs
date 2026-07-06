@@ -1,13 +1,7 @@
-//! Independent implementation of the visibility semantics — on purpose.
+//! Independent metadata visibility implementation for differential tests.
 //!
-//! This module re-states the metadata visibility rules (binding identity,
-//! active bindings, tombstone coverage, visible-path resolution) from
-//! scratch, deliberately NOT sharing code with `loonfs-core`'s
-//! `metadata::visibility` module. The differential suite replays the same
-//! logical commits through both implementations and requires identical
-//! outcomes; that comparison only catches bugs while the two sides remain
-//! independent. Do not "deduplicate" this into core — collapsing them would
-//! turn the differential tests into a tautology.
+//! Do not deduplicate this with `loonfs-core`; the comparison is useful only
+//! while the two implementations stay independent.
 
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{

@@ -14,22 +14,10 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
 
 const MAX_DELETE_CAS_ATTEMPTS: usize = 8;
 
-/// Deletes a namespace by compare-and-swapping its head into the terminal
-/// `deleted` state (format spec, "Tombstones and deletion").
+/// Deletes a namespace by swapping its head into the terminal `deleted` state.
 ///
-/// The deleting writer first acquires the namespace writer epoch, so no stale
-/// writer session can publish past the delete, then swaps the head. Every
-/// retry re-checks the acquired epoch against the reloaded head, so a writer
-/// takeover between acquisition and the swap aborts the delete instead of
-/// deleting a namespace another writer now owns.
-/// The delete linearizes at that swap: commits whose
-/// head advance serialized before it stay committed and durable; everything
-/// that observes the deleted head afterward fails with `namespace_deleted`.
-///
-/// Because `deleted` is terminal, a lost acknowledgment is self-resolving:
-/// if a reload after an ambiguous swap shows the head deleted, the delete
-/// succeeded (ours or a concurrent deleter's — indistinguishable and
-/// equivalent). Only an unreachable store surfaces an unknown outcome.
+/// The delete first acquires the writer epoch, then linearizes at the head CAS.
+/// A lost acknowledgement is resolved by reloading the terminal head.
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

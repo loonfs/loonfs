@@ -178,13 +178,8 @@ pub struct Page<T, C> {
 
 /// Cursor for one directory listing snapshot.
 ///
-/// Directory pagination advances in canonical `name_key` order.
-///
-/// The cursor intentionally contains only the snapshot (`head_seq`), listed
-/// directory identity (`dir_inode_id`), and resume position (`last_name_key`).
-/// HTTP clients must pass the URL namespace and `path` on every page.
-/// Runtime/server code resolves that path at `head_seq` and rejects the cursor
-/// unless it names `dir_inode_id`.
+/// The cursor stores only the snapshot, directory identity, and last emitted
+/// name key. Callers must pass the namespace and path again on each page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryPageCursor {
     /// Snapshot sequence captured by the first page.

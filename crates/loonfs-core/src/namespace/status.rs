@@ -99,14 +99,9 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Counts WAL tail segments from their position-ordered object names.
+/// Counts visible WAL tail segment candidates from their position-prefixed names.
 ///
-/// Status is an inspection surface, so the count comes from one listing
-/// instead of loading and validating segment bodies: segment file names
-/// carry their `start_seq`, and every chain segment past the manifest starts
-/// above it. Objects that lost a head race are counted until reclamation
-/// removes them, which can only over-trigger maintenance, never starve it.
-/// Recovery authority stays with the head and chain.
+/// This inspection count can over-trigger maintenance, but not starve it.
 async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

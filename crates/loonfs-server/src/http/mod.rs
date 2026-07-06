@@ -1,19 +1,7 @@
 //! The v0 HTTP surface of the LoonFS server.
 //!
-//! This module owns the route table, the server startup path, and the
-//! request glue shared by every handler (bearer-token authorization,
-//! `{namespace}` path parsing, and the JSON body extractors). The handlers
-//! themselves live in sibling modules grouped by API area:
-//!
-//! - [`handlers_namespace`]: namespace lifecycle, status, capability
-//!   discovery, and the admin maintenance endpoints.
-//! - [`handlers_filesystem`]: path- and inode-oriented filesystem reads and
-//!   mutations, revision listings, semantic commits, and the change feed.
-//! - [`handlers_uploads`]: upload session flows plus the presign and
-//!   content-token helpers backing them.
-//! - [`error`]: the [`ApiResponseError`] envelope and the error-kind → HTTP
-//!   status mapping.
-//! - [`openapi`]: assembly of the static OpenAPI document.
+//! Owns routing, startup, authorization, namespace parsing, JSON extraction,
+//! and handler modules grouped by API area.
 
 mod error;
 mod handlers_filesystem;
@@ -295,14 +283,10 @@ struct NamespaceSegment {
     namespace: String,
 }
 
-/// Extractor for the `:namespace` path segment of namespace-scoped routes.
+/// Extractor for the `:namespace` path segment.
 ///
-/// The segment is parsed into a [`NamespaceId`] at extraction time, but the
-/// outcome is surfaced through [`NamespaceIdPath::into_id`] inside the
-/// handler body rather than as an extractor rejection: every handler
-/// authorizes before validating the namespace id, and rejecting during
-/// extraction would let a malformed id short-circuit `authorize` and turn
-/// today's 401 into a 400 for unauthorized requests.
+/// Handlers authorize before calling [`NamespaceIdPath::into_id`], so malformed
+/// ids cannot bypass auth and turn a 401 into a 400.
 struct NamespaceIdPath(Result<NamespaceId, ApiResponseError>);
 
 impl NamespaceIdPath {

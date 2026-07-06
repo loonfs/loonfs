@@ -15,15 +15,13 @@ use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::metadata_manifest;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
-// Root CAS retries are about publisher concurrency, not manifest id
-// allocation. Keep this separate so errors describe the failed phase.
+// Keep root-CAS retry errors distinct from manifest-id allocation errors.
 pub(super) const ROOT_CAS_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
     Published(MetadataRootState),
-    /// Someone already published something at least as new; the caller's
-    /// manifest stays durable and valid, the newer root simply wins.
+    /// Another writer already published an equal or newer root.
     Superseded(MetadataRootState),
     RootCasRaceLost,
 }
@@ -106,11 +104,8 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     updated_at_ms: u64,
     writer_version: &str,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
-    // Manifest publication CASes metadata/root.json, never the WAL head:
-    // head watchers see only commits. Updates are monotonic in
-    // manifest_head_seq; a same-seq replacement may reference a different
-    // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
-    // whatever newer root someone else already published.
+    // Manifest publication updates metadata/root.json, not the WAL head.
+    // Same-seq replacements are allowed for compaction-only manifest updates.
     let manifest_id = manifest.payload.manifest_id;
     let manifest_head_seq = manifest.payload.head_seq;
     for _attempt in 0..ROOT_CAS_RETRY_LIMIT {

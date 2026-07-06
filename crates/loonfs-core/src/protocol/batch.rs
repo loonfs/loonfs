@@ -507,20 +507,10 @@ async fn cas_batch_head<S: ObjectStore + ?Sized>(
     result.map_err(CoreError::from)
 }
 
-/// Fails every outcome that was contingent on this batch publishing durably.
+/// Fails outcomes that depended on unpublished session state.
 ///
-/// The accepted candidates take the batch error: they never committed. So do
-/// rejections recorded after the first acceptance, because their verdicts
-/// were decided against session state advanced by tentatively accepted
-/// candidates — state that never became durable. Reporting them would hand a
-/// client a definitive semantic error (path conflict, missing path, stale
-/// revision, ...) it correctly treats as non-retryable, for a precondition
-/// that was never durably true (format.md section 3.1.5).
-///
-/// Rejections recorded before any acceptance were decided against the loaded
-/// durable publish view and stand. Idempotent `Ok` completions replay durable
-/// commit receipts and stand. Alias slots stay unfilled here and inherit
-/// their primary's final outcome.
+/// Durable-view rejections and idempotent receipt hits stand. Accepted
+/// candidates, and rejections after the first acceptance, take the batch error.
 fn fail_outcomes_contingent_on_unpublished_batch(
     outcomes: &mut [Option<Result<ApiCommitResponse>>],
     accepted: &[(usize, MaterializedCommit)],

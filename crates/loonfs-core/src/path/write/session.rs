@@ -10,11 +10,8 @@ use loonfs_objectstore::ObjectStore;
 
 /// Working view of one publish attempt.
 ///
-/// The session owns the batch's evolving head and only the rows accepted
-/// during this publish attempt. Durable base reads come from the loaded
-/// manifest-plus-tail view; accepted rows are a small overlay so later
-/// candidates observe earlier accepted candidates without cloning the whole
-/// namespace.
+/// Accepted rows form a small overlay so later candidates see earlier accepted
+/// candidates without cloning the namespace.
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
     accepted_rows: MetadataState,
@@ -46,8 +43,7 @@ impl PublishPlanningSession {
         plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &view).await
     }
 
-    /// Folds an accepted commit into the session so later candidates in the
-    /// same batch plan and validate against it.
+    /// Applies an accepted commit to the batch overlay.
     pub(crate) fn apply_accepted_commit(
         &mut self,
         preview: &WalCommitPayload,

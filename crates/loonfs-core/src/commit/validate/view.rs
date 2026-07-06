@@ -1,21 +1,8 @@
-//! The metadata lookup contract the commit validator consults.
+//! Metadata lookup adapters for commit validation.
 //!
-//! Both commit entry points validate against the same op-validation loop in
-//! [`super::checks`]; they differ only in which metadata view backs each
-//! lookup and in the error surface each reports. This module defines the
-//! [`CommitValidationView`] contract that unifies them and the two adapters
-//! that implement it: [`InMemoryValidationView`] over the in-memory
-//! [`InMemoryMetadataView`] and [`PublishValidationView`] over the
-//! object-store-backed [`MetadataView`].
-//!
-//! The associated error type preserves each entry point's error surface. The
-//! in-memory view never reaches an object store, so its lookups cannot fail
-//! for IO reasons; it surfaces plain [`CommitValidationError`]s (mapping the
-//! [`CoreError`] the shared view produces through
-//! [`commit_validation_from_core`]). The publish view threads [`CoreError`]
-//! so object-store failures propagate. Validation failures themselves are
-//! always constructed as [`CommitValidationError`] and converted through the
-//! `From` bound.
+//! The validator runs the same checks against either in-memory rows or an
+//! object-store-backed metadata view, while preserving each entry point's error
+//! type.
 
 use super::super::metadata_overlay::CommitOverlayRows;
 use super::super::{CommitValidationError, ValidatedOp};
@@ -27,13 +14,10 @@ use crate::metadata::{
 use loonfs_api::{ChangeSeq, InodeId, NamePolicy, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
-/// Seq-scoped metadata lookups the commit validator performs, implemented by
-/// the in-memory [`InMemoryValidationView`] and the publish-path
-/// [`PublishValidationView`].
+/// Seq-scoped metadata lookups used by the shared commit validator.
 ///
-/// Every method observes the accumulating commit overlay: the loop applies
-/// each validated op through [`Self::apply_validated_op_mut`] so later ops in
-/// a batch see the rows earlier ops would persist.
+/// Implementations include the accumulating commit overlay, so later ops see
+/// rows earlier ops would persist.
 pub(super) trait CommitValidationView {
     type Error: From<CommitValidationError>;
 
@@ -82,8 +66,7 @@ pub(super) trait CommitValidationView {
     fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp);
 }
 
-/// Bridges the shared [`MetadataView`] error surface into the plain
-/// [`CommitValidationError`] the in-memory entry point returns.
+/// Maps shared view errors into the in-memory validator's error type.
 fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
     match error {
         CoreError::CommitValidation(error) => error,
@@ -91,11 +74,7 @@ fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
     }
 }
 
-/// The in-memory view: it holds the base metadata rows plus the accumulating
-/// commit overlay, rebuilding an [`InMemoryMetadataView`] over both for each
-/// lookup. Every such lookup completes without awaiting an object store — the
-/// view has no manifest tables — which is what lets [`super::build_commit_plan`]
-/// stay synchronous (its future is resolved by a single poll).
+/// In-memory validator view over base rows plus the current commit overlay.
 pub(super) struct InMemoryValidationView<'a> {
     metadata_state: &'a MetadataState,
     committed_seq: ChangeSeq,
@@ -222,10 +201,7 @@ impl CommitValidationView for InMemoryValidationView<'_> {
     }
 }
 
-/// The publish view: it holds the loaded [`MetadataView`] plus the
-/// accumulating commit overlay (seeded from the rows already accepted earlier
-/// in the batch), rebuilding an overlaid view for each lookup so object-store
-/// failures surface as [`CoreError`].
+/// Publish validator view over manifest-backed metadata plus accepted batch rows.
 pub(super) struct PublishValidationView<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
     committed_seq: ChangeSeq,

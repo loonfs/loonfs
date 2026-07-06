@@ -1,8 +1,4 @@
-//! The single op-validation loop and its precondition checks.
-//!
-//! Every check is written once against [`CommitValidationView`]; checks that
-//! only differ by error vocabulary take error-constructor closures so each
-//! call site keeps its exact wire-visible variant.
+//! Shared op-validation loop and precondition checks.
 
 use super::super::{
     push_unique_invariant, CommitOp, CommitRequest, CommitValidationError, Precondition,

@@ -29,18 +29,8 @@ pub enum WriterEpochAcquireError {
 
 /// Acquires the namespace writer epoch for a writer session.
 ///
-/// Lazy by design: sessions call this on their first semantic write, not at
-/// open, and cache the result. Acquisition bumps `writer_epoch` and records
-/// the non-authoritative `writer` block, which fences every other session at
-/// its next publish. There is no lease and no expiry: nothing arbitrates
-/// between two live writers except the epoch itself, so acquisition never
-/// refuses a caller and contention resolves as deterministic
-/// last-writer-wins. A session that has been fenced must not call this again
-/// on its own; reacquisition is an explicit caller decision.
-///
-/// The only non-bumping path is idempotent retry: when the head's writer
-/// block already names this exact session, its current epoch is returned
-/// without a CAS.
+/// Acquisition bumps the epoch and fences other sessions at their next publish.
+/// An idempotent retry by the same session returns the existing epoch.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

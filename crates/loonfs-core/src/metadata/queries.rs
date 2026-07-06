@@ -1,11 +1,7 @@
-//! Seq-gated reads over [`MetadataState`]: record lookups, visibility
-//! checks, and path resolution.
+//! Seq-gated reads over [`MetadataState`].
 //!
-//! Every seq-parameterized query routes to its `*_at_head` twin once
-//! `base_seq` reaches [`MetadataState::indexed_seq`], and to a historical
-//! row scan below it. The composite visibility decisions themselves live in
-//! [`super::visibility`]; this module only chooses which storage arm
-//! (historical scan or at-head index) answers the primitive lookups.
+//! Current-head reads use indexes; historical reads use row scans. Composite
+//! visibility rules live in [`super::visibility`].
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
 use super::{

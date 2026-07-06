@@ -1,11 +1,6 @@
 use std::fmt;
 
 /// Broad error category for caller or operator action.
-///
-/// Each kind implies one served HTTP status (`status_for_error_kind` in
-/// `loonfs-server`); a code's kind and its documented status in the API spec
-/// must agree in spirit, and the server's spec-table sync test enforces the
-/// composition exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -43,21 +38,13 @@ pub enum ErrorKind {
 }
 
 /// Declares the complete wire error-code registry in one place.
-///
-/// One `Variant => "wire_string"` line emits the enum variant, its
-/// [`ErrorCode::ALL`] entry (in registry order), its `as_str` arm, its
-/// `parse` arm, and the string-backed serde impls — so registering a new
-/// code is one line here plus a [`ErrorCode::kind`] arm and an api.md row.
 macro_rules! error_codes {
     (@count) => { 0 };
     (@count $head:ident $($tail:ident)*) => { 1 + error_codes!(@count $($tail)*) };
     ($($variant:ident => $wire:literal),+ $(,)?) => {
         /// Stable machine-readable error reason.
         ///
-        /// This is the complete registry of `code` values carried by
-        /// [`ApiError`](crate::ApiError) bodies and embedded errors. Codes are
-        /// permanent once released: the API spec documents each code's meaning and HTTP
-        /// status, and clients must tolerate codes they do not recognize.
+        /// Complete registry of `code` values carried by API errors.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[non_exhaustive]
         pub enum ErrorCode {

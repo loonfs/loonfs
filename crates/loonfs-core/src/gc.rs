@@ -1,12 +1,7 @@
-//! v1 listing mark-and-sweep garbage collection (format spec, "Garbage
-//! collection").
+//! Listing-based mark-and-sweep garbage collection.
 //!
-//! GC and floor advancement are the only consumers of listing. Nothing
-//! sweeps by default: callers opt in through the admin endpoint or an
-//! explicit maintenance-tick option. The safety rules close the two races
-//! the un-serialized layout admits — create-vs-collect and
-//! publish-in-flight — via the grace window, delete-time re-verification,
-//! and retention-wins defaults. When in doubt, this module retains.
+//! GC runs only when explicitly requested. When safety is uncertain, this
+//! module retains objects.
 
 use crate::checkpoint::{load_namespace_manifest_envelope, read_checkpoint_record};
 use crate::context::MutationContext;
