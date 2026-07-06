@@ -1,4 +1,5 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::secret::SecretString;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 pub struct AzureAbsStoreConfig {
     pub account_name: String,
     pub container_name: String,
-    pub access_key: String,
+    pub access_key: SecretString,
     pub endpoint_url: Option<String>,
     pub key_prefix: Option<String>,
 }
@@ -38,7 +39,7 @@ impl AzureAbsStore {
                 "container name must not be empty".to_owned(),
             ));
         }
-        if config.access_key.trim().is_empty() {
+        if config.access_key.expose().trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "access key must not be empty".to_owned(),
             ));
@@ -47,7 +48,7 @@ impl AzureAbsStore {
         let mut builder = MicrosoftAzureBuilder::new()
             .with_account(config.account_name)
             .with_container_name(config.container_name)
-            .with_access_key(config.access_key);
+            .with_access_key(config.access_key.expose());
         if let Some(endpoint_url) = config.endpoint_url {
             let endpoint_url = endpoint_url.trim();
             if endpoint_url.is_empty() {
@@ -144,7 +145,7 @@ mod tests {
         let error = AzureAbsStore::new(AzureAbsStoreConfig {
             account_name: "account".to_owned(),
             container_name: "container".to_owned(),
-            access_key: " ".to_owned(),
+            access_key: " ".into(),
             endpoint_url: None,
             key_prefix: None,
         })
@@ -160,7 +161,7 @@ mod tests {
         AzureAbsStore::new(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
             container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.to_owned(),
+            access_key: AZURITE_ACCOUNT_KEY.into(),
             endpoint_url: Some("http://127.0.0.1:10000/devstoreaccount1".to_owned()),
             key_prefix: None,
         })
@@ -172,7 +173,7 @@ mod tests {
         AzureAbsStore::new(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
             container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.to_owned(),
+            access_key: AZURITE_ACCOUNT_KEY.into(),
             endpoint_url: Some("HTTP://127.0.0.1:10000/devstoreaccount1".to_owned()),
             key_prefix: None,
         })
@@ -184,7 +185,7 @@ mod tests {
         let store = AzureAbsStore::new(AzureAbsStoreConfig {
             account_name: "devstoreaccount1".to_owned(),
             container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.to_owned(),
+            access_key: AZURITE_ACCOUNT_KEY.into(),
             endpoint_url: None,
             key_prefix: Some("tenant-a".to_owned()),
         })

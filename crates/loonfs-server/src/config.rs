@@ -1,22 +1,37 @@
-use http::Uri;
 use loonfs::RuntimeCacheConfig;
-use loonfs_objectstore::abs::AzureAbsStoreConfig;
-use loonfs_objectstore::gcs::GcpGcsStoreConfig;
-use loonfs_objectstore::r2::CloudflareR2StoreConfig;
-use loonfs_objectstore::s3::AwsS3StoreConfig;
-use loonfs_objectstore::ConfiguredObjectStore;
+use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
 use serde::Deserialize;
-use std::fmt;
+use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use thiserror::Error;
 
-#[derive(Clone, Deserialize)]
+pub use loonfs_objectstore::StoreConfig;
+
+/// Environment fallback for [`ServerConfig::auth_token`].
+const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
+/// Environment fallback for [`ServerConfig::content_token_secret`].
+const CONTENT_TOKEN_SECRET_ENV: &str = "LOONFS_CONTENT_TOKEN_SECRET";
+
+/// The server config file.
+///
+/// # Secret precedence
+///
+/// `auth_token` and `content_token_secret` may be supplied through the
+/// `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET` environment
+/// variables instead of the file. A non-blank value in the file always takes
+/// precedence; the environment variable fills the field only when the file
+/// leaves it unset (blank environment values are ignored).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: String,
-    pub auth_token: Option<String>,
-    pub content_token_secret: String,
+    pub auth_token: Option<SecretString>,
+    /// Signs content tokens; unset or empty here falls back to
+    /// `LOONFS_CONTENT_TOKEN_SECRET`.
+    #[serde(default)]
+    pub content_token_secret: SecretString,
     pub writer_id: String,
     pub writer_version: String,
     #[serde(default)]
@@ -25,6 +40,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeCacheConfigOverrides {
     pub wal_tail_projection_cache_enabled: Option<bool>,
     pub control_cache_enabled: Option<bool>,
@@ -34,137 +50,6 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_table_cache_enabled: Option<bool>,
     pub metadata_table_cache_max_blocks: Option<usize>,
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum StoreConfig {
-    LocalFs {
-        root: String,
-        key_prefix: Option<String>,
-    },
-    AwsS3 {
-        bucket: String,
-        region: String,
-        endpoint_url: Option<String>,
-        access_key_id: String,
-        secret_access_key: String,
-        session_token: Option<String>,
-        key_prefix: Option<String>,
-        force_path_style: Option<bool>,
-    },
-    CloudflareR2 {
-        bucket: String,
-        account_id: String,
-        endpoint_url: String,
-        access_key_id: String,
-        secret_access_key: String,
-        key_prefix: Option<String>,
-    },
-    GcpGcs {
-        bucket: String,
-        service_account_key_path: String,
-        key_prefix: Option<String>,
-    },
-    AzureAbs {
-        account_name: String,
-        container_name: String,
-        access_key: String,
-        endpoint_url: Option<String>,
-        key_prefix: Option<String>,
-    },
-}
-
-impl fmt::Debug for ServerConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ServerConfig")
-            .field("bind", &self.bind)
-            .field(
-                "auth_token",
-                &self.auth_token.as_ref().map(|_| "<redacted>"),
-            )
-            .field("content_token_secret", &"<redacted>")
-            .field("writer_id", &self.writer_id)
-            .field("writer_version", &self.writer_version)
-            .field("runtime_cache", &self.runtime_cache)
-            .field("store", &self.store)
-            .finish()
-    }
-}
-
-impl fmt::Debug for StoreConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StoreConfig::LocalFs { root, key_prefix } => f
-                .debug_struct("LocalFs")
-                .field("root", root)
-                .field("key_prefix", key_prefix)
-                .finish(),
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                access_key_id: _,
-                secret_access_key: _,
-                session_token,
-                key_prefix,
-                force_path_style,
-            } => f
-                .debug_struct("AwsS3")
-                .field("bucket", bucket)
-                .field("region", region)
-                .field("endpoint_url", endpoint_url)
-                .field("access_key_id", &"<redacted>")
-                .field("secret_access_key", &"<redacted>")
-                .field(
-                    "session_token",
-                    &session_token.as_ref().map(|_| "<redacted>"),
-                )
-                .field("key_prefix", key_prefix)
-                .field("force_path_style", force_path_style)
-                .finish(),
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                access_key_id: _,
-                secret_access_key: _,
-                key_prefix,
-            } => f
-                .debug_struct("CloudflareR2")
-                .field("bucket", bucket)
-                .field("account_id", account_id)
-                .field("endpoint_url", endpoint_url)
-                .field("access_key_id", &"<redacted>")
-                .field("secret_access_key", &"<redacted>")
-                .field("key_prefix", key_prefix)
-                .finish(),
-            StoreConfig::GcpGcs {
-                bucket,
-                service_account_key_path,
-                key_prefix,
-            } => f
-                .debug_struct("GcpGcs")
-                .field("bucket", bucket)
-                .field("service_account_key_path", service_account_key_path)
-                .field("key_prefix", key_prefix)
-                .finish(),
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                access_key: _,
-                endpoint_url,
-                key_prefix,
-            } => f
-                .debug_struct("AzureAbs")
-                .field("account_name", account_name)
-                .field("container_name", container_name)
-                .field("access_key", &"<redacted>")
-                .field("endpoint_url", endpoint_url)
-                .field("key_prefix", key_prefix)
-                .finish(),
-        }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -181,7 +66,27 @@ pub enum ServerConfigError {
 
 impl ServerConfig {
     pub(crate) fn content_token_secret(&self) -> &str {
-        &self.content_token_secret
+        self.content_token_secret.expose()
+    }
+
+    /// Fills `auth_token` and `content_token_secret` from the environment
+    /// when the file left them unset. Non-blank file values win; blank
+    /// environment values are ignored.
+    fn apply_env_fallbacks(
+        &mut self,
+        auth_token_env: Option<String>,
+        content_token_secret_env: Option<String>,
+    ) {
+        if self.auth_token.is_none() {
+            if let Some(token) = non_blank(auth_token_env) {
+                self.auth_token = Some(SecretString::new(token));
+            }
+        }
+        if self.content_token_secret.expose().trim().is_empty() {
+            if let Some(secret) = non_blank(content_token_secret_env) {
+                self.content_token_secret = SecretString::new(secret);
+            }
+        }
     }
 
     pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
@@ -217,88 +122,12 @@ impl ServerConfig {
     }
 
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
-        match &self.store {
-            StoreConfig::LocalFs { root, key_prefix } => {
-                ConfiguredObjectStore::local_fs(root, key_prefix.as_deref()).map_err(|err| {
-                    ServerConfigError::InvalidField {
-                        field: "store.key_prefix",
-                        reason: err.to_string(),
-                    }
-                })
-            }
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                session_token,
-                key_prefix,
-                force_path_style,
-            } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
-                bucket: bucket.clone(),
-                region: region.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                session_token: session_token.clone(),
-                key_prefix: key_prefix.clone(),
-                force_path_style: force_path_style.unwrap_or(false),
-            })
+        self.store
+            .configured_object_store()
             .map_err(|err| ServerConfigError::InvalidField {
                 field: "store.key_prefix",
                 reason: err.to_string(),
-            }),
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                key_prefix,
-            } => ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
-                bucket: bucket.clone(),
-                account_id: account_id.clone(),
-                endpoint_url: endpoint_url.clone(),
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                key_prefix: key_prefix.clone(),
             })
-            .map_err(|err| ServerConfigError::InvalidField {
-                field: "store.key_prefix",
-                reason: err.to_string(),
-            }),
-            StoreConfig::GcpGcs {
-                bucket,
-                service_account_key_path,
-                key_prefix,
-            } => ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
-                bucket: bucket.clone(),
-                service_account_key_path: service_account_key_path.clone(),
-                key_prefix: key_prefix.clone(),
-            })
-            .map_err(|err| ServerConfigError::InvalidField {
-                field: "store.key_prefix",
-                reason: err.to_string(),
-            }),
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                access_key,
-                endpoint_url,
-                key_prefix,
-            } => ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
-                account_name: account_name.clone(),
-                container_name: container_name.clone(),
-                access_key: access_key.clone(),
-                endpoint_url: endpoint_url.clone(),
-                key_prefix: key_prefix.clone(),
-            })
-            .map_err(|err| ServerConfigError::InvalidField {
-                field: "store.key_prefix",
-                reason: err.to_string(),
-            }),
-        }
     }
 
     fn validate(&self) -> Result<(), ServerConfigError> {
@@ -307,85 +136,48 @@ impl ServerConfig {
         require_non_empty("writer_version", &self.writer_version)?;
 
         if let Some(token) = &self.auth_token {
-            if token.trim().is_empty() {
+            if token.expose().trim().is_empty() {
                 return Err(ServerConfigError::InvalidField {
                     field: "auth_token",
                     reason: "must not be empty".to_owned(),
                 });
             }
         }
-        require_non_empty("content_token_secret", &self.content_token_secret)?;
-        match &self.store {
-            StoreConfig::LocalFs { root, .. } => {
-                require_non_empty("store.root", root)?;
-            }
-            StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                ..
-            } => {
-                require_non_empty("store.bucket", bucket)?;
-                require_non_empty("store.region", region)?;
-                require_non_empty("store.access_key_id", access_key_id)?;
-                require_non_empty("store.secret_access_key", secret_access_key)?;
-                if let Some(url) = endpoint_url {
-                    validate_optional_absolute_http_url("store.endpoint_url", url)?;
-                }
-            }
-            StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                ..
-            } => {
-                require_non_empty("store.bucket", bucket)?;
-                require_non_empty("store.account_id", account_id)?;
-                require_non_empty("store.access_key_id", access_key_id)?;
-                require_non_empty("store.secret_access_key", secret_access_key)?;
-                validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
-            }
-            StoreConfig::GcpGcs {
-                bucket,
-                service_account_key_path,
-                ..
-            } => {
-                require_non_empty("store.bucket", bucket)?;
-                require_non_empty("store.service_account_key_path", service_account_key_path)?;
-            }
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                access_key,
-                endpoint_url,
-                ..
-            } => {
-                require_non_empty("store.account_name", account_name)?;
-                require_non_empty("store.container_name", container_name)?;
-                require_non_empty("store.access_key", access_key)?;
-                if let Some(url) = endpoint_url {
-                    validate_optional_absolute_http_url("store.endpoint_url", url)?;
-                }
-            }
-        }
+        require_non_empty("content_token_secret", self.content_token_secret.expose())?;
+        self.store.validate().map_err(ServerConfigError::from)?;
 
         Ok(())
     }
 }
 
+impl From<StoreConfigError> for ServerConfigError {
+    fn from(error: StoreConfigError) -> Self {
+        match error {
+            StoreConfigError::MissingField { field } => ServerConfigError::MissingField { field },
+            StoreConfigError::InvalidField { field, reason } => {
+                ServerConfigError::InvalidField { field, reason }
+            }
+        }
+    }
+}
+
 pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, ServerConfigError> {
     let bytes = fs::read(path.as_ref()).map_err(|err| ServerConfigError::Io(err.to_string()))?;
-    let config: ServerConfig = toml::from_str(
+    let mut config: ServerConfig = toml::from_str(
         std::str::from_utf8(&bytes).map_err(|err| ServerConfigError::Decode(err.to_string()))?,
     )
     .map_err(|err| ServerConfigError::Decode(err.to_string()))?;
+    config.apply_env_fallbacks(
+        env::var(AUTH_TOKEN_ENV).ok(),
+        env::var(CONTENT_TOKEN_SECRET_ENV).ok(),
+    );
     config.validate()?;
     config.object_store()?;
     Ok(config)
+}
+
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
@@ -408,56 +200,6 @@ fn validate_socket_addr(field: &'static str, value: &str) -> Result<(), ServerCo
             field,
             reason: err.to_string(),
         })
-}
-
-fn validate_optional_absolute_http_url(
-    field: &'static str,
-    value: &str,
-) -> Result<(), ServerConfigError> {
-    if value.trim().is_empty() {
-        return Err(ServerConfigError::MissingField { field });
-    }
-    validate_absolute_http_url(field, value)
-}
-
-fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(ServerConfigError::MissingField { field });
-    }
-
-    let uri: Uri =
-        trimmed.parse().map_err(
-            |err: http::uri::InvalidUri| ServerConfigError::InvalidField {
-                field,
-                reason: err.to_string(),
-            },
-        )?;
-
-    match uri.scheme_str() {
-        Some("http" | "https") => {}
-        Some(other) => {
-            return Err(ServerConfigError::InvalidField {
-                field,
-                reason: format!("scheme must be http or https, got `{other}`"),
-            });
-        }
-        None => {
-            return Err(ServerConfigError::InvalidField {
-                field,
-                reason: "must be an absolute http or https URL".to_owned(),
-            });
-        }
-    }
-
-    if uri.authority().is_none() {
-        return Err(ServerConfigError::InvalidField {
-            field,
-            reason: "must be an absolute http or https URL".to_owned(),
-        });
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -738,6 +480,148 @@ force_path_style = false
     }
 
     #[test]
+    fn env_fallbacks_fill_only_unset_secrets() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "file-auth-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let mut config = load_server_config(&path).expect("load config");
+
+        // File values win over the environment.
+        config.apply_env_fallbacks(
+            Some("env-auth-token".to_owned()),
+            Some("env-content-token-secret".to_owned()),
+        );
+        assert_eq!(
+            config.auth_token.as_ref().map(|token| token.expose()),
+            Some("file-auth-token")
+        );
+        assert_eq!(config.content_token_secret(), "dev-content-token-secret");
+
+        // The environment fills fields the file left unset.
+        config.auth_token = None;
+        config.content_token_secret = loonfs_objectstore::SecretString::default();
+        config.apply_env_fallbacks(
+            Some("env-auth-token".to_owned()),
+            Some("env-content-token-secret".to_owned()),
+        );
+        assert_eq!(
+            config.auth_token.as_ref().map(|token| token.expose()),
+            Some("env-auth-token")
+        );
+        assert_eq!(config.content_token_secret(), "env-content-token-secret");
+
+        // Blank environment values are ignored.
+        config.auth_token = None;
+        config.content_token_secret = loonfs_objectstore::SecretString::default();
+        config.apply_env_fallbacks(Some("   ".to_owned()), Some(String::new()));
+        assert!(config.auth_token.is_none());
+        assert!(config.content_token_secret().is_empty());
+    }
+
+    #[test]
+    fn load_rejects_unknown_keys_at_every_level() {
+        let top_level = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+lease_duration = 60000
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let store_level = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+key_prefiks = "typo"
+"#,
+        );
+        let runtime_cache_level = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[runtime_cache]
+control_cache_enable = true
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        for (path, typo) in [
+            (top_level, "lease_duration"),
+            (store_level, "key_prefiks"),
+            (runtime_cache_level, "control_cache_enable"),
+        ] {
+            let error = load_server_config(&path).expect_err("typo'd key must be rejected");
+            match error {
+                ServerConfigError::Decode(message) => {
+                    assert!(
+                        message.contains(typo),
+                        "decode error must name `{typo}`, got: {message}"
+                    );
+                }
+                other => panic!("expected decode error naming {typo}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_accepts_config_without_content_token_secret_field() {
+        // `content_token_secret` may come from LOONFS_CONTENT_TOKEN_SECRET
+        // instead of the file; omitting both must still fail validation.
+        let path = write_config_verbatim(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let mut config: super::ServerConfig =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read config"))
+                .expect("config without content_token_secret parses");
+        assert!(config.content_token_secret().is_empty());
+
+        config.apply_env_fallbacks(None, Some("env-content-token-secret".to_owned()));
+        assert_eq!(config.content_token_secret(), "env-content-token-secret");
+
+        // Without the env fallback the load path reports the missing field.
+        if std::env::var("LOONFS_CONTENT_TOKEN_SECRET").is_err() {
+            let error = load_server_config(&path).expect_err("missing content token secret");
+            assert_missing_field(error, "content_token_secret");
+        }
+    }
+
+    #[test]
     fn load_uses_default_runtime_cache_when_omitted() {
         let path = write_config(
             r#"
@@ -850,9 +734,35 @@ root = "/tmp/loonfs-server"
         }
     }
 
+    /// Every server example config must keep parsing into [`ServerConfig`]
+    /// (including under `deny_unknown_fields`) and passing field validation.
+    #[test]
+    fn server_example_configs_parse_and_validate() {
+        let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs");
+        let mut examples = 0usize;
+        for entry in fs::read_dir(configs_dir).expect("read configs directory") {
+            let path = entry.expect("read configs entry").path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("loonfs-server.") || !name.ends_with(".example.toml") {
+                continue;
+            }
+            let contents = fs::read_to_string(&path).expect("read example config");
+            let config: super::ServerConfig =
+                toml::from_str(&contents).unwrap_or_else(|err| panic!("{name} must parse: {err}"));
+            config
+                .validate()
+                .unwrap_or_else(|err| panic!("{name} must validate: {err}"));
+            examples += 1;
+        }
+        assert!(
+            examples >= 5,
+            "expected at least 5 server example configs, found {examples}"
+        );
+    }
+
     fn write_config(contents: &str) -> std::path::PathBuf {
-        let temp_dir = tempdir().expect("tempdir");
-        let path = temp_dir.path().join("server.toml");
         let contents = if contents.contains("content_token_secret") {
             contents.to_owned()
         } else {
@@ -862,6 +772,12 @@ root = "/tmp/loonfs-server"
                 1,
             )
         };
+        write_config_verbatim(&contents)
+    }
+
+    fn write_config_verbatim(contents: &str) -> std::path::PathBuf {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("server.toml");
         fs::write(&path, contents).expect("write config");
         let _ = temp_dir.keep();
         path

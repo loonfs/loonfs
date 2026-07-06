@@ -59,7 +59,7 @@ fn profile_create_list_show_remove_work() {
     assert_success(&show);
     let stdout = stdout_string(&show);
     assert!(stdout.contains("mode = \"remote\""));
-    assert!(stdout.contains("REDACTED"));
+    assert!(stdout.contains("<redacted>"));
     assert!(!stdout.contains("test-token"));
 
     let show_default = harness.run(&["--json", "profile", "show"]);
@@ -992,7 +992,6 @@ auth_token = "test-token"
 content_token_secret = "test-content-token-secret"
 writer_id = "{name}"
 writer_version = "{name}/0.1.0"
-lease_duration_ms = 200
 
 [store]
 kind = "local-fs"

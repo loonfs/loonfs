@@ -1,3 +1,4 @@
+use crate::secret::SecretString;
 use crate::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig, PutMode,
@@ -15,9 +16,9 @@ pub(crate) struct S3CompatibleConfig {
     pub bucket: String,
     pub region: String,
     pub endpoint_url: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: Option<SecretString>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
     pub sha256_checksum_metadata: bool,
@@ -51,8 +52,8 @@ impl S3CompatibleStore {
         let mut builder = AmazonS3Builder::new()
             .with_bucket_name(config.bucket)
             .with_region(config.region)
-            .with_access_key_id(config.access_key_id)
-            .with_secret_access_key(config.secret_access_key)
+            .with_access_key_id(config.access_key_id.expose())
+            .with_secret_access_key(config.secret_access_key.expose())
             .with_virtual_hosted_style_request(!config.force_path_style);
 
         if let Some(endpoint_url) = endpoint_url {
@@ -61,8 +62,8 @@ impl S3CompatibleStore {
                 .with_endpoint(endpoint_url)
                 .with_allow_http(allow_http);
         }
-        if let Some(session_token) = config.session_token {
-            builder = builder.with_token(session_token);
+        if let Some(session_token) = &config.session_token {
+            builder = builder.with_token(session_token.expose());
         }
         if config.sha256_checksum_metadata {
             builder = builder.with_checksum_algorithm(Checksum::SHA256);
@@ -143,12 +144,12 @@ fn validate_config(config: &S3CompatibleConfig) -> Result<(), ObjectStoreError> 
             "region must not be empty".to_owned(),
         ));
     }
-    if config.access_key_id.trim().is_empty() {
+    if config.access_key_id.expose().trim().is_empty() {
         return Err(ObjectStoreError::Configuration(
             "access key id must not be empty".to_owned(),
         ));
     }
-    if config.secret_access_key.trim().is_empty() {
+    if config.secret_access_key.expose().trim().is_empty() {
         return Err(ObjectStoreError::Configuration(
             "secret access key must not be empty".to_owned(),
         ));
@@ -219,8 +220,8 @@ mod tests {
             bucket: "bucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
-            access_key_id: "access".to_owned(),
-            secret_access_key: "secret".to_owned(),
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn s3_compatible_store_rejects_blank_credentials() {
         let mut config = test_config();
-        config.access_key_id.clear();
+        config.access_key_id = "".into();
         assert!(S3CompatibleStore::new(config).is_err());
     }
 

@@ -1176,7 +1176,7 @@ mod tests {
         Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
-            content_token_secret: "test-content-token-secret".to_owned(),
+            content_token_secret: "test-content-token-secret".into(),
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             runtime_cache: RuntimeCacheConfigOverrides::default(),
@@ -1658,7 +1658,7 @@ mod tests {
         let config = Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
-            content_token_secret: "test-content-token-secret".to_owned(),
+            content_token_secret: "test-content-token-secret".into(),
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             runtime_cache: RuntimeCacheConfigOverrides::default(),
@@ -1712,7 +1712,7 @@ mod tests {
         let config = Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
             auth_token: None,
-            content_token_secret: "test-content-token-secret".to_owned(),
+            content_token_secret: "test-content-token-secret".into(),
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             runtime_cache: RuntimeCacheConfigOverrides::default(),

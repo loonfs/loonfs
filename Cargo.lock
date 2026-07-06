@@ -1171,6 +1171,7 @@ dependencies = [
  "bytes",
  "fs4",
  "futures",
+ "http",
  "loonfs-api",
  "object_store",
  "serde",
@@ -1179,6 +1180,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
 ]
 
 [[package]]
