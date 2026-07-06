@@ -1,6 +1,6 @@
 use crate::layout::{self, ObjectLayout};
 use crate::ObjectStoreError;
-use loonfs_api::ManifestId;
+use loonfs_api::{ManifestId, ManifestObjectId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataTableFamily {
@@ -83,6 +83,12 @@ pub fn metadata_manifest(namespace: &str, manifest_id: ManifestId) -> String {
         .into_string()
 }
 
+pub fn metadata_manifest_object(namespace: &str, manifest_object_id: &ManifestObjectId) -> String {
+    ObjectLayout::new()
+        .metadata_manifest_object(namespace, manifest_object_id)
+        .into_string()
+}
+
 pub fn metadata_table(namespace: &str, table_id: &str) -> String {
     ObjectLayout::new()
         .metadata_table(namespace, table_id)
@@ -139,11 +145,11 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 mod tests {
     use super::{
         checkpoint_record, content_blob, content_store_descriptor, metadata_manifest,
-        metadata_root, metadata_table, namespace_config, pin, sha256_hex_from_digest,
-        upload_session, upload_session_prefix, wal_floor, wal_head, wal_segment,
-        wal_segment_id_from_key, wal_segment_prefix,
+        metadata_manifest_object, metadata_root, metadata_table, namespace_config, pin,
+        sha256_hex_from_digest, upload_session, upload_session_prefix, wal_floor, wal_head,
+        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
-    use loonfs_api::ManifestId;
+    use loonfs_api::{ManifestId, ManifestObjectId};
 
     /// Pins every standard key pattern in the format spec's "Durable object
     /// families" table to the key this crate actually builds for that family.
@@ -275,6 +281,12 @@ mod tests {
         assert_eq!(
             metadata_manifest("ns-1", ManifestId(400)),
             "namespaces/ns-1/metadata/manifests/00000000000000000400.json"
+        );
+        let manifest_object_id = ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
+            .expect("valid manifest object id");
+        assert_eq!(
+            metadata_manifest_object("ns-1", &manifest_object_id),
+            "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
             metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
