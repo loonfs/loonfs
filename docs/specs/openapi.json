@@ -42,7 +42,7 @@
         ],
         "summary": "Create checkpoint",
         "description": "Records a checkpoint of the current namespace view. Unnamed checkpoints are maintenance bookkeeping: a manifest retains only the four newest, so this is not a durable pin with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
-        "operationId": "create_checkpoint_handler",
+        "operationId": "create_checkpoint",
         "parameters": [
           {
             "name": "namespace",
@@ -125,7 +125,7 @@
         ],
         "summary": "Collect garbage",
         "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
-        "operationId": "gc_namespace_handler",
+        "operationId": "gc_namespace",
         "parameters": [
           {
             "name": "namespace",
@@ -199,7 +199,7 @@
         ],
         "summary": "Advance retention",
         "description": "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
-        "operationId": "advance_retention_handler",
+        "operationId": "advance_retention",
         "parameters": [
           {
             "name": "namespace",
@@ -272,7 +272,7 @@
         ],
         "summary": "Get config",
         "description": "Returns a summary of supported features and limits.",
-        "operationId": "config_handler",
+        "operationId": "config",
         "responses": {
           "200": {
             "description": "Capability document",
@@ -376,7 +376,7 @@
         ],
         "summary": "Get namespace status",
         "description": "Returns the current head, manifest, checkpoint, WAL tail, and retention state for a namespace.",
-        "operationId": "namespace_status_handler",
+        "operationId": "namespace_status",
         "parameters": [
           {
             "name": "namespace",
@@ -447,7 +447,7 @@
         ],
         "summary": "Delete namespace",
         "description": "Marks a namespace as deleted.",
-        "operationId": "delete_namespace_handler",
+        "operationId": "delete_namespace",
         "parameters": [
           {
             "name": "namespace",
@@ -541,7 +541,7 @@
         ],
         "summary": "List changes",
         "description": "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
-        "operationId": "list_changes_handler",
+        "operationId": "list_changes",
         "parameters": [
           {
             "name": "namespace",
@@ -634,7 +634,7 @@
         ],
         "summary": "Commit operations",
         "description": "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this for advanced cases that require inode-specificity, preconditions, or batch transactions.",
-        "operationId": "commit_operations_handler",
+        "operationId": "commit_operations",
         "parameters": [
           {
             "name": "namespace",
@@ -1218,7 +1218,7 @@
         ],
         "summary": "Fork namespace",
         "description": "Creates a new namespace as a fork from the source namespace's current durable view.",
-        "operationId": "fork_namespace_handler",
+        "operationId": "fork_namespace",
         "parameters": [
           {
             "name": "namespace",
@@ -1618,7 +1618,7 @@
         ],
         "summary": "Begin upload",
         "description": "Starts an upload session for content that may later be attached to a file. Service-proxied uploads send bytes through the server; direct-put uploads return object-store presigned credentials.",
-        "operationId": "begin_upload_handler",
+        "operationId": "begin_upload",
         "parameters": [
           {
             "name": "namespace",
@@ -1711,7 +1711,7 @@
         ],
         "summary": "Complete upload",
         "description": "Completes an upload session once the caller confirms the expected content reference. The response may include a short-lived validation token for a following file write.",
-        "operationId": "complete_upload_handler",
+        "operationId": "complete_upload",
         "parameters": [
           {
             "name": "namespace",
@@ -1813,7 +1813,7 @@
         ],
         "summary": "Upload content",
         "description": "Uploads bytes into a service-proxied upload session and returns the content reference for the stored object.",
-        "operationId": "upload_content_handler",
+        "operationId": "upload_content",
         "parameters": [
           {
             "name": "namespace",
