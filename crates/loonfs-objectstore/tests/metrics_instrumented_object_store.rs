@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
-use loonfs_api::ManifestId;
+use loonfs_api::ManifestObjectId;
 use loonfs_objectstore::keys::{
-    metadata_manifest, metadata_table, namespace_config, wal_head, wal_segment,
+    metadata_manifest_object, metadata_table, namespace_config, wal_head, wal_segment,
 };
 use loonfs_objectstore::layout::ObjectLayout;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -224,7 +224,11 @@ async fn classifies_wal_and_manifest_key_families() {
         .expect("put wal");
     store
         .put_overwrite(
-            &metadata_manifest("ns-1", ManifestId(2)),
+            &metadata_manifest_object(
+                "ns-1",
+                &ManifestObjectId::parse("00000000000000000002-0123456789abcdef")
+                    .expect("valid manifest object id"),
+            ),
             bytes(b"manifest"),
         )
         .await
@@ -253,7 +257,11 @@ async fn classifies_gc_namespace_layout_family() {
     store
         .put_overwrite(
             &layout
-                .metadata_manifest("ns-1", ManifestId(1))
+                .metadata_manifest_object(
+                    "ns-1",
+                    &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+                        .expect("valid manifest object id"),
+                )
                 .into_string(),
             bytes(b"manifest"),
         )
