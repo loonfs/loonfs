@@ -28,12 +28,12 @@ pub struct GcpGcsStore {
 impl GcpGcsStore {
     pub fn new(config: GcpGcsStoreConfig) -> Result<Self, ObjectStoreError> {
         if config.bucket.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "bucket must not be empty".to_owned(),
             ));
         }
         if config.service_account_key_path.trim().is_empty() {
-            return Err(ObjectStoreError::Transport(
+            return Err(ObjectStoreError::Configuration(
                 "service account key path must not be empty".to_owned(),
             ));
         }
@@ -44,7 +44,7 @@ impl GcpGcsStore {
 
         let provider = builder
             .build()
-            .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
+            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
         let inner = ProviderObjectStore::new(
             Arc::new(provider),
             ProviderObjectStoreConfig {
@@ -63,11 +63,16 @@ impl GcpGcsStore {
         }
     }
 
-    fn require_generation_compare_token(expected_etag: &str) -> Result<(), ObjectStoreError> {
+    fn require_generation_compare_token(
+        key: &str,
+        expected_etag: &str,
+    ) -> Result<(), ObjectStoreError> {
         expected_etag
             .parse::<u64>()
             .map(|_| ())
-            .map_err(|_| ObjectStoreError::PreconditionFailed)
+            .map_err(|_| ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            })
     }
 }
 
@@ -115,7 +120,7 @@ impl ObjectStore for GcpGcsStore {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.validate_key(key)?;
         if let PutMode::CompareAndSwap { expected_etag } = &mode {
-            Self::require_generation_compare_token(expected_etag)?;
+            Self::require_generation_compare_token(key, expected_etag)?;
         }
         Ok(Self::generation_as_compare_token(
             self.inner.put(key, bytes, mode).await?,
@@ -159,7 +164,7 @@ mod tests {
             store
                 .compare_and_swap("../escape", "not-a-generation", Bytes::from_static(b"oops"))
                 .await,
-            Err(ObjectStoreError::InvalidKey(_))
+            Err(ObjectStoreError::InvalidKey { .. })
         ));
     }
 
@@ -171,7 +176,7 @@ mod tests {
                 service_account_key_path: " ".to_owned(),
                 key_prefix: None,
             }),
-            Err(ObjectStoreError::Transport(_))
+            Err(ObjectStoreError::Configuration(_))
         ));
     }
 

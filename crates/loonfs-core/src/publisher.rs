@@ -1,7 +1,7 @@
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
-use crate::error::{CoreError, ErrorCode, MetadataViewError};
+use crate::error::{CoreError, ErrorCode, MetadataViewError, Result};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::planner::plan_path_mutation_against_publish_view;
 use crate::path::write::{
@@ -41,11 +41,13 @@ impl NamespaceMutationCandidate {
     pub fn semantic_identity(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<SemanticMutationIdentity, CoreError> {
+    ) -> Result<SemanticMutationIdentity> {
         match self {
             Self::Commit(request) => core_commit_fingerprint_for_v0_request(namespace_id, request)
                 .map(SemanticMutationIdentity::CoreCommit)
-                .map_err(|err| CoreError::Store(err.to_string())),
+                .map_err(|err| {
+                    CoreError::Internal(format!("failed to fingerprint commit request: {err}"))
+                }),
             Self::Path(intent) | Self::PathWithContentAdmission { intent, .. } => {
                 path_intent_fingerprint_for_path_intent(namespace_id, intent)
                     .map(SemanticMutationIdentity::PathIntent)
@@ -83,7 +85,7 @@ pub(crate) const WAL_TAIL_BACKPRESSURE_SEGMENTS: u64 = 128;
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
-    pub results: Vec<Result<ApiCommitResponse, CoreError>>,
+    pub results: Vec<Result<ApiCommitResponse>>,
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
@@ -294,7 +296,7 @@ impl NamespaceCommitEngine {
     }
 }
 
-fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitResponse, CoreError>> {
+fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitResponse>> {
     (0..count).map(|_| Err(error.clone())).collect()
 }
 
@@ -311,7 +313,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
-    ) -> Result<PlannedPathMutation, CoreError> {
+    ) -> Result<PlannedPathMutation> {
         let (view, _projection) = load_publish_metadata_view(
             self.store,
             namespace_id,
@@ -338,7 +340,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         intent: PathMutationIntent,
         context: &MutationContext,
         options: PublishOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> Result<MutationResult> {
         let attempts = options.stale_head_retry_limit.max(1);
         let mut last_error = None;
 
@@ -350,9 +352,9 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
                 context,
             )
             .await;
-            let result = results
-                .pop()
-                .unwrap_or_else(|| Err(CoreError::Store("empty path mutation batch".to_owned())));
+            let result = results.pop().unwrap_or_else(|| {
+                Err(CoreError::Internal("empty path mutation batch".to_owned()))
+            });
             match result {
                 Ok(response) => {
                     return Ok(MutationResult {
@@ -368,7 +370,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            CoreError::Store("path mutation stale-head retry exhausted".to_owned())
+            CoreError::Internal("path mutation stale-head retry exhausted".to_owned())
         }))
     }
 
@@ -377,7 +379,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         namespace_id: &NamespaceId,
         request: ApiCommitRequest,
         context: &MutationContext,
-    ) -> Result<ApiCommitResponse, CoreError> {
+    ) -> Result<ApiCommitResponse> {
         crate::protocol::commit_operations(self.store, namespace_id, request, context).await
     }
 
@@ -386,7 +388,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         namespace_id: &NamespaceId,
         requests: Vec<ApiCommitRequest>,
         context: &MutationContext,
-    ) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    ) -> Vec<Result<ApiCommitResponse>> {
         crate::protocol::commit_operations_batch(self.store, namespace_id, requests, context).await
     }
 }
@@ -396,7 +398,7 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
+) -> Vec<Result<ApiCommitResponse>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     engine
         .publish_batch(store, candidates, context)

@@ -131,8 +131,8 @@ pub enum ControlObjectLoadError {
     },
     #[error("control object codec error for `{object_key}`: {message}")]
     Codec { object_key: String, message: String },
-    #[error("control object store error: {0}")]
-    Store(String),
+    #[error("control object store error for `{object_key}`: {message}")]
+    Store { object_key: String, message: String },
 }
 
 pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
@@ -398,9 +398,13 @@ fn control_identity(
     object_key: &str,
     metadata: &ObjectMetadata,
 ) -> Result<ControlObjectIdentity, ControlObjectLoadError> {
-    let etag = metadata.etag.clone().ok_or_else(|| {
-        ControlObjectLoadError::Store(format!("missing control object etag for `{object_key}`"))
-    })?;
+    let etag = metadata
+        .etag
+        .clone()
+        .ok_or_else(|| ControlObjectLoadError::Store {
+            object_key: object_key.to_owned(),
+            message: "missing control object etag".to_owned(),
+        })?;
     Ok(ControlObjectIdentity { etag })
 }
 
@@ -411,7 +415,7 @@ async fn read_control_object_bytes<S: ObjectStore + ?Sized>(
     let body = store
         .get_with_metadata(object_key)
         .await
-        .map_err(map_store_load_error)?
+        .map_err(|err| map_store_load_error(object_key, err))?
         .ok_or_else(|| ControlObjectLoadError::MissingObject {
             object_key: object_key.to_owned(),
         })?;
@@ -463,6 +467,9 @@ pub(crate) fn map_control_codec_error(
     }
 }
 
-fn map_store_load_error(err: ObjectStoreError) -> ControlObjectLoadError {
-    ControlObjectLoadError::Store(err.to_string())
+fn map_store_load_error(object_key: &str, err: ObjectStoreError) -> ControlObjectLoadError {
+    ControlObjectLoadError::Store {
+        object_key: object_key.to_owned(),
+        message: err.message(),
+    }
 }

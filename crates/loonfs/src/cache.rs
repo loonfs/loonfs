@@ -314,7 +314,12 @@ impl Fs {
         let descriptor_key = namespace_config(namespace_id.as_str());
         let descriptor_exists = match self.store().head(&descriptor_key).await {
             Ok(value) => value.is_some(),
-            Err(error) => return RuntimeError::Core(CoreError::Store(error.to_string())),
+            Err(error) => {
+                return RuntimeError::Core(CoreError::Store {
+                    object_key: descriptor_key,
+                    message: error.message(),
+                })
+            }
         };
         if descriptor_exists {
             RuntimeError::Core(CoreError::MetadataProjection(
@@ -342,14 +347,18 @@ impl Fs {
             .store()
             .head(object_key)
             .await
-            .map_err(|error| ControlObjectLoadError::Store(error.to_string()))?
+            .map_err(|error| ControlObjectLoadError::Store {
+                object_key: object_key.to_owned(),
+                message: error.message(),
+            })?
             .ok_or_else(|| ControlObjectLoadError::MissingObject {
                 object_key: object_key.to_owned(),
             })?;
         let Some(etag) = metadata.etag else {
-            return Err(ControlObjectLoadError::Store(format!(
-                "missing control object etag for `{object_key}`"
-            )));
+            return Err(ControlObjectLoadError::Store {
+                object_key: object_key.to_owned(),
+                message: "missing control object etag".to_owned(),
+            });
         };
         Ok(etag == identity.etag)
     }

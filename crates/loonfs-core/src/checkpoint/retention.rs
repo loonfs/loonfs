@@ -77,7 +77,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             let present = store
                 .head(&metadata_file.object_key)
                 .await
-                .map_err(|error| CoreError::Store(error.to_string()))?
+                .map_err(|error| CoreError::store(&metadata_file.object_key, &error))?
                 .is_some();
             if present {
                 Ok(())
@@ -120,9 +120,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             &context.writer_version,
             next,
         )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded =
-            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| CoreError::Internal(format!("failed to build wal floor envelope: {err}")))?;
+        let encoded = encode_control_object(&envelope).map_err(|err| {
+            CoreError::Internal(format!("failed to encode wal floor object: {err}"))
+        })?;
         let expected_etag = loaded.metadata.etag.as_deref().ok_or_else(|| {
             CoreError::NamespaceCorrupt(format!("missing floor etag for `{}`", loaded.object_key))
         })?;
@@ -136,11 +137,13 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                     retention_floor_seq: target_floor,
                 })
             }
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-            Err(error) => return Err(CoreError::Store(error.to_string())),
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+            ) => continue,
+            Err(error) => return Err(CoreError::store(&loaded.object_key, &error)),
         }
     }
-    Err(CoreError::Store(
-        "retention floor cas retry exhausted".to_owned(),
+    Err(CoreError::Internal(
+        "retention floor compare-and-swap retry exhausted".to_owned(),
     ))
 }

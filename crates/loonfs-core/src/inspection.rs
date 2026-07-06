@@ -23,7 +23,7 @@ pub async fn visible_tree_hash<S: ObjectStore + ?Sized>(
 ) -> Result<String, CoreError> {
     let entries = list_visible_paths(store, namespace_id).await?;
     let bytes = serde_json::to_vec(&entries).map_err(|error| {
-        CoreError::Store(format!("failed to encode visible tree hash: {error}"))
+        CoreError::Internal(format!("failed to encode visible tree hash: {error}"))
     })?;
     let digest = Sha256::digest(bytes);
     Ok(format!("sha256:{digest:x}"))

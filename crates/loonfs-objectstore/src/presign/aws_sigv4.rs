@@ -12,11 +12,17 @@ pub(crate) struct AwsSigV4Dates {
     pub(crate) amz_date: String,
 }
 
-pub(crate) fn aws_dates(time: SystemTime) -> Result<AwsSigV4Dates, ObjectStoreError> {
+pub(crate) fn aws_dates(
+    object_key: &str,
+    time: SystemTime,
+) -> Result<AwsSigV4Dates, ObjectStoreError> {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map_err(|err| {
-            ObjectStoreError::Transport(format!("system time is before unix epoch: {err}"))
+            ObjectStoreError::transport(
+                object_key,
+                format!("system time is before unix epoch: {err}"),
+            )
         })?
         .as_secs() as i64;
     let days = seconds.div_euclid(86_400);

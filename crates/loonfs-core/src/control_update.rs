@@ -73,7 +73,10 @@ where
                     .await
                 {
                     Ok(_) => return Ok(outcome),
-                    Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+                    Err(
+                        ObjectStoreError::PreconditionFailed { .. }
+                        | ObjectStoreError::Conflict { .. },
+                    ) => {
                         continue;
                     }
                     Err(error) => {
@@ -114,24 +117,30 @@ where
                     writer_version,
                     *next,
                 )
-                .map_err(|err| CoreError::Store(err.to_string()))?;
-                let encoded = encode_control_object(&envelope)
-                    .map_err(|err| CoreError::Store(err.to_string()))?;
+                .map_err(|err| {
+                    CoreError::Internal(format!("failed to build upload session envelope: {err}"))
+                })?;
+                let encoded = encode_control_object(&envelope).map_err(|err| {
+                    CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
+                })?;
                 match store
                     .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
                     .await
                 {
                     Ok(_) => return Ok(outcome),
-                    Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+                    Err(
+                        ObjectStoreError::PreconditionFailed { .. }
+                        | ObjectStoreError::Conflict { .. },
+                    ) => {
                         continue;
                     }
-                    Err(error) => return Err(CoreError::Store(error.to_string())),
+                    Err(error) => return Err(CoreError::store(&loaded.object_key, &error)),
                 }
             }
         }
     }
 
-    Err(CoreError::Store(
+    Err(CoreError::Internal(
         "upload session compare-and-swap retry exhausted".to_owned(),
     ))
 }
@@ -158,10 +167,10 @@ fn required_etag_core<'a>(
     metadata: &'a ObjectMetadata,
     object_key: &str,
 ) -> Result<&'a str, CoreError> {
-    metadata
-        .etag
-        .as_deref()
-        .ok_or_else(|| CoreError::Store(format!("missing control object etag for `{object_key}`")))
+    metadata.etag.as_deref().ok_or_else(|| CoreError::Store {
+        object_key: object_key.to_owned(),
+        message: "missing control object etag".to_owned(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -180,21 +189,21 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     let body = store
         .get_with_metadata(&object_key)
         .await
-        .map_err(|err| CoreError::Store(err.to_string()))?
+        .map_err(|err| CoreError::store(&object_key, &err))?
         .ok_or_else(|| CoreError::UploadNotFound {
             upload_id: upload_id.clone(),
         })?;
     let envelope: UploadSessionEnvelope =
         decode_control_object(&body.bytes, ControlObjectKind::UploadSession).map_err(|err| {
-            CoreError::Store(format!("invalid upload session `{object_key}`: {err}"))
+            CoreError::Internal(format!("invalid upload session `{object_key}`: {err}"))
         })?;
     if envelope.state.namespace_id != *namespace_id {
-        return Err(CoreError::Store(format!(
+        return Err(CoreError::Internal(format!(
             "upload session namespace mismatch for `{object_key}`"
         )));
     }
     if envelope.state.upload_id != *upload_id {
-        return Err(CoreError::Store(format!(
+        return Err(CoreError::Internal(format!(
             "upload session id mismatch for `{object_key}`"
         )));
     }
@@ -354,7 +363,9 @@ mod tests {
         ) -> Result<ObjectMetadata, ObjectStoreError> {
             if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
                 self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
-                return Err(ObjectStoreError::PreconditionFailed);
+                return Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                });
             }
             self.inner.compare_and_swap(key, expected_etag, bytes).await
         }

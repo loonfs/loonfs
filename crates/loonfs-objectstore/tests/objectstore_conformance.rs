@@ -655,42 +655,44 @@ async fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
 }
 
 async fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
+    fn assert_invalid_key<T: std::fmt::Debug>(key: &str, result: Result<T, ObjectStoreError>) {
+        let carries_rejected_key = matches!(
+            &result,
+            Err(ObjectStoreError::InvalidKey { object_key, .. }) if object_key == key
+        );
+        assert!(
+            carries_rejected_key,
+            "expected invalid key error for `{key}`, got {result:?}"
+        );
+    }
+
     for key in ["../escape", "namespaces//bad", "./escape"] {
-        assert!(matches!(
-            store.head(key).await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
-        assert!(matches!(
-            store.get(key, None).await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
-        assert!(matches!(
+        assert_invalid_key(key, store.head(key).await);
+        assert_invalid_key(key, store.get(key, None).await);
+        assert_invalid_key(
+            key,
             store.put_if_absent(key, Bytes::from_static(b"oops")).await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
-        assert!(matches!(
+        );
+        assert_invalid_key(
+            key,
             store.put_overwrite(key, Bytes::from_static(b"oops")).await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
-        assert!(matches!(
+        );
+        assert_invalid_key(
+            key,
             store
                 .compare_and_swap(key, "etag", Bytes::from_static(b"oops"))
                 .await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
-        assert!(matches!(
-            store.delete(key).await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
-        assert!(matches!(
-            store.list_prefix(key).await,
-            Err(ObjectStoreError::InvalidKey(_))
-        ));
+        );
+        assert_invalid_key(key, store.delete(key).await);
+        assert_invalid_key(key, store.list_prefix(key).await);
     }
 }
 
 fn assert_precondition_failed<T>(result: Result<T, ObjectStoreError>) {
-    assert!(matches!(result, Err(ObjectStoreError::PreconditionFailed)));
+    assert!(matches!(
+        result,
+        Err(ObjectStoreError::PreconditionFailed { .. })
+    ));
 }
 
 #[derive(Debug)]

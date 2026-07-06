@@ -512,14 +512,17 @@ fn classify_result<T>(result: &Result<T, ObjectStoreError>) -> ObjectStoreResult
 
 fn classify_error(error: &ObjectStoreError) -> ObjectStoreResultClass {
     match error {
-        ObjectStoreError::NotFound => ObjectStoreResultClass::NotFound,
-        ObjectStoreError::InvalidKey(_) => ObjectStoreResultClass::InvalidKey,
+        ObjectStoreError::NotFound { .. } => ObjectStoreResultClass::NotFound,
+        ObjectStoreError::InvalidKey { .. } => ObjectStoreResultClass::InvalidKey,
         ObjectStoreError::InvalidContentRef(_) => ObjectStoreResultClass::InvalidContentRef,
-        ObjectStoreError::InvalidRange => ObjectStoreResultClass::InvalidRange,
-        ObjectStoreError::PreconditionFailed => ObjectStoreResultClass::PreconditionFailed,
-        ObjectStoreError::Conflict => ObjectStoreResultClass::Conflict,
+        ObjectStoreError::InvalidRange { .. } => ObjectStoreResultClass::InvalidRange,
+        ObjectStoreError::PreconditionFailed { .. } => ObjectStoreResultClass::PreconditionFailed,
+        ObjectStoreError::Conflict { .. } => ObjectStoreResultClass::Conflict,
         ObjectStoreError::Unsupported(_) => ObjectStoreResultClass::Unsupported,
-        ObjectStoreError::Transport(_) => ObjectStoreResultClass::Transport,
+        // Configuration failures happen at store construction, before any
+        // metered operation; classify defensively as transport.
+        ObjectStoreError::Configuration(_) => ObjectStoreResultClass::Transport,
+        ObjectStoreError::Transport { .. } => ObjectStoreResultClass::Transport,
     }
 }
 

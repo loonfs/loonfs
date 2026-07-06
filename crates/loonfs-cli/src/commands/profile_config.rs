@@ -125,7 +125,7 @@ pub(super) fn build_profile_from_create_spec(
     match mode.as_str() {
         "embedded" => build_embedded_profile(spec, runtime),
         "remote" => build_remote_profile(spec, runtime),
-        _ => unreachable!(),
+        _ => unreachable!("mode is validated to `embedded` or `remote` above"),
     }
 }
 
@@ -328,7 +328,11 @@ fn build_embedded_profile(
                 key_prefix: spec.key_prefix,
             }
         }
-        _ => unreachable!(),
+        other => {
+            return Err(CliError::invalid_config(format!(
+                "store kind `{other}` has no embedded profile builder"
+            )))
+        }
     };
 
     Ok(ProfileConfig::Embedded {

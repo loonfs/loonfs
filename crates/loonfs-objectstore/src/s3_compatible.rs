@@ -70,7 +70,7 @@ impl S3CompatibleStore {
 
         let provider = builder
             .build()
-            .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
+            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
         let inner = ProviderObjectStore::new(
             Arc::new(provider),
             ProviderObjectStoreConfig {
@@ -134,22 +134,22 @@ impl ObjectStore for S3CompatibleStore {
 
 fn validate_config(config: &S3CompatibleConfig) -> Result<(), ObjectStoreError> {
     if config.bucket.trim().is_empty() {
-        return Err(ObjectStoreError::Transport(
+        return Err(ObjectStoreError::Configuration(
             "bucket must not be empty".to_owned(),
         ));
     }
     if config.region.trim().is_empty() {
-        return Err(ObjectStoreError::Transport(
+        return Err(ObjectStoreError::Configuration(
             "region must not be empty".to_owned(),
         ));
     }
     if config.access_key_id.trim().is_empty() {
-        return Err(ObjectStoreError::Transport(
+        return Err(ObjectStoreError::Configuration(
             "access key id must not be empty".to_owned(),
         ));
     }
     if config.secret_access_key.trim().is_empty() {
-        return Err(ObjectStoreError::Transport(
+        return Err(ObjectStoreError::Configuration(
             "secret access key must not be empty".to_owned(),
         ));
     }
@@ -192,13 +192,13 @@ fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>, ObjectStoreErro
         .map(|rest| ("https", rest))
         .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
         .ok_or_else(|| {
-            ObjectStoreError::Transport(
+            ObjectStoreError::Configuration(
                 "endpoint url must start with http:// or https://".to_owned(),
             )
         })?;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     if authority.is_empty() {
-        return Err(ObjectStoreError::Transport(
+        return Err(ObjectStoreError::Configuration(
             "endpoint url must include authority".to_owned(),
         ));
     }

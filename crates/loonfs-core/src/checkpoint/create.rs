@@ -26,6 +26,7 @@ use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::error::Result;
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::catalog::load_namespace_catalog_entry;
@@ -63,7 +64,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<CreateCheckpointResponse, CoreError> {
+) -> Result<CreateCheckpointResponse> {
     create_checkpoint_with_policy(store, namespace_id, context, MetadataLsmPolicy::default()).await
 }
 
@@ -80,7 +81,7 @@ pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: MetadataLsmPolicy,
-) -> Result<CreateCheckpointResponse, CoreError> {
+) -> Result<CreateCheckpointResponse> {
     create_checkpoint_with_policy_and_owner(store, namespace_id, context, policy, None).await
 }
 
@@ -90,7 +91,7 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
     context: &MutationContext,
     policy: MetadataLsmPolicy,
     owner: Option<CheckpointOwner>,
-) -> Result<CreateCheckpointResponse, CoreError> {
+) -> Result<CreateCheckpointResponse> {
     // Checkpoint creation pins a manifest version as a first-class record
     // under `checkpoints/`, write-then-verify (format spec, "Checkpoints"):
     //
@@ -171,7 +172,7 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
                 }
             }
             let Some(manifest) = written_manifest else {
-                return Err(CoreError::Store(
+                return Err(CoreError::Internal(
                     "manifest id allocation retry exhausted".to_owned(),
                 ));
             };
@@ -283,7 +284,7 @@ struct CheckpointProjection<'a, S: ObjectStore + ?Sized> {
 async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-) -> Result<CheckpointProjection<'a, S>, CoreError> {
+) -> Result<CheckpointProjection<'a, S>> {
     load_namespace_catalog_entry(store, namespace_id)
         .await
         .map_err(|error| CoreError::MetadataProjection(error.into()))?;
@@ -362,7 +363,7 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
 pub(super) async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<(HeadState, MetadataState), CoreError> {
+) -> Result<(HeadState, MetadataState)> {
     let projection = load_checkpoint_projection(store, namespace_id).await?;
     let mut metadata_state = MetadataStateBuilder::default();
     for family in CHECKPOINT_TABLE_FAMILIES {
@@ -386,7 +387,7 @@ pub(super) async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?
 fn ensure_checkpoint_reconstructed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if current_head.namespace_id != reconstructed.namespace_id
         || current_head.seq != reconstructed.seq
         || current_head.head_commit_id != reconstructed.head_commit_id
@@ -404,12 +405,12 @@ fn ensure_checkpoint_reconstructed_head_matches(
     Ok(())
 }
 
-pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId, CoreError> {
+pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId> {
     current
         .0
         .checked_add(1)
         .map(ManifestId)
-        .ok_or_else(|| CoreError::Store("manifest id overflow".to_owned()))
+        .ok_or_else(|| CoreError::Internal("manifest id overflow".to_owned()))
 }
 
 pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
@@ -417,7 +418,7 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     initial_head: &HeadState,
     writer_version: &str,
-) -> Result<NamespaceManifestEnvelope, CoreError> {
+) -> Result<NamespaceManifestEnvelope> {
     let manifest_id = ManifestId(initial_head.seq.0);
     let metadata_state = bootstrap_metadata_state();
     let run_tables = build_manifest_tables(
@@ -453,7 +454,11 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             metadata_files: flatten_manifest_tables(run_tables),
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))
+    .map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to build namespace manifest envelope: {err}"
+        ))
+    })
 }
 
 #[tracing::instrument(
@@ -470,7 +475,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
-) -> Result<NamespaceManifestEnvelope, CoreError> {
+) -> Result<NamespaceManifestEnvelope> {
     let head_seq = projection.head.seq;
     let previous_manifest = projection.manifest_tables.manifest();
 
@@ -535,7 +540,11 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             metadata_files,
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))
+    .map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to build namespace manifest envelope: {err}"
+        ))
+    })
 }
 
 /// Unnamed checkpoint records are maintenance bookkeeping; a manifest keeps
@@ -549,7 +558,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
 pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     // The latest revision at or below the floor is what the floor itself
     // observes; every older one is superseded at every retained sequence.
     let mut latest_revision_at_floor = BTreeMap::new();
@@ -731,7 +740,7 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     projection: &CheckpointProjection<'_, S>,
     writer_version: &str,
     max_rows_per_segment: usize,
-) -> Result<Vec<super::runs::MetadataTableManifest>, CoreError> {
+) -> Result<Vec<super::runs::MetadataTableManifest>> {
     let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
     for family in CHECKPOINT_TABLE_FAMILIES {
         let mut rows = projection
@@ -832,7 +841,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
-) -> Result<NamespaceManifestEnvelope, CoreError> {
+) -> Result<NamespaceManifestEnvelope> {
     let head = source.head;
     let metadata_state = source.metadata_state;
     let head_seq = head.seq;
@@ -927,7 +936,11 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             metadata_files,
         },
     )
-    .map_err(|err| CoreError::Store(err.to_string()))
+    .map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to build namespace manifest envelope: {err}"
+        ))
+    })
 }
 
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {

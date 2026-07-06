@@ -82,7 +82,7 @@ fn path_intent_fingerprint(
         intent: identity,
     })
     .map(PathIntentFingerprint::new_unchecked)
-    .map_err(|err| CoreError::Store(err.to_string()))
+    .map_err(|err| CoreError::Internal(format!("failed to fingerprint path intent: {err}")))
 }
 
 pub(crate) fn path_intent_fingerprint_for_path_intent(
@@ -154,7 +154,7 @@ fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreEr
 fn is_missing_visible_path(error: &CoreError) -> bool {
     matches!(
         error,
-        CoreError::MissingPath(_) | CoreError::VisiblePath(VisiblePathError::PathNotFound { .. })
+        CoreError::PathNotFound(_) | CoreError::VisiblePath(VisiblePathError::PathNotFound { .. })
     )
 }
 
@@ -241,9 +241,9 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
         .metadata_state
         .current_parent_binding_for_child(resolved.inode_id)
         .await?
-        .ok_or_else(|| CoreError::MissingPath(resolved.absolute_path.clone()))?;
+        .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
     if binding.parent_inode_id != parent_inode_id {
-        return Err(CoreError::MissingPath(resolved.absolute_path.clone()));
+        return Err(CoreError::PathNotFound(resolved.absolute_path.clone()));
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode_id,
@@ -391,7 +391,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .metadata_state
                 .latest_revision_head(existing.inode_id)
                 .await?
-                .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
+                .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
             preconditions.push(publish_binding_is_precondition(view, &existing).await?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
@@ -557,7 +557,7 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
         .metadata_state
         .latest_revision_head(source.inode_id)
         .await?
-        .ok_or_else(|| CoreError::MissingPath(from_path.as_str().to_owned()))?;
+        .ok_or_else(|| CoreError::PathNotFound(from_path.as_str().to_owned()))?;
 
     let target_parent = publish_resolve_parent_directory(view, &to_path).await?;
     let target_name = final_component(&to_path)?;
@@ -608,7 +608,7 @@ async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
         .metadata_state
         .latest_revision_head(target.inode_id)
         .await?
-        .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
+        .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
 
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
@@ -657,7 +657,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
                     .metadata_state
                     .visible_inode(child.child_inode_id)
                     .await?
-                    .ok_or_else(|| CoreError::MissingPath(component.as_str().to_owned()))?;
+                    .ok_or_else(|| CoreError::PathNotFound(component.as_str().to_owned()))?;
                 if inode.inode_kind != InodeKind::Dir {
                     return Err(CoreError::NonDirectoryPathComponent(
                         component.as_str().to_owned(),
@@ -714,9 +714,9 @@ fn binding_is_precondition(
     let binding = view
         .metadata_state
         .current_parent_binding_for_child(resolved.inode_id, view.head.seq)
-        .ok_or_else(|| CoreError::MissingPath(resolved.absolute_path.clone()))?;
+        .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
     if binding.parent_inode_id != parent_inode_id {
-        return Err(CoreError::MissingPath(resolved.absolute_path.clone()));
+        return Err(CoreError::PathNotFound(resolved.absolute_path.clone()));
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode_id,

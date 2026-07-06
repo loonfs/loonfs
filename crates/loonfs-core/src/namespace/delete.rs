@@ -94,9 +94,9 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             &context.writer_version,
             deleted_head,
         )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded =
-            encode_control_object(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+        .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
+        let encoded = encode_control_object(&envelope)
+            .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
 
         let swap = store
             .put(
@@ -116,14 +116,16 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             // The head moved (a commit, fence takeover, or another deleter
             // landed first). Reload and re-evaluate.
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+            ) => continue,
             // Outcome unobserved; the reload at the top of the loop resolves
             // it, because the target state is terminal.
-            Err(ObjectStoreError::Transport(_)) => {
+            Err(ObjectStoreError::Transport { .. }) => {
                 attempted_swap = true;
                 continue;
             }
-            Err(other) => return Err(CoreError::Store(other.to_string())),
+            Err(other) => return Err(CoreError::store(&loaded.object_key, &other)),
         }
     }
 
