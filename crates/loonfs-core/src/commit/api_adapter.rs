@@ -32,18 +32,18 @@ pub fn commit_request_from_v0(
 pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
     match op {
         api_v0::CommitOp::CreateDirectory {
-            parent_inode,
+            parent_inode_id,
             display_name,
         } => CommitOp::CreateDirectory {
-            parent_inode,
+            parent_inode_id,
             display_name,
         },
         api_v0::CommitOp::CreateFile {
-            parent_inode,
+            parent_inode_id,
             display_name,
             content_ref,
         } => CommitOp::CreateFile {
-            parent_inode,
+            parent_inode_id,
             display_name,
             content_ref,
         },
@@ -68,16 +68,18 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
         api_v0::CommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
         api_v0::CommitOp::Rename {
             inode_id,
-            new_parent_inode,
+            new_parent_inode_id,
             new_display_name,
             behavior,
         } => CommitOp::Rename {
             inode_id,
-            new_parent_inode,
+            new_parent_inode_id,
             new_display_name,
             behavior,
         },
-        api_v0::CommitOp::DeleteSubtree { root_inode } => CommitOp::DeleteSubtree { root_inode },
+        api_v0::CommitOp::DeleteSubtree { root_inode_id } => {
+            CommitOp::DeleteSubtree { root_inode_id }
+        }
     }
 }
 
@@ -96,22 +98,22 @@ pub(super) fn commit_precondition_from_v0(
             Precondition::AncestorsNotSubtreeDeleted { inode_id }
         }
         api_v0::CommitPrecondition::ChildNameAbsent {
-            parent_inode,
+            parent_inode_id,
             name_key,
         } => Precondition::ChildNameAbsent {
-            parent_inode,
+            parent_inode_id,
             name_key: name_key.as_str().to_owned(),
         },
         api_v0::CommitPrecondition::BindingIs {
-            parent_inode,
+            parent_inode_id,
             name_key,
-            child_inode,
+            child_inode_id,
             bind_seq,
             bind_delta_index,
         } => Precondition::BindingIs {
-            parent_inode,
+            parent_inode_id,
             name_key: name_key.as_str().to_owned(),
-            child_inode,
+            child_inode_id,
             bind_seq,
             bind_delta_index,
         },
@@ -143,13 +145,13 @@ mod tests {
                     inode_id: InodeId(2),
                 },
                 ApiCommitPrecondition::ChildNameAbsent {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     name_key: NameKey::parse("docs").expect("valid name key"),
                 },
                 ApiCommitPrecondition::BindingIs {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     name_key: NameKey::parse("file.txt").expect("valid name key"),
-                    child_inode: InodeId(2),
+                    child_inode_id: InodeId(2),
                     bind_seq: loonfs_api::ChangeSeq(4),
                     bind_delta_index: 1,
                 },
@@ -159,11 +161,11 @@ mod tests {
             ],
             ops: vec![
                 ApiCommitOp::CreateDirectory {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "docs".to_owned(),
                 },
                 ApiCommitOp::CreateFile {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "a.txt".to_owned(),
                     content_ref: content_ref.clone(),
                 },
@@ -182,12 +184,12 @@ mod tests {
                 },
                 ApiCommitOp::Rename {
                     inode_id: InodeId(2),
-                    new_parent_inode: InodeId(1),
+                    new_parent_inode_id: InodeId(1),
                     new_display_name: "b.txt".to_owned(),
                     behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 },
                 ApiCommitOp::DeleteSubtree {
-                    root_inode: InodeId(3),
+                    root_inode_id: InodeId(3),
                 },
             ],
             message: Some("all ops".to_owned()),

@@ -99,7 +99,7 @@ mod tests {
         );
         let _wal_delta = wire::wal::WalDelta::TombstoneSubtree {
             delta_index: 0,
-            root_inode: InodeId(1),
+            root_inode_id: InodeId(1),
         };
         let _manifest_row = wire::manifest::MetadataRow::Tombstone {
             root_inode_id: InodeId(1),

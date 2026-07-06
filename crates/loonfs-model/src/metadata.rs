@@ -130,16 +130,16 @@ impl MetadataState {
                 }
                 WalDelta::BindDirentry {
                     delta_index,
-                    parent_inode,
+                    parent_inode_id,
                     name_key,
                     display_name,
-                    child_inode,
+                    child_inode_id,
                 } => {
                     metadata_state.direntry_binds.push(DirentryBindRecord {
-                        parent_inode_id: *parent_inode,
+                        parent_inode_id: *parent_inode_id,
                         name_key: name_key.clone(),
                         display_name: display_name.clone(),
-                        child_inode_id: *child_inode,
+                        child_inode_id: *child_inode_id,
                         bind_seq: committed_seq,
                         bind_delta_index: *delta_index,
                     });
@@ -150,16 +150,16 @@ impl MetadataState {
                 }
                 WalDelta::UnbindDirentry {
                     delta_index,
-                    parent_inode,
+                    parent_inode_id,
                     name_key,
-                    child_inode,
+                    child_inode_id,
                     bind_seq,
                     bind_delta_index,
                 } => {
                     metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
-                        parent_inode_id: *parent_inode,
+                        parent_inode_id: *parent_inode_id,
                         name_key: name_key.clone(),
-                        child_inode_id: *child_inode,
+                        child_inode_id: *child_inode_id,
                         bind_seq: *bind_seq,
                         bind_delta_index: *bind_delta_index,
                         unbind_seq: committed_seq,
@@ -190,12 +190,12 @@ impl MetadataState {
                 }
                 WalDelta::TombstoneSubtree {
                     delta_index,
-                    root_inode,
+                    root_inode_id,
                 } => {
                     metadata_state
                         .subtree_tombstones
                         .push(SubtreeTombstoneRecord {
-                            root_inode_id: *root_inode,
+                            root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
                         });
@@ -526,10 +526,10 @@ impl MetadataState {
     pub fn would_create_directory_cycle(
         &self,
         inode_id: InodeId,
-        new_parent_inode: InodeId,
+        new_parent_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> bool {
-        let mut current = Some(new_parent_inode);
+        let mut current = Some(new_parent_inode_id);
         let mut visited = BTreeSet::new();
 
         while let Some(candidate_inode_id) = current {
@@ -573,10 +573,10 @@ mod tests {
                 ChangeSeq(1),
                 &[WalDelta::BindDirentry {
                     delta_index: 7,
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     name_key: "persisted-key".to_owned(),
                     display_name: "Report.TXT".to_owned(),
-                    child_inode: InodeId(2),
+                    child_inode_id: InodeId(2),
                 }],
             )
             .expect("apply bind delta");

@@ -107,7 +107,7 @@ pub struct MetadataPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "row_kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MetadataRow {
     Inode {
         inode_id: InodeId,

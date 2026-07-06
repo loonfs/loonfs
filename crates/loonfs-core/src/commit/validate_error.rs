@@ -6,21 +6,21 @@ pub enum CommitValidationError {
     EmptyCommit,
     NamespaceMismatch,
     NamePreconditionParentMissing {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
     },
     NamePreconditionParentNotDirectory {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         actual_kind: InodeKind,
     },
     BindingPreconditionMissing {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         name_key: String,
     },
     BindingPreconditionMismatch {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         name_key: String,
-        expected_child_inode: InodeId,
-        actual_child_inode: Option<InodeId>,
+        expected_child_inode_id: InodeId,
+        actual_child_inode_id: Option<InodeId>,
     },
     DirectoryEmptyPreconditionInodeMissing {
         inode_id: InodeId,
@@ -33,23 +33,23 @@ pub enum CommitValidationError {
         inode_id: InodeId,
     },
     CreateParentMissing {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
     },
     CreateParentNotDirectory {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         actual_kind: InodeKind,
     },
     CreateChildNameCollision {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         name_key: String,
-        child_inode: InodeId,
+        child_inode_id: InodeId,
     },
     InvalidDisplayName {
         display_name: String,
     },
     CreateUnderSubtreeTombstone {
-        parent_inode: InodeId,
-        root_inode: InodeId,
+        parent_inode_id: InodeId,
+        root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     ReplaceFileInodeMissing {
@@ -82,12 +82,12 @@ pub enum CommitValidationError {
     },
     RestoreRevisionUnderSubtreeTombstone {
         inode_id: InodeId,
-        root_inode: InodeId,
+        root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     ReplaceFileUnderSubtreeTombstone {
         inode_id: InodeId,
-        root_inode: InodeId,
+        root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     DeleteFileInodeMissing {
@@ -99,7 +99,7 @@ pub enum CommitValidationError {
     },
     DeleteFileCoveredByTombstone {
         inode_id: InodeId,
-        covering_root_inode: InodeId,
+        covering_root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     RenameInodeMissing {
@@ -112,41 +112,41 @@ pub enum CommitValidationError {
         inode_id: InodeId,
     },
     RenameTargetParentMissing {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
     },
     RenameTargetParentNotDirectory {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         actual_kind: InodeKind,
     },
     RenameTargetNameCollision {
-        parent_inode: InodeId,
+        parent_inode_id: InodeId,
         name_key: String,
-        child_inode: InodeId,
+        child_inode_id: InodeId,
     },
     RenameWouldCycleDirectory {
         inode_id: InodeId,
-        new_parent_inode: InodeId,
+        new_parent_inode_id: InodeId,
     },
     RenameInodeUnderSubtreeTombstone {
         inode_id: InodeId,
-        root_inode: InodeId,
+        root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     RenameTargetParentUnderSubtreeTombstone {
-        parent_inode: InodeId,
-        root_inode: InodeId,
+        parent_inode_id: InodeId,
+        root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     DeleteSubtreeRootMissing {
-        root_inode: InodeId,
+        root_inode_id: InodeId,
     },
     DeleteSubtreeRootNotDirectory {
-        root_inode: InodeId,
+        root_inode_id: InodeId,
         actual_kind: InodeKind,
     },
     DeleteSubtreeRootCoveredByTombstone {
-        root_inode: InodeId,
-        covering_root_inode: InodeId,
+        root_inode_id: InodeId,
+        covering_root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     RestoreRevisionOverflow {

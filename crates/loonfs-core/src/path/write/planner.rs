@@ -33,7 +33,7 @@ pub struct PlannedPathMutation {
 /// normalized intent must fingerprint identically across releases. A
 /// pinned-value test below fails if the encoding drifts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 enum PathFingerprintInput {
     CreateDir {
         namespace_id: NamespaceId,
@@ -234,7 +234,7 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
 ) -> Result<ApiCommitPrecondition, CoreError> {
-    let parent_inode = resolved
+    let parent_inode_id = resolved
         .parent_inode_id
         .ok_or(CoreError::RootMutationForbidden)?;
     let binding = view
@@ -242,15 +242,15 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
         .current_parent_binding_for_child(resolved.inode_id)
         .await?
         .ok_or_else(|| CoreError::MissingPath(resolved.absolute_path.clone()))?;
-    if binding.parent_inode_id != parent_inode {
+    if binding.parent_inode_id != parent_inode_id {
         return Err(CoreError::MissingPath(resolved.absolute_path.clone()));
     }
     Ok(ApiCommitPrecondition::BindingIs {
-        parent_inode,
+        parent_inode_id,
         name_key: NameKey::try_new(binding.name_key).map_err(|err| {
             CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
         })?,
-        child_inode: binding.child_inode_id,
+        child_inode_id: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
     })
@@ -258,14 +258,14 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
 
 fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    parent_inode: InodeId,
+    parent_inode_id: InodeId,
     display_name: &str,
 ) -> ApiCommitPrecondition {
     let display_name =
         DisplayName::parse(display_name).expect("path planner should provide valid display name");
     let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
     ApiCommitPrecondition::ChildNameAbsent {
-        parent_inode,
+        parent_inode_id,
         name_key,
     }
 }
@@ -304,7 +304,7 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
         {
             return Err(CoreError::TombstoneConflict {
                 path: visible_path.as_str().to_owned(),
-                root_inode: tombstone.root_inode_id,
+                root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             });
         }
@@ -334,18 +334,18 @@ async fn plan_publish_create_dir<S: ObjectStore + ?Sized>(
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
     }
-    let parent_inode = publish_resolve_parent_directory(view, &absolute_path).await?;
+    let parent_inode_id = publish_resolve_parent_directory(view, &absolute_path).await?;
     let display_name = final_component(&absolute_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateDirectory {
-            parent_inode,
+            parent_inode_id,
             display_name: display_name.clone(),
         }],
         preconditions: vec![
-            publish_child_name_absent_precondition(view, parent_inode, &display_name),
+            publish_child_name_absent_precondition(view, parent_inode_id, &display_name),
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: parent_inode,
+                inode_id: parent_inode_id,
             },
         ],
         message: None,
@@ -408,7 +408,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
         }
         Err(error) if is_missing_visible_path(&error) => {
             ops.push(ApiCommitOp::CreateFile {
-                parent_inode: final_parent_inode,
+                parent_inode_id: final_parent_inode,
                 display_name: final_name.clone(),
                 content_ref,
             });
@@ -456,7 +456,7 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
             inode_id: resolved.inode_id,
         },
         InodeKind::Dir if recursive => ApiCommitOp::DeleteSubtree {
-            root_inode: resolved.inode_id,
+            root_inode_id: resolved.inode_id,
         },
         InodeKind::Dir => {
             let children = view
@@ -469,7 +469,7 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
                 ));
             }
             ApiCommitOp::DeleteSubtree {
-                root_inode: resolved.inode_id,
+                root_inode_id: resolved.inode_id,
             }
         }
     };
@@ -510,7 +510,7 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::Rename {
             inode_id: source.inode_id,
-            new_parent_inode: target_parent,
+            new_parent_inode_id: target_parent,
             new_display_name: target_name.clone(),
             behavior,
         }],
@@ -564,7 +564,7 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateFile {
-            parent_inode: target_parent,
+            parent_inode_id: target_parent,
             display_name: target_name.clone(),
             content_ref: revision.content_ref,
         }],
@@ -670,7 +670,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
         }
 
         ops.push(ApiCommitOp::CreateDirectory {
-            parent_inode: current_inode,
+            parent_inode_id: current_inode,
             display_name: display_name.as_str().to_owned(),
         });
         let allocated = *next_inode_id;
@@ -708,22 +708,22 @@ fn binding_is_precondition(
     view: &PathPlanningView<'_>,
     resolved: &ResolvedVisiblePath,
 ) -> Result<ApiCommitPrecondition, CoreError> {
-    let parent_inode = resolved
+    let parent_inode_id = resolved
         .parent_inode_id
         .ok_or(CoreError::RootMutationForbidden)?;
     let binding = view
         .metadata_state
         .current_parent_binding_for_child(resolved.inode_id, view.head.seq)
         .ok_or_else(|| CoreError::MissingPath(resolved.absolute_path.clone()))?;
-    if binding.parent_inode_id != parent_inode {
+    if binding.parent_inode_id != parent_inode_id {
         return Err(CoreError::MissingPath(resolved.absolute_path.clone()));
     }
     Ok(ApiCommitPrecondition::BindingIs {
-        parent_inode,
+        parent_inode_id,
         name_key: NameKey::try_new(binding.name_key).map_err(|err| {
             CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
         })?,
-        child_inode: binding.child_inode_id,
+        child_inode_id: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
     })
@@ -774,7 +774,7 @@ mod tests {
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:85be04e569ee0e20adb4b3da3d095a6c27bd4fc2b5cb90785cc71980a48fddad"
+            "v0:sha256:09720e44df06757059ecba380849fc1e35ec24b5f34603b9588492fa4a323453"
         );
     }
 
@@ -888,7 +888,7 @@ mod tests {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateDirectory {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     display_name: "docs".to_owned(),
                 }],
                 message: None,
@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(
             planned.commit_request.ops,
             vec![CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             }]
         );
@@ -926,7 +926,7 @@ mod tests {
             .any(|precondition| matches!(
                 precondition,
                 CommitPrecondition::ChildNameAbsent {
-                    parent_inode: InodeId(1),
+                    parent_inode_id: InodeId(1),
                     name_key,
                 } if name_key.as_str() == "docs"
             )));
@@ -954,7 +954,7 @@ mod tests {
         assert!(matches!(
             &planned.commit_request.ops[0],
             CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name,
             } if display_name == "docs"
         ));

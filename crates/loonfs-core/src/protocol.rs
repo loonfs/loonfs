@@ -1435,35 +1435,35 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
         },
         WalDelta::BindDirentry {
             delta_index,
-            parent_inode,
+            parent_inode_id,
             name_key,
             display_name,
-            child_inode,
+            child_inode_id,
         } => CommitDelta::BindDirentry {
             semantic_op_index,
             delta_index: *delta_index,
-            parent_inode: *parent_inode,
+            parent_inode_id: *parent_inode_id,
             name_key: NameKey::try_new(name_key.clone()).map_err(|err| {
                 CoreError::NamespaceCorrupt(format!("invalid WAL name_key: {err}"))
             })?,
             display_name: display_name.clone(),
-            child_inode: *child_inode,
+            child_inode_id: *child_inode_id,
         },
         WalDelta::UnbindDirentry {
             delta_index,
-            parent_inode,
+            parent_inode_id,
             name_key,
-            child_inode,
+            child_inode_id,
             bind_seq,
             bind_delta_index,
         } => CommitDelta::UnbindDirentry {
             semantic_op_index,
             delta_index: *delta_index,
-            parent_inode: *parent_inode,
+            parent_inode_id: *parent_inode_id,
             name_key: NameKey::try_new(name_key.clone()).map_err(|err| {
                 CoreError::NamespaceCorrupt(format!("invalid WAL name_key: {err}"))
             })?,
-            child_inode: *child_inode,
+            child_inode_id: *child_inode_id,
             bind_seq: *bind_seq,
             bind_delta_index: *bind_delta_index,
         },
@@ -1481,11 +1481,11 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreErro
         },
         WalDelta::TombstoneSubtree {
             delta_index,
-            root_inode,
+            root_inode_id,
         } => CommitDelta::TombstoneSubtree {
             semantic_op_index,
             delta_index: *delta_index,
-            root_inode: *root_inode,
+            root_inode_id: *root_inode_id,
         },
     })
 }
@@ -1628,10 +1628,10 @@ mod tests {
             semantic_op_index: 0,
             delta: WalDelta::BindDirentry {
                 delta_index: 0,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: "bad/key".to_owned(),
                 display_name: "file.txt".to_owned(),
-                child_inode: InodeId(2),
+                child_inode_id: InodeId(2),
             },
         };
 
@@ -1646,9 +1646,9 @@ mod tests {
             semantic_op_index: 0,
             delta: WalDelta::UnbindDirentry {
                 delta_index: 0,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: "bad/key".to_owned(),
-                child_inode: InodeId(2),
+                child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
             },

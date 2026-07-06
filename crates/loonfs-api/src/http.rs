@@ -123,7 +123,7 @@ pub enum DeleteDirectoryBehavior {
 /// One path-oriented filesystem operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FilesystemOperation {
     /// Create one directory.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&create_directory).expect("create directory op json"),
             serde_json::json!({
-                "op": "create_directory",
+                "kind": "create_directory",
                 "path": "/docs"
             })
         );
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&delete).expect("delete op json"),
             serde_json::json!({
-                "op": "delete_path",
+                "kind": "delete_path",
                 "path": "/docs",
                 "behavior": "recursive"
             })
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&move_path).expect("move op json"),
             serde_json::json!({
-                "op": "move_path",
+                "kind": "move_path",
                 "from_path": "/docs/a.txt",
                 "to_path": "/docs/b.txt",
                 "behavior": "no_replace"
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn filesystem_operations_default_omitted_behavior_fields() {
         let put: FilesystemOperation = serde_json::from_value(serde_json::json!({
-            "op": "put_file",
+            "kind": "put_file",
             "path": "/docs/a.txt",
             "content_ref": {
                 "kind": "whole_file_v0",
@@ -405,7 +405,7 @@ mod tests {
         ));
 
         let delete: FilesystemOperation = serde_json::from_value(serde_json::json!({
-            "op": "delete_path",
+            "kind": "delete_path",
             "path": "/docs"
         }))
         .expect("delete op defaults behavior");
@@ -418,7 +418,7 @@ mod tests {
         );
 
         let move_path: FilesystemOperation = serde_json::from_value(serde_json::json!({
-            "op": "move_path",
+            "kind": "move_path",
             "from_path": "/docs/a.txt",
             "to_path": "/docs/b.txt"
         }))

@@ -622,7 +622,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateFile {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "uploaded.txt".to_owned(),
                 content_ref: content_ref.clone(),
             }],
@@ -791,7 +791,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                     commit_id: CommitId::parse("req-restore-create").expect("valid commit id"),
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
-                        parent_inode: InodeId(1),
+                        parent_inode_id: InodeId(1),
                         display_name: "restore.txt".to_owned(),
                         content_ref: first_content_ref.clone(),
                     }],
@@ -1039,7 +1039,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                         .expect("valid commit id"),
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
-                        parent_inode: InodeId(1),
+                        parent_inode_id: InodeId(1),
                         display_name: "restore.txt".to_owned(),
                         content_ref: first_content_ref,
                     }],
@@ -1103,7 +1103,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
             commit_id: CommitId::parse("req-phase-2a-conflict").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateFile {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "first.txt".to_owned(),
                 content_ref: first_content_ref,
             }],
@@ -1120,7 +1120,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
             commit_id: first_request.commit_id.clone(),
             preconditions: first_request.preconditions.clone(),
             ops: vec![CommitOp::CreateFile {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "second.txt".to_owned(),
                 content_ref: second_content_ref,
             }],

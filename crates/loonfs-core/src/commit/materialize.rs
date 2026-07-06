@@ -18,7 +18,7 @@ pub struct MaterializedCommit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommitOpResult {
     CreateDirectory {
         op_index: u32,
@@ -53,7 +53,7 @@ pub enum CommitOpResult {
     },
     DeleteSubtree {
         op_index: u32,
-        root_inode: InodeId,
+        root_inode_id: InodeId,
     },
 }
 
@@ -78,10 +78,10 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
     let result = match op {
         ValidatedOp::CreateDir {
             op_index,
-            parent_inode,
+            parent_inode_id,
             display_name,
             name_key,
-            child_inode,
+            child_inode_id,
             create_inode_delta_index,
             bind_delta_index,
         } => {
@@ -90,7 +90,7 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::CreateInode {
                     delta_index: *create_inode_delta_index,
-                    inode_id: *child_inode,
+                    inode_id: *child_inode_id,
                     inode_kind: InodeKind::Dir,
                 },
             );
@@ -99,23 +99,23 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::BindDirentry {
                     delta_index: *bind_delta_index,
-                    parent_inode: *parent_inode,
+                    parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
                     display_name: display_name.clone(),
-                    child_inode: *child_inode,
+                    child_inode_id: *child_inode_id,
                 },
             );
             CommitOpResult::CreateDirectory {
                 op_index: *op_index,
-                inode_id: *child_inode,
+                inode_id: *child_inode_id,
             }
         }
         ValidatedOp::CreateFile {
             op_index,
-            parent_inode,
+            parent_inode_id,
             display_name,
             name_key,
-            child_inode,
+            child_inode_id,
             content_ref,
             create_inode_delta_index,
             bind_delta_index,
@@ -126,7 +126,7 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::CreateInode {
                     delta_index: *create_inode_delta_index,
-                    inode_id: *child_inode,
+                    inode_id: *child_inode_id,
                     inode_kind: InodeKind::File,
                 },
             );
@@ -135,10 +135,10 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::BindDirentry {
                     delta_index: *bind_delta_index,
-                    parent_inode: *parent_inode,
+                    parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
                     display_name: display_name.clone(),
-                    child_inode: *child_inode,
+                    child_inode_id: *child_inode_id,
                 },
             );
             push_delta(
@@ -146,14 +146,14 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::AppendFileRevision {
                     delta_index: *revision_delta_index,
-                    inode_id: *child_inode,
+                    inode_id: *child_inode_id,
                     revision_no: RevisionNo(1),
                     content_ref: content_ref.clone(),
                 },
             );
             CommitOpResult::CreateFile {
                 op_index: *op_index,
-                inode_id: *child_inode,
+                inode_id: *child_inode_id,
                 revision_no: RevisionNo(1),
                 content_ref: content_ref.clone(),
             }
@@ -221,7 +221,7 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
-                    root_inode: *inode_id,
+                    root_inode_id: *inode_id,
                 },
             );
             CommitOpResult::DeleteFile {
@@ -232,7 +232,7 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
         ValidatedOp::Rename {
             op_index,
             inode_id,
-            new_parent_inode,
+            new_parent_inode_id,
             new_display_name,
             new_name_key,
             source_binding,
@@ -245,10 +245,10 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::BindDirentry {
                     delta_index: *bind_delta_index,
-                    parent_inode: *new_parent_inode,
+                    parent_inode_id: *new_parent_inode_id,
                     name_key: new_name_key.clone(),
                     display_name: new_display_name.clone(),
-                    child_inode: *inode_id,
+                    child_inode_id: *inode_id,
                 },
             );
             CommitOpResult::Rename {
@@ -258,7 +258,7 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
         }
         ValidatedOp::DeleteSubtree {
             op_index,
-            root_inode,
+            root_inode_id,
             source_binding,
             unbind_delta_index,
             tombstone_delta_index,
@@ -269,12 +269,12 @@ fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, 
                 *op_index,
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
-                    root_inode: *root_inode,
+                    root_inode_id: *root_inode_id,
                 },
             );
             CommitOpResult::DeleteSubtree {
                 op_index: *op_index,
-                root_inode: *root_inode,
+                root_inode_id: *root_inode_id,
             }
         }
     };
@@ -293,9 +293,9 @@ fn push_unbind_delta(
         semantic_op_index,
         WalDelta::UnbindDirentry {
             delta_index,
-            parent_inode: binding.parent_inode,
+            parent_inode_id: binding.parent_inode_id,
             name_key: binding.name_key.clone(),
-            child_inode: binding.child_inode,
+            child_inode_id: binding.child_inode_id,
             bind_seq: binding.bind_seq,
             bind_delta_index: binding.bind_delta_index,
         },

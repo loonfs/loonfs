@@ -20,7 +20,7 @@ pub(crate) struct CommandFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CommandData {
     Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),

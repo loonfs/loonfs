@@ -40,7 +40,7 @@ mod tests {
             writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
             preconditions: Vec::new(),
@@ -53,10 +53,10 @@ mod tests {
             assigned_seq: ChangeSeq(1),
             validated_ops: vec![ValidatedOp::CreateDir {
                 op_index: 0,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
                 name_key: "docs".to_owned(),
-                child_inode: InodeId(2),
+                child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
                 bind_delta_index: 1,
             }],
@@ -384,7 +384,7 @@ mod tests {
             writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: display_name.to_owned(),
             }],
             preconditions: Vec::new(),
@@ -397,13 +397,13 @@ mod tests {
             assigned_seq,
             validated_ops: vec![ValidatedOp::CreateDir {
                 op_index: 0,
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: display_name.to_owned(),
                 name_key: loonfs_api::name_key_for_display_name(
                     loonfs_api::NamePolicy::default(),
                     display_name,
                 ),
-                child_inode: InodeId(2),
+                child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
                 bind_delta_index: 1,
             }],

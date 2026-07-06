@@ -2196,15 +2196,9 @@
               "delta_index",
               "inode_id",
               "inode_kind",
-              "delta"
+              "kind"
             ],
             "properties": {
-              "delta": {
-                "type": "string",
-                "enum": [
-                  "create_inode"
-                ]
-              },
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
@@ -2215,6 +2209,12 @@
               },
               "inode_kind": {
                 "$ref": "#/components/schemas/InodeKind"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "create_inode"
+                ]
               },
               "semantic_op_index": {
                 "type": "integer",
@@ -2229,21 +2229,15 @@
             "required": [
               "semantic_op_index",
               "delta_index",
-              "parent_inode",
+              "parent_inode_id",
               "name_key",
               "display_name",
-              "child_inode",
-              "delta"
+              "child_inode_id",
+              "kind"
             ],
             "properties": {
-              "child_inode": {
+              "child_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
-              },
-              "delta": {
-                "type": "string",
-                "enum": [
-                  "bind_direntry"
-                ]
               },
               "delta_index": {
                 "type": "integer",
@@ -2253,10 +2247,16 @@
               "display_name": {
                 "type": "string"
               },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bind_direntry"
+                ]
+              },
               "name_key": {
                 "$ref": "#/components/schemas/NameKey"
               },
-              "parent_inode": {
+              "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
               "semantic_op_index": {
@@ -2272,12 +2272,12 @@
             "required": [
               "semantic_op_index",
               "delta_index",
-              "parent_inode",
+              "parent_inode_id",
               "name_key",
-              "child_inode",
+              "child_inode_id",
               "bind_seq",
               "bind_delta_index",
-              "delta"
+              "kind"
             ],
             "properties": {
               "bind_delta_index": {
@@ -2288,24 +2288,24 @@
               "bind_seq": {
                 "$ref": "#/components/schemas/ChangeSeq"
               },
-              "child_inode": {
+              "child_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
-              },
-              "delta": {
-                "type": "string",
-                "enum": [
-                  "unbind_direntry"
-                ]
               },
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
                 "minimum": 0
               },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unbind_direntry"
+                ]
+              },
               "name_key": {
                 "$ref": "#/components/schemas/NameKey"
               },
-              "parent_inode": {
+              "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
               "semantic_op_index": {
@@ -2324,17 +2324,11 @@
               "inode_id",
               "revision_no",
               "content_ref",
-              "delta"
+              "kind"
             ],
             "properties": {
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef"
-              },
-              "delta": {
-                "type": "string",
-                "enum": [
-                  "append_file_revision"
-                ]
               },
               "delta_index": {
                 "type": "integer",
@@ -2343,6 +2337,12 @@
               },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "append_file_revision"
+                ]
               },
               "revision_no": {
                 "$ref": "#/components/schemas/RevisionNo"
@@ -2360,22 +2360,22 @@
             "required": [
               "semantic_op_index",
               "delta_index",
-              "root_inode",
-              "delta"
+              "root_inode_id",
+              "kind"
             ],
             "properties": {
-              "delta": {
-                "type": "string",
-                "enum": [
-                  "tombstone_subtree"
-                ]
-              },
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
                 "minimum": 0
               },
-              "root_inode": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tombstone_subtree"
+                ]
+              },
+              "root_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
               "semantic_op_index": {
@@ -2399,21 +2399,21 @@
             "title": "CommitOpCreateDirectory",
             "description": "Create a directory under a parent inode.",
             "required": [
-              "parent_inode",
+              "parent_inode_id",
               "display_name",
-              "op"
+              "kind"
             ],
             "properties": {
               "display_name": {
                 "type": "string"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "create_directory"
                 ]
               },
-              "parent_inode": {
+              "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               }
             }
@@ -2423,10 +2423,10 @@
             "title": "CommitOpCreateFile",
             "description": "Create a file under a parent inode.",
             "required": [
-              "parent_inode",
+              "parent_inode_id",
               "display_name",
               "content_ref",
-              "op"
+              "kind"
             ],
             "properties": {
               "content_ref": {
@@ -2435,13 +2435,13 @@
               "display_name": {
                 "type": "string"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "create_file"
                 ]
               },
-              "parent_inode": {
+              "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               }
             }
@@ -2454,7 +2454,7 @@
               "inode_id",
               "base_revision_no",
               "content_ref",
-              "op"
+              "kind"
             ],
             "properties": {
               "base_revision_no": {
@@ -2466,7 +2466,7 @@
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "replace_file"
@@ -2482,7 +2482,7 @@
               "inode_id",
               "source_revision_no",
               "base_revision_no",
-              "op"
+              "kind"
             ],
             "properties": {
               "base_revision_no": {
@@ -2491,7 +2491,7 @@
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "restore_revision"
@@ -2508,13 +2508,13 @@
             "description": "Delete a file inode.",
             "required": [
               "inode_id",
-              "op"
+              "kind"
             ],
             "properties": {
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "delete_file"
@@ -2528,9 +2528,9 @@
             "description": "Rename or move an inode.",
             "required": [
               "inode_id",
-              "new_parent_inode",
+              "new_parent_inode_id",
               "new_display_name",
-              "op"
+              "kind"
             ],
             "properties": {
               "behavior": {
@@ -2539,17 +2539,17 @@
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "new_display_name": {
-                "type": "string"
-              },
-              "new_parent_inode": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "rename"
                 ]
+              },
+              "new_display_name": {
+                "type": "string"
+              },
+              "new_parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
               }
             }
           },
@@ -2558,17 +2558,17 @@
             "title": "CommitOpDeleteSubtree",
             "description": "Delete a directory subtree.",
             "required": [
-              "root_inode",
-              "op"
+              "root_inode_id",
+              "kind"
             ],
             "properties": {
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "delete_subtree"
                 ]
               },
-              "root_inode": {
+              "root_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               }
             }
@@ -2585,20 +2585,20 @@
             "required": [
               "inode_id",
               "revision_no",
-              "type"
+              "kind"
             ],
             "properties": {
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
-              },
-              "type": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "inode_revision_is"
                 ]
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo"
               }
             }
           },
@@ -2608,13 +2608,13 @@
             "description": "Inode ancestors have not been subtree-deleted.",
             "required": [
               "inode_id",
-              "type"
+              "kind"
             ],
             "properties": {
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "type": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "ancestors_not_subtree_deleted"
@@ -2627,22 +2627,22 @@
             "title": "CommitPreconditionChildNameAbsent",
             "description": "Directory child name is still absent.",
             "required": [
-              "parent_inode",
+              "parent_inode_id",
               "name_key",
-              "type"
+              "kind"
             ],
             "properties": {
-              "name_key": {
-                "$ref": "#/components/schemas/NameKey"
-              },
-              "parent_inode": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "type": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "child_name_absent"
                 ]
+              },
+              "name_key": {
+                "$ref": "#/components/schemas/NameKey"
+              },
+              "parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
               }
             }
           },
@@ -2651,12 +2651,12 @@
             "title": "CommitPreconditionBindingIs",
             "description": "Directory binding is still exactly the binding the caller saw.",
             "required": [
-              "parent_inode",
+              "parent_inode_id",
               "name_key",
-              "child_inode",
+              "child_inode_id",
               "bind_seq",
               "bind_delta_index",
-              "type"
+              "kind"
             ],
             "properties": {
               "bind_delta_index": {
@@ -2667,20 +2667,20 @@
               "bind_seq": {
                 "$ref": "#/components/schemas/ChangeSeq"
               },
-              "child_inode": {
+              "child_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "name_key": {
-                "$ref": "#/components/schemas/NameKey"
-              },
-              "parent_inode": {
-                "$ref": "#/components/schemas/InodeId"
-              },
-              "type": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "binding_is"
                 ]
+              },
+              "name_key": {
+                "$ref": "#/components/schemas/NameKey"
+              },
+              "parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
               }
             }
           },
@@ -2690,13 +2690,13 @@
             "description": "Directory is still empty.",
             "required": [
               "inode_id",
-              "type"
+              "kind"
             ],
             "properties": {
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
-              "type": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "directory_empty"
@@ -2991,10 +2991,10 @@
             "description": "Create one directory.",
             "required": [
               "path",
-              "op"
+              "kind"
             ],
             "properties": {
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "create_directory"
@@ -3012,7 +3012,7 @@
             "required": [
               "path",
               "content_ref",
-              "op"
+              "kind"
             ],
             "properties": {
               "behavior": {
@@ -3021,7 +3021,7 @@
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "put_file"
@@ -3038,13 +3038,13 @@
             "description": "Delete one path.",
             "required": [
               "path",
-              "op"
+              "kind"
             ],
             "properties": {
               "behavior": {
                 "$ref": "#/components/schemas/DeleteDirectoryBehavior"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "delete_path"
@@ -3062,7 +3062,7 @@
             "required": [
               "from_path",
               "to_path",
-              "op"
+              "kind"
             ],
             "properties": {
               "behavior": {
@@ -3071,7 +3071,7 @@
               "from_path": {
                 "type": "string"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "move_path"
@@ -3089,13 +3089,13 @@
             "required": [
               "from_path",
               "to_path",
-              "op"
+              "kind"
             ],
             "properties": {
               "from_path": {
                 "type": "string"
               },
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "copy_path"
@@ -3113,10 +3113,10 @@
             "required": [
               "path",
               "source_revision_no",
-              "op"
+              "kind"
             ],
             "properties": {
-              "op": {
+              "kind": {
                 "type": "string",
                 "enum": [
                   "restore_revision"

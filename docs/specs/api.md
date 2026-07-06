@@ -384,7 +384,7 @@ validation.
     }
   ],
   "operation": {
-    "op": "put_file",
+    "kind": "put_file",
     "path": "/docs/report.pdf",
     "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
     "behavior": "no_replace"
@@ -572,7 +572,7 @@ Representative request:
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "operation": {
-    "op": "move_path",
+    "kind": "move_path",
     "from_path": "/docs/report.txt",
     "to_path": "/reports/report.txt",
     "mode": "no_replace"
@@ -598,7 +598,7 @@ The same endpoint also accepts path directory creation:
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
   "operation": {
-    "op": "create_directory",
+    "kind": "create_directory",
     "path": "/docs"
   }
 }
@@ -610,7 +610,7 @@ and path revision restore:
 {
   "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
   "operation": {
-    "op": "restore_revision",
+    "kind": "restore_revision",
     "path": "/docs/report.txt",
     "source_revision_no": 3
   }
@@ -712,18 +712,18 @@ Representative request:
   "message": "replace report bytes",
   "preconditions": [
     {
-      "type": "inode_revision_is",
+      "kind": "inode_revision_is",
       "inode_id": 42,
       "revision_no": 7
     },
     {
-      "type": "ancestors_not_subtree_deleted",
+      "kind": "ancestors_not_subtree_deleted",
       "inode_id": 42
     }
   ],
   "ops": [
     {
-      "op": "replace_file",
+      "kind": "replace_file",
       "inode_id": 42,
       "base_revision_no": 7,
       "content_ref": {
@@ -765,7 +765,7 @@ Representative response:
         {
           "semantic_op_index": 0,
           "delta_index": 0,
-          "delta": "append_file_revision",
+          "kind": "append_file_revision",
           "inode_id": 42,
           "revision_no": 8,
           "content_ref": {

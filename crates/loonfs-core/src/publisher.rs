@@ -431,7 +431,7 @@ mod tests {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: display_name.to_owned(),
             }],
             message: None,

@@ -160,7 +160,7 @@ mod tests {
             writer_session_id: "wrs_test".to_owned(),
             writer_epoch,
             ops: vec![CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
             preconditions: Vec::new(),
@@ -192,7 +192,7 @@ mod tests {
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:99748ecdf47502f2be08817699c571d4cd69ecabd6827fb66c9e2f587384a841"
+            "v0:sha256:47b8951d2684f60b5f3a679d4ca40a575e5c9da91cb8ed3a7d1dc0433a39e409"
         );
     }
 
@@ -207,11 +207,11 @@ mod tests {
         );
         let v0_ops = vec![
             api_v0::CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "Docs".to_owned(),
             },
             api_v0::CommitOp::CreateFile {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "a.txt".to_owned(),
                 content_ref: content_ref.clone(),
             },
@@ -230,12 +230,12 @@ mod tests {
             },
             api_v0::CommitOp::Rename {
                 inode_id: InodeId(5),
-                new_parent_inode: InodeId(2),
+                new_parent_inode_id: InodeId(2),
                 new_display_name: "b.txt".to_owned(),
                 behavior: api_v0::MoveBehavior::NoReplace,
             },
             api_v0::CommitOp::DeleteSubtree {
-                root_inode: InodeId(9),
+                root_inode_id: InodeId(9),
             },
         ];
         let v0_preconditions = vec![
@@ -247,13 +247,13 @@ mod tests {
                 inode_id: InodeId(5),
             },
             api_v0::CommitPrecondition::ChildNameAbsent {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key: name_key.clone(),
             },
             api_v0::CommitPrecondition::BindingIs {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 name_key,
-                child_inode: InodeId(5),
+                child_inode_id: InodeId(5),
                 bind_seq: loonfs_api::ChangeSeq(7),
                 bind_delta_index: 3,
             },
@@ -309,7 +309,7 @@ mod tests {
             core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("baseline fingerprint");
         let mut changed = core_request(WriterEpoch(1));
         changed.ops = vec![CommitOp::CreateDirectory {
-            parent_inode: InodeId(1),
+            parent_inode_id: InodeId(1),
             display_name: "drafts".to_owned(),
         }];
 
@@ -325,7 +325,7 @@ mod tests {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![api_v0::CommitOp::CreateDirectory {
-                parent_inode: InodeId(1),
+                parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
             message: Some("create docs".to_owned()),

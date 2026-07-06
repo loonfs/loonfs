@@ -100,11 +100,11 @@ pub enum CoreError {
         retention_floor_seq: ChangeSeq,
     },
     #[error(
-        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
+        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq:?}`"
     )]
     TombstoneConflict {
         path: String,
-        root_inode: InodeId,
+        root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
     #[error("path component `{0}` is not a directory")]
