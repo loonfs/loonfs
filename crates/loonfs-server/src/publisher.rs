@@ -1,9 +1,11 @@
-use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs::content_tokens::ContentAdmission;
+use loonfs::publish::{
+    CommitHeadPublishError, NamespaceMutationCandidate, PathMutationIntent,
+    SemanticMutationIdentity,
+};
 use loonfs::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
-use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
-use loonfs_core::content::ContentAdmission;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Notify};
@@ -823,14 +825,12 @@ mod tests {
     use bytes::Bytes;
     use futures::stream::BoxStream;
     use loonfs::{
-        CreateNamespaceOptions, ErrorCode, Fs, FsConfig, RuntimeCacheConfig,
+        BeginUploadRequest, CreateNamespaceOptions, ErrorCode, Fs, FsConfig, RuntimeCacheConfig,
         SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
     };
     use loonfs_api::v0::{CommitOp, CommitRequest};
     use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loonfs_api::{ChangeSeq, InodeId, PutBehavior};
-    use loonfs_core::content::store_bytes_as_content;
-    use loonfs_core::publish::PathMutationIntent;
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::{
@@ -1724,7 +1724,18 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store.clone(), &config);
         create_namespace(&fs, &namespace_id).await;
-        let content = store_bytes_as_content(store.as_ref(), &namespace_id, b"hello")
+        let upload = fs
+            .begin_upload(
+                &namespace_id,
+                BeginUploadRequest {
+                    mode: None,
+                    content_ref: None,
+                },
+            )
+            .await
+            .expect("begin upload");
+        let staged = fs
+            .upload_content(&namespace_id, &upload.upload_id, b"hello")
             .await
             .expect("stage content");
         let registry = PublisherRegistry::new(fs);
@@ -1741,7 +1752,7 @@ mod tests {
         let path_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),
             absolute_path: "/file.txt".to_owned(),
-            content_ref: content.content_ref,
+            content_ref: staged.content_ref,
             behavior: PutBehavior::NoReplace,
         };
 

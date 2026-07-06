@@ -16,8 +16,8 @@ use crate::{
     DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId, ListChangesOptions,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
-    NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
-    RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
+    NamespaceStatusResponse, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder,
+    PutFileOptions, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
     UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
@@ -305,9 +305,12 @@ impl Fs {
 
     /// Summarizes a namespace's current head: manifest, latest checkpoint,
     /// WAL tail, and retention floor.
-    pub async fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
+    pub async fn namespace_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceStatusResponse> {
         let summary = load_namespace_head_summary(self.store(), namespace_id).await?;
-        Ok(NamespaceStatus {
+        Ok(NamespaceStatusResponse {
             namespace_id: summary.namespace_id,
             head_seq: summary.head_seq,
             current_manifest_id: summary.current_manifest_id,
@@ -402,8 +405,8 @@ impl Fs {
     async fn run_tick_gc(
         &self,
         namespace_id: &NamespaceId,
-        config: Option<&loonfs_core::GcConfig>,
-    ) -> Result<Option<loonfs_core::GcReport>> {
+        config: Option<&crate::GcConfig>,
+    ) -> Result<Option<crate::GcReport>> {
         let Some(config) = config else {
             return Ok(None);
         };
@@ -417,8 +420,8 @@ impl Fs {
     pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
-        config: &loonfs_core::GcConfig,
-    ) -> Result<loonfs_core::GcReport> {
+        config: &crate::GcConfig,
+    ) -> Result<crate::GcReport> {
         let report =
             loonfs_core::gc_namespace(self.store(), namespace_id, config, &self.mutation_context())
                 .await
@@ -1288,7 +1291,7 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    pub(crate) fn store(&self) -> &(dyn ObjectStore + Send + Sync) {
+    pub(crate) fn store(&self) -> &dyn ObjectStore {
         self.inner.store.as_ref()
     }
 

@@ -11,9 +11,9 @@ use loonfs::{
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteOptions,
     DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    MutationResult, NamespaceId, NamespaceStatus, PageRequest, PaginationPolicy, PutBehavior,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
-    UploadContentResponse, UploadId,
+    MutationResult, NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy,
+    PutBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
+    TraceStoreKind, UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::fs::LocalFsStore;
@@ -87,7 +87,7 @@ trait FsTestExt {
     fn namespace_status_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<NamespaceStatus>;
+    ) -> loonfs::Result<NamespaceStatusResponse>;
     fn maintenance_tick_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -202,7 +202,7 @@ impl FsTestExt for Fs {
     fn namespace_status_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<NamespaceStatus> {
+    ) -> loonfs::Result<NamespaceStatusResponse> {
         block_on(self.namespace_status(namespace_id))
     }
 
