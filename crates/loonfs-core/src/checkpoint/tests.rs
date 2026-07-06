@@ -131,6 +131,30 @@ async fn load_current_projection<S: ObjectStore + ?Sized>(
     })
 }
 
+async fn build_manifest_from_projection<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    projection: &CurrentProjection,
+    context: &MutationContext,
+    manifest_id: ManifestId,
+) -> NamespaceManifestEnvelope {
+    build_namespace_manifest_from_metadata_state(
+        store,
+        namespace_id,
+        ManifestMetadataSource {
+            head: &projection.head,
+            basis_manifest_id: Some(projection.root.manifest_id),
+            retention_floor_seq: read_floor_seq(store, namespace_id).await,
+            metadata_state: &projection.metadata_state,
+        },
+        &context.writer_version,
+        MetadataLsmPolicy::default(),
+        manifest_id,
+    )
+    .await
+    .expect("build manifest")
+}
+
 #[test]
 fn fork_and_retention_do_not_use_inspection_materialization() {
     let fork_source = include_str!("../namespace/fork.rs");
@@ -3306,6 +3330,110 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
 }
 
 #[tokio::test]
+async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser_is_superseded() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let materialization = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    let first_manifest = build_manifest_from_projection(
+        &store,
+        &namespace_id,
+        &materialization,
+        &context,
+        ManifestId(1),
+    )
+    .await;
+    let second_manifest = build_manifest_from_projection(
+        &store,
+        &namespace_id,
+        &materialization,
+        &context,
+        ManifestId(1),
+    )
+    .await;
+    assert_eq!(
+        first_manifest.payload.manifest_id,
+        second_manifest.payload.manifest_id
+    );
+    assert_ne!(
+        first_manifest.payload.manifest_object_id,
+        second_manifest.payload.manifest_object_id
+    );
+
+    write_namespace_manifest(&store, &first_manifest)
+        .await
+        .expect("write first manifest");
+    write_namespace_manifest(&store, &second_manifest)
+        .await
+        .expect("write second manifest");
+
+    let first_outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &first_manifest,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await
+    .expect("first publication succeeds");
+    match first_outcome {
+        ManifestPublicationOutcome::Published(root) => {
+            assert_eq!(
+                root.manifest_object_id,
+                first_manifest.payload.manifest_object_id
+            );
+        }
+        other => panic!("expected first publication to win, got {other:?}"),
+    }
+
+    let second_outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &second_manifest,
+        context.now_ms + 1,
+        &context.writer_version,
+    )
+    .await
+    .expect("second publication should yield to the published root");
+    match second_outcome {
+        ManifestPublicationOutcome::Superseded(root) => {
+            assert_eq!(
+                root.manifest_object_id,
+                first_manifest.payload.manifest_object_id
+            );
+        }
+        other => panic!("expected second publication to be superseded, got {other:?}"),
+    }
+
+    let manifest_objects = store
+        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
+        .await
+        .expect("list manifest objects");
+    assert_eq!(
+        manifest_objects.len(),
+        3,
+        "bootstrap and both race manifests should remain distinct immutable objects"
+    );
+}
+
+#[tokio::test]
 async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3696,6 +3824,89 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
             assert_eq!(root.manifest_object_id, manifest.payload.manifest_object_id);
         }
         other => panic!("expected recovered published root, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let raw_store = LocalFsStore::new(temp_dir.path()).expect("raw store");
+    bootstrap_namespace(&raw_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &raw_store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+
+    let materialization = load_current_projection(&raw_store, &namespace_id)
+        .await
+        .expect("materialization");
+    let candidate_manifest = build_manifest_from_projection(
+        &raw_store,
+        &namespace_id,
+        &materialization,
+        &context,
+        ManifestId(1),
+    )
+    .await;
+    let competing_manifest = build_manifest_from_projection(
+        &raw_store,
+        &namespace_id,
+        &materialization,
+        &context,
+        ManifestId(2),
+    )
+    .await;
+    write_namespace_manifest(&raw_store, &candidate_manifest)
+        .await
+        .expect("write candidate manifest");
+    write_namespace_manifest(&raw_store, &competing_manifest)
+        .await
+        .expect("write competing manifest");
+
+    let competing_root = MetadataRootState {
+        namespace_id: namespace_id.clone(),
+        manifest_id: competing_manifest.payload.manifest_id,
+        manifest_object_id: competing_manifest.payload.manifest_object_id.clone(),
+        manifest_head_seq: competing_manifest.payload.head_seq,
+        manifest_payload_checksum: competing_manifest.payload_checksum.clone(),
+        updated_at_ms: context.now_ms + 1,
+    };
+    let store = RootCasTransportAfterCompetingRootStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+        competing_root,
+        &context.writer_version,
+    );
+
+    let outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &candidate_manifest,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await
+    .expect("root publication should recover by observing the competing root");
+
+    match outcome {
+        ManifestPublicationOutcome::Superseded(root) => {
+            assert_eq!(root.manifest_id, competing_manifest.payload.manifest_id);
+            assert_eq!(
+                root.manifest_object_id,
+                competing_manifest.payload.manifest_object_id
+            );
+        }
+        other => panic!("expected superseded root after ambiguous CAS, got {other:?}"),
     }
 }
 
@@ -4217,6 +4428,101 @@ impl ObjectStore for RootCasTransportAfterApplyStore {
             };
             if should_fail {
                 self.inner.put(key, bytes, mode).await?;
+                return Err(ObjectStoreError::transport(
+                    key,
+                    "simulated ambiguous root CAS transport error",
+                ));
+            }
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct RootCasTransportAfterCompetingRootStore {
+    inner: LocalFsStore,
+    root_key: String,
+    competing_root: Mutex<Option<MetadataRootState>>,
+    writer_version: String,
+}
+
+impl RootCasTransportAfterCompetingRootStore {
+    fn new(
+        inner: LocalFsStore,
+        root_key: String,
+        competing_root: MetadataRootState,
+        writer_version: &str,
+    ) -> Self {
+        Self {
+            inner,
+            root_key,
+            competing_root: Mutex::new(Some(competing_root)),
+            writer_version: writer_version.to_owned(),
+        }
+    }
+
+    async fn install_competing_root(&self, root: MetadataRootState) {
+        let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
+            loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
+            &self.writer_version,
+            root,
+        )
+        .expect("metadata root envelope");
+        let bytes = Bytes::from(
+            loonfs_api::wire::control::encode_control_object(&envelope)
+                .expect("encode metadata root"),
+        );
+        self.inner
+            .put(&self.root_key, bytes, PutMode::Overwrite)
+            .await
+            .expect("install competing root");
+    }
+}
+
+#[async_trait]
+impl ObjectStore for RootCasTransportAfterCompetingRootStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key == self.root_key && matches!(&mode, PutMode::CompareAndSwap { .. }) {
+            let competing_root = {
+                self.competing_root
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+            };
+            if let Some(root) = competing_root {
+                self.install_competing_root(root).await;
                 return Err(ObjectStoreError::transport(
                     key,
                     "simulated ambiguous root CAS transport error",
