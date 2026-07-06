@@ -241,11 +241,8 @@ impl Client {
             entries.extend(page.entries);
             cursor = page.next_cursor;
             if cursor.is_none() {
-                entries.sort_by(|left, right| {
-                    left.display_name
-                        .cmp(&right.display_name)
-                        .then(left.inode_id.0.cmp(&right.inode_id.0))
-                });
+                // Pages arrive in canonical name-key order; concatenation
+                // preserves it, so aggregation must not re-sort.
                 envelope_ref.entries = entries;
                 return Ok(envelope.expect("first page initializes response envelope"));
             }

@@ -247,6 +247,43 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     harness.server.abort();
 }
 
+/// The client aggregates pages without re-ordering: mixed-case names must come
+/// back in the server's canonical casefolded name-key order, not in raw
+/// display-name byte order (`B.txt` sorts after `a.txt`, not before).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_client_listing_preserves_canonical_name_key_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-listing-order",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let docs = NamespacePath::parse("demo:/docs").expect("docs path");
+        harness.client.create_dir(&docs).expect("create docs dir");
+        for name in ["B.txt", "a.txt", "c.txt"] {
+            let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
+            harness
+                .client
+                .write_file_bytes(&path, name.as_bytes())
+                .expect("write file");
+        }
+
+        let listing = harness.client.list_path(&docs).expect("directory list");
+        assert_eq!(entry_names(&listing), vec!["a.txt", "B.txt", "c.txt"]);
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let temp_dir = tempdir().expect("tempdir");

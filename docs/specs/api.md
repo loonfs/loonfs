@@ -491,7 +491,9 @@ an empty directory still reports which state it observed and the response can
 grow without reshaping `entries`. Entries are full path entries with the same
 shape as `stat` (directory entries leave the file-only fields out).
 
-Directory listing advances in canonical `name_key` order. The `path` query parameter is
+Directory listing advances in canonical `name_key` order. Concatenating pages
+in cursor order yields the complete listing in that same order; clients must
+not re-sort aggregated pages. The `path` query parameter is
 required on every page; the cursor pins the snapshot and resume position, but
 the request path remains the authority for what is being listed. Responses
 include `next_cursor` only when another page is available.
