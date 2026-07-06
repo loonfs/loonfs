@@ -354,18 +354,26 @@ impl MetadataState {
         let mut checked_invariants = Vec::new();
 
         for delta in deltas {
-            self.apply_committed_wal_delta_mut(committed_seq, delta, &mut checked_invariants);
+            let checked_invariant = self.apply_committed_wal_delta_mut(committed_seq, delta);
+            push_unique_invariant(&mut checked_invariants, checked_invariant);
         }
 
         Ok(checked_invariants)
     }
 
-    fn apply_committed_wal_delta_mut(
+    /// Appends the metadata row encoded by one committed WAL delta and
+    /// returns the invariant that append witnesses.
+    ///
+    /// This is the only WAL-delta to metadata-row mapping in the crate:
+    /// durable replay ([`Self::apply_committed_wal_deltas_mut`]) and the
+    /// commit validation overlay (`commit::metadata_overlay`) both append
+    /// rows through it, so the effects a batch validates against cannot
+    /// diverge from what replay later persists.
+    pub(crate) fn apply_committed_wal_delta_mut(
         &mut self,
         committed_seq: ChangeSeq,
         delta: &WalDelta,
-        checked_invariants: &mut Vec<InvariantId>,
-    ) {
+    ) -> InvariantId {
         match delta {
             WalDelta::CreateInode {
                 delta_index: _,
@@ -377,7 +385,7 @@ impl MetadataState {
                     inode_kind: *inode_kind,
                     created_seq: committed_seq,
                 });
-                push_unique_invariant(checked_invariants, InvariantId::CreateInodeWritesInodeRow);
+                InvariantId::CreateInodeWritesInodeRow
             }
             WalDelta::BindDirentry {
                 delta_index,
@@ -394,10 +402,7 @@ impl MetadataState {
                     bind_seq: committed_seq,
                     bind_delta_index: *delta_index,
                 });
-                push_unique_invariant(
-                    checked_invariants,
-                    InvariantId::BindDirentryWritesDirentryBindRow,
-                );
+                InvariantId::BindDirentryWritesDirentryBindRow
             }
             WalDelta::UnbindDirentry {
                 delta_index,
@@ -416,10 +421,7 @@ impl MetadataState {
                     unbind_seq: committed_seq,
                     unbind_delta_index: *delta_index,
                 });
-                push_unique_invariant(
-                    checked_invariants,
-                    InvariantId::UnbindDirentryWritesUnbindRow,
-                );
+                InvariantId::UnbindDirentryWritesUnbindRow
             }
             WalDelta::AppendFileRevision {
                 delta_index,
@@ -434,10 +436,7 @@ impl MetadataState {
                     revision_delta_index: *delta_index,
                     content_ref: content_ref.clone(),
                 });
-                push_unique_invariant(
-                    checked_invariants,
-                    InvariantId::AppendFileRevisionWritesRevisionRow,
-                );
+                InvariantId::AppendFileRevisionWritesRevisionRow
             }
             WalDelta::TombstoneSubtree {
                 delta_index,
@@ -448,10 +447,7 @@ impl MetadataState {
                     tombstone_seq: committed_seq,
                     tombstone_delta_index: *delta_index,
                 });
-                push_unique_invariant(
-                    checked_invariants,
-                    InvariantId::TombstoneSubtreeWritesTombstoneRow,
-                );
+                InvariantId::TombstoneSubtreeWritesTombstoneRow
             }
         }
     }
@@ -492,7 +488,8 @@ impl MetadataState {
     ) -> Result<Vec<InvariantId>, MetadataApplyError> {
         let mut checked_invariants = Vec::new();
         for delta in deltas {
-            self.apply_committed_wal_delta_mut(seq, &delta.delta, &mut checked_invariants);
+            let checked_invariant = self.apply_committed_wal_delta_mut(seq, &delta.delta);
+            push_unique_invariant(&mut checked_invariants, checked_invariant);
         }
         self.push_commit_receipt_record(CommitReceiptRecord {
             commit_id: commit_id.clone(),

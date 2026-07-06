@@ -73,7 +73,9 @@ pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
     }
 }
 
-fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, CommitOpResult) {
+pub(super) fn materialize_validated_op(
+    op: &ValidatedOp,
+) -> (Vec<MaterializedCommitDelta>, CommitOpResult) {
     let mut deltas = Vec::new();
     let result = match op {
         ValidatedOp::CreateDir {
