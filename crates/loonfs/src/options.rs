@@ -3,23 +3,8 @@
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, EffectiveLimit, ManifestId, MoveBehavior,
-    NamespaceId, PutBehavior,
+    NamespaceId, NamespaceStatusResponse, PutBehavior,
 };
-
-/// Current maintenance-related namespace status.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamespaceStatus {
-    /// Namespace being inspected.
-    pub namespace_id: NamespaceId,
-    /// Current visible namespace sequence.
-    pub head_seq: ChangeSeq,
-    /// Current manifest pointer recorded by the head.
-    pub current_manifest_id: Option<ManifestId>,
-    /// Number of visible WAL segments after the manifest materialization.
-    pub wal_tail_segments: u64,
-    /// Oldest sequence still promised for incremental replay.
-    pub retention_floor_seq: ChangeSeq,
-}
 
 /// Options for one maintenance tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +13,7 @@ pub struct MaintenanceTickOptions {
     pub max_wal_tail_segments: u64,
     /// Run the mark-and-sweep garbage collector after the tick's checkpoint
     /// and retention work. Nothing sweeps unless this is set.
-    pub gc: Option<loonfs_core::GcConfig>,
+    pub gc: Option<crate::GcConfig>,
 }
 
 impl Default for MaintenanceTickOptions {
@@ -70,11 +55,11 @@ pub struct MaintenanceTickResult {
     /// Namespace the tick ran against.
     pub namespace_id: NamespaceId,
     /// Namespace status observed before the tick acted.
-    pub status_before: NamespaceStatus,
+    pub status_before: NamespaceStatusResponse,
     /// What the tick did.
     pub outcome: MaintenanceTickOutcome,
     /// Garbage-collection report when the tick opted into sweeping.
-    pub gc: Option<loonfs_core::GcReport>,
+    pub gc: Option<crate::GcReport>,
 }
 
 /// Options for creating a namespace.

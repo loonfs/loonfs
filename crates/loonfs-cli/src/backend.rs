@@ -274,14 +274,7 @@ impl Backend for EmbeddedBackend {
 
     fn namespace_status(&self, namespace_id: &str) -> Result<NamespaceStatusResponse, CliError> {
         let parsed = parse_namespace_id(namespace_id)?;
-        let status = self.block_on_scoped(namespace_id, self.fs.namespace_status(&parsed))?;
-        Ok(NamespaceStatusResponse {
-            namespace_id: status.namespace_id,
-            head_seq: status.head_seq,
-            current_manifest_id: status.current_manifest_id,
-            wal_tail_segments: status.wal_tail_segments,
-            retention_floor_seq: status.retention_floor_seq,
-        })
+        self.block_on_scoped(namespace_id, self.fs.namespace_status(&parsed))
     }
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
