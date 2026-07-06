@@ -113,14 +113,3 @@ pub(super) fn commit_receipt_from_manifest_row(row: MetadataRow) -> Option<Commi
         _ => None,
     }
 }
-
-pub(super) fn unbind_matches_binding(
-    unbind: &DirentryUnbindRecord,
-    direntry: &DirentryBindRecord,
-) -> bool {
-    unbind.parent_inode_id == direntry.parent_inode_id
-        && unbind.name_key == direntry.name_key
-        && unbind.child_inode_id == direntry.child_inode_id
-        && unbind.bind_seq == direntry.bind_seq
-        && unbind.bind_delta_index == direntry.bind_delta_index
-}

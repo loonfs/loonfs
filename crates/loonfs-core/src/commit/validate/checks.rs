@@ -10,7 +10,7 @@ use super::super::{
 };
 use super::view::CommitValidationView;
 use crate::invariants::InvariantId;
-use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::{
     name_key_for_display_name, ChangeSeq, DisplayName, InodeId, InodeKind, NamePolicy, RevisionNo,
 };
@@ -566,10 +566,17 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
         }
         .into());
     };
-    if existing.child_inode_id != child_inode_id
-        || existing.bind_seq != bind_seq
-        || existing.bind_delta_index != bind_delta_index
-    {
+    // Same parent and name by construction: `existing` was looked up under
+    // `(parent_inode_id, name_key)`, so identity equality reduces to the
+    // remaining binding-identity fields.
+    let expected = BindingIdentity {
+        parent_inode_id,
+        name_key,
+        child_inode_id,
+        bind_seq,
+        bind_delta_index,
+    };
+    if BindingIdentity::from(&existing) != expected {
         return Err(CommitValidationError::BindingPreconditionMismatch {
             parent_inode_id,
             name_key: name_key.to_owned(),

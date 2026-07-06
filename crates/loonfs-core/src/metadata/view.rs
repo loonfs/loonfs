@@ -1,18 +1,17 @@
-use super::{manifest_index, row_decode::unbind_matches_binding};
+use super::manifest_index;
+use super::visibility::{self, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataTables;
 use crate::error::CoreError;
 use crate::metadata::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, VisiblePathError,
+    unbind_matches_binding, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
+    InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo,
-};
+use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NamePolicy, RevisionNo};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -197,7 +196,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 }
 
-impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
+impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
+    /// Adapter presenting this view's primitive lookups as the
+    /// [`MetadataVisibilityReads`] contract, so the composite rules are
+    /// decided once in [`super::visibility`]. The view is `Copy`, so the
+    /// adapter owns a copy and needs no borrow of `self`.
+    fn reads(&self) -> MetadataViewReads<'a, 'store, S> {
+        MetadataViewReads { view: *self }
+    }
+
     pub(crate) async fn visible_children(
         &self,
         parent_inode_id: InodeId,
@@ -210,21 +217,10 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         }
 
         let candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
+        let mut reads = self.reads();
         let mut children = Vec::new();
         for direntry in candidates {
-            let active = self
-                .visible_child(parent_inode_id, &direntry.name_key)
-                .await?;
-            if active
-                .as_ref()
-                .map(|active| {
-                    active.child_inode_id == direntry.child_inode_id
-                        && active.bind_seq == direntry.bind_seq
-                        && active.bind_delta_index == direntry.bind_delta_index
-                })
-                .unwrap_or(false)
-                && self.visible_inode(direntry.child_inode_id).await?.is_some()
-            {
+            if visibility::is_visible_child_direntry(&mut reads, &direntry).await? {
                 children.push(direntry);
             }
         }
@@ -240,74 +236,12 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         &self,
         absolute_path: &AbsolutePath,
     ) -> Result<ResolvedVisiblePath, CoreError> {
-        let root_inode_id = InodeId(1);
-        let root = self
-            .visible_inode(root_inode_id)
-            .await?
-            .ok_or(VisiblePathError::RootMissing)?;
-        if absolute_path.is_root() {
-            return Ok(ResolvedVisiblePath {
-                absolute_path: absolute_path.as_str().to_owned(),
-                inode_id: root_inode_id,
-                inode_kind: root.inode_kind,
-                parent_inode_id: None,
-                display_name: String::new(),
-            });
-        }
-
-        let mut current_inode_id = root_inode_id;
-        let mut current_absolute_path = String::from("/");
-        let mut current_parent_inode_id = None;
-        let mut current_display_name = String::new();
-
-        for component in absolute_path.components() {
-            let current_inode = self.visible_inode(current_inode_id).await?.ok_or_else(|| {
-                VisiblePathError::PathNotFound {
-                    absolute_path: current_absolute_path.clone(),
-                }
-            })?;
-            if current_inode.inode_kind != InodeKind::Dir {
-                return Err(VisiblePathError::PathComponentNotDirectory {
-                    absolute_path: current_absolute_path,
-                    inode_id: current_inode_id,
-                    inode_kind: current_inode.inode_kind,
-                }
-                .into());
-            }
-
-            let requested_absolute_path = if current_absolute_path == "/" {
-                format!("/{}", component.as_str())
-            } else {
-                format!("{}/{}", current_absolute_path, component.as_str())
-            };
-            let display_name = component.to_display_name();
-            let name_key = NameKey::for_display_name(self.snapshot.name_policy, &display_name);
-            let direntry = self
-                .visible_child(current_inode_id, name_key.as_str())
-                .await?
-                .ok_or(VisiblePathError::PathNotFound {
-                    absolute_path: requested_absolute_path,
-                })?;
-
-            current_parent_inode_id = Some(current_inode_id);
-            current_inode_id = direntry.child_inode_id;
-            current_absolute_path =
-                absolute_path_prefix(&current_absolute_path, &direntry.display_name);
-            current_display_name = direntry.display_name;
-        }
-
-        let inode = self.visible_inode(current_inode_id).await?.ok_or_else(|| {
-            VisiblePathError::PathNotFound {
-                absolute_path: current_absolute_path.clone(),
-            }
-        })?;
-        Ok(ResolvedVisiblePath {
-            absolute_path: current_absolute_path,
-            inode_id: current_inode_id,
-            inode_kind: inode.inode_kind,
-            parent_inode_id: current_parent_inode_id,
-            display_name: current_display_name,
-        })
+        visibility::resolve_visible_path(
+            &mut self.reads(),
+            absolute_path,
+            self.snapshot.name_policy,
+        )
+        .await
     }
 
     pub(crate) async fn visible_child(
@@ -315,48 +249,14 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
-        let Some(parent) = self.visible_inode(parent_inode_id).await? else {
-            return Ok(None);
-        };
-        if parent.inode_kind != InodeKind::Dir {
-            return Ok(None);
-        }
-
-        let Some(direntry) = self.bound_child(parent_inode_id, name_key).await? else {
-            return Ok(None);
-        };
-        if self.is_direntry_unbound(&direntry).await? {
-            return Ok(None);
-        }
-        let Some(latest_binding) = self
-            .current_parent_binding_for_child(direntry.child_inode_id)
-            .await?
-        else {
-            return Ok(None);
-        };
-        if latest_binding.parent_inode_id != direntry.parent_inode_id
-            || latest_binding.name_key != direntry.name_key
-            || latest_binding.bind_seq != direntry.bind_seq
-            || latest_binding.bind_delta_index != direntry.bind_delta_index
-            || self.is_direntry_unbound(&latest_binding).await?
-        {
-            return Ok(None);
-        }
-
-        Ok(Some(direntry))
+        visibility::visible_child(&mut self.reads(), parent_inode_id, name_key).await
     }
 
     pub(crate) async fn visible_inode(
         &self,
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, CoreError> {
-        let Some(inode) = self.inode_at_seq(inode_id).await? else {
-            return Ok(None);
-        };
-        if self.covering_subtree_tombstone(inode_id).await?.is_some() {
-            return Ok(None);
-        }
-        Ok(Some(inode))
+        visibility::visible_inode(&mut self.reads(), inode_id).await
     }
 
     pub(crate) async fn inode_at_seq(
@@ -490,39 +390,29 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         &self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        visibility::current_parent_binding_for_child(&mut self.reads(), child_inode_id).await
+    }
+
+    /// Latest binding whose child is `child_inode_id` at the visible seq,
+    /// regardless of whether it has since been unbound. The
+    /// [`MetadataVisibilityReads`] primitive backing
+    /// [`Self::current_parent_binding_for_child`]'s canonical rule.
+    async fn latest_parent_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
         let bindings = self.direntry_binds_for_child(child_inode_id).await?;
-        let Some(binding) = bindings
+        Ok(bindings
             .into_iter()
             .filter(|direntry| direntry.bind_seq <= self.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
-        else {
-            return Ok(None);
-        };
-        if self.is_direntry_unbound(&binding).await? {
-            return Ok(None);
-        }
-        Ok(Some(binding))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
     }
 
     pub(crate) async fn covering_subtree_tombstone(
         &self,
         inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
-        let mut current = Some(inode_id);
-        let mut visited = std::collections::BTreeSet::new();
-        while let Some(candidate_inode_id) = current {
-            if !visited.insert(candidate_inode_id.0) {
-                break;
-            }
-            if let Some(tombstone) = self.active_subtree_tombstone(candidate_inode_id).await? {
-                return Ok(Some(tombstone));
-            }
-            current = self
-                .current_parent_binding_for_child(candidate_inode_id)
-                .await?
-                .map(|direntry| direntry.parent_inode_id);
-        }
-        Ok(None)
+        visibility::covering_subtree_tombstone(&mut self.reads(), inode_id).await
     }
 
     pub(crate) async fn would_create_directory_cycle(
@@ -530,23 +420,8 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     ) -> Result<bool, CoreError> {
-        let mut current = Some(new_parent_inode_id);
-        let mut visited = BTreeSet::new();
-
-        while let Some(candidate_inode_id) = current {
-            if !visited.insert(candidate_inode_id.0) {
-                break;
-            }
-            if candidate_inode_id == inode_id {
-                return Ok(true);
-            }
-            current = self
-                .current_parent_binding_for_child(candidate_inode_id)
-                .await?
-                .map(|direntry| direntry.parent_inode_id);
-        }
-
-        Ok(false)
+        visibility::would_create_directory_cycle(&mut self.reads(), inode_id, new_parent_inode_id)
+            .await
     }
 
     pub(crate) async fn bound_child(
@@ -754,6 +629,54 @@ impl<S: ObjectStore + ?Sized> MetadataView<'_, '_, S> {
     }
 }
 
+/// [`MetadataView`] as a [`MetadataVisibilityReads`] source: it answers only
+/// the primitive lookups (over the manifest tables merged with the row-state
+/// tail) and takes every composite rule from the provided trait methods, so
+/// the object-store-backed view decides visibility through the exact same
+/// bodies as the in-memory state.
+struct MetadataViewReads<'a, 'store, S: ObjectStore + ?Sized> {
+    view: MetadataView<'a, 'store, S>,
+}
+
+impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, '_, S> {
+    type Error = CoreError;
+
+    async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
+        self.view.inode_at_seq(inode_id).await
+    }
+
+    async fn find_latest_bound_child(
+        &mut self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+        self.view.bound_child(parent_inode_id, name_key).await
+    }
+
+    async fn find_latest_parent_binding_for_child(
+        &mut self,
+        child_inode_id: InodeId,
+    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+        self.view
+            .latest_parent_binding_for_child(child_inode_id)
+            .await
+    }
+
+    async fn find_active_subtree_tombstone(
+        &mut self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+        self.view.active_subtree_tombstone(root_inode_id).await
+    }
+
+    async fn is_binding_unbound(
+        &mut self,
+        direntry: &DirentryBindRecord,
+    ) -> Result<bool, Self::Error> {
+        self.view.is_direntry_unbound(direntry).await
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct VisibleChildEntry {
     pub(crate) binding: DirentryBindRecord,
@@ -904,36 +827,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         name_key: &str,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         self.counters.visible_child_calls = self.counters.visible_child_calls.saturating_add(1);
-
-        let Some(parent) = self.visible_inode(parent_inode_id).await? else {
-            return Ok(None);
-        };
-        if parent.inode_kind != InodeKind::Dir {
-            return Ok(None);
-        }
-
-        let Some(direntry) = self.bound_child(parent_inode_id, name_key).await? else {
-            return Ok(None);
-        };
-        if self.is_direntry_unbound(&direntry).await? {
-            return Ok(None);
-        }
-        let Some(latest_binding) = self
-            .current_parent_binding_for_child(direntry.child_inode_id)
-            .await?
-        else {
-            return Ok(None);
-        };
-        if latest_binding.parent_inode_id != direntry.parent_inode_id
-            || latest_binding.name_key != direntry.name_key
-            || latest_binding.bind_seq != direntry.bind_seq
-            || latest_binding.bind_delta_index != direntry.bind_delta_index
-            || self.is_direntry_unbound(&latest_binding).await?
-        {
-            return Ok(None);
-        }
-
-        Ok(Some(direntry))
+        visibility::visible_child(self, parent_inode_id, name_key).await
     }
 
     pub(crate) async fn visible_inode(
@@ -945,15 +839,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(cached);
         }
 
-        let visible = if let Some(inode) = self.inode_at_seq(inode_id).await? {
-            if self.covering_subtree_tombstone(inode_id).await?.is_some() {
-                None
-            } else {
-                Some(inode)
-            }
-        } else {
-            None
-        };
+        let visible = visibility::visible_inode(self, inode_id).await?;
         self.visible_inode_cache.insert(inode_id, visible.clone());
         Ok(visible)
     }
@@ -1010,26 +896,28 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(cached);
         }
 
+        let binding = visibility::current_parent_binding_for_child(self, child_inode_id).await?;
+        self.current_parent_binding_cache
+            .insert(child_inode_id, binding.clone());
+        Ok(binding)
+    }
+
+    /// Latest binding whose child is `child_inode_id` at the visible seq,
+    /// regardless of whether it has since been unbound. The
+    /// [`MetadataVisibilityReads`] primitive backing the session's cached
+    /// [`Self::current_parent_binding_for_child`].
+    async fn latest_parent_binding_for_child(
+        &mut self,
+        child_inode_id: InodeId,
+    ) -> Result<Option<DirentryBindRecord>, CoreError> {
         self.counters.direntry_child_scan_calls =
             self.counters.direntry_child_scan_calls.saturating_add(1);
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let bindings = self.base.direntry_binds_for_child(child_inode_id).await?;
-        let binding = bindings
+        Ok(bindings
             .into_iter()
             .filter(|direntry| direntry.bind_seq <= self.base.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
-        let binding = if let Some(binding) = binding {
-            if self.is_direntry_unbound(&binding).await? {
-                None
-            } else {
-                Some(binding)
-            }
-        } else {
-            None
-        };
-        self.current_parent_binding_cache
-            .insert(child_inode_id, binding.clone());
-        Ok(binding)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
     }
 
     pub(crate) async fn covering_subtree_tombstone(
@@ -1042,22 +930,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(cached);
         }
 
-        let mut current = Some(inode_id);
-        let mut visited = BTreeSet::new();
-        let mut tombstone = None;
-        while let Some(candidate_inode_id) = current {
-            if !visited.insert(candidate_inode_id.0) {
-                break;
-            }
-            if let Some(active) = self.active_subtree_tombstone(candidate_inode_id).await? {
-                tombstone = Some(active);
-                break;
-            }
-            current = self
-                .current_parent_binding_for_child(candidate_inode_id)
-                .await?
-                .map(|direntry| direntry.parent_inode_id);
-        }
+        let tombstone = visibility::covering_subtree_tombstone(self, inode_id).await?;
         self.covering_tombstone_cache
             .insert(inode_id, tombstone.clone());
         Ok(tombstone)
@@ -1124,6 +997,70 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     }
 }
 
+/// The session as a [`MetadataVisibilityReads`] source. Its primitives route
+/// through the per-session caches, and it overrides exactly the composite
+/// rules it memoizes (`visible_inode`, `current_parent_binding_for_child`,
+/// `covering_subtree_tombstone`) so a cache hit short-circuits the walk;
+/// every override's miss path, and the un-overridden composites, still decide
+/// through the canonical [`super::visibility`] rule bodies.
+impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_, '_, S> {
+    type Error = CoreError;
+
+    async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
+        self.inode_at_seq(inode_id).await
+    }
+
+    async fn find_latest_bound_child(
+        &mut self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+        self.bound_child(parent_inode_id, name_key).await
+    }
+
+    async fn find_latest_parent_binding_for_child(
+        &mut self,
+        child_inode_id: InodeId,
+    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+        self.latest_parent_binding_for_child(child_inode_id).await
+    }
+
+    async fn find_active_subtree_tombstone(
+        &mut self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+        self.active_subtree_tombstone(root_inode_id).await
+    }
+
+    async fn is_binding_unbound(
+        &mut self,
+        direntry: &DirentryBindRecord,
+    ) -> Result<bool, Self::Error> {
+        self.is_direntry_unbound(direntry).await
+    }
+
+    async fn current_parent_binding_for_child(
+        &mut self,
+        child_inode_id: InodeId,
+    ) -> Result<Option<DirentryBindRecord>, Self::Error> {
+        MetadataViewSession::current_parent_binding_for_child(self, child_inode_id).await
+    }
+
+    async fn covering_subtree_tombstone(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+        MetadataViewSession::covering_subtree_tombstone(self, inode_id).await
+    }
+
+    async fn visible_inode(
+        &mut self,
+        inode_id: InodeId,
+    ) -> Result<Option<InodeRecord>, Self::Error> {
+        MetadataViewSession::visible_inode(self, inode_id).await
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ParentNameCacheKey {
     parent_inode_id: InodeId,
@@ -1187,12 +1124,4 @@ fn revision_is_after_position_desc(
             position.committed_seq,
             position.revision_delta_index,
         )
-}
-
-fn absolute_path_prefix(current: &str, component: &str) -> String {
-    if current == "/" {
-        format!("/{component}")
-    } else {
-        format!("{current}/{component}")
-    }
 }
