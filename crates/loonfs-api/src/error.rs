@@ -1,6 +1,11 @@
 use std::fmt;
 
 /// Broad error category for caller or operator action.
+///
+/// Each kind implies one served HTTP status (`status_for_error_kind` in
+/// `loonfs-server`); a code's kind and its documented status in the API spec
+/// must agree in spirit, and the server's spec-table sync test enforces the
+/// composition exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -16,12 +21,15 @@ pub enum ErrorKind {
     NotSupported,
     /// The requested object does not exist. Refresh state or choose another target.
     NotFound,
+    /// The target was deleted and its id is permanently retired. Do not
+    /// retry; choose another target.
+    Gone,
     /// The create target already exists. Pick another id or treat this as idempotent.
     AlreadyExists,
-    /// The request raced with current namespace state. Re-read and retry if desired.
+    /// The request raced with current namespace state, or a caller-supplied
+    /// precondition (base revision, expected head) no longer holds. Re-read
+    /// fresh state, re-plan, and retry if desired.
     Conflict,
-    /// A caller-supplied precondition was false. Re-plan against fresh state.
-    PreconditionFailed,
     /// The system is temporarily unavailable. Back off and retry.
     Unavailable,
     /// The operation may have committed: its acknowledgment was lost. Retry
@@ -34,98 +42,132 @@ pub enum ErrorKind {
     Internal,
 }
 
-/// Stable machine-readable error reason.
+/// Declares the complete wire error-code registry in one place.
 ///
-/// This is the complete registry of `code` values carried by
-/// [`ApiError`](crate::ApiError) bodies and embedded errors. Codes are
-/// permanent once released: the API spec documents each code's meaning and HTTP
-/// status, and clients must tolerate codes they do not recognize.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ErrorCode {
-    InvalidRequest,
-    Unauthorized,
-    NotSupported,
-    NamespaceNotFound,
-    NamespaceDeleted,
-    NamespaceExists,
-    NamespacePartial,
-    PathNotFound,
-    RevisionNotFound,
-    PathConflict,
-    DirectoryNotEmpty,
-    StaleHead,
-    StaleRevision,
-    TombstoneConflict,
-    WriterFenced,
-    WouldCycle,
-    CommitIdReuseConflict,
-    CommitOutcomeUnknown,
-    CommitQueueFull,
-    CheckpointUnavailable,
-    MaintenanceRequired,
-    UploadNotFound,
-    UploadAlreadyCompleted,
-    UploadContentConflict,
-    RebootstrapRequired,
-    NamespaceCorrupt,
-    ServerError,
+/// One `Variant => "wire_string"` line emits the enum variant, its
+/// [`ErrorCode::ALL`] entry (in registry order), its `as_str` arm, its
+/// `parse` arm, and the string-backed serde impls — so registering a new
+/// code is one line here plus a [`ErrorCode::kind`] arm and an api.md row.
+macro_rules! error_codes {
+    (@count) => { 0 };
+    (@count $head:ident $($tail:ident)*) => { 1 + error_codes!(@count $($tail)*) };
+    ($($variant:ident => $wire:literal),+ $(,)?) => {
+        /// Stable machine-readable error reason.
+        ///
+        /// This is the complete registry of `code` values carried by
+        /// [`ApiError`](crate::ApiError) bodies and embedded errors. Codes are
+        /// permanent once released: the API spec documents each code's meaning and HTTP
+        /// status, and clients must tolerate codes they do not recognize.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[non_exhaustive]
+        pub enum ErrorCode {
+            $($variant,)+
+        }
+
+        impl ErrorCode {
+            /// Every registered code, in registry order.
+            pub const ALL: [ErrorCode; error_codes!(@count $($variant)+)] =
+                [$(ErrorCode::$variant,)+];
+
+            /// Returns the stable wire string for this code.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(ErrorCode::$variant => $wire,)+
+                }
+            }
+
+            /// Parses a registered code string, returning `None` for codes this
+            /// build does not know (clients must tolerate those).
+            pub fn parse(value: &str) -> Option<ErrorCode> {
+                match value {
+                    $($wire => Some(ErrorCode::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl serde::Serialize for ErrorCode {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for ErrorCode {
+            // Strict: unknown codes fail to deserialize. Wire structs carry
+            // codes as plain strings (`ApiError::code`) precisely so unknown
+            // codes stay tolerated; deserialize into `ErrorCode` only where
+            // strictness is intended.
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = String::deserialize(deserializer)?;
+                ErrorCode::parse(&value).ok_or_else(|| {
+                    serde::de::Error::custom(format_args!("unknown error code `{value}`"))
+                })
+            }
+        }
+    };
+}
+
+error_codes! {
+    InvalidRequest => "invalid_request",
+    Unauthorized => "unauthorized",
+    NotSupported => "not_supported",
+    NamespaceNotFound => "namespace_not_found",
+    NamespaceDeleted => "namespace_deleted",
+    NamespaceExists => "namespace_exists",
+    NamespacePartial => "namespace_partial",
+    PathNotFound => "path_not_found",
+    RevisionNotFound => "revision_not_found",
+    PathConflict => "path_conflict",
+    DirectoryNotEmpty => "directory_not_empty",
+    StaleHead => "stale_head",
+    StaleRevision => "stale_revision",
+    TombstoneConflict => "tombstone_conflict",
+    WriterFenced => "writer_fenced",
+    WouldCycle => "would_cycle",
+    CommitIdReuseConflict => "commit_id_reuse_conflict",
+    CommitOutcomeUnknown => "commit_outcome_unknown",
+    CommitQueueFull => "commit_queue_full",
+    CheckpointUnavailable => "checkpoint_unavailable",
+    MaintenanceRequired => "maintenance_required",
+    UploadNotFound => "upload_not_found",
+    UploadAlreadyCompleted => "upload_already_completed",
+    UploadContentConflict => "upload_content_conflict",
+    RebootstrapRequired => "rebootstrap_required",
+    NamespaceCorrupt => "namespace_corrupt",
+    ServerError => "server_error",
 }
 
 impl ErrorCode {
-    /// Every registered code, in registry order.
-    pub const ALL: [ErrorCode; 27] = [
-        ErrorCode::InvalidRequest,
-        ErrorCode::Unauthorized,
-        ErrorCode::NotSupported,
-        ErrorCode::NamespaceNotFound,
-        ErrorCode::NamespaceDeleted,
-        ErrorCode::NamespaceExists,
-        ErrorCode::NamespacePartial,
-        ErrorCode::PathNotFound,
-        ErrorCode::RevisionNotFound,
-        ErrorCode::PathConflict,
-        ErrorCode::DirectoryNotEmpty,
-        ErrorCode::StaleHead,
-        ErrorCode::StaleRevision,
-        ErrorCode::TombstoneConflict,
-        ErrorCode::WriterFenced,
-        ErrorCode::WouldCycle,
-        ErrorCode::CommitIdReuseConflict,
-        ErrorCode::CommitOutcomeUnknown,
-        ErrorCode::CommitQueueFull,
-        ErrorCode::CheckpointUnavailable,
-        ErrorCode::MaintenanceRequired,
-        ErrorCode::UploadNotFound,
-        ErrorCode::UploadAlreadyCompleted,
-        ErrorCode::UploadContentConflict,
-        ErrorCode::RebootstrapRequired,
-        ErrorCode::NamespaceCorrupt,
-        ErrorCode::ServerError,
-    ];
-
+    /// Returns the caller-action category for this code.
+    ///
+    /// The kind agrees with the HTTP status the api.md error table documents
+    /// for the code; the server derives the served status from it.
     pub fn kind(self) -> ErrorKind {
         match self {
             ErrorCode::InvalidRequest => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
-            | ErrorCode::NamespaceDeleted
             | ErrorCode::PathNotFound
             | ErrorCode::RevisionNotFound
             | ErrorCode::UploadNotFound => ErrorKind::NotFound,
+            ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
-            ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
             ErrorCode::CommitQueueFull
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError => ErrorKind::Internal,
+            // The spec deliberately surfaces precondition failures
+            // (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) as
+            // 409 resource-state conflicts, not 412 (api.md, "Standard error
+            // contract").
             ErrorCode::NamespacePartial
             | ErrorCode::PathConflict
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
+            | ErrorCode::StaleRevision
             | ErrorCode::TombstoneConflict
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
@@ -134,46 +176,6 @@ impl ErrorCode {
             | ErrorCode::UploadContentConflict
             | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
         }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ErrorCode::InvalidRequest => "invalid_request",
-            ErrorCode::Unauthorized => "unauthorized",
-            ErrorCode::NotSupported => "not_supported",
-            ErrorCode::NamespaceNotFound => "namespace_not_found",
-            ErrorCode::NamespaceDeleted => "namespace_deleted",
-            ErrorCode::NamespaceExists => "namespace_exists",
-            ErrorCode::NamespacePartial => "namespace_partial",
-            ErrorCode::PathNotFound => "path_not_found",
-            ErrorCode::RevisionNotFound => "revision_not_found",
-            ErrorCode::PathConflict => "path_conflict",
-            ErrorCode::DirectoryNotEmpty => "directory_not_empty",
-            ErrorCode::StaleHead => "stale_head",
-            ErrorCode::StaleRevision => "stale_revision",
-            ErrorCode::TombstoneConflict => "tombstone_conflict",
-            ErrorCode::WriterFenced => "writer_fenced",
-            ErrorCode::WouldCycle => "would_cycle",
-            ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
-            ErrorCode::CommitOutcomeUnknown => "commit_outcome_unknown",
-            ErrorCode::CommitQueueFull => "commit_queue_full",
-            ErrorCode::CheckpointUnavailable => "checkpoint_unavailable",
-            ErrorCode::MaintenanceRequired => "maintenance_required",
-            ErrorCode::UploadNotFound => "upload_not_found",
-            ErrorCode::UploadAlreadyCompleted => "upload_already_completed",
-            ErrorCode::UploadContentConflict => "upload_content_conflict",
-            ErrorCode::RebootstrapRequired => "rebootstrap_required",
-            ErrorCode::NamespaceCorrupt => "namespace_corrupt",
-            ErrorCode::ServerError => "server_error",
-        }
-    }
-
-    /// Parses a registered code string, returning `None` for codes this
-    /// build does not know (clients must tolerate those).
-    pub fn parse(value: &str) -> Option<ErrorCode> {
-        ErrorCode::ALL
-            .into_iter()
-            .find(|code| code.as_str() == value)
     }
 }
 
@@ -193,5 +195,16 @@ mod tests {
             assert_eq!(ErrorCode::parse(code.as_str()), Some(code));
         }
         assert_eq!(ErrorCode::parse("not_a_code"), None);
+    }
+
+    #[test]
+    fn error_codes_serde_uses_the_wire_strings() {
+        for code in ErrorCode::ALL {
+            let value = serde_json::to_value(code).expect("serialize error code");
+            assert_eq!(value, serde_json::Value::String(code.as_str().to_owned()));
+            let parsed: ErrorCode = serde_json::from_value(value).expect("deserialize error code");
+            assert_eq!(parsed, code);
+        }
+        assert!(serde_json::from_str::<ErrorCode>("\"not_a_code\"").is_err());
     }
 }
