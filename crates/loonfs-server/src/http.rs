@@ -10,7 +10,8 @@ use loonfs::publish::PathMutationIntent;
 use loonfs::{
     payload_class, BootstrapNamespaceError, ChangeSeq, CoreError, CreateNamespaceOptions,
     DeleteNamespaceOptions, ErrorCode, ErrorKind, Fs, JsonlObjectStoreMetricsRecorder,
-    ObjectStoreMetricsRecorder, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
+    ListChangesOptions, ObjectStoreMetricsRecorder, RuntimeError, SharedObjectStore, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_api::{
     decode_directory_cursor, decode_file_revisions_cursor,
@@ -980,7 +981,7 @@ async fn begin_upload_handler(
 
     let response = state
         .fs
-        .begin_upload_with_request(&namespace_id, request)
+        .begin_upload(&namespace_id, request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
@@ -1262,7 +1263,11 @@ async fn list_changes_handler(
     let limit = resolve_page_limit(query.limit)?;
     let response = state
         .fs
-        .list_changes_after_with_limit(&namespace_id, after_seq, limit)
+        .list_changes_after(
+            &namespace_id,
+            after_seq,
+            ListChangesOptions { limit: Some(limit) },
+        )
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

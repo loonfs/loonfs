@@ -13,7 +13,7 @@ use crate::{
     ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
     CreateCheckpointResponse, CreateDirOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
+    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId, ListChangesOptions,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
     NamespaceStatus, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder, PutFileOptions,
@@ -920,20 +920,14 @@ impl Fs {
     }
 
     /// Starts a durable upload session for a namespace.
-    pub async fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
-        self.begin_upload_with_request(namespace_id, BeginUploadRequest::default())
-            .await
-    }
-
-    /// Starts a durable upload session with explicit transport options.
-    pub async fn begin_upload_with_request(
+    pub async fn begin_upload(
         &self,
         namespace_id: &NamespaceId,
         request: BeginUploadRequest,
     ) -> Result<BeginUploadResponse> {
         Ok(self
             .namespace_engine(namespace_id)
-            .begin_upload_with_request(request)
+            .begin_upload(request)
             .await?)
     }
 
@@ -1235,24 +1229,17 @@ impl Fs {
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
+        options: ListChangesOptions,
     ) -> Result<ChangesResponse> {
-        let limit = PaginationPolicy::default()
-            .resolve_limit(None)
-            .map_err(|error| RuntimeError::Config(error.to_string()))?;
-        self.list_changes_after_with_limit(namespace_id, after_seq, limit)
-            .await
-    }
-
-    /// Reads up to `limit` committed changes after the `after_seq` cursor.
-    pub async fn list_changes_after_with_limit(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        limit: EffectiveLimit,
-    ) -> Result<ChangesResponse> {
+        let limit = match options.limit {
+            Some(limit) => limit,
+            None => PaginationPolicy::default()
+                .resolve_limit(None)
+                .map_err(|error| RuntimeError::Config(error.to_string()))?,
+        };
         Ok(self
             .namespace_engine(namespace_id)
-            .list_changes_after_with_limit(after_seq, limit)
+            .list_changes_after(after_seq, limit)
             .await?)
     }
 

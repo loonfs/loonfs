@@ -416,13 +416,7 @@ impl Client {
         Ok(())
     }
 
-    pub fn begin_upload(&self, namespace: &str) -> Result<BeginUploadResponse, ClientError> {
-        let namespace = namespace_url_segment(namespace)?;
-        let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
-        self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
-    }
-
-    pub fn begin_upload_with_request(
+    pub fn begin_upload(
         &self,
         namespace: &str,
         request: &BeginUploadRequest,
@@ -437,7 +431,7 @@ impl Client {
         namespace: &str,
         content_ref: ContentRef,
     ) -> Result<BeginUploadResponse, ClientError> {
-        self.begin_upload_with_request(
+        self.begin_upload(
             namespace,
             &BeginUploadRequest {
                 mode: Some(UploadMode::DirectPut),
@@ -562,7 +556,7 @@ impl Client {
         namespace: &str,
         bytes: &[u8],
     ) -> Result<StagedContent, ClientError> {
-        let upload = self.begin_upload(namespace)?;
+        let upload = self.begin_upload(namespace, &BeginUploadRequest::default())?;
         let staged = self.upload_content(namespace, upload.upload_id.as_str(), bytes)?;
         let response = self.complete_upload(
             namespace,
@@ -1128,7 +1122,9 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, ClientConfig, ClientError, ErrorCode, ErrorKind, NamespacePath};
+    use super::{
+        BeginUploadRequest, Client, ClientConfig, ClientError, ErrorCode, ErrorKind, NamespacePath,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -1258,7 +1254,9 @@ auth_token = "   "
         for result in [
             client.create_namespace("bad/name").map(|_| ()),
             client.fork_namespace("demo", "bad/name").map(|_| ()),
-            client.begin_upload("bad/name").map(|_| ()),
+            client
+                .begin_upload("bad/name", &BeginUploadRequest::default())
+                .map(|_| ()),
         ] {
             assert!(matches!(result, Err(ClientError::InvalidNamespacePath(_))));
         }

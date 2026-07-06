@@ -58,9 +58,9 @@ pub use config::{
 };
 pub use fs::{Fs, FsBuilder};
 pub use options::{
-    CopyOptions, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, NamespaceStatus, PutFileOptions,
-    RestoreRevisionOptions,
+    CopyOptions, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
+    NamespaceStatus, PutFileOptions, RestoreRevisionOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

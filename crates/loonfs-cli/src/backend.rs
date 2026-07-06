@@ -713,12 +713,11 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let changes = target
             .backend
-            .block_on(
-                target
-                    .backend
-                    .fs
-                    .list_changes_after(&namespace_id, ChangeSeq(0)),
-            )
+            .block_on(target.backend.fs.list_changes_after(
+                &namespace_id,
+                ChangeSeq(0),
+                loonfs::ListChangesOptions::default(),
+            ))
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
         assert!(!changes.changes[0].commit_id.as_str().trim().is_empty());
