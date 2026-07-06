@@ -336,9 +336,9 @@ async fn aws_s3_real_provider_conformance() {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        session_token: config.session_token,
+        access_key_id: config.access_key_id.into(),
+        secret_access_key: config.secret_access_key.into(),
+        session_token: config.session_token.map(Into::into),
         key_prefix: Some(config.prefix),
         force_path_style: false,
     })
@@ -355,8 +355,8 @@ async fn cloudflare_r2_real_provider_conformance() {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
+        access_key_id: config.access_key_id.into(),
+        secret_access_key: config.secret_access_key.into(),
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
@@ -385,7 +385,7 @@ async fn azure_abs_real_provider_conformance() {
     let store = AzureAbsStore::new(AzureAbsStoreConfig {
         account_name: config.account_name,
         container_name: config.container_name,
-        access_key: config.access_key,
+        access_key: config.access_key.into(),
         endpoint_url: config.endpoint,
         key_prefix: Some(config.prefix),
     })

@@ -1779,8 +1779,8 @@ async fn start_server(config: ServerConfig) -> TestServer {
 fn test_config(store_root: std::path::PathBuf, writer_id: &str, key_prefix: &str) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
-        auth_token: Some("test-token".to_owned()),
-        content_token_secret: "test-content-token-secret".to_owned(),
+        auth_token: Some("test-token".into()),
+        content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),

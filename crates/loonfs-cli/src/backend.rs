@@ -568,7 +568,7 @@ impl ResolvedTarget {
             } => Ok(Self::Remote(RemoteTarget::new(
                 profile_name,
                 server_url,
-                auth_token.as_deref(),
+                auth_token.as_ref().map(|token| token.expose()),
             )?)),
         }
     }
@@ -594,7 +594,9 @@ impl EmbeddedTarget {
         writer_id: Option<&str>,
         writer_version: Option<&str>,
     ) -> Result<Self, CliError> {
-        let store = store_config.object_store()?;
+        let store = store_config
+            .configured_object_store()
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?;
         let store: SharedObjectStore = Arc::new(store);
         let fs = Fs::open(
             store,
@@ -607,7 +609,7 @@ impl EmbeddedTarget {
                     .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
                 runtime_cache: RuntimeCacheConfig::default(),
                 trace_mode: TraceMode::Embedded,
-                trace_store_kind: trace_store_kind(store_config),
+                trace_store_kind: TraceStoreKind::from(store_config.kind()),
             },
         )
         .map_err(map_runtime_error)?;
@@ -617,16 +619,6 @@ impl EmbeddedTarget {
             .map_err(|error| CliError::invalid_config(error.to_string()))?;
         let backend = EmbeddedBackend { fs, runtime };
         Ok(Self { backend })
-    }
-}
-
-fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
-    match store {
-        StoreConfig::LocalFs { .. } => TraceStoreKind::LocalFs,
-        StoreConfig::AwsS3 { .. } => TraceStoreKind::S3,
-        StoreConfig::CloudflareR2 { .. } => TraceStoreKind::R2,
-        StoreConfig::GcpGcs { .. } => TraceStoreKind::Gcs,
-        StoreConfig::AzureAbs { .. } => TraceStoreKind::Abs,
     }
 }
 

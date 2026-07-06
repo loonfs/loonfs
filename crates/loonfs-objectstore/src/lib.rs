@@ -23,6 +23,8 @@ mod provider_object_store;
 pub mod r2;
 pub mod s3;
 mod s3_compatible;
+mod secret;
+mod store_config;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use object_store::{
@@ -30,5 +32,7 @@ pub use object_store::{
     SharedObjectStore,
 };
 pub use provider_object_store::{ProviderObjectStore, ProviderObjectStoreConfig};
+pub use secret::SecretString;
+pub use store_config::{StoreConfig, StoreConfigError};
 
 pub mod object_store;
