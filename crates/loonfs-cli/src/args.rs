@@ -36,6 +36,11 @@ pub(crate) enum Command {
     Rm(FilesystemPathArgs),
     Mv(FilesystemMoveArgs),
     Cp(FilesystemMoveArgs),
+    Changes(ChangesArgs),
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -303,6 +308,31 @@ pub(crate) struct FilesystemRestoreArgs {
     pub revision: u64,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ChangesArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Return committed changes after this sequence (defaults to 0, the
+    /// start of retained history).
+    #[arg(long)]
+    pub after: Option<u64>,
+    /// Maximum number of changes to return.
+    #[arg(long)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AdminCommand {
+    Checkpoint(AdminNamespaceArgs),
+    RetentionAdvance(AdminNamespaceArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminNamespaceArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum ConfigCommand {
     Path,
@@ -355,6 +385,9 @@ pub(crate) enum CommandKind {
     FilesystemRm,
     FilesystemMv,
     FilesystemCp,
+    Changes,
+    AdminCheckpoint,
+    AdminRetentionAdvance,
     ConfigPath,
     ConfigShow,
     Version,
@@ -386,6 +419,9 @@ impl CommandKind {
             CommandKind::FilesystemRm => "filesystem_rm",
             CommandKind::FilesystemMv => "filesystem_mv",
             CommandKind::FilesystemCp => "filesystem_cp",
+            CommandKind::Changes => "changes",
+            CommandKind::AdminCheckpoint => "admin_checkpoint",
+            CommandKind::AdminRetentionAdvance => "admin_retention_advance",
             CommandKind::ConfigPath => "config_path",
             CommandKind::ConfigShow => "config_show",
             CommandKind::Version => "version",
@@ -427,6 +463,11 @@ impl Cli {
             Command::Rm(_) => CommandKind::FilesystemRm,
             Command::Mv(_) => CommandKind::FilesystemMv,
             Command::Cp(_) => CommandKind::FilesystemCp,
+            Command::Changes(_) => CommandKind::Changes,
+            Command::Admin { command } => match command {
+                AdminCommand::Checkpoint(_) => CommandKind::AdminCheckpoint,
+                AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
+            },
             Command::Config { command } => match command {
                 ConfigCommand::Path => CommandKind::ConfigPath,
                 ConfigCommand::Show => CommandKind::ConfigShow,

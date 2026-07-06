@@ -145,6 +145,39 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             "deleted {} (head_seq {})",
             response.namespace_id, response.head_seq.0
         ),
+        CommandData::CheckpointCreated(response) => format!(
+            "checkpointed {} @ seq {} (checkpoint {}, manifest {})",
+            response.namespace_id,
+            response.checkpoint_seq.0,
+            response.checkpoint_id,
+            response.manifest_id
+        ),
+        CommandData::RetentionAdvanced(response) => format!(
+            "advanced retention floor for {} to seq {}; changes before this floor are no longer replayable",
+            response.namespace_id, response.retention_floor_seq.0
+        ),
+        CommandData::Changes(response) => {
+            let mut lines = vec![
+                format!(
+                    "changes for {} after seq {} (through seq {})",
+                    response.namespace_id, response.after_seq.0, response.through_seq.0
+                ),
+                "SEQ\tCOMMIT_ID\tDELTAS\tMESSAGE".to_owned(),
+            ];
+            for change in &response.changes {
+                lines.push(format!(
+                    "{}\t{}\t{}\t{}",
+                    change.seq.0,
+                    change.commit_id,
+                    change.deltas.len(),
+                    change.message.as_deref().unwrap_or("-")
+                ));
+            }
+            if let Some(next_after_seq) = response.next_after_seq {
+                lines.push(format!("next_after_seq: {}", next_after_seq.0));
+            }
+            lines.join("\n")
+        }
         CommandData::PathEntries { entries } => entries
             .iter()
             .map(|entry| {
@@ -288,7 +321,9 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),
             mode: Some("remote".to_owned()),
-            error: CliError::client_error("connection refused"),
+            error: CliError::from(crate::backend::BackendError::client_error(
+                "connection refused",
+            )),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
             &json_error(&failure).expect("json error renders")
