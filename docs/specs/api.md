@@ -524,7 +524,7 @@ include `next_cursor` only when another page is available.
       "namespace_id": "demo",
       "absolute_path": "/docs/slides",
       "inode_id": 43,
-      "inode_kind": "dir",
+      "inode_kind": "directory",
       "head_seq": 418,
       "parent_inode_id": 7,
       "display_name": "slides"

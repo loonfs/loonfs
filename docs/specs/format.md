@@ -403,7 +403,7 @@ The core inode kinds are:
 
 | Kind | Meaning |
 | --- | --- |
-| **dir** | A directory that can own child bindings. |
+| **directory** | A directory that can own child bindings. |
 | **file** | A file whose history is an ordered set of revisions. |
 
 The format does not require a larger type taxonomy in the core model. New

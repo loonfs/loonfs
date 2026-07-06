@@ -102,7 +102,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
     let docs = harness.run(&["--json", "stat", "/docs"]);
     assert_success(&docs);
-    assert_eq!(json_data(&docs)["inode_kind"], "dir");
+    assert_eq!(json_data(&docs)["inode_kind"], "directory");
 
     let put = harness.run(&[
         "--json",
