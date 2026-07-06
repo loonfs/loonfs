@@ -23,7 +23,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    sha256_digest, CheckpointId, ManifestId, NamespaceId, NamespaceSummary, WriterEpoch,
+    sha256_digest, CheckpointId, GcPinId, ManifestId, NamespaceId, NamespaceSummary, WriterEpoch,
 };
 use loonfs_objectstore::keys::{metadata_root, namespace_config, pin, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -158,7 +158,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let gc_pin_key = pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
+    let gc_pin_key = pin(
+        source_namespace_id.as_str(),
+        gc_pin_envelope.state.pin_id.as_str(),
+    );
     write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope).await?;
     verify_written_gc_pin(
         store,
@@ -288,7 +291,7 @@ fn deterministic_gc_pin_id(
     source_namespace_id: &NamespaceId,
     target_namespace_id: &NamespaceId,
     source_checkpoint_id: &CheckpointId,
-) -> String {
+) -> GcPinId {
     let identity = format!(
         "loonfs.gc-pin.v1\0source={}\0target={}\0checkpoint={}",
         source_namespace_id.as_str(),
@@ -299,7 +302,8 @@ fn deterministic_gc_pin_id(
     let hex = digest
         .strip_prefix("sha256:")
         .expect("sha256_digest returns a sha256-prefixed digest");
-    format!("pin_{}", &hex[..32])
+    GcPinId::parse(format!("pin_{}", &hex[..32]))
+        .expect("sha256-derived pin body is a valid gc pin id")
 }
 
 /// Pin creation is write-then-verify, like checkpoints: after the pin is
@@ -428,8 +432,7 @@ mod tests {
     };
     use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
     use loonfs_api::{
-        validate_gc_pin_id, ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, NamespaceId,
-        WriterEpoch,
+        ChangeSeq, CheckpointId, CommitId, GcPinId, InodeId, ManifestId, NamespaceId, WriterEpoch,
     };
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::pin;
@@ -447,7 +450,7 @@ mod tests {
         let second = deterministic_gc_pin_id(&source, &target, &checkpoint_id);
 
         assert_eq!(first, second);
-        validate_gc_pin_id(&first).expect("valid deterministic pin id");
+        GcPinId::parse(first.as_str()).expect("valid deterministic pin id");
     }
 
     #[tokio::test]
@@ -455,7 +458,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let expected = gc_pin_envelope("source", "target", 1_000);
-        let object_key = pin("source", &expected.state.pin_id);
+        let object_key = pin("source", expected.state.pin_id.as_str());
 
         write_source_gc_pin(&store, &object_key, &expected)
             .await
@@ -478,7 +481,7 @@ mod tests {
             conflicting.state,
         )
         .expect("conflicting envelope");
-        let object_key = pin("source", &expected.state.pin_id);
+        let object_key = pin("source", expected.state.pin_id.as_str());
         store
             .put_if_absent(
                 &object_key,

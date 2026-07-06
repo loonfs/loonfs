@@ -21,9 +21,7 @@ mod tests {
     use bytes::Bytes;
     use loonfs_api::wire::control::WalSegmentPointer;
     use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
-    use loonfs_api::{
-        validate_wal_segment_id, ChangeSeq, CommitId, InodeId, NamespaceId, WriterEpoch,
-    };
+    use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_segment;
     use loonfs_objectstore::ObjectStore;
@@ -109,8 +107,8 @@ mod tests {
 
         assert_ne!(first.segment_id, second.segment_id);
         assert_ne!(first.object_key, second.object_key);
-        validate_wal_segment_id(&first.segment_id).expect("first segment id shape");
-        validate_wal_segment_id(&second.segment_id).expect("second segment id shape");
+        WalSegmentId::parse(first.segment_id.as_str()).expect("first segment id shape");
+        WalSegmentId::parse(second.segment_id.as_str()).expect("second segment id shape");
     }
 
     #[tokio::test]
@@ -312,13 +310,15 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                &envelope.payload.segment_id,
+                envelope.payload.segment_id.as_str(),
             );
             *pointer = envelope.pointer(object_key.clone());
         })
         .await;
         assert_wal_chain_corruption_rejected(|_object_key, envelope, _pointer| {
-            envelope.payload.segment_id = "seg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+            envelope.payload.segment_id =
+                WalSegmentId::parse("00000000000000000001-bbbbbbbbbbbbbbbb")
+                    .expect("valid segment id");
             rewrap_envelope(envelope);
         })
         .await;
@@ -337,7 +337,7 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                &envelope.payload.segment_id,
+                envelope.payload.segment_id.as_str(),
             );
             *pointer = envelope.pointer(object_key.clone());
         })
@@ -350,7 +350,7 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                &envelope.payload.segment_id,
+                envelope.payload.segment_id.as_str(),
             );
             *pointer = envelope.pointer(object_key.clone());
         })
@@ -363,7 +363,7 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                &envelope.payload.segment_id,
+                envelope.payload.segment_id.as_str(),
             );
             *pointer = envelope.pointer(object_key.clone());
         })
@@ -525,10 +525,12 @@ mod tests {
         // fetches, never correctness: chain links stay the authority.
         let mut lying_tip = second.envelope.pointer(second.object_key.clone());
         lying_tip.end_seq = ChangeSeq(999);
+        let missing_segment_id =
+            WalSegmentId::parse("00000000000000000001-00000000deadbeef").expect("valid segment id");
         let garbage = [
             WalSegmentPointer {
-                object_key: wal_segment(namespace_id.as_str(), "seg_gone"),
-                segment_id: "seg_gone".to_owned(),
+                object_key: wal_segment(namespace_id.as_str(), missing_segment_id.as_str()),
+                segment_id: missing_segment_id,
                 start_seq: ChangeSeq(1),
                 end_seq: ChangeSeq(1),
                 payload_checksum: "sha256:absent".to_owned(),

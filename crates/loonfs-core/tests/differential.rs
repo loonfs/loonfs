@@ -272,13 +272,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
         state
             .inodes()
             .iter()
-            .map(|inode| {
-                normalize_inode(
-                    inode.inode_id.0,
-                    inode.inode_kind.clone(),
-                    inode.created_seq.0,
-                )
-            })
+            .map(|inode| normalize_inode(inode.inode_id.0, inode.inode_kind, inode.created_seq.0))
             .collect(),
         state
             .direntry_binds()
@@ -331,13 +325,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
     (
         inodes
             .iter()
-            .map(|inode| {
-                normalize_inode(
-                    inode.inode_id.0,
-                    inode.inode_kind.clone(),
-                    inode.created_seq.0,
-                )
-            })
+            .map(|inode| normalize_inode(inode.inode_id.0, inode.inode_kind, inode.created_seq.0))
             .collect(),
         direntry_binds
             .iter()

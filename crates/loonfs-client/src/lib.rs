@@ -523,10 +523,10 @@ impl Client {
         bytes: &[u8],
     ) -> Result<StagedContent, ClientError> {
         let upload = self.begin_upload(namespace)?;
-        let staged = self.upload_content(namespace, &upload.upload_id, bytes)?;
+        let staged = self.upload_content(namespace, upload.upload_id.as_str(), bytes)?;
         let response = self.complete_upload(
             namespace,
-            &upload.upload_id,
+            upload.upload_id.as_str(),
             &CompleteUploadRequest {
                 content_ref: staged.content_ref,
             },

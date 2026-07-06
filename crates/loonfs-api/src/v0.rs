@@ -1,6 +1,6 @@
 use crate::{
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamePolicy,
-    NamespaceId, RevisionNo,
+    NamespaceId, RevisionNo, UploadId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -90,7 +90,7 @@ pub struct ValidatedContentToken {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BeginUploadResponse {
     pub namespace_id: NamespaceId,
-    pub upload_id: String,
+    pub upload_id: UploadId,
     pub mode: UploadMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put: Option<DirectPutUpload>,
@@ -101,7 +101,7 @@ pub struct BeginUploadResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadContentResponse {
     pub namespace_id: NamespaceId,
-    pub upload_id: String,
+    pub upload_id: UploadId,
     pub content_ref: ContentRef,
 }
 
@@ -117,7 +117,7 @@ pub struct CompleteUploadRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
-    pub upload_id: String,
+    pub upload_id: UploadId,
     pub content_ref: ContentRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validated_content_token: Option<String>,
@@ -380,7 +380,7 @@ mod tests {
         BeginUploadRequest, BeginUploadResponse, CommitDelta, CommitOp, CommitPrecondition,
         DirectPutUpload, MoveBehavior, ObjectTransferAccess, UploadMode,
     };
-    use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NameKey, NamespaceId};
+    use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NameKey, NamespaceId, UploadId};
     use std::collections::BTreeMap;
 
     #[test]
@@ -401,7 +401,8 @@ mod tests {
     fn direct_put_response_exposes_only_presigned_access() {
         let response = BeginUploadResponse {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            upload_id: "upl_00000000000000000000000000000001".to_owned(),
+            upload_id: UploadId::parse("upl_00000000000000000000000000000001")
+                .expect("valid upload id"),
             mode: UploadMode::DirectPut,
             direct_put: Some(DirectPutUpload {
                 content_ref: ContentRef::whole_file_v0(b"hello"),

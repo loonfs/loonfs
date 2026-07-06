@@ -29,8 +29,10 @@ pub fn init_tracing_from_env() -> Result<(), TraceInitError> {
     else {
         return Ok(());
     };
-    let filter =
-        EnvFilter::try_new(config.filter).map_err(|err| TraceInitError::Filter(err.to_string()))?;
+    let filter = config
+        .filter
+        .parse::<EnvFilter>()
+        .map_err(|err| TraceInitError::Filter(err.to_string()))?;
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)

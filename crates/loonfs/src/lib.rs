@@ -29,7 +29,7 @@ pub use loonfs_api::{
     EffectiveLimit, FileRevision, FileRevisionsPageCursor, FilesystemOperationResponse, InodeId,
     InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult,
     NameKey, NamePolicy, NamespaceId, NamespaceSummary, Page, PageRequest, PaginationPolicy,
-    PutBehavior, RevisionNo, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    PutBehavior, RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
     FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROTOCOL_VERSION,
 };

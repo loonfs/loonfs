@@ -14,7 +14,7 @@ use loonfs_api::wire::manifest::{
     encode_metadata_sst_envelope_zstd, MetadataFileRef, MetadataPage, MetadataRow,
     MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload, MetadataTableFamily,
 };
-use loonfs_api::{generate_metadata_table_id, ChangeSeq, NamespaceId};
+use loonfs_api::{ChangeSeq, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_table;
 use loonfs_objectstore::ObjectStore;
 
@@ -127,8 +127,8 @@ where
         for (segment_index, segment_rows) in segments.into_iter().enumerate() {
             let segment_index = u32::try_from(segment_index)
                 .map_err(|_| CoreError::Store("metadata SST index overflow".to_owned()))?;
-            let table_id = generate_metadata_table_id();
-            let object_key = metadata_table(namespace_id.as_str(), &table_id);
+            let table_id = MetadataTableId::generate();
+            let object_key = metadata_table(namespace_id.as_str(), table_id.as_str());
             requests.push(MetadataSstWriteRequest {
                 namespace_id,
                 table_id,
@@ -172,7 +172,7 @@ where
 
 pub(super) struct MetadataSstWriteRequest<'a> {
     namespace_id: &'a NamespaceId,
-    table_id: String,
+    table_id: MetadataTableId,
     run_seq: ChangeSeq,
     level: u32,
     family: MetadataTableFamily,

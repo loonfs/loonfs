@@ -5,7 +5,7 @@ use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope,
     UploadSessionEnvelope, UploadSessionState,
 };
-use loonfs_api::{validate_upload_id, NamespaceId};
+use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
@@ -92,7 +92,7 @@ where
 pub(crate) async fn update_upload_session<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
-    upload_id: &str,
+    upload_id: &UploadId,
     writer_version: &str,
     max_attempts: usize,
     mut update: F,
@@ -174,17 +174,15 @@ struct LoadedUploadSessionObject {
 async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    upload_id: &str,
+    upload_id: &UploadId,
 ) -> Result<LoadedUploadSessionObject, CoreError> {
-    NamespaceId::parse(namespace_id.as_str()).map_err(CoreError::from)?;
-    validate_upload_id(upload_id).map_err(CoreError::InvalidUploadId)?;
-    let object_key = upload_session(namespace_id.as_str(), upload_id);
+    let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
     let body = store
         .get_with_metadata(&object_key)
         .await
         .map_err(|err| CoreError::Store(err.to_string()))?
         .ok_or_else(|| CoreError::UploadNotFound {
-            upload_id: upload_id.to_owned(),
+            upload_id: upload_id.clone(),
         })?;
     let envelope: UploadSessionEnvelope =
         decode_control_object(&body.bytes, ControlObjectKind::UploadSession).map_err(|err| {
@@ -195,7 +193,7 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
             "upload session namespace mismatch for `{object_key}`"
         )));
     }
-    if envelope.state.upload_id != upload_id {
+    if envelope.state.upload_id != *upload_id {
         return Err(CoreError::Store(format!(
             "upload session id mismatch for `{object_key}`"
         )));

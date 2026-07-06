@@ -7,7 +7,7 @@ use loonfs_api::{
         CommitDelta, CommitOp, CommitRequest as ApiCommitRequest, CompleteUploadRequest,
         ValidatedContentToken,
     },
-    validate_checkpoint_id, AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, ContentRef,
     CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest,
     FilesystemOperationResponse, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
     PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
@@ -578,16 +578,16 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .expect("begin upload");
         let first_content = harness
             .client
-            .upload_content(namespace, &begin.upload_id, file_bytes)
+            .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
             .expect("upload content");
         let repeated_content = harness
             .client
-            .upload_content(namespace, &begin.upload_id, file_bytes)
+            .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
             .expect("repeat upload content");
         assert_eq!(first_content, repeated_content);
         match harness
             .client
-            .upload_content(namespace, &begin.upload_id, b"different bytes")
+            .upload_content(namespace, begin.upload_id.as_str(), b"different bytes")
         {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
             other => panic!("expected upload_content_conflict, got {other:?}"),
@@ -599,7 +599,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .expect("begin mismatch upload");
         let staged = harness
             .client
-            .upload_content(namespace, &mismatch_upload.upload_id, file_bytes)
+            .upload_content(namespace, mismatch_upload.upload_id.as_str(), file_bytes)
             .expect("stage mismatch upload content");
         assert_ne!(
             staged.content_ref,
@@ -607,7 +607,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         );
         match harness.client.complete_upload(
             namespace,
-            &mismatch_upload.upload_id,
+            mismatch_upload.upload_id.as_str(),
             &CompleteUploadRequest {
                 content_ref: ContentRef::whole_file_v0(b"other bytes"),
             },
@@ -715,13 +715,13 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
             .expect("begin upload");
         let staged = harness
             .client
-            .upload_content(namespace, &begin.upload_id, b"token fallback")
+            .upload_content(namespace, begin.upload_id.as_str(), b"token fallback")
             .expect("upload content");
         let completed = harness
             .client
             .complete_upload(
                 namespace,
-                &begin.upload_id,
+                begin.upload_id.as_str(),
                 &CompleteUploadRequest {
                     content_ref: staged.content_ref,
                 },
@@ -1492,7 +1492,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .expect("write file");
 
         let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
-        assert!(validate_checkpoint_id(&first.checkpoint_id).is_ok());
+        assert!(CheckpointId::parse(first.checkpoint_id.as_str()).is_ok());
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
         assert_eq!(first.manifest_id, ManifestId(1));
         assert_eq!(first.current_manifest_id, Some(first.manifest_id));
@@ -1856,16 +1856,16 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
 fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {
     let begin = client.begin_upload(namespace).expect("begin upload");
     let staged = client
-        .upload_content(namespace, &begin.upload_id, file_bytes)
+        .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
         .expect("upload content");
     let complete_request = CompleteUploadRequest {
         content_ref: staged.content_ref,
     };
     let complete = client
-        .complete_upload(namespace, &begin.upload_id, &complete_request)
+        .complete_upload(namespace, begin.upload_id.as_str(), &complete_request)
         .expect("complete upload");
     let repeated = client
-        .complete_upload(namespace, &begin.upload_id, &complete_request)
+        .complete_upload(namespace, begin.upload_id.as_str(), &complete_request)
         .expect("repeat complete upload");
     assert_eq!(repeated.namespace_id, complete.namespace_id);
     assert_eq!(repeated.upload_id, complete.upload_id);

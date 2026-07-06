@@ -598,8 +598,8 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
             name_key,
             display_name,
             ..
-        } => 96 + name_key.len() + display_name.len(),
-        MetadataRow::DirentryUnbind { name_key, .. } => 96 + name_key.len(),
+        } => 96 + name_key.as_str().len() + display_name.len(),
+        MetadataRow::DirentryUnbind { name_key, .. } => 96 + name_key.as_str().len(),
         MetadataRow::Revision { content_ref, .. } => 96 + content_ref.digest.len(),
         MetadataRow::Tombstone { .. } => 32,
         MetadataRow::CommitReceipt {
@@ -633,7 +633,7 @@ pub(super) fn append_rows_to_metadata(
                 },
             ) => metadata_state.push_inode(InodeRecord {
                 inode_id: *inode_id,
-                inode_kind: inode_kind.clone(),
+                inode_kind: *inode_kind,
                 created_seq: *created_seq,
             }),
             (
@@ -648,7 +648,7 @@ pub(super) fn append_rows_to_metadata(
                 },
             ) => metadata_state.push_direntry_bind(DirentryBindRecord {
                 parent_inode_id: *parent_inode_id,
-                name_key: name_key.clone(),
+                name_key: name_key.as_str().to_owned(),
                 display_name: display_name.clone(),
                 child_inode_id: *child_inode_id,
                 bind_seq: *bind_seq,
@@ -668,7 +668,7 @@ pub(super) fn append_rows_to_metadata(
                 },
             ) => metadata_state.push_direntry_unbind(DirentryUnbindRecord {
                 parent_inode_id: *parent_inode_id,
-                name_key: name_key.clone(),
+                name_key: name_key.as_str().to_owned(),
                 child_inode_id: *child_inode_id,
                 bind_seq: *bind_seq,
                 bind_delta_index: *bind_delta_index,

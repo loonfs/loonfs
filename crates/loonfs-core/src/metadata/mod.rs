@@ -85,6 +85,16 @@ impl<'de> Deserialize<'de> for MetadataState {
     }
 }
 
+/// Converts a metadata record name key back to the wire [`NameKey`] type.
+///
+/// Record name keys only enter [`MetadataState`] from validated sources:
+/// typed manifest rows, commit plans built from typed [`NameKey`]s, and WAL
+/// deltas whose name keys replay validation checks before applying. An
+/// invalid key here is therefore a logic bug, not untrusted input.
+pub(crate) fn record_name_key(name_key: &str) -> NameKey {
+    NameKey::parse(name_key).expect("metadata record name keys are validated on ingress")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InodeRecord {
     pub inode_id: InodeId,
@@ -364,7 +374,7 @@ impl MetadataState {
             } => {
                 self.push_inode_record(InodeRecord {
                     inode_id: *inode_id,
-                    inode_kind: inode_kind.clone(),
+                    inode_kind: *inode_kind,
                     created_seq: committed_seq,
                 });
                 push_unique_invariant(checked_invariants, InvariantId::CreateInodeWritesInodeRow);

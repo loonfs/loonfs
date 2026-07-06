@@ -1,16 +1,31 @@
+use crate::ids::string_id;
+use std::fmt;
 use thiserror::Error;
 
+/// Normalized absolute path plus its parsed components.
+///
+/// Richer than the string-id newtypes (it carries segments), so it exposes
+/// only `Display`/`AsRef<str>` on top of its structural accessors instead of
+/// the full `string_id!` suite.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AbsolutePath {
     normalized: String,
     components: Vec<PathComponent>,
 }
 
+/// One path segment as stored, preserving display spelling.
+///
+/// Components are only produced by parsing an [`AbsolutePath`] or joining a
+/// [`DisplayName`], so there is no fallible string constructor.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathComponent(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DisplayName(String);
+string_id! {
+    /// User-facing spelling of one path component.
+    DisplayName,
+    error = PathError,
+    validate = validate_display_name
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PathError {
@@ -114,6 +129,18 @@ impl AbsolutePath {
     }
 }
 
+impl AsRef<str> for AbsolutePath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for AbsolutePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.normalized)
+    }
+}
+
 fn normalized_path(components: &[PathComponent]) -> String {
     if components.is_empty() {
         "/".to_owned()
@@ -139,28 +166,33 @@ impl PathComponent {
     }
 }
 
-impl DisplayName {
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, PathError> {
-        let value = value.as_ref();
-        if value.is_empty() {
-            return Err(PathError::EmptyDisplayName);
-        }
-        if value.contains('/') {
-            return Err(PathError::DisplayNameContainsSeparator {
-                display_name: value.to_owned(),
-            });
-        }
-        if value == "." || value == ".." {
-            return Err(PathError::ReservedDisplayName {
-                display_name: value.to_owned(),
-            });
-        }
-        Ok(Self(value.to_owned()))
+impl AsRef<str> for PathComponent {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
+}
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl fmt::Display for PathComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
+}
+
+fn validate_display_name(value: &str) -> Result<(), PathError> {
+    if value.is_empty() {
+        return Err(PathError::EmptyDisplayName);
+    }
+    if value.contains('/') {
+        return Err(PathError::DisplayNameContainsSeparator {
+            display_name: value.to_owned(),
+        });
+    }
+    if value == "." || value == ".." {
+        return Err(PathError::ReservedDisplayName {
+            display_name: value.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl PathError {

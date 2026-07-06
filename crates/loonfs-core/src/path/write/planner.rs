@@ -247,7 +247,7 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode_id,
-        name_key: NameKey::try_new(binding.name_key).map_err(|err| {
+        name_key: NameKey::parse(&binding.name_key).map_err(|err| {
             CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
         })?,
         child_inode_id: binding.child_inode_id,
@@ -720,7 +720,7 @@ fn binding_is_precondition(
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode_id,
-        name_key: NameKey::try_new(binding.name_key).map_err(|err| {
+        name_key: NameKey::parse(&binding.name_key).map_err(|err| {
             CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
         })?,
         child_inode_id: binding.child_inode_id,

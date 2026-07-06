@@ -25,7 +25,7 @@ use loonfs_api::{
     FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, InodeId, LimitError, ListFileRevisionsResponse, NamespaceId,
     NamespaceIdValidationError, PageCursorError, PageRequest, PaginationPolicy,
-    RestoreFileRevisionRequest, RevisionNo, FEATURE_UPLOADS_DIRECT_PUT,
+    RestoreFileRevisionRequest, RevisionNo, UploadId, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_core::content::{
     mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
@@ -1113,6 +1113,7 @@ async fn upload_content_handler(
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
+    let upload_id = parse_upload_id(&upload_id)?;
     let bytes = body.to_vec();
     let response = state
         .fs
@@ -1153,6 +1154,7 @@ async fn complete_upload_handler(
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
+    let upload_id = parse_upload_id(&upload_id)?;
     let mut response = state
         .fs
         .complete_upload(&namespace_id, &upload_id, &request)
@@ -1493,6 +1495,16 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
     NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
+}
+
+fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {
+    UploadId::parse(value).map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &error.to_string(),
+        )
+    })
 }
 
 fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {

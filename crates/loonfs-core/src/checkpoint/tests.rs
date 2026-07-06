@@ -50,7 +50,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loonfs_api::{
-    validate_checkpoint_id, ChangeSeq, CommitId, EffectiveLimit, InodeId, ManifestId, NamespaceId,
+    ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId, NameKey, NamespaceId,
     PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::fs::LocalFsStore;
@@ -258,7 +258,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert!(validate_checkpoint_id(&record.checkpoint_id).is_ok());
+    assert!(CheckpointId::parse(record.checkpoint_id.as_str()).is_ok());
     assert_eq!(record.manifest_head_seq, ChangeSeq(0));
     assert_eq!(record.manifest_id, ManifestId(0));
 }
@@ -831,7 +831,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     use std::collections::BTreeMap;
     let bind = |seq: u64, delta: u32| MetadataRow::DirentryBind {
         parent_inode_id: InodeId(1),
-        name_key: "docs".to_owned(),
+        name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: "docs".to_owned(),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(seq),
@@ -839,7 +839,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     };
     let unbind = |bind_seq: u64, delta: u32, unbind_seq: u64| MetadataRow::DirentryUnbind {
         parent_inode_id: InodeId(1),
-        name_key: "docs".to_owned(),
+        name_key: NameKey::parse("docs").expect("valid name key"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(bind_seq),
         bind_delta_index: delta,
@@ -874,7 +874,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     use std::collections::BTreeMap;
     let bind = |delta: u32| MetadataRow::DirentryBind {
         parent_inode_id: InodeId(1),
-        name_key: "docs".to_owned(),
+        name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: "docs".to_owned(),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(1),
@@ -882,7 +882,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     };
     let unbind = MetadataRow::DirentryUnbind {
         parent_inode_id: InodeId(1),
-        name_key: "docs".to_owned(),
+        name_key: NameKey::parse("docs").expect("valid name key"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(1),
         bind_delta_index: 0,
@@ -926,7 +926,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
     use std::collections::BTreeMap;
     let bind = |delta: u32| MetadataRow::DirentryBind {
         parent_inode_id: InodeId(1),
-        name_key: "docs".to_owned(),
+        name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: "docs".to_owned(),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(1),

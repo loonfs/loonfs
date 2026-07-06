@@ -2,7 +2,7 @@ use crate::invariants::InvariantId;
 use crate::metadata::MetadataApplyError;
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WriterEpoch};
+use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalSegmentId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use thiserror::Error;
@@ -10,7 +10,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedWalSegment {
     pub object_key: String,
-    pub segment_id: String,
+    pub segment_id: WalSegmentId,
     pub envelope: WalSegmentEnvelope,
     pub encoded_bytes: Vec<u8>,
     pub checked_invariants: Vec<InvariantId>,

@@ -196,7 +196,7 @@ mod tests {
     }
     use loonfs_api::wire::control::WriterBlock;
     use loonfs_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
-    use loonfs_api::{CommitId, InodeId, NamespaceId, WriterEpoch};
+    use loonfs_api::{CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
@@ -242,7 +242,7 @@ mod tests {
                 let seq = ChangeSeq(start_seq.0 + offset);
                 WalCommitPayload {
                     seq,
-                    commit_id: CommitId::try_new(format!("publish-record-{index}"))
+                    commit_id: CommitId::parse(format!("publish-record-{index}"))
                         .expect("valid commit id"),
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     message: None,
@@ -250,7 +250,8 @@ mod tests {
                 }
             })
             .collect();
-        let segment_id = "seg_publish_test".to_owned();
+        let segment_id =
+            WalSegmentId::parse("00000000000000000001-aaaaaaaaaaaaaaaa").expect("valid segment id");
         let payload = WalSegmentPayload {
             namespace_id: namespace_id.clone(),
             segment_id: segment_id.clone(),
@@ -263,7 +264,7 @@ mod tests {
         };
         let envelope = WalSegmentEnvelope::from_payload("test", payload).expect("wal envelope");
         PreparedWalSegment {
-            object_key: wal_segment_key(namespace_id.as_str(), &segment_id),
+            object_key: wal_segment_key(namespace_id.as_str(), segment_id.as_str()),
             segment_id,
             envelope,
             encoded_bytes: Vec::new(),

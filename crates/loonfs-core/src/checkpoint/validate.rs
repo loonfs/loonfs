@@ -7,7 +7,7 @@ use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataPage, MetadataRow, MetadataSstEnvelope, MetadataTableFamily,
     NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{validate_metadata_table_id, ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 
 pub(super) fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
@@ -68,12 +68,8 @@ pub(super) fn validate_manifest_materialization_ranges(
     let mut saw_head_seq_file = false;
     let mut seen_table_ids = Vec::new();
     for metadata_file in &payload.metadata_files {
-        validate_metadata_table_id(&metadata_file.table_id).map_err(|error| {
-            ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: error.to_string(),
-            }
-        })?;
+        // The id shape is validated on decode: `table_id` is a typed
+        // `MetadataTableId`, so only well-formed ids can reach this point.
         if seen_table_ids.contains(&metadata_file.table_id.as_str()) {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
