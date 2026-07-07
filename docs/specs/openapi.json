@@ -192,6 +192,90 @@
         }
       }
     },
+    "/v0/admin/namespaces/{namespace}/maintenance/tick": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Run maintenance tick",
+        "description": "Runs one bounded maintenance step: publishes a checkpoint once the visible WAL tail reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing a checkpoint race is an outcome, not an error.",
+        "operationId": "maintenance_tick",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional threshold and GC overrides",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceTickRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Maintenance tick completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceTickResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id or options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/admin/namespaces/{namespace}/retention/advance": {
       "post": {
         "tags": [
@@ -1918,6 +2002,7 @@
     "schemas": {
       "AdvanceRetentionResponse": {
         "type": "object",
+        "description": "Result of advancing the retention floor.",
         "required": [
           "namespace_id",
           "retention_floor_seq"
@@ -3191,7 +3276,7 @@
       },
       "GcRequest": {
         "type": "object",
-        "description": "Result of advancing the retention floor.\nOptional overrides for one garbage-collection pass. Absent fields use\nthe server's conservative defaults.",
+        "description": "Optional overrides for one garbage-collection pass. Absent fields use\nthe server's conservative defaults.",
         "properties": {
           "grace_window_ms": {
             "type": [
@@ -3367,6 +3452,151 @@
               "null"
             ],
             "description": "Cursor for the next page, if more entries remain."
+          }
+        }
+      },
+      "MaintenanceTickOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No checkpoint was needed.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_needed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A checkpoint was published.",
+            "required": [
+              "checkpoint_seq",
+              "kind"
+            ],
+            "properties": {
+              "checkpoint_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence covered by the published checkpoint."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "checkpoint_published"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Another checkpoint already covered the attempted sequence.",
+            "required": [
+              "attempted_seq",
+              "current_manifest_id",
+              "kind"
+            ],
+            "properties": {
+              "attempted_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence this tick attempted to checkpoint."
+              },
+              "current_manifest_id": {
+                "$ref": "#/components/schemas/ManifestId",
+                "description": "Manifest pointer the head currently records."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "checkpoint_superseded"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A concurrent head update won the race.",
+            "required": [
+              "observed_head_seq",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "checkpoint_publish_race_lost"
+                ]
+              },
+              "observed_head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Head sequence observed before the checkpoint attempt."
+              }
+            }
+          }
+        ],
+        "description": "What one maintenance tick did."
+      },
+      "MaintenanceTickRequest": {
+        "type": "object",
+        "description": "Options for one explicit maintenance tick. Absent fields use the\nserver's defaults; garbage collection runs only when `gc` is present.",
+        "properties": {
+          "gc": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GcRequest",
+                "description": "Run the mark-and-sweep garbage collector after the tick's checkpoint\nwork. Nothing sweeps unless this is present."
+              }
+            ]
+          },
+          "max_wal_tail_segments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Publish a checkpoint when the visible WAL tail reaches this many\nsegments.",
+            "minimum": 0
+          }
+        }
+      },
+      "MaintenanceTickResponse": {
+        "type": "object",
+        "description": "Result of one explicit maintenance tick.",
+        "required": [
+          "namespace_id",
+          "status_before",
+          "outcome"
+        ],
+        "properties": {
+          "gc": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GcResponse",
+                "description": "Garbage-collection report when the tick opted into sweeping."
+              }
+            ]
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the tick ran against."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/MaintenanceTickOutcome",
+            "description": "What the tick did."
+          },
+          "status_before": {
+            "$ref": "#/components/schemas/NamespaceStatusResponse",
+            "description": "Namespace status observed before the tick acted."
           }
         }
       },

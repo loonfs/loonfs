@@ -7,8 +7,8 @@ use crate::fs::FsCore;
 use crate::{
     AdvanceRetentionResponse, CreateCheckpointResponse, GcConfig, GcReport, MaintenanceTickOptions,
     MaintenanceTickResult, NamespaceId, NamespaceStatusResponse, ObjectStoreMetricsRecorder,
-    Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind,
+    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -49,6 +49,12 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse> {
         self.core.namespace_status(namespace_id).await
+    }
+
+    /// Snapshots the runtime cache counters, so maintenance work driven
+    /// through this handle is observable alongside writer and reader work.
+    pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
+        self.core.runtime_cache_stats()
     }
 
     /// Runs one bounded maintenance step against a namespace.

@@ -240,7 +240,6 @@ pub struct CreateCheckpointResponse {
     pub current_manifest_id: Option<ManifestId>,
 }
 
-/// Result of advancing the retention floor.
 /// Optional overrides for one garbage-collection pass. Absent fields use
 /// the server's conservative defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +278,7 @@ pub struct GcResponse {
     pub degraded_retention: bool,
 }
 
+/// Result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AdvanceRetentionResponse {
@@ -286,6 +286,62 @@ pub struct AdvanceRetentionResponse {
     pub namespace_id: NamespaceId,
     /// New minimum sequence for incremental replay.
     pub retention_floor_seq: ChangeSeq,
+}
+
+/// Options for one explicit maintenance tick. Absent fields use the
+/// server's defaults; garbage collection runs only when `gc` is present.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MaintenanceTickRequest {
+    /// Publish a checkpoint when the visible WAL tail reaches this many
+    /// segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wal_tail_segments: Option<u64>,
+    /// Run the mark-and-sweep garbage collector after the tick's checkpoint
+    /// work. Nothing sweeps unless this is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gc: Option<GcRequest>,
+}
+
+/// What one maintenance tick did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MaintenanceTickOutcome {
+    /// No checkpoint was needed.
+    NotNeeded,
+    /// A checkpoint was published.
+    CheckpointPublished {
+        /// Sequence covered by the published checkpoint.
+        checkpoint_seq: ChangeSeq,
+    },
+    /// Another checkpoint already covered the attempted sequence.
+    CheckpointSuperseded {
+        /// Sequence this tick attempted to checkpoint.
+        attempted_seq: ChangeSeq,
+        /// Manifest pointer the head currently records.
+        current_manifest_id: ManifestId,
+    },
+    /// A concurrent head update won the race.
+    CheckpointPublishRaceLost {
+        /// Head sequence observed before the checkpoint attempt.
+        observed_head_seq: ChangeSeq,
+    },
+}
+
+/// Result of one explicit maintenance tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct MaintenanceTickResponse {
+    /// Namespace the tick ran against.
+    pub namespace_id: NamespaceId,
+    /// Namespace status observed before the tick acted.
+    pub status_before: NamespaceStatusResponse,
+    /// What the tick did.
+    pub outcome: MaintenanceTickOutcome,
+    /// Garbage-collection report when the tick opted into sweeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gc: Option<GcResponse>,
 }
 
 impl From<MutationResult> for FilesystemOperationResponse {

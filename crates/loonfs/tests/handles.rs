@@ -113,6 +113,9 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
             .expect("namespace status");
         assert_eq!(status.namespace_id, namespace_id);
         assert_eq!(status.wal_tail_segments, 1);
+        // Admin-driven work is observable through the admin handle's own
+        // cache counters, like writer and reader work through theirs.
+        let _ = admin.runtime_cache_stats();
 
         standalone.close().await.expect("close standalone reader");
         derived.close().await.expect("close derived reader");

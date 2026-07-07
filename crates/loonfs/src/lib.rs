@@ -96,9 +96,10 @@ pub use config::{
 };
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use options::{
-    CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions,
+    gc_config_from_request, gc_response_from_report, CopyOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

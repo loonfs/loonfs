@@ -1614,6 +1614,65 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-tick",
+        "http-admin-tick",
+    ))
+    .await;
+    let client = harness.client.clone();
+    let server_url = harness.server_url.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        client
+            .write_file_bytes(&target, b"hello tick\n")
+            .expect("write file");
+
+        // One WAL segment sits far below the default threshold.
+        let idle = post_maintenance_tick(&server_url, namespace).expect("idle tick");
+        assert_eq!(idle.namespace_id.as_str(), namespace);
+        assert_eq!(idle.status_before.wal_tail_segments, 1);
+        assert_eq!(idle.outcome, loonfs_api::MaintenanceTickOutcome::NotNeeded);
+        assert!(idle.gc.is_none());
+
+        // Forcing the threshold to one segment publishes a checkpoint and
+        // runs the opted-in GC pass.
+        let forced: loonfs_api::MaintenanceTickResponse = client
+            .maintenance_tick(
+                namespace,
+                &loonfs_api::MaintenanceTickRequest {
+                    max_wal_tail_segments: Some(1),
+                    gc: Some(loonfs_api::GcRequest::default()),
+                },
+            )
+            .expect("forced tick");
+        assert_eq!(
+            forced.outcome,
+            loonfs_api::MaintenanceTickOutcome::CheckpointPublished {
+                checkpoint_seq: ChangeSeq(1),
+            }
+        );
+        let gc = forced.gc.expect("gc report present when opted in");
+        assert_eq!(gc.deleted_wal_segments, 0);
+        assert!(!gc.degraded_retention);
+
+        let bytes = client.read_file_bytes(&target).expect("read file");
+        assert_eq!(bytes, b"hello tick\n");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -1851,6 +1910,16 @@ fn post_checkpoint(
 fn post_gc(server_url: &str, namespace: &str) -> Result<loonfs_api::GcResponse, ApiError> {
     post_admin_json(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+        "test-token",
+    )
+}
+
+fn post_maintenance_tick(
+    server_url: &str,
+    namespace: &str,
+) -> Result<loonfs_api::MaintenanceTickResponse, ApiError> {
+    post_admin_json(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/tick"),
         "test-token",
     )
 }
