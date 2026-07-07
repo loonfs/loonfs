@@ -2,7 +2,7 @@ use super::intent::PathMutationIntent;
 use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
 use crate::commit::CommitPlan;
 use crate::error::CoreError;
-use crate::metadata::{MetadataApplyError, MetadataState, MetadataView};
+use crate::metadata::{DurableVisibilityCache, MetadataApplyError, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
@@ -18,6 +18,10 @@ use loonfs_objectstore::ObjectStore;
 pub(crate) struct PublishPlanningSession {
     head: HeadState,
     accepted_rows: MetadataState,
+    /// Durable-layer lookups memoized across the whole batch attempt; the
+    /// accepted-rows overlay is the only layer that changes between
+    /// candidates and is composed per lookup.
+    durable_cache: DurableVisibilityCache,
 }
 
 impl PublishPlanningSession {
@@ -25,6 +29,7 @@ impl PublishPlanningSession {
         Self {
             head: head.clone(),
             accepted_rows: MetadataState::default(),
+            durable_cache: DurableVisibilityCache::default(),
         }
     }
 
@@ -36,13 +41,18 @@ impl PublishPlanningSession {
         &self.accepted_rows
     }
 
+    pub(crate) fn durable_cache(&self) -> &DurableVisibilityCache {
+        &self.durable_cache
+    }
+
     pub(crate) async fn plan_path_mutation<S: ObjectStore + ?Sized>(
         &self,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
         base_view: MetadataView<'_, '_, S>,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let view = base_view.with_overlay(&self.accepted_rows, self.head.seq);
+        let cached_view = base_view.with_durable_cache(&self.durable_cache);
+        let view = cached_view.with_overlay(&self.accepted_rows, self.head.seq);
         plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &view).await
     }
 
@@ -68,6 +78,7 @@ mod tests {
     use crate::engine::NamespaceEngine;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -122,6 +133,75 @@ mod tests {
             .writer_version(context.writer_version.clone())
             .build()
             .expect("test engine")
+    }
+
+    /// Two plans through one session share the durable-layer memo: the
+    /// second plan's path walk answers from cache instead of re-scanning
+    /// the manifest for the components both paths share.
+    #[tokio::test]
+    async fn second_plan_in_a_session_hits_the_durable_cache() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let staged = store_bytes_as_content(&store, &namespace_id, b"hello")
+            .await
+            .expect("stage");
+        // Durable parent directory so the walks touch manifest-backed state.
+        publish_namespace_mutations_batch(
+            &store,
+            &namespace_id,
+            vec![put_file_candidate(
+                "seed-docs",
+                "/docs/seed.txt",
+                staged.content_ref.clone(),
+            )],
+            &context,
+        )
+        .await
+        .remove(0)
+        .expect("seed publish");
+
+        let (view, _projection) = load_publish_metadata_view(
+            &store,
+            &namespace_id,
+            None,
+            None,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .expect("load publish view");
+        let session = PublishPlanningSession::new(view.head());
+
+        let first_intent = PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("plan-a").expect("valid commit id"),
+            absolute_path: "/docs/a.txt".to_owned(),
+            content_ref: staged.content_ref.clone(),
+            behavior: PutBehavior::NoReplace,
+        };
+        session
+            .plan_path_mutation(&namespace_id, &first_intent, view.metadata_view())
+            .await
+            .expect("first plan");
+        let after_first = session.durable_cache().stats();
+
+        let second_intent = PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("plan-b").expect("valid commit id"),
+            absolute_path: "/docs/b.txt".to_owned(),
+            content_ref: staged.content_ref.clone(),
+            behavior: PutBehavior::NoReplace,
+        };
+        session
+            .plan_path_mutation(&namespace_id, &second_intent, view.metadata_view())
+            .await
+            .expect("second plan");
+        let after_second = session.durable_cache().stats();
+
+        assert!(
+            after_second.hits > after_first.hits,
+            "second plan should reuse durable lookups from the first: {after_first:?} -> {after_second:?}"
+        );
+        assert!(
+            after_second.misses < after_first.misses * 2,
+            "shared path components should not re-scan per plan: {after_first:?} -> {after_second:?}"
+        );
     }
 
     /// The first candidate implicitly creates `/wide`; the second must plan

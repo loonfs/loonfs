@@ -254,7 +254,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             };
             let validation = PublishCommitValidationContext {
                 head: session.head(),
-                metadata_view: view.metadata_view(),
+                metadata_view: view
+                    .metadata_view()
+                    .with_durable_cache(session.durable_cache()),
                 accepted_rows: session.accepted_rows(),
             };
             let request = candidate_request.request;
