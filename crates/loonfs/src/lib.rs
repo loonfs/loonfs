@@ -3,12 +3,37 @@
 //! `loonfs` is the ergonomic runtime layer. It wraps `loonfs-core` with caching,
 //! upload helpers, maintenance hooks, and optional object-store metrics. Use it
 //! when you want LoonFS in-process, or when building the reference server.
+//!
+//! The runtime is opened through purpose-specific handles, each built
+//! asynchronously inside the Tokio runtime that will own it:
+//!
+//! - [`FsWriter`] for writes, with [`FsBackgroundWork`] controlling whether
+//!   the writer schedules non-destructive maintenance after writes.
+//! - [`FsReader`] for read-only latest views.
+//! - [`FsAdmin`] for explicit maintenance: status, checkpoints, retention,
+//!   and garbage collection.
+//!
+//! ```no_run
+//! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
+//! let writer = loonfs::FsWriter::builder(store_config)
+//!     .writer_id("server-a")
+//!     .background_work(loonfs::FsBackgroundWork::Enabled)
+//!     .build()
+//!     .await?;
+//! # Ok(()) }
+//! ```
+//!
+//! LoonFS never creates a hidden maintenance runtime: any background work a
+//! handle starts is spawned on that handle's owning runtime, and each handle
+//! has an async `close()` that settles what it owns. The all-purpose [`Fs`]
+//! handle remains as a transitional facade; new code should pick a handle.
 #![warn(missing_docs)]
 
 mod background;
 mod cache;
 mod config;
 mod fs;
+mod handle;
 mod options;
 pub mod publisher;
 mod time;
@@ -61,7 +86,7 @@ pub use loonfs_objectstore::metrics::{
     JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
 };
-pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore};
+pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig};
 
 pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;
@@ -71,6 +96,7 @@ pub use config::{
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS, DEFAULT_MAX_WAL_TAIL_SEGMENTS,
 };
 pub use fs::{Fs, FsBuilder};
+pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use options::{
     CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,

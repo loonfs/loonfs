@@ -41,6 +41,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// Embedded filesystem runtime.
 ///
 /// `Fs` is cheap to clone. Clones share caches and the underlying object store.
+///
+/// This all-purpose handle is transitional: new code should open a
+/// purpose-specific [`FsWriter`](crate::FsWriter),
+/// [`FsReader`](crate::FsReader), or [`FsAdmin`](crate::FsAdmin) instead.
 #[derive(Clone)]
 pub struct Fs {
     pub(crate) inner: Arc<FsInner>,
@@ -1163,6 +1167,11 @@ impl Fs {
     /// error.
     pub async fn wait_for_background_maintenance(&self) -> Result<()> {
         self.inner.background.drain().await
+    }
+
+    /// Rejects any further background maintenance scheduling.
+    pub(crate) fn shut_down_background(&self) {
+        self.inner.background.shut_down();
     }
 
     /// Snapshots the runtime cache counters.

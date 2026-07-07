@@ -74,6 +74,11 @@ impl BackgroundWork {
             .remove(namespace_id);
     }
 
+    /// Rejects any further background scheduling.
+    pub(crate) fn shut_down(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
     /// Spawns claimed work on the owning runtime and registers it for
     /// shutdown. Dropping the future without running it must release its
     /// claim, so an unresolvable runtime cleans up by dropping.
