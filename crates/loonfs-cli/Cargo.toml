@@ -13,6 +13,7 @@ name = "loon"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 clap.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 hostname = "0.4"

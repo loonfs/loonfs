@@ -10,8 +10,14 @@
 //! The embedded implementation lives with the host that embeds the `loonfs`
 //! runtime (currently `loonfs-cli`), which keeps this crate's dependency
 //! surface wire-only (`loonfs-api`).
+//!
+//! The trait is async so hosts drive every transport from their own runtime.
+//! [`Client`] stays a synchronous wire client; [`RemoteBackend`] bridges by
+//! running each wire call on the runtime's blocking pool instead of stalling
+//! an async worker.
 
 use crate::{Client, ClientError, NamespacePath};
+use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
     CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode, ListFileRevisionsResponse,
@@ -109,69 +115,76 @@ impl From<ClientError> for BackendError {
 /// failure, so a host renders identical outcomes regardless of which
 /// transport a profile selects (`loonfs-cli`'s two-mode parity tests hold
 /// this line).
+#[async_trait]
 pub trait Backend {
     /// Creates a new empty namespace.
-    fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError>;
+    async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError>;
     /// Marks a namespace deleted; `expected_head_seq` guards against deleting
     /// a namespace that moved since the caller last observed it.
-    fn delete_namespace(
+    async fn delete_namespace(
         &self,
         namespace_id: &str,
         expected_head_seq: Option<u64>,
     ) -> Result<DeleteNamespaceResponse, BackendError>;
     /// Creates a new namespace as a fork of the source's durable view.
-    fn fork_namespace(
+    async fn fork_namespace(
         &self,
         source: &str,
         new_namespace_id: &str,
     ) -> Result<NamespaceSummary, BackendError>;
     /// Summarizes a namespace's current head state.
-    fn namespace_status(&self, namespace_id: &str)
-        -> Result<NamespaceStatusResponse, BackendError>;
+    async fn namespace_status(
+        &self,
+        namespace_id: &str,
+    ) -> Result<NamespaceStatusResponse, BackendError>;
     /// Lists the entries of a directory.
-    fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, BackendError>;
+    async fn list_path(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<Vec<AuthoritativePathEntry>, BackendError>;
     /// Describes a single path entry.
-    fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, BackendError>;
+    async fn stat_path(&self, spec: &NamespacePath)
+        -> Result<AuthoritativePathEntry, BackendError>;
     /// Reads a file's current content.
-    fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError>;
+    async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError>;
     /// Reads a retained file revision's content.
-    fn read_file_revision_bytes(
+    async fn read_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError>;
     /// Lists one page of a file's retained revisions.
-    fn list_file_revisions(
+    async fn list_file_revisions(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError>;
     /// Writes a file; `force` replaces existing content.
-    fn put_file_bytes(
+    async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, BackendError>;
     /// Creates a directory.
-    fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
+    async fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
     /// Deletes a file or empty directory.
-    fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
+    async fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError>;
     /// Moves a path within a namespace.
-    fn move_path(
+    async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, BackendError>;
     /// Copies a file within a namespace.
-    fn copy_path(
+    async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, BackendError>;
     /// Restores a file to one of its retained revisions.
-    fn restore_file_revision(
+    async fn restore_file_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
@@ -180,18 +193,18 @@ pub trait Backend {
     // --- maintenance/admin plane (`admin/v0`) ---
 
     /// Creates or reuses a checkpoint pinning the namespace's current view.
-    fn create_checkpoint(
+    async fn create_checkpoint(
         &self,
         namespace_id: &str,
     ) -> Result<CreateCheckpointResponse, BackendError>;
     /// Advances the namespace retention floor. Irreversible: WAL history
     /// before the floor stops being replayable.
-    fn advance_retention(
+    async fn advance_retention(
         &self,
         namespace_id: &str,
     ) -> Result<AdvanceRetentionResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
-    fn list_changes(
+    async fn list_changes(
         &self,
         namespace_id: &str,
         after_seq: ChangeSeq,
@@ -212,155 +225,188 @@ impl RemoteBackend {
     }
 }
 
-impl Backend for RemoteBackend {
-    fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
-        self.client
-            .create_namespace(namespace_id)
+impl RemoteBackend {
+    /// Runs one synchronous wire call on the blocking pool, so async hosts
+    /// never stall an executor worker on HTTP I/O.
+    async fn wire<T, F>(&self, call: F) -> Result<T, BackendError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Client) -> Result<T, ClientError> + Send + 'static,
+    {
+        let client = self.client.clone();
+        tokio::task::spawn_blocking(move || call(client))
+            .await
+            .map_err(|error| BackendError::runtime_error(error.to_string()))?
             .map_err(BackendError::from)
     }
+}
 
-    fn delete_namespace(
+#[async_trait]
+impl Backend for RemoteBackend {
+    async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.create_namespace(&namespace_id))
+            .await
+    }
+
+    async fn delete_namespace(
         &self,
         namespace_id: &str,
         expected_head_seq: Option<u64>,
     ) -> Result<DeleteNamespaceResponse, BackendError> {
-        self.client
-            .delete_namespace(namespace_id, expected_head_seq.map(ChangeSeq))
-            .map_err(BackendError::from)
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| {
+            client.delete_namespace(&namespace_id, expected_head_seq.map(ChangeSeq))
+        })
+        .await
     }
 
-    fn fork_namespace(
+    async fn fork_namespace(
         &self,
         source: &str,
         new_namespace_id: &str,
     ) -> Result<NamespaceSummary, BackendError> {
-        self.client
-            .fork_namespace(source, new_namespace_id)
-            .map_err(BackendError::from)
+        let source = source.to_owned();
+        let new_namespace_id = new_namespace_id.to_owned();
+        self.wire(move |client| client.fork_namespace(&source, &new_namespace_id))
+            .await
     }
 
-    fn namespace_status(
+    async fn namespace_status(
         &self,
         namespace_id: &str,
     ) -> Result<NamespaceStatusResponse, BackendError> {
-        self.client
-            .namespace_status(namespace_id)
-            .map_err(BackendError::from)
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.namespace_status(&namespace_id))
+            .await
     }
 
-    fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
+    async fn list_path(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
+        let spec = spec.clone();
         Ok(self
-            .client
-            .list_path(spec)
-            .map_err(BackendError::from)?
+            .wire(move |client| client.list_path(&spec))
+            .await?
             .entries)
     }
 
-    fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, BackendError> {
-        self.client.stat_path(spec).map_err(BackendError::from)
+    async fn stat_path(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<AuthoritativePathEntry, BackendError> {
+        let spec = spec.clone();
+        self.wire(move |client| client.stat_path(&spec)).await
     }
 
-    fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
-        self.client
-            .read_file_bytes(spec)
-            .map_err(BackendError::from)
+    async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
+        let spec = spec.clone();
+        self.wire(move |client| client.read_file_bytes(&spec)).await
     }
 
-    fn read_file_revision_bytes(
+    async fn read_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError> {
-        self.client
-            .read_file_revision_bytes(spec, revision_no)
-            .map_err(BackendError::from)
+        let spec = spec.clone();
+        self.wire(move |client| client.read_file_revision_bytes(&spec, revision_no))
+            .await
     }
 
-    fn list_file_revisions(
+    async fn list_file_revisions(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError> {
-        self.client
-            .list_file_revisions_page(spec, limit, cursor)
-            .map_err(BackendError::from)
+        let spec = spec.clone();
+        let cursor = cursor.map(ToOwned::to_owned);
+        self.wire(move |client| client.list_file_revisions_page(&spec, limit, cursor.as_deref()))
+            .await
     }
 
-    fn put_file_bytes(
+    async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, BackendError> {
-        self.client
-            .put_file_bytes(spec, bytes, force)
-            .map_err(BackendError::from)
+        let spec = spec.clone();
+        let bytes = bytes.to_vec();
+        self.wire(move |client| client.put_file_bytes(&spec, &bytes, force))
+            .await
     }
 
-    fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
-        self.client
-            .create_directory(spec)
-            .map_err(BackendError::from)
+    async fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+        let spec = spec.clone();
+        self.wire(move |client| client.create_directory(&spec))
+            .await
     }
 
-    fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
-        self.client.delete_path(spec).map_err(BackendError::from)
+    async fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+        let spec = spec.clone();
+        self.wire(move |client| client.delete_path(&spec)).await
     }
 
-    fn move_path(
+    async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, BackendError> {
-        self.client.move_path(from, to).map_err(BackendError::from)
+        let from = from.clone();
+        let to = to.clone();
+        self.wire(move |client| client.move_path(&from, &to)).await
     }
 
-    fn copy_path(
+    async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, BackendError> {
-        self.client.copy_path(from, to).map_err(BackendError::from)
+        let from = from.clone();
+        let to = to.clone();
+        self.wire(move |client| client.copy_path(&from, &to)).await
     }
 
-    fn restore_file_revision(
+    async fn restore_file_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
     ) -> Result<MutationResult, BackendError> {
-        self.client
-            .restore_file_revision(spec, source_revision_no)
-            .map_err(BackendError::from)
+        let spec = spec.clone();
+        self.wire(move |client| client.restore_file_revision(&spec, source_revision_no))
+            .await
     }
 
-    fn create_checkpoint(
+    async fn create_checkpoint(
         &self,
         namespace_id: &str,
     ) -> Result<CreateCheckpointResponse, BackendError> {
-        self.client
-            .create_checkpoint(namespace_id)
-            .map_err(BackendError::from)
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.create_checkpoint(&namespace_id))
+            .await
     }
 
-    fn advance_retention(
+    async fn advance_retention(
         &self,
         namespace_id: &str,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
-        self.client
-            .advance_retention(namespace_id)
-            .map_err(BackendError::from)
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.advance_retention(&namespace_id))
+            .await
     }
 
-    fn list_changes(
+    async fn list_changes(
         &self,
         namespace_id: &str,
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError> {
-        self.client
-            .list_changes_page(namespace_id, after_seq, limit)
-            .map_err(BackendError::from)
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.list_changes_page(&namespace_id, after_seq, limit))
+            .await
     }
 }
 

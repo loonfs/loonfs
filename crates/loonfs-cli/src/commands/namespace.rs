@@ -12,23 +12,24 @@ use crate::resolve::{load_cli_config, resolve_target_profile, resolve_target_pro
 
 // --- namespace ---
 
-pub(crate) fn run_namespace_command(
+pub(crate) async fn run_namespace_command(
     kind: CommandKind,
     command: NamespaceCommand,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        NamespaceCommand::Create(args) => run_namespace_create(kind, args),
-        NamespaceCommand::Delete(args) => run_namespace_delete(kind, args),
-        NamespaceCommand::Fork(args) => run_namespace_fork(kind, args),
+        NamespaceCommand::Create(args) => run_namespace_create(kind, args).await,
+        NamespaceCommand::Delete(args) => run_namespace_delete(kind, args).await,
+        NamespaceCommand::Fork(args) => run_namespace_fork(kind, args).await,
     }
 }
 
-fn run_namespace_create(
+async fn run_namespace_create(
     kind: CommandKind,
     args: NamespaceCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let resolved = resolve_target_profile(explicit_profile)
+        .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     validate_namespace_id(&args.namespace_id).map_err(|error| {
@@ -43,6 +44,7 @@ fn run_namespace_create(
         .target
         .backend()
         .create_namespace(&args.namespace_id)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -60,12 +62,13 @@ fn run_namespace_create(
     })
 }
 
-fn run_namespace_delete(
+async fn run_namespace_delete(
     kind: CommandKind,
     args: NamespaceDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let resolved = resolve_target_profile(explicit_profile)
+        .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     validate_namespace_id(&args.namespace_id).map_err(|error| {
@@ -109,6 +112,7 @@ fn run_namespace_delete(
         .target
         .backend()
         .delete_namespace(&args.namespace_id, args.expected_head_seq)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -126,12 +130,13 @@ fn run_namespace_delete(
     })
 }
 
-fn run_namespace_fork(
+async fn run_namespace_fork(
     kind: CommandKind,
     args: NamespaceForkArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
     let resolved = resolve_target_profile(explicit_profile)
+        .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     validate_namespace_id(&args.source).map_err(|error| {
@@ -154,6 +159,7 @@ fn run_namespace_fork(
         .target
         .backend()
         .fork_namespace(&args.source, &args.new_namespace_id)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -171,7 +177,7 @@ fn run_namespace_fork(
     })
 }
 
-pub(crate) fn run_namespace_use(
+pub(crate) async fn run_namespace_use(
     kind: CommandKind,
     args: NamespaceUseArgs,
 ) -> Result<CommandOutput, CommandFailure> {
@@ -179,6 +185,7 @@ pub(crate) fn run_namespace_use(
     let mut loaded = load_cli_config()
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
+        .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     validate_namespace_id(&args.namespace).map_err(|error| {
@@ -194,6 +201,7 @@ pub(crate) fn run_namespace_use(
         .target
         .backend()
         .namespace_status(&args.namespace)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -233,7 +241,7 @@ pub(crate) fn run_namespace_use(
     })
 }
 
-pub(crate) fn run_namespace_current(
+pub(crate) async fn run_namespace_current(
     kind: CommandKind,
     args: CurrentArgs,
 ) -> Result<CommandOutput, CommandFailure> {
