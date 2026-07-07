@@ -175,6 +175,45 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
+    let temp_dir = tempdir().expect("tempdir");
+    let config = test_config(temp_dir.path(), "shutdown-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve_on(listener, config, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    // The server accepts work while running.
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".to_owned()),
+    });
+    tokio::task::spawn_blocking(move || {
+        client
+            .create_namespace("demo")
+            .expect("create namespace over http");
+    })
+    .await
+    .expect("join blocking task");
+
+    shutdown_tx.send(()).expect("trigger shutdown");
+    server
+        .await
+        .expect("join server task")
+        .expect("graceful shutdown settles background work");
+
+    // The listener is closed once serve returns.
+    assert!(
+        std::net::TcpStream::connect(addr).is_err(),
+        "listener should refuse connections after shutdown"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_created_state_is_readable_through_http() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;

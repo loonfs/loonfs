@@ -74,6 +74,13 @@ struct AppState {
 }
 
 pub async fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
+    Ok(app_parts(config).await?.0)
+}
+
+/// Builds the router plus the writer handle `serve` keeps aside, so a
+/// graceful shutdown can settle writer-scheduled background maintenance
+/// after the listener drains.
+async fn app_parts(config: ServerConfig) -> Result<(Router, FsWriter), ServerConfigError> {
     let store = config.object_store()?;
     let transfer_issuer = store.transfer_issuer();
     let store = Arc::new(store) as SharedStore;
@@ -85,26 +92,28 @@ async fn app_with_store(
     config: ServerConfig,
     store: SharedStore,
 ) -> Result<Router, ServerConfigError> {
-    app_with_store_and_transfer_issuer(config, store, None).await
+    Ok(app_with_store_and_transfer_issuer(config, store, None)
+        .await?
+        .0)
 }
 
 async fn app_with_store_and_transfer_issuer(
     config: ServerConfig,
     store: SharedStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
-) -> Result<Router, ServerConfigError> {
+) -> Result<(Router, FsWriter), ServerConfigError> {
     let (writer, reader, admin) = build_handles(&config, store).await?;
     let config = Arc::new(config);
     let publisher = PublisherRegistry::new(writer.clone());
     let state = AppState {
         config,
-        writer,
+        writer: writer.clone(),
         reader,
         admin,
         publisher,
         transfer_issuer,
     };
-    Ok(router(state))
+    Ok((router(state), writer))
 }
 
 fn router(state: AppState) -> Router {
@@ -265,18 +274,70 @@ pub enum ServeError {
     },
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
+    #[error("background maintenance did not settle during shutdown: {0}")]
+    Shutdown(#[source] loonfs::RuntimeError),
 }
 
+/// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
+/// stops accepting, in-flight requests drain, and the writer's scheduled
+/// background maintenance settles before this returns.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
+    serve_with_shutdown(config, shutdown_signal()).await
+}
+
+/// [`serve`] with a caller-supplied shutdown trigger instead of process
+/// signals, for hosts that manage their own lifecycle.
+pub async fn serve_with_shutdown(
+    config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
     let bind: SocketAddr = config.bind.parse().map_err(|source| ServeError::BindAddr {
         addr: config.bind.clone(),
         source,
     })?;
-    let app = app(config).await?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServeError::Bind { addr: bind, source })?;
-    axum::serve(listener, app).await.map_err(ServeError::Serve)
+    serve_on(listener, config, shutdown).await
+}
+
+async fn serve_on(
+    listener: tokio::net::TcpListener,
+    config: ServerConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    let (app, writer) = app_parts(config).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(ServeError::Serve)?;
+    // The listener has drained; settle writer-owned maintenance so a
+    // checkpoint tick in flight is not torn down mid-write-set. Panicked
+    // ticks surface here rather than disappearing with the process.
+    writer.close().await.map_err(ServeError::Shutdown)
+}
+
+/// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container
+/// orchestrators send before a kill.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install ctrl-c handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 #[cfg_attr(
