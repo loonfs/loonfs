@@ -168,6 +168,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         MetadataRootState {
             namespace_id: namespace_id.clone(),
             manifest_id: initial_manifest.payload.manifest_id,
+            manifest_object_id: initial_manifest.payload.manifest_object_id.clone(),
             manifest_head_seq: initial_head.seq,
             manifest_payload_checksum: initial_manifest.payload_checksum.clone(),
             updated_at_ms: context.now_ms,
@@ -192,6 +193,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             floor_seq: initial_head.seq,
             basis: WalFloorBasis {
                 manifest_id: initial_manifest.payload.manifest_id,
+                manifest_object_id: initial_manifest.payload.manifest_object_id.clone(),
                 manifest_head_seq: initial_head.seq,
                 manifest_payload_checksum: initial_manifest.payload_checksum.clone(),
             },

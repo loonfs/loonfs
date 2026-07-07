@@ -1,5 +1,5 @@
 use crate::ObjectStoreError;
-use loonfs_api::ManifestId;
+use loonfs_api::ManifestObjectId;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ObjectLayout;
@@ -183,14 +183,14 @@ impl ObjectLayout {
         )))
     }
 
-    pub fn metadata_manifest(
+    pub fn metadata_manifest_object(
         &self,
         namespace: &str,
-        manifest_id: ManifestId,
+        manifest_object_id: &ManifestObjectId,
     ) -> MetadataManifestKey {
         MetadataManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/metadata/manifests/{:020}.json",
-            manifest_id.0
+            "namespaces/{namespace}/metadata/manifests/{}.manifest.json",
+            manifest_object_id.as_str()
         )))
     }
 
@@ -351,7 +351,7 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{parse_object_key, sha256_hex_from_digest, DurableObjectFamily, ObjectLayout};
-    use loonfs_api::ManifestId;
+    use loonfs_api::ManifestObjectId;
 
     #[test]
     fn layout_golden_tree_matches_target_paths() {
@@ -390,9 +390,13 @@ mod tests {
             layout.metadata_root("ns-1").as_str(),
             "namespaces/ns-1/metadata/root.json"
         );
+        let manifest_object_id = ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
+            .expect("valid manifest object id");
         assert_eq!(
-            layout.metadata_manifest("ns-1", ManifestId(400)).as_str(),
-            "namespaces/ns-1/metadata/manifests/00000000000000000400.json"
+            layout
+                .metadata_manifest_object("ns-1", &manifest_object_id)
+                .as_str(),
+            "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
             layout
@@ -492,7 +496,11 @@ mod tests {
             ),
             (
                 layout
-                    .metadata_manifest("ns-1", ManifestId(1))
+                    .metadata_manifest_object(
+                        "ns-1",
+                        &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+                            .expect("valid manifest object id"),
+                    )
                     .into_string(),
                 DurableObjectFamily::MetadataManifest,
             ),

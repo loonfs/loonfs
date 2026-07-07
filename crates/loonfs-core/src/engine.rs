@@ -16,7 +16,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DirectoryPageCursor,
     FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId,
-    MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
+    ManifestObjectId, MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo,
+    UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ pub struct RuntimeReadContext {
     head: HeadState,
     head_etag: String,
     manifest_id: ManifestId,
+    manifest_object_id: ManifestObjectId,
     table_cache: Option<Arc<MetadataTableCache>>,
     tail_cache: Option<Arc<WalTailProjectionCache>>,
 }
@@ -39,6 +41,7 @@ impl RuntimeReadContext {
         head: HeadState,
         head_etag: String,
         manifest_id: ManifestId,
+        manifest_object_id: ManifestObjectId,
         table_cache: Option<Arc<MetadataTableCache>>,
         tail_cache: Option<Arc<WalTailProjectionCache>>,
     ) -> Self {
@@ -46,6 +49,7 @@ impl RuntimeReadContext {
             head,
             head_etag,
             manifest_id,
+            manifest_object_id,
             table_cache,
             tail_cache,
         }
@@ -57,6 +61,7 @@ fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_
         &options.head,
         Some(options.head_etag.as_str()),
         options.manifest_id,
+        &options.manifest_object_id,
         options.table_cache.as_deref(),
         options.tail_cache.as_deref(),
     )

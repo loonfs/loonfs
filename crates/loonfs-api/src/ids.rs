@@ -342,6 +342,32 @@ fn check_wal_segment_id(value: &str) -> Result<(), GeneratedIdValidationError> {
     Ok(())
 }
 
+fn check_manifest_object_id(value: &str) -> Result<(), GeneratedIdValidationError> {
+    let Some((position, suffix)) = value.split_once('-') else {
+        return Err(generated_id_error(
+            value,
+            "must be `<20 digit manifest_id>-<16 lowercase hex>`".to_owned(),
+        ));
+    };
+    if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(generated_id_error(
+            value,
+            "manifest id prefix must be 20 decimal digits".to_owned(),
+        ));
+    }
+    if suffix.len() != 16
+        || !suffix
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(generated_id_error(
+            value,
+            "suffix must be 16 lowercase hex characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_id_grammar(value: &str) -> Result<(), &'static str> {
     if value.is_empty() {
         return Err("must not be empty");
@@ -458,6 +484,29 @@ string_id! {
     /// Durable id for one metadata SST table file.
     MetadataTableId,
     prefix = "tbl"
+}
+
+string_id! {
+    /// Durable object id for one namespace manifest candidate.
+    ManifestObjectId,
+    error = GeneratedIdValidationError,
+    validate = check_manifest_object_id
+}
+
+impl ManifestObjectId {
+    /// Manifest object ids order by logical manifest position and stay unique
+    /// under races.
+    pub fn generate(manifest_id: ManifestId) -> Self {
+        let suffix = Uuid::new_v4().simple().to_string();
+        Self(format!("{:020}-{}", manifest_id.0, &suffix[..16]))
+    }
+}
+
+/// Logical manifest id encoded in a manifest object id's 20-digit prefix.
+pub fn manifest_object_id_manifest_id(object_id: &str) -> Option<ManifestId> {
+    check_manifest_object_id(object_id).ok()?;
+    let (position, _) = object_id.split_once('-')?;
+    position.parse().ok().map(ManifestId)
 }
 
 string_id! {
@@ -592,8 +641,8 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeSeq, CheckpointId, CommitId, ContentStoreId, GcPinId, MetadataTableId, NameKey,
-        NamespaceId, UploadId, WalSegmentId,
+        ChangeSeq, CheckpointId, CommitId, ContentStoreId, GcPinId, ManifestId, ManifestObjectId,
+        MetadataTableId, NameKey, NamespaceId, UploadId, WalSegmentId,
     };
     use std::collections::BTreeSet;
 
@@ -676,12 +725,19 @@ mod tests {
                 .as_str(),
             "report.txt"
         );
+        assert_eq!(
+            ManifestObjectId::try_from("00000000000000000042-0123456789abcdef")
+                .expect("valid manifest object id")
+                .as_str(),
+            "00000000000000000042-0123456789abcdef"
+        );
 
         assert!(NamespaceId::try_from("invalid/name").is_err());
         assert!(CommitId::try_from("invalid/name").is_err());
         assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
         assert!(CheckpointId::try_from("chk_0000000000000000000000000000000g").is_err());
         assert!(NameKey::try_from("a/b").is_err());
+        assert!(ManifestObjectId::try_from("42-0123456789abcdef").is_err());
     }
 
     #[test]
@@ -765,8 +821,12 @@ mod tests {
         assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
         assert!(WalSegmentId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
+        assert!(ManifestObjectId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
         assert!(WalSegmentId::parse("412-9f2a6c0e4b7d4a90").is_err());
         assert!(WalSegmentId::parse("00000000000000000412-9F2A6C0E4B7D4A90").is_err());
+        assert!(ManifestObjectId::parse("412-9f2a6c0e4b7d4a90").is_err());
+        assert!(ManifestObjectId::parse("00000000000000000412-9F2A6C0E4B7D4A90").is_err());
+        assert!(ManifestObjectId::parse("mf_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(WalSegmentId::parse("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(MetadataTableId::parse(["tbl", "123"].join("-")).is_err());
         assert!(GcPinId::parse(["pin", "123"].join("-")).is_err());
@@ -777,17 +837,22 @@ mod tests {
     fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
         let upload_id = UploadId::generate();
         let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
+        let manifest_object_id = ManifestObjectId::generate(ManifestId(413));
         let metadata_table_id = MetadataTableId::generate();
         let gc_pin_id = GcPinId::generate();
         let checkpoint_id = CheckpointId::generate();
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
         assert!(wal_segment_id.as_str().starts_with("00000000000000000412-"));
+        assert!(manifest_object_id
+            .as_str()
+            .starts_with("00000000000000000413-"));
         assert_generated_id_shape(metadata_table_id.as_str(), "tbl");
         assert_generated_id_shape(gc_pin_id.as_str(), "pin");
         assert_generated_id_shape(checkpoint_id.as_str(), "chk");
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(WalSegmentId::parse(wal_segment_id.as_str()).is_ok());
+        assert!(ManifestObjectId::parse(manifest_object_id.as_str()).is_ok());
         assert!(MetadataTableId::parse(metadata_table_id.as_str()).is_ok());
         assert!(GcPinId::parse(gc_pin_id.as_str()).is_ok());
         assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
@@ -808,12 +873,36 @@ mod tests {
     }
 
     #[test]
+    fn generated_manifest_object_ids_are_not_reused_across_samples() {
+        let mut ids = BTreeSet::new();
+        for _ in 0..128 {
+            let id = ManifestObjectId::generate(ManifestId(412));
+            assert!(
+                ids.insert(id.clone()),
+                "generated duplicate manifest object id {id}"
+            );
+        }
+    }
+
+    #[test]
     fn wal_segment_id_start_seq_reads_position_prefix() {
         assert_eq!(
             super::wal_segment_id_start_seq("00000000000000000412-9f2a6c0e4b7d4a90"),
             Some(ChangeSeq(412))
         );
         assert_eq!(super::wal_segment_id_start_seq("not-a-segment-id"), None);
+    }
+
+    #[test]
+    fn manifest_object_id_manifest_id_reads_position_prefix() {
+        assert_eq!(
+            super::manifest_object_id_manifest_id("00000000000000000412-9f2a6c0e4b7d4a90"),
+            Some(ManifestId(412))
+        );
+        assert_eq!(
+            super::manifest_object_id_manifest_id("not-a-manifest-object-id"),
+            None
+        );
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {

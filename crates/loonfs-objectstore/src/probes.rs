@@ -1,7 +1,7 @@
-use crate::keys::{metadata_manifest, upload_session, wal_head};
+use crate::keys::{metadata_manifest_object, upload_session, wal_head};
 use crate::{ObjectStore, ObjectStoreError};
 use bytes::Bytes;
-use loonfs_api::ManifestId;
+use loonfs_api::ManifestObjectId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -257,9 +257,11 @@ async fn probe_sorted_listing<S: ObjectStore + ?Sized>(
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "sorted");
+    let manifest_object_id = ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+        .expect("valid manifest object id");
     let keys = vec![
         wal_head(&namespace),
-        metadata_manifest(&namespace, ManifestId(1)),
+        metadata_manifest_object(&namespace, &manifest_object_id),
         upload_session(&namespace, "upl_00000000000000000000000000000001"),
     ];
     for key in &keys {

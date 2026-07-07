@@ -1,7 +1,7 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
 use loonfs_api::wire::manifest::{MetadataSegmentKey, MetadataTableFamily};
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -38,6 +38,14 @@ pub enum ManifestLoadError {
         object_key: String,
         expected: ManifestId,
         actual: ManifestId,
+    },
+    #[error(
+        "namespace manifest object id mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+    )]
+    ManifestObjectIdMismatch {
+        object_key: String,
+        expected: ManifestObjectId,
+        actual: ManifestObjectId,
     },
     #[error(
         "namespace manifest conflict for `{object_key}` manifest `{manifest_id}`: expected payload checksum `{expected_payload_checksum}`, actual `{actual_payload_checksum}`"

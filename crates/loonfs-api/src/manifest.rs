@@ -2,8 +2,8 @@ use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId, MetadataTableId,
-    NameKey, NamespaceId, RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId,
+    ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,7 @@ pub struct NamespaceManifestFork {
     pub fork_seq: ChangeSeq,
     pub source_checkpoint_id: CheckpointId,
     pub source_manifest_id: ManifestId,
+    pub source_manifest_object_id: ManifestObjectId,
     pub source_head_seq: ChangeSeq,
 }
 
@@ -314,6 +315,7 @@ impl MetadataSstEnvelope {
 pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
     pub manifest_id: ManifestId,
+    pub manifest_object_id: ManifestObjectId,
     /// Same-namespace manifest this one was derived from; null for the
     /// bootstrap or fork-initial manifest. Provenance and a discovery aid,
     /// never authority — superseded-table sets are derived by predecessor
@@ -628,8 +630,8 @@ mod tests {
         NamespaceManifestPayload,
     };
     use crate::{
-        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, MetadataTableId, NameKey,
-        NamespaceId, WriterEpoch,
+        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId,
+        NameKey, NamespaceId, WriterEpoch,
     };
     use std::collections::BTreeMap;
 
@@ -641,6 +643,10 @@ mod tests {
                 prev_manifest_id: None,
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(10),
+                manifest_object_id: ManifestObjectId::parse(
+                    "00000000000000000010-0123456789abcdef",
+                )
+                .expect("valid manifest object id"),
                 head_seq: ChangeSeq(10),
                 head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
                     .expect("commit id"),
@@ -680,6 +686,10 @@ mod tests {
                 prev_manifest_id: None,
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(12),
+                manifest_object_id: ManifestObjectId::parse(
+                    "00000000000000000012-0123456789abcdef",
+                )
+                .expect("valid manifest object id"),
                 head_seq: ChangeSeq(12),
                 head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
                     .expect("commit id"),
@@ -697,6 +707,10 @@ mod tests {
                     )
                     .expect("checkpoint id"),
                     source_manifest_id: ManifestId(10),
+                    source_manifest_object_id: ManifestObjectId::parse(
+                        "00000000000000000010-0123456789abcdef",
+                    )
+                    .expect("valid manifest object id"),
                     source_head_seq: ChangeSeq(12),
                 }),
                 features: BTreeMap::new(),

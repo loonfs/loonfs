@@ -31,13 +31,19 @@ use crate::metadata::{
 };
 #[cfg(test)]
 use futures::future::try_join_all;
+#[cfg(test)]
+use loonfs_api::manifest_object_id_manifest_id;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
     decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json, MetadataFileRef,
     MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
 };
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
-use loonfs_objectstore::keys::{metadata_manifest, metadata_table};
+#[cfg(test)]
+use loonfs_api::ManifestId;
+use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
+#[cfg(test)]
+use loonfs_objectstore::keys::metadata_manifest_prefix;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -50,11 +56,51 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
 ) -> Result<ManifestMaterializationForInspection, ManifestLoadError> {
-    load_manifest_materialization_for_inspection_if_present(store, namespace_id, manifest_id)
-        .await?
-        .ok_or_else(|| ManifestLoadError::MissingManifest {
-            object_key: metadata_manifest(namespace_id.as_str(), manifest_id),
-        })
+    let manifest_object_id =
+        manifest_object_id_for_manifest_id(store, namespace_id, manifest_id).await?;
+    load_manifest_materialization_for_inspection_if_present(
+        store,
+        namespace_id,
+        &manifest_object_id,
+    )
+    .await?
+    .ok_or_else(|| ManifestLoadError::MissingManifest {
+        object_key: metadata_manifest_object(namespace_id.as_str(), &manifest_object_id),
+    })
+}
+
+#[cfg(test)]
+async fn manifest_object_id_for_manifest_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_id: ManifestId,
+) -> Result<ManifestObjectId, ManifestLoadError> {
+    let prefix = metadata_manifest_prefix(namespace_id.as_str());
+    let keys =
+        store
+            .list_prefix(&prefix)
+            .await
+            .map_err(|error| ManifestLoadError::ReadManifest {
+                object_key: prefix.clone(),
+                message: error.to_string(),
+            })?;
+    for key in keys {
+        let Some(file_name) = key.rsplit('/').next() else {
+            continue;
+        };
+        let Some(raw_id) = file_name.strip_suffix(".manifest.json") else {
+            continue;
+        };
+        let Ok(object_id) = ManifestObjectId::parse(raw_id) else {
+            continue;
+        };
+        if manifest_object_id_manifest_id(object_id.as_str()) == Some(manifest_id) {
+            return Ok(object_id);
+        }
+    }
+    Err(ManifestLoadError::MissingManifest {
+        object_key: format!("{prefix}{:020}-*.manifest.json", manifest_id.0),
+    })
 }
 
 /// Loads and validates only the manifest envelope, without fetching its
@@ -63,14 +109,19 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
 pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope, ManifestLoadError> {
-    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
-    load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_id, &manifest_key)
-        .await?
-        .ok_or(ManifestLoadError::MissingManifest {
-            object_key: manifest_key,
-        })
+    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
+    load_namespace_manifest_envelope_if_present(
+        store,
+        namespace_id,
+        manifest_object_id,
+        &manifest_key,
+    )
+    .await?
+    .ok_or(ManifestLoadError::MissingManifest {
+        object_key: manifest_key,
+    })
 }
 
 /// Loads the current manifest's verified table descriptors without fetching
@@ -78,18 +129,18 @@ pub(crate) async fn load_namespace_manifest_envelope<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_verified_manifest_tables<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
-    load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_id).await
+    load_verified_manifest_tables_with_cache(store, None, namespace_id, manifest_object_id).await
 }
 
 pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
-    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
+    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
     let manifest = {
         let Some(manifest_bytes) = store
             .get(&manifest_key, None)
@@ -115,7 +166,13 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
             }
         })
     }?;
-    validate_namespace_manifest(namespace_id, manifest_id, &manifest_key, &manifest)?;
+    validate_namespace_manifest(
+        namespace_id,
+        manifest.payload.manifest_id,
+        manifest_object_id,
+        &manifest_key,
+        &manifest,
+    )?;
     validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
     validate_manifest_table_descriptors(&manifest_key, &manifest)?;
     let tables = VerifiedMetadataTables {
@@ -153,13 +210,13 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
 >(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
 ) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
-    let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
+    let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
     let manifest = load_namespace_manifest_envelope_if_present(
         store,
         namespace_id,
-        manifest_id,
+        manifest_object_id,
         &manifest_key,
     )
     .await?;
@@ -182,7 +239,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
 pub(super) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
     manifest_key: &str,
 ) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
     let Some(manifest_bytes) = store
@@ -206,7 +263,13 @@ pub(super) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore +
             message: err.to_string(),
         }
     })?;
-    validate_namespace_manifest(namespace_id, manifest_id, manifest_key, &manifest)?;
+    validate_namespace_manifest(
+        namespace_id,
+        manifest.payload.manifest_id,
+        manifest_object_id,
+        manifest_key,
+        &manifest,
+    )?;
     Ok(Some(manifest))
 }
 
