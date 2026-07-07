@@ -8,11 +8,13 @@ description = "Blocking HTTP client for a LoonFS server."
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 http.workspace = true
 loonfs-api = { path = "../loonfs-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 toml.workspace = true
 ureq.workspace = true
 urlencoding.workspace = true

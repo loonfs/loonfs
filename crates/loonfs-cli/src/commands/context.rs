@@ -13,7 +13,7 @@ pub(crate) struct CommandContext {
     pub(crate) target: crate::backend::ResolvedTarget,
 }
 
-pub(crate) fn resolve_command_context(
+pub(crate) async fn resolve_command_context(
     kind: CommandKind,
     target: &TargetSelectorArgs,
 ) -> Result<CommandContext, CommandFailure> {
@@ -21,6 +21,7 @@ pub(crate) fn resolve_command_context(
     let loaded = load_cli_config()
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
+        .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let namespace = resolve_namespace(

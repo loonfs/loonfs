@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    loonfs_cli::main()
+#[tokio::main]
+async fn main() -> ExitCode {
+    loonfs_cli::main().await
 }

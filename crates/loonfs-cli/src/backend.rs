@@ -7,12 +7,12 @@
 
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
+use async_trait::async_trait;
 use loonfs::{
     BootstrapNamespaceError, ChangesResponse, CopyOptions, CoreError, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    ErrorCode, Fs, FsConfig, ListChangesOptions, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
-    TraceStoreKind,
+    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, ListChangesOptions, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
@@ -21,46 +21,34 @@ use loonfs_api::{
     PaginationPolicy, PutBehavior, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
-use std::future::Future;
 use std::sync::Arc;
 
 pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
 
 // --- Embedded backend (embedded/direct mode uses the shared loonfs runtime) ---
 
+/// Purpose-specific handles over one shared store client: reads go through
+/// the reader, mutations through the writer, and maintenance through the
+/// admin handle. Embedded CLI writes stay `ManualOnly` — a one-shot command
+/// never schedules background maintenance; `loon admin` commands are the
+/// explicit maintenance path.
 pub(crate) struct EmbeddedBackend {
-    fs: Fs,
-    runtime: tokio::runtime::Runtime,
+    writer: FsWriter,
+    reader: FsReader,
+    admin: FsAdmin,
 }
 
-impl EmbeddedBackend {
-    fn block_on<T, F>(&self, future: F) -> Result<T, BackendError>
-    where
-        F: Future<Output = loonfs::Result<T>>,
-    {
-        self.runtime.block_on(future).map_err(map_runtime_error)
-    }
-
-    fn block_on_scoped<T, F>(&self, namespace: &str, future: F) -> Result<T, BackendError>
-    where
-        F: Future<Output = loonfs::Result<T>>,
-    {
-        self.runtime
-            .block_on(future)
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace, error))
-    }
-}
-
+#[async_trait]
 impl Backend for EmbeddedBackend {
-    fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
+    async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
         let namespace_id = parse_namespace_id(namespace_id)?;
-        self.block_on(
-            self.fs
-                .create_namespace(&namespace_id, CreateNamespaceOptions::default()),
-        )
+        self.writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .map_err(map_runtime_error)
     }
 
-    fn delete_namespace(
+    async fn delete_namespace(
         &self,
         namespace_id: &str,
         expected_head_seq: Option<u64>,
@@ -69,95 +57,105 @@ impl Backend for EmbeddedBackend {
         let options = DeleteNamespaceOptions {
             expected_head_seq: expected_head_seq.map(ChangeSeq),
         };
-        self.block_on(self.fs.delete_namespace(&namespace_id, options))
+        self.writer
+            .delete_namespace(&namespace_id, options)
+            .await
+            .map_err(map_runtime_error)
     }
 
-    fn fork_namespace(
+    async fn fork_namespace(
         &self,
         source: &str,
         new_namespace_id: &str,
     ) -> Result<NamespaceSummary, BackendError> {
         let source_namespace_id = parse_namespace_id(source)?;
         let new_namespace_id = parse_namespace_id(new_namespace_id)?;
-        self.block_on(
-            self.fs
-                .fork_namespace(&source_namespace_id, &new_namespace_id),
-        )
+        self.writer
+            .fork_namespace(&source_namespace_id, &new_namespace_id)
+            .await
+            .map_err(map_runtime_error)
     }
 
-    fn namespace_status(
+    async fn namespace_status(
         &self,
         namespace_id: &str,
     ) -> Result<NamespaceStatusResponse, BackendError> {
         let parsed = parse_namespace_id(namespace_id)?;
-        self.block_on_scoped(namespace_id, self.fs.namespace_status(&parsed))
+        self.admin
+            .namespace_status(&parsed)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
+    async fn list_path(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.list_path(&namespace_id, &spec.absolute_path),
-        )
+        self.reader
+            .list_path(&namespace_id, &spec.absolute_path)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, BackendError> {
+    async fn stat_path(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<AuthoritativePathEntry, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.stat_path(&namespace_id, &spec.absolute_path),
-        )
+        self.reader
+            .stat_path(&namespace_id, &spec.absolute_path)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
+    async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        let result = self.block_on_scoped(
-            &spec.namespace,
-            self.fs.read_file_bytes(&namespace_id, &spec.absolute_path),
-        )?;
+        let result = self
+            .reader
+            .read_file_bytes(&namespace_id, &spec.absolute_path)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
         Ok(result.bytes)
     }
 
-    fn read_file_revision_bytes(
+    async fn read_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        let result = self.block_on_scoped(
-            &spec.namespace,
-            self.fs
-                .read_file_revision_bytes(&namespace_id, &spec.absolute_path, revision_no),
-        )?;
+        let result = self
+            .reader
+            .read_file_revision_bytes(&namespace_id, &spec.absolute_path, revision_no)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
         Ok(result.bytes)
     }
 
-    fn list_file_revisions(
+    async fn list_file_revisions(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.list_file_revisions_page(
-                &namespace_id,
-                &spec.absolute_path,
-                loonfs_api::PageRequest {
-                    limit: resolve_cli_page_limit(limit)?,
-                    cursor: cursor
-                        .map(loonfs_api::decode_file_revisions_cursor)
-                        .transpose()
-                        .map_err(|error| {
-                            BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-                        })?,
-                },
-            ),
-        )
+        let request = loonfs_api::PageRequest {
+            limit: resolve_cli_page_limit(limit)?,
+            cursor: cursor
+                .map(loonfs_api::decode_file_revisions_cursor)
+                .transpose()
+                .map_err(|error| {
+                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                })?,
+        };
+        self.reader
+            .list_file_revisions_page(&namespace_id, &spec.absolute_path, request)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    fn put_file_bytes(
+    async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
@@ -170,9 +168,8 @@ impl Backend for EmbeddedBackend {
             PutBehavior::NoReplace
         };
         let commit_id = generated_commit_id();
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.put_file_bytes(
+        self.writer
+            .put_file_bytes(
                 &namespace_id,
                 &spec.absolute_path,
                 bytes,
@@ -180,51 +177,51 @@ impl Backend for EmbeddedBackend {
                     behavior,
                     commit_id: Some(commit_id),
                 },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+    async fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.delete_path(
+        self.writer
+            .delete_path(
                 &namespace_id,
                 &spec.absolute_path,
                 DeleteOptions {
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     commit_id: Some(commit_id),
                 },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+    async fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.create_directory(
+        self.writer
+            .create_directory(
                 &namespace_id,
                 &spec.absolute_path,
                 CreateDirectoryOptions {
                     commit_id: Some(commit_id),
                 },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    fn move_path(
+    async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
-        self.block_on_scoped(
-            &from.namespace,
-            self.fs.move_path(
+        self.writer
+            .move_path(
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
@@ -232,71 +229,78 @@ impl Backend for EmbeddedBackend {
                     behavior: MoveBehavior::NoReplace,
                     commit_id: Some(commit_id),
                 },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
     }
 
-    fn copy_path(
+    async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
-        self.block_on_scoped(
-            &from.namespace,
-            self.fs.copy_path(
+        self.writer
+            .copy_path(
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 CopyOptions {
                     commit_id: Some(commit_id),
                 },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
     }
 
-    fn restore_file_revision(
+    async fn restore_file_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
     ) -> Result<MutationResult, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        self.block_on_scoped(
-            &spec.namespace,
-            self.fs.restore_file_revision(
+        self.writer
+            .restore_file_revision(
                 &namespace_id,
                 &spec.absolute_path,
                 source_revision_no,
                 RestoreRevisionOptions {
                     commit_id: Some(commit_id),
                 },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
     // The admin methods mirror the server handlers' error scoping exactly:
     // checkpoint/retention map runtime errors unscoped, the change feed is
     // namespace-scoped. Parity keeps embedded and remote outputs identical.
 
-    fn create_checkpoint(
+    async fn create_checkpoint(
         &self,
         namespace_id: &str,
     ) -> Result<CreateCheckpointResponse, BackendError> {
         let parsed = parse_namespace_id(namespace_id)?;
-        self.block_on(self.fs.create_checkpoint(&parsed))
+        self.admin
+            .create_checkpoint(&parsed)
+            .await
+            .map_err(map_runtime_error)
     }
 
-    fn advance_retention(
+    async fn advance_retention(
         &self,
         namespace_id: &str,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
         let parsed = parse_namespace_id(namespace_id)?;
-        self.block_on(self.fs.advance_retention_floor(&parsed))
+        self.admin
+            .advance_retention_floor(&parsed)
+            .await
+            .map_err(map_runtime_error)
     }
 
-    fn list_changes(
+    async fn list_changes(
         &self,
         namespace_id: &str,
         after_seq: ChangeSeq,
@@ -304,14 +308,14 @@ impl Backend for EmbeddedBackend {
     ) -> Result<ChangesResponse, BackendError> {
         let parsed = parse_namespace_id(namespace_id)?;
         let limit = resolve_cli_page_limit(limit)?;
-        self.block_on_scoped(
-            namespace_id,
-            self.fs.list_changes_after(
+        self.reader
+            .list_changes_after(
                 &parsed,
                 after_seq,
                 ListChangesOptions { limit: Some(limit) },
-            ),
-        )
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 }
 
@@ -396,18 +400,19 @@ pub(crate) struct RemoteTarget {
 }
 
 impl ResolvedTarget {
-    pub(crate) fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
+    pub(crate) async fn resolve(
+        profile_name: &str,
+        profile: &ProfileConfig,
+    ) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
                 store,
                 writer_id,
                 writer_version,
                 ..
-            } => Ok(Self::Embedded(Box::new(EmbeddedTarget::new(
-                store,
-                writer_id.as_deref(),
-                writer_version.as_deref(),
-            )?))),
+            } => Ok(Self::Embedded(Box::new(
+                EmbeddedTarget::new(store, writer_id.as_deref(), writer_version.as_deref()).await?,
+            ))),
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
@@ -436,35 +441,46 @@ impl ResolvedTarget {
 }
 
 impl EmbeddedTarget {
-    fn new(
+    async fn new(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
         writer_version: Option<&str>,
     ) -> Result<Self, CliError> {
-        let store = store_config
-            .configured_object_store()
-            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?;
-        let store: SharedObjectStore = Arc::new(store);
-        let fs = Fs::open(
-            store,
-            FsConfig {
-                writer_id: writer_id
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(default_writer_id),
-                writer_version: writer_version
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
-                runtime_cache: RuntimeCacheConfig::default(),
-                trace_mode: TraceMode::Embedded,
-                trace_store_kind: TraceStoreKind::from(store_config.kind()),
-            },
-        )
-        .map_err(map_runtime_error)?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
+        let writer_id = writer_id
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(default_writer_id);
+        let writer_version = writer_version
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION")));
+        let trace_store_kind = TraceStoreKind::from(store_config.kind());
+        // One command drives all three handles from one runtime, so they
+        // deliberately share one provider client.
+        let store: SharedObjectStore = Arc::new(
+            store_config
+                .configured_object_store()
+                .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?,
+        );
+        let writer = FsWriter::builder_with_store(store.clone())
+            .writer_id(writer_id.clone())
+            .writer_version(writer_version.clone())
+            .background_work(FsBackgroundWork::ManualOnly)
+            .trace_store_kind(trace_store_kind)
             .build()
-            .map_err(|error| CliError::invalid_config(error.to_string()))?;
-        let backend = EmbeddedBackend { fs, runtime };
+            .await
+            .map_err(map_runtime_error)?;
+        let reader = writer.reader();
+        let admin = FsAdmin::builder_with_store(store)
+            .actor_id(writer_id)
+            .actor_version(writer_version)
+            .trace_store_kind(trace_store_kind)
+            .build()
+            .await
+            .map_err(map_runtime_error)?;
+        let backend = EmbeddedBackend {
+            writer,
+            reader,
+            admin,
+        };
         Ok(Self { backend })
     }
 }
@@ -524,17 +540,20 @@ mod tests {
         assert!(error.message.contains("already exists"));
     }
 
-    #[test]
-    fn embedded_backend_generates_non_empty_commit_id_for_embedded_put() {
+    #[tokio::test]
+    async fn embedded_backend_generates_non_empty_commit_id_for_embedded_put() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = EmbeddedTarget::new(&store, None, None).expect("build embedded target");
+        let target = EmbeddedTarget::new(&store, None, None)
+            .await
+            .expect("build embedded target");
         target
             .backend
             .create_namespace("demo")
+            .await
             .expect("create namespace");
 
         target
@@ -547,39 +566,40 @@ mod tests {
                 b"hello",
                 false,
             )
+            .await
             .expect("put file");
 
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let changes = target
             .backend
-            .block_on(target.backend.fs.list_changes_after(
-                &namespace_id,
-                ChangeSeq(0),
-                loonfs::ListChangesOptions::default(),
-            ))
+            .list_changes("demo", ChangeSeq(0), None)
+            .await
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
         assert!(!changes.changes[0].commit_id.as_str().trim().is_empty());
     }
 
-    #[test]
-    fn embedded_admin_methods_surface_registry_codes_for_missing_namespaces() {
+    #[tokio::test]
+    async fn embedded_admin_methods_surface_registry_codes_for_missing_namespaces() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = EmbeddedTarget::new(&store, None, None).expect("build embedded target");
+        let target = EmbeddedTarget::new(&store, None, None)
+            .await
+            .expect("build embedded target");
 
         let checkpoint = target
             .backend
             .create_checkpoint("missing")
+            .await
             .expect_err("checkpoint on missing namespace");
         assert_eq!(checkpoint.code, ErrorCode::NamespaceNotFound.as_str());
 
         let changes = target
             .backend
             .list_changes("missing", ChangeSeq(0), None)
+            .await
             .expect_err("changes on missing namespace");
         assert_eq!(changes.code, ErrorCode::NamespaceNotFound.as_str());
         assert_eq!(changes.message, "namespace `missing` does not exist");

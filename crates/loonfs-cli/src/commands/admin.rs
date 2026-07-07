@@ -5,25 +5,26 @@ use loonfs_api::ChangeSeq;
 
 // --- maintenance/admin plane ---
 
-pub(crate) fn run_admin_command(
+pub(crate) async fn run_admin_command(
     kind: CommandKind,
     command: AdminCommand,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, args),
-        AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args),
+        AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, args).await,
+        AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
     }
 }
 
-fn run_admin_checkpoint(
+async fn run_admin_checkpoint(
     kind: CommandKind,
     args: AdminNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
         .backend()
         .create_checkpoint(&context.namespace)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -41,15 +42,16 @@ fn run_admin_checkpoint(
     })
 }
 
-fn run_admin_retention_advance(
+async fn run_admin_retention_advance(
     kind: CommandKind,
     args: AdminNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
         .backend()
         .advance_retention(&context.namespace)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -67,16 +69,17 @@ fn run_admin_retention_advance(
     })
 }
 
-pub(crate) fn run_admin_changes(
+pub(crate) async fn run_admin_changes(
     kind: CommandKind,
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let after_seq = ChangeSeq(args.after.unwrap_or(0));
     let response = context
         .target
         .backend()
         .list_changes(&context.namespace, after_seq, args.limit)
+        .await
         .map_err(|error| {
             fail(
                 kind,
