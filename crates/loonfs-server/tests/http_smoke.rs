@@ -10,11 +10,11 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, ContentRef,
     CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest,
     FilesystemOperationResponse, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
-    PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
-    LIMIT_PAGINATION_MAX,
+    NamespaceId, PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_objectstore::keys::metadata_manifest;
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -1667,8 +1667,14 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
+        let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+        let root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
+            &store,
+            &namespace_id,
+        ))
+        .expect("metadata root");
         block_on(store.put_overwrite(
-            &metadata_manifest(namespace, ManifestId(1)),
+            &metadata_manifest_object(namespace, &root.state.manifest_object_id),
             Bytes::from_static(br#"{"bad":"json"}"#),
         ))
         .expect("corrupt manifest");

@@ -48,10 +48,11 @@ pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
-    generated_id, wal_segment_id_start_seq, ChangeSeq, CheckpointId, CommitId,
-    CommitIdValidationError, ContentStoreId, GcPinId, GeneratedIdValidationError, InodeId,
-    InodeKind, ManifestId, MetadataTableId, NameKey, NameKeyValidationError, NamespaceId,
-    NamespaceIdValidationError, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
+    generated_id, manifest_object_id_manifest_id, wal_segment_id_start_seq, ChangeSeq,
+    CheckpointId, CommitId, CommitIdValidationError, ContentStoreId, GcPinId,
+    GeneratedIdValidationError, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId,
+    NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId,
+    WalSegmentId, WriterEpoch,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{

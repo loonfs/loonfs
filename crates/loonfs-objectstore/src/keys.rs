@@ -1,6 +1,6 @@
 use crate::layout::{self, ObjectLayout};
 use crate::ObjectStoreError;
-use loonfs_api::ManifestId;
+use loonfs_api::ManifestObjectId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataTableFamily {
@@ -77,9 +77,9 @@ pub fn metadata_table_prefix(namespace: &str) -> String {
     ObjectLayout::new().metadata_table_prefix(namespace)
 }
 
-pub fn metadata_manifest(namespace: &str, manifest_id: ManifestId) -> String {
+pub fn metadata_manifest_object(namespace: &str, manifest_object_id: &ManifestObjectId) -> String {
     ObjectLayout::new()
-        .metadata_manifest(namespace, manifest_id)
+        .metadata_manifest_object(namespace, manifest_object_id)
         .into_string()
 }
 
@@ -138,12 +138,12 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, content_store_descriptor, metadata_manifest,
+        checkpoint_record, content_blob, content_store_descriptor, metadata_manifest_object,
         metadata_root, metadata_table, namespace_config, pin, sha256_hex_from_digest,
         upload_session, upload_session_prefix, wal_floor, wal_head, wal_segment,
         wal_segment_id_from_key, wal_segment_prefix,
     };
-    use loonfs_api::ManifestId;
+    use loonfs_api::ManifestObjectId;
 
     /// Pins every standard key pattern in the format spec's "Durable object
     /// families" table to the key this crate actually builds for that family.
@@ -193,7 +193,10 @@ mod tests {
                 .replace("{content_store_id}", "cs-1")
                 .replace("{start_seq:020}", &format!("{:020}", 42))
                 .replace("{suffix}", "0123456789abcdef")
-                .replace("{manifest_id:020}", &format!("{:020}", 400))
+                .replace(
+                    "{manifest_object_id}",
+                    "00000000000000000400-0123456789abcdef",
+                )
                 .replace("{checkpoint_id}", "chk-1")
                 .replace("{table_id}", "tbl-1")
                 .replace("{pin_id}", "pin-1")
@@ -212,7 +215,11 @@ mod tests {
             ),
             (
                 "Metadata manifests",
-                metadata_manifest("ns-1", ManifestId(400)),
+                metadata_manifest_object(
+                    "ns-1",
+                    &ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
+                        .expect("valid manifest object id"),
+                ),
             ),
             ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
@@ -272,9 +279,11 @@ mod tests {
             None
         );
         assert_eq!(metadata_root("ns-1"), "namespaces/ns-1/metadata/root.json");
+        let manifest_object_id = ManifestObjectId::parse("00000000000000000400-0123456789abcdef")
+            .expect("valid manifest object id");
         assert_eq!(
-            metadata_manifest("ns-1", ManifestId(400)),
-            "namespaces/ns-1/metadata/manifests/00000000000000000400.json"
+            metadata_manifest_object("ns-1", &manifest_object_id),
+            "namespaces/ns-1/metadata/manifests/00000000000000000400-0123456789abcdef.manifest.json"
         );
         assert_eq!(
             metadata_table("ns-1", "tbl_00000000000000000000000000000001"),

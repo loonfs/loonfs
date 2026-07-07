@@ -16,7 +16,7 @@ use loonfs::{
     TraceStoreKind, UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::keys::{metadata_manifest, namespace_config, wal_head};
+use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loonfs_objectstore::{
@@ -2064,7 +2064,13 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let manifest_key = metadata_manifest(namespace_id.as_str(), ManifestId(2));
+    let root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
+        &raw_store,
+        &namespace_id,
+    ))
+    .expect("metadata root");
+    let manifest_key =
+        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
     let manifest_bytes = block_on(raw_store.get(&manifest_key, None))
         .expect("read namespace manifest")
         .expect("namespace manifest exists");

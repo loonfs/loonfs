@@ -268,6 +268,24 @@ pub(crate) async fn write_immutable_object<S: ObjectStore + ?Sized>(
                 message: "object already exists with different bytes".to_owned(),
             })
         }
+        Err(err @ ObjectStoreError::Transport { .. }) => {
+            let original = err.message();
+            match existing_object_matches_expected_bytes(store, object_key, expected_bytes).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(ImmutableObjectWriteError::Store {
+                    object_key: object_key.to_owned(),
+                    message: format!(
+                        "{original}; immutable object exists with different bytes after transport error"
+                    ),
+                }),
+                Err(verify_err) => Err(ImmutableObjectWriteError::Store {
+                    object_key: object_key.to_owned(),
+                    message: format!(
+                        "{original}; failed to verify immutable write after transport error: {verify_err}"
+                    ),
+                }),
+            }
+        }
         Err(err) => Err(ImmutableObjectWriteError::Store {
             object_key: object_key.to_owned(),
             message: err.message(),
@@ -305,7 +323,7 @@ async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
         })?
         .ok_or_else(|| ImmutableObjectWriteError::Store {
             object_key: object_key.to_owned(),
-            message: "object is missing after precondition failure".to_owned(),
+            message: "object is missing while verifying immutable write".to_owned(),
         })?;
     Ok(existing == expected_bytes)
 }
@@ -329,8 +347,8 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        read_durable_content_bytes, validate_durable_content_reference,
-        DurableContentValidationError,
+        read_durable_content_bytes, validate_durable_content_reference, write_immutable_object,
+        DurableContentValidationError, ImmutableObjectWriteError,
     };
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -451,6 +469,82 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn immutable_write_recovers_when_transport_error_hides_committed_object() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = TransportOnCreateStore::new(inner, TransportBehavior::WriteThenError);
+        let bytes = b"metadata table bytes";
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        let object_key =
+            content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
+
+        write_immutable_object(&store, &object_key, bytes)
+            .await
+            .expect("committed object is accepted after transport error");
+
+        let stored = store
+            .inner
+            .get(&object_key, None)
+            .await
+            .expect("read object")
+            .expect("object exists");
+        assert_eq!(stored, Bytes::copy_from_slice(bytes));
+    }
+
+    #[tokio::test]
+    async fn immutable_write_rejects_transport_error_without_committed_object() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = TransportOnCreateStore::new(inner, TransportBehavior::ErrorWithoutWrite);
+        let bytes = b"metadata table bytes";
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        let object_key =
+            content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
+
+        let err = write_immutable_object(&store, &object_key, bytes)
+            .await
+            .expect_err("missing object after transport error is rejected");
+
+        assert_error_contains(&err, "simulated timeout");
+        assert_error_contains(
+            &err,
+            "failed to verify immutable write after transport error",
+        );
+        assert_error_contains(&err, "object is missing while verifying immutable write");
+    }
+
+    #[tokio::test]
+    async fn immutable_write_rejects_different_existing_bytes_after_transport_error() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let expected = b"expected immutable bytes";
+        let different = b"different immutable bytes";
+        let content_ref = ContentRef::whole_file_v0(expected);
+        let object_key =
+            content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
+        inner
+            .put_if_absent(&object_key, Bytes::copy_from_slice(different))
+            .await
+            .expect("preload different object");
+        let store = TransportOnCreateStore::new(inner, TransportBehavior::ErrorWithoutWrite);
+
+        let err = write_immutable_object(&store, &object_key, expected)
+            .await
+            .expect_err("different existing bytes are rejected");
+
+        assert_error_contains(&err, "simulated timeout");
+        assert_error_contains(
+            &err,
+            "immutable object exists with different bytes after transport error",
+        );
+    }
+
+    fn assert_error_contains(error: &ImmutableObjectWriteError, expected: &str) {
+        let message = error.to_string();
+        assert!(
+            message.contains(expected),
+            "expected error to contain `{expected}`, got `{message}`"
+        );
+    }
+
     fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -471,6 +565,72 @@ mod tests {
             .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await
             .expect("put content");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum TransportBehavior {
+        WriteThenError,
+        ErrorWithoutWrite,
+    }
+
+    #[derive(Debug)]
+    struct TransportOnCreateStore {
+        inner: LocalFsStore,
+        behavior: TransportBehavior,
+    }
+
+    impl TransportOnCreateStore {
+        fn new(inner: LocalFsStore, behavior: TransportBehavior) -> Self {
+            Self { inner, behavior }
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for TransportOnCreateStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if mode == PutMode::CreateIfAbsent {
+                if matches!(self.behavior, TransportBehavior::WriteThenError) {
+                    self.inner.put(key, bytes, mode).await?;
+                }
+                return Err(ObjectStoreError::transport(key, "simulated timeout"));
+            }
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
     }
 
     #[derive(Debug)]

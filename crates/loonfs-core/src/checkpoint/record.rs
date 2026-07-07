@@ -15,7 +15,7 @@ use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointRecordEnvelope,
     CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
 };
-use loonfs_api::{CheckpointId, ManifestId, NamespaceId};
+use loonfs_api::{CheckpointId, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 pub(crate) fn deterministic_checkpoint_id(
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
+    manifest_object_id: &ManifestObjectId,
     manifest_payload_checksum: &str,
 ) -> CheckpointId {
     let mut hasher = Sha256::new();
@@ -34,6 +35,8 @@ pub(crate) fn deterministic_checkpoint_id(
     hasher.update(namespace_id.as_str().as_bytes());
     hasher.update(b"\0");
     hasher.update(manifest_id.0.to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(manifest_object_id.as_str().as_bytes());
     hasher.update(b"\0");
     hasher.update(manifest_payload_checksum.as_bytes());
     let digest = hasher.finalize();
@@ -186,12 +189,15 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     if floor_seq > record.manifest_head_seq {
         return Ok(false);
     }
-    let manifest =
-        match load_namespace_manifest_envelope(store, &record.namespace_id, record.manifest_id)
-            .await
-        {
-            Ok(manifest) => manifest,
-            Err(_) => return Ok(false),
-        };
+    let manifest = match load_namespace_manifest_envelope(
+        store,
+        &record.namespace_id,
+        &record.manifest_object_id,
+    )
+    .await
+    {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(false),
+    };
     Ok(manifest.payload_checksum == record.manifest_payload_checksum)
 }

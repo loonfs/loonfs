@@ -23,7 +23,8 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::{
-    sha256_digest, CheckpointId, GcPinId, ManifestId, NamespaceId, NamespaceSummary, WriterEpoch,
+    sha256_digest, CheckpointId, GcPinId, ManifestId, ManifestObjectId, NamespaceId,
+    NamespaceSummary, WriterEpoch,
 };
 use loonfs_objectstore::keys::{metadata_root, namespace_config, pin, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -82,12 +83,13 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                 ))
             })?
             .state;
-    let source_tables =
-        load_verified_manifest_tables(store, source_namespace_id, source_record.manifest_id)
-            .await
-            .map_err(|err| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err))
-            })?;
+    let source_tables = load_verified_manifest_tables(
+        store,
+        source_namespace_id,
+        &source_record.manifest_object_id,
+    )
+    .await
+    .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
     let source_manifest = source_tables.manifest();
     let fork_seq = source_record.manifest_head_seq;
     let source_head_commit_id = source_record.head_commit_id.clone();
@@ -97,6 +99,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         .map_err(MetadataProjectionLoadError::from)?;
     let source_content_store_id = source_config.content_store_id.clone();
     let target_manifest_id = ManifestId(fork_seq.0);
+    let target_manifest_object_id = ManifestObjectId::generate(target_manifest_id);
 
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
@@ -136,6 +139,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         fork_target_manifest_payload(
             new_namespace_id,
             target_manifest_id,
+            target_manifest_object_id,
             source_namespace_id,
             source_manifest,
             &source_record,
@@ -179,6 +183,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         MetadataRootState {
             namespace_id: new_namespace_id.clone(),
             manifest_id: target_manifest_id,
+            manifest_object_id: target_manifest.payload.manifest_object_id.clone(),
             manifest_head_seq: fork_seq,
             manifest_payload_checksum: target_manifest.payload_checksum.clone(),
             updated_at_ms: context.now_ms,
@@ -202,6 +207,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             floor_seq: fork_seq,
             basis: WalFloorBasis {
                 manifest_id: target_manifest_id,
+                manifest_object_id: target_manifest.payload.manifest_object_id.clone(),
                 manifest_head_seq: fork_seq,
                 manifest_payload_checksum: target_manifest.payload_checksum.clone(),
             },
@@ -251,6 +257,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 fn fork_target_manifest_payload(
     new_namespace_id: &NamespaceId,
     target_manifest_id: ManifestId,
+    target_manifest_object_id: ManifestObjectId,
     source_namespace_id: &NamespaceId,
     source_manifest: &NamespaceManifestEnvelope,
     source_record: &CheckpointRecordState,
@@ -259,6 +266,7 @@ fn fork_target_manifest_payload(
     NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
+        manifest_object_id: target_manifest_object_id,
         prev_manifest_id: None,
         head_seq: fork_seq,
         head_commit_id: source_record.head_commit_id.clone(),
@@ -273,6 +281,7 @@ fn fork_target_manifest_payload(
             fork_seq,
             source_checkpoint_id: source_record.checkpoint_id.clone(),
             source_manifest_id: source_record.manifest_id,
+            source_manifest_object_id: source_record.manifest_object_id.clone(),
             source_head_seq: source_record.manifest_head_seq,
         }),
         features: source_manifest.payload.features.clone(),
@@ -443,7 +452,8 @@ mod tests {
     };
     use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
     use loonfs_api::{
-        ChangeSeq, CheckpointId, CommitId, GcPinId, InodeId, ManifestId, NamespaceId, WriterEpoch,
+        ChangeSeq, CheckpointId, CommitId, GcPinId, InodeId, ManifestId, ManifestObjectId,
+        NamespaceId, WriterEpoch,
     };
     use loonfs_objectstore::keys::pin;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -533,6 +543,11 @@ mod tests {
         .expect("pin envelope")
     }
 
+    fn manifest_object_id(manifest_id: ManifestId) -> ManifestObjectId {
+        ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_id.0))
+            .expect("valid manifest object id")
+    }
+
     fn source_checkpoint_record(
         checkpoint_id: &str,
         manifest_id: ManifestId,
@@ -543,6 +558,7 @@ mod tests {
             checkpoint_id: CheckpointId::parse(checkpoint_id).expect("checkpoint id"),
             namespace_id: NamespaceId::parse("source").expect("source namespace"),
             manifest_id,
+            manifest_object_id: manifest_object_id(manifest_id),
             manifest_head_seq: head_seq,
             manifest_payload_checksum: "sha256:test".to_owned(),
             head_commit_id: CommitId::parse(head_commit_id).expect("commit id"),
@@ -566,6 +582,7 @@ mod tests {
             NamespaceManifestPayload {
                 namespace_id,
                 manifest_id,
+                manifest_object_id: manifest_object_id(manifest_id),
                 prev_manifest_id: None,
                 head_seq,
                 head_commit_id: commit_id.clone(),
@@ -606,6 +623,7 @@ mod tests {
         let target = fork_target_manifest_payload(
             &NamespaceId::parse("target").expect("target namespace"),
             ManifestId(7),
+            manifest_object_id(ManifestId(7)),
             &NamespaceId::parse("source").expect("source namespace"),
             &source,
             &source_checkpoint,

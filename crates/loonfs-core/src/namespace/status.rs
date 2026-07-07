@@ -74,11 +74,12 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     }
     let head = loaded_head.envelope.state;
     let root = loaded_root.envelope.state;
-    let manifest = load_namespace_manifest_envelope(store, expected_namespace_id, root.manifest_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let manifest =
+        load_namespace_manifest_envelope(store, expected_namespace_id, &root.manifest_object_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
     let manifest_head_seq = manifest.payload.head_seq;
     let wal_tail_segments = if head.visible_wal_tip.is_some() {
         count_wal_tail_segments_by_position(store, expected_namespace_id, manifest_head_seq).await?

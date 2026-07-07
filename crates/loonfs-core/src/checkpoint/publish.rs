@@ -11,8 +11,8 @@ use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, MetadataRootEnvelope, MetadataRootState,
 };
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::metadata_manifest;
+use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 // Root CAS retries are about publisher concurrency, not manifest id
@@ -39,9 +39,9 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<(), MetadataProjectionLoadError> {
-    let manifest_key = metadata_manifest(
+    let manifest_key = metadata_manifest_object(
         manifest.payload.namespace_id.as_str(),
-        manifest.payload.manifest_id,
+        &manifest.payload.manifest_object_id,
     );
     let manifest_bytes = encode_namespace_manifest_json(manifest).map_err(|err| {
         MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::ManifestCodec {
@@ -58,7 +58,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
             let Some(existing) = load_namespace_manifest_envelope_if_present(
                 store,
                 &manifest.payload.namespace_id,
-                manifest.payload.manifest_id,
+                &manifest.payload.manifest_object_id,
                 &manifest_key,
             )
             .await
@@ -112,6 +112,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
     // whatever newer root someone else already published.
     let manifest_id = manifest.payload.manifest_id;
+    let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let manifest_head_seq = manifest.payload.head_seq;
     for _attempt in 0..ROOT_CAS_RETRY_LIMIT {
         let loaded = read_metadata_root_object(store, namespace_id)
@@ -120,17 +121,14 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             })?;
         let current = &loaded.envelope.state;
-        let superseded = current.manifest_head_seq > manifest_head_seq
-            || (current.manifest_head_seq == manifest_head_seq
-                && current.manifest_id == manifest_id
-                && current.manifest_payload_checksum == manifest.payload_checksum);
-        if superseded {
+        if root_supersedes_candidate(current, manifest_head_seq, manifest_id) {
             return Ok(ManifestPublicationOutcome::Superseded(current.clone()));
         }
 
         let next = MetadataRootState {
             namespace_id: namespace_id.clone(),
             manifest_id,
+            manifest_object_id: manifest_object_id.clone(),
             manifest_head_seq,
             manifest_payload_checksum: manifest.payload_checksum.clone(),
             updated_at_ms,
@@ -157,8 +155,42 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             Err(
                 ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
             ) => continue,
-            Err(error) => return Err(CoreError::store(&loaded.object_key, &error)),
+            Err(error) => {
+                let recovered = read_metadata_root_object(store, namespace_id)
+                    .await
+                    .map_err(|reload_error| {
+                        CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
+                            reload_error,
+                        ))
+                    })?
+                    .envelope
+                    .state;
+                if root_points_to_candidate(&recovered, &next) {
+                    return Ok(ManifestPublicationOutcome::Published(recovered));
+                }
+                if root_supersedes_candidate(&recovered, manifest_head_seq, manifest_id) {
+                    return Ok(ManifestPublicationOutcome::Superseded(recovered));
+                }
+                return Err(CoreError::store(&loaded.object_key, &error));
+            }
         }
     }
     Ok(ManifestPublicationOutcome::RootCasRaceLost)
+}
+
+fn root_points_to_candidate(current: &MetadataRootState, candidate: &MetadataRootState) -> bool {
+    current.manifest_id == candidate.manifest_id
+        && current.manifest_object_id == candidate.manifest_object_id
+        && current.manifest_head_seq == candidate.manifest_head_seq
+        && current.manifest_payload_checksum == candidate.manifest_payload_checksum
+}
+
+fn root_supersedes_candidate(
+    current: &MetadataRootState,
+    candidate_head_seq: ChangeSeq,
+    candidate_manifest_id: ManifestId,
+) -> bool {
+    current.manifest_head_seq > candidate_head_seq
+        || (current.manifest_head_seq == candidate_head_seq
+            && current.manifest_id >= candidate_manifest_id)
 }

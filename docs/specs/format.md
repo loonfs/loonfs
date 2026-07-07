@@ -59,7 +59,7 @@ The required durable object families and standard key patterns are:
 | **Namespace config** | Immutable | Stable namespace identity and immutable configuration, including the content-store binding; written last at creation as the completion marker. | `namespaces/{namespace_id}/namespace.json` |
 | **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_id:020}.json` |
+| **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest; written active, verified after the write, flipped dead on failure or release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Pins** | Immutable | Explicit reachability roots referencing a source checkpoint only (reachability resolves pin -> checkpoint -> manifest -> tables); stored under the **source** namespace, whose GC is the consumer. | `namespaces/{source_namespace_id}/pins/{pin_id}.json` |
@@ -112,9 +112,9 @@ The namespace tree's lifecycle can be read off its grammar:
   `metadata/manifests/`, `metadata/tables/`, `pins/`, `uploads/`,
   `content-stores/.../blobs/`). A record in a collection matters only when a
   pointer, chain link, checkpoint, or pin reaches it — except to GC, which
-  lists collections to find garbage and roots. Ordered segment names exist so
-  inspection and reclamation can trust a listing's order; opaque names exist
-  where nothing should ever read meaning into one.
+  lists collections to find garbage and roots. WAL segments and metadata
+  manifests use ordered prefixes plus random suffixes so listings stay useful
+  while concurrent writers avoid fighting for one immutable object name.
 - **Paths express ownership, not authority.** Envelopes and payloads still
   validate namespace id, object id, family, checksum, and sequence fields;
   the same fact is never encoded twice (table family lives in the manifest

@@ -38,8 +38,8 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
-    GcPinId, InodeId, InodeKind, ManifestId, MetadataTableId, NameKey, NamePolicy, NamespaceId,
-    RevisionNo, UploadId, WalSegmentId, WriterEpoch,
+    GcPinId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
+    NamePolicy, NamespaceId, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -113,6 +113,11 @@ fn commit_id() -> CommitId {
 
 fn checkpoint_id(value: &str) -> CheckpointId {
     CheckpointId::parse(value).expect("valid checkpoint id")
+}
+
+fn manifest_object_id(manifest_id: u64, suffix: &str) -> ManifestObjectId {
+    ManifestObjectId::parse(format!("{manifest_id:020}-{suffix}"))
+        .expect("valid manifest object id")
 }
 
 fn sample_content_ref() -> ContentRef {
@@ -290,6 +295,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
         NamespaceManifestPayload {
             namespace_id: namespace_id(),
             manifest_id: ManifestId(2),
+            manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
             prev_manifest_id: Some(ManifestId(1)),
             head_seq: ChangeSeq(2),
             head_commit_id: commit_id(),
@@ -304,6 +310,7 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 fork_seq: ChangeSeq(2),
                 source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000001"),
                 source_manifest_id: ManifestId(1),
+                source_manifest_object_id: manifest_object_id(1, "0123456789abcdef"),
                 source_head_seq: ChangeSeq(2),
             }),
             features: BTreeMap::from([(
@@ -468,6 +475,7 @@ fn control_objects_match_golden_bytes() {
             floor_seq: ChangeSeq(1),
             basis: WalFloorBasis {
                 manifest_id: ManifestId(2),
+                manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
                 manifest_head_seq: ChangeSeq(2),
                 manifest_payload_checksum:
                     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -483,6 +491,7 @@ fn control_objects_match_golden_bytes() {
         MetadataRootState {
             namespace_id: namespace_id(),
             manifest_id: ManifestId(2),
+            manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
             manifest_head_seq: ChangeSeq(2),
             manifest_payload_checksum:
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
@@ -503,6 +512,7 @@ fn control_objects_match_golden_bytes() {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
             namespace_id: namespace_id(),
             manifest_id: ManifestId(2),
+            manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
             manifest_head_seq: ChangeSeq(2),
             manifest_payload_checksum:
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),

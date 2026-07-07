@@ -4,7 +4,7 @@ use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, GcPinId, InodeId, ManifestId,
-    NamePolicy, NamespaceId, UploadId, WalSegmentId,
+    ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,7 @@ pub struct NamespaceConfigState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalFloorBasis {
     pub manifest_id: ManifestId,
+    pub manifest_object_id: ManifestObjectId,
     pub manifest_head_seq: ChangeSeq,
     pub manifest_payload_checksum: String,
 }
@@ -120,6 +121,7 @@ pub struct WalFloorState {
 pub struct MetadataRootState {
     pub namespace_id: NamespaceId,
     pub manifest_id: ManifestId,
+    pub manifest_object_id: ManifestObjectId,
     pub manifest_head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub manifest_payload_checksum: String,
@@ -163,6 +165,7 @@ pub struct CheckpointRecordState {
     pub checkpoint_id: CheckpointId,
     pub namespace_id: NamespaceId,
     pub manifest_id: ManifestId,
+    pub manifest_object_id: ManifestObjectId,
     pub manifest_head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub manifest_payload_checksum: String,

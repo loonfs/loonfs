@@ -1,12 +1,12 @@
 mod provider_env;
 
 use bytes::Bytes;
-use loonfs_api::ManifestId;
+use loonfs_api::ManifestObjectId;
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, metadata_manifest, metadata_table, namespace_config,
-    upload_session, wal_head, wal_segment,
+    content_blob, content_store_descriptor, metadata_manifest_object, metadata_table,
+    namespace_config, upload_session, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probes::run_contract_probes;
@@ -217,8 +217,12 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/wal/segments/seg_00000000000000000000000000000001.wal.zst"
     );
     assert_eq!(
-        metadata_manifest("ns-1", ManifestId(420)),
-        "namespaces/ns-1/metadata/manifests/00000000000000000420.json"
+        metadata_manifest_object(
+            "ns-1",
+            &ManifestObjectId::parse("00000000000000000420-0123456789abcdef")
+                .expect("valid manifest object id"),
+        ),
+        "namespaces/ns-1/metadata/manifests/00000000000000000420-0123456789abcdef.manifest.json"
     );
     assert_eq!(
         metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
@@ -593,9 +597,11 @@ async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: 
 }
 
 async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
+    let manifest_object_id = ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+        .expect("valid manifest object id");
     let keys = vec![
         wal_head("ns-sort"),
-        metadata_manifest("ns-sort", ManifestId(1)),
+        metadata_manifest_object("ns-sort", &manifest_object_id),
         upload_session("ns-sort", "upl_00000000000000000000000000000001"),
     ];
     for key in &keys {

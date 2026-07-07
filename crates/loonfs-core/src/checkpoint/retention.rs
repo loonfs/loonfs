@@ -31,11 +31,12 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     let root = loaded_root.envelope.state;
-    let manifest_tables = load_verified_manifest_tables(store, namespace_id, root.manifest_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let manifest_tables =
+        load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
     if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
             "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",
@@ -109,6 +110,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             floor_seq: target_floor,
             basis: WalFloorBasis {
                 manifest_id: root.manifest_id,
+                manifest_object_id: root.manifest_object_id.clone(),
                 manifest_head_seq: root.manifest_head_seq,
                 manifest_payload_checksum: root.manifest_payload_checksum.clone(),
             },

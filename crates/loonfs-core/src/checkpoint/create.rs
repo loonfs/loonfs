@@ -41,8 +41,8 @@ use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, NamespaceId};
-use loonfs_objectstore::keys::metadata_manifest;
+use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::Instrument;
@@ -72,6 +72,7 @@ pub(crate) const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
 
 struct CheckpointBasis {
     manifest_id: ManifestId,
+    manifest_object_id: ManifestObjectId,
     manifest_head_seq: ChangeSeq,
     manifest_payload_checksum: String,
 }
@@ -116,25 +117,28 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
         let basis = if projection.root.manifest_head_seq == head_seq {
             CheckpointBasis {
                 manifest_id: projection.root.manifest_id,
+                manifest_object_id: projection.root.manifest_object_id.clone(),
                 manifest_head_seq: projection.root.manifest_head_seq,
                 manifest_payload_checksum: projection.root.manifest_payload_checksum.clone(),
             }
         } else {
-            let mut manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
+            let manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
             let mut written_manifest = None;
             for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
-                let manifest_key = metadata_manifest(namespace_id.as_str(), manifest_id);
+                let manifest_object_id = ManifestObjectId::generate(manifest_id);
+                let manifest_key =
+                    metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
                 match load_namespace_manifest_envelope_if_present(
                     store,
                     namespace_id,
-                    manifest_id,
+                    &manifest_object_id,
                     &manifest_key,
                 )
                 .await
                 {
                     Ok(Some(_existing)) => {
-                        // Another writer owns this allocation slot.
-                        manifest_id = next_manifest_id_after(manifest_id)?;
+                        // Physical-id collision or retry; keep the logical
+                        // slot and generate another object id.
                         continue;
                     }
                     Ok(None) => {
@@ -145,6 +149,7 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
                             &context.writer_version,
                             policy,
                             manifest_id,
+                            manifest_object_id,
                         )
                         .await?;
                         // `write_namespace_manifest` owns the idempotent
@@ -156,7 +161,6 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
                             Err(MetadataProjectionLoadError::ManifestLoad(
                                 ManifestLoadError::ManifestConflict { .. },
                             )) => {
-                                manifest_id = next_manifest_id_after(manifest_id)?;
                                 continue;
                             }
                             Err(error) => return Err(CoreError::MetadataProjection(error)),
@@ -197,6 +201,7 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
             }
             CheckpointBasis {
                 manifest_id: manifest.payload.manifest_id,
+                manifest_object_id: manifest.payload.manifest_object_id.clone(),
                 manifest_head_seq: manifest.payload.head_seq,
                 manifest_payload_checksum: manifest.payload_checksum.clone(),
             }
@@ -205,12 +210,14 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
         let checkpoint_id = deterministic_checkpoint_id(
             namespace_id,
             basis.manifest_id,
+            &basis.manifest_object_id,
             &basis.manifest_payload_checksum,
         );
         let record = CheckpointRecordState {
             checkpoint_id: checkpoint_id.clone(),
             namespace_id: namespace_id.clone(),
             manifest_id: basis.manifest_id,
+            manifest_object_id: basis.manifest_object_id.clone(),
             manifest_head_seq: basis.manifest_head_seq,
             manifest_payload_checksum: basis.manifest_payload_checksum.clone(),
             head_commit_id: projection.head.head_commit_id.clone(),
@@ -307,12 +314,16 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let manifest_tables =
-        load_verified_manifest_tables_with_cache(store, None, namespace_id, root.manifest_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
+    let manifest_tables = load_verified_manifest_tables_with_cache(
+        store,
+        None,
+        namespace_id,
+        &root.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
             "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",
@@ -420,6 +431,7 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
     writer_version: &str,
 ) -> Result<NamespaceManifestEnvelope> {
     let manifest_id = ManifestId(initial_head.seq.0);
+    let manifest_object_id = ManifestObjectId::generate(manifest_id);
     let metadata_state = bootstrap_metadata_state();
     let run_tables = build_manifest_tables(
         store,
@@ -438,6 +450,7 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id,
+            manifest_object_id,
             prev_manifest_id: None,
             head_seq: initial_head.seq,
             head_commit_id: initial_head.head_commit_id.clone(),
@@ -475,6 +488,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
+    manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope> {
     let head_seq = projection.head.seq;
     let previous_manifest = projection.manifest_tables.manifest();
@@ -526,6 +540,7 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id,
+            manifest_object_id,
             prev_manifest_id: Some(projection.root.manifest_id),
             head_seq,
             head_commit_id: projection.head.head_commit_id.clone(),
@@ -771,9 +786,13 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     // every family, so cross-check the index families against their
     // canonical tables before compacting them forward (format spec,
     // "Manifest publication and checkpoint verification").
-    let source_manifest_key = metadata_manifest(
+    let source_manifest_key = metadata_manifest_object(
         namespace_id.as_str(),
-        projection.manifest_tables.manifest().payload.manifest_id,
+        &projection
+            .manifest_tables
+            .manifest()
+            .payload
+            .manifest_object_id,
     );
     let index_error =
         |error| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error));
@@ -842,6 +861,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
 ) -> Result<NamespaceManifestEnvelope> {
+    let manifest_object_id = ManifestObjectId::generate(manifest_id);
     let head = source.head;
     let metadata_state = source.metadata_state;
     let head_seq = head.seq;
@@ -855,6 +875,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         ),
         _ => None,
     };
+    let prev_manifest_id = source.basis_manifest_id;
 
     let (base_seq, metadata_files) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
@@ -922,7 +943,8 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
             manifest_id,
-            prev_manifest_id: source.basis_manifest_id,
+            manifest_object_id,
+            prev_manifest_id,
             head_seq,
             head_commit_id: head.head_commit_id.clone(),
             base_seq,
