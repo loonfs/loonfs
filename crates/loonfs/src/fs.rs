@@ -4,6 +4,10 @@
 
 use crate::background::BackgroundWork;
 use crate::cache::{CommitEngineCache, RuntimeCacheStatsInner, RuntimeControlCache};
+use crate::commit_window::{
+    combine_content_gates, commit_window_delay, pad_missing_results, CommitWindows, WindowEntry,
+    WindowRole,
+};
 use crate::config::{validate_config, FsConfig};
 use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
@@ -56,6 +60,7 @@ pub(crate) struct FsInner {
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     pub(crate) background: BackgroundWork,
+    pub(crate) commit_windows: CommitWindows,
 }
 
 /// Lock accessors for the runtime caches.
@@ -107,6 +112,7 @@ impl FsCore {
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::default(),
                 background,
+                commit_windows: CommitWindows::default(),
             }),
         })
     }
@@ -918,9 +924,10 @@ impl FsCore {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_namespace_mutations_batch(
+        self.publish_through_commit_window(
             namespace_id,
             vec![NamespaceMutationCandidate::Commit(request)],
+            None,
         )
         .await
         .into_iter()
@@ -939,12 +946,13 @@ impl FsCore {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<Result<CommitResponse>> {
-        self.publish_namespace_mutations_batch(
+        self.publish_through_commit_window(
             namespace_id,
             requests
                 .into_iter()
                 .map(NamespaceMutationCandidate::Commit)
                 .collect(),
+            None,
         )
         .await
     }
@@ -965,7 +973,7 @@ impl FsCore {
         content_gate: Option<loonfs_core::publish::ContentDurabilityGate>,
     ) -> Result<MutationResult> {
         let mut results = self
-            .publish_namespace_mutations_batch_gated(namespace_id, vec![candidate], content_gate)
+            .publish_through_commit_window(namespace_id, vec![candidate], content_gate)
             .await;
         let response = results.pop().unwrap_or_else(|| {
             Err(RuntimeError::Core(CoreError::Internal(
@@ -976,6 +984,83 @@ impl FsCore {
             namespace_id: response.namespace_id,
             committed_seq: response.committed_seq,
         })
+    }
+
+    /// Publishes a direct submission through the namespace's commit window
+    /// (see [`crate::commit_window`]): concurrent submissions within the
+    /// window flush as one batch — one WAL segment, one head CAS — and every
+    /// submitter receives its own results. A zero-length window bypasses
+    /// coalescing entirely. The server's batching publisher submits through
+    /// [`Self::publish_namespace_mutations_batch`] instead, which stays
+    /// window-free because it already coalesces.
+    async fn publish_through_commit_window(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+        content_gate: Option<loonfs_core::publish::ContentDurabilityGate>,
+    ) -> Vec<Result<CommitResponse>> {
+        let window_ms = self.inner.config.commit_window_ms;
+        if window_ms == 0 {
+            return self
+                .publish_namespace_mutations_batch_gated(namespace_id, candidates, content_gate)
+                .await;
+        }
+        let candidate_count = candidates.len();
+        let role = self
+            .inner
+            .commit_windows
+            .enter(namespace_id, candidates, content_gate);
+        let result_receiver = match role {
+            WindowRole::Opener {
+                guard,
+                result_receiver,
+            } => {
+                commit_window_delay(std::time::Duration::from_millis(window_ms)).await;
+                let entries = guard.take_entries();
+                let mut combined = Vec::new();
+                let mut gates = Vec::new();
+                let mut routes = Vec::new();
+                for entry in entries {
+                    let WindowEntry {
+                        candidates,
+                        content_gate,
+                        result_sender,
+                    } = entry;
+                    routes.push((candidates.len(), result_sender));
+                    combined.extend(candidates);
+                    if let Some(gate) = content_gate {
+                        gates.push(gate);
+                    }
+                }
+                let mut results = self
+                    .publish_namespace_mutations_batch_gated(
+                        namespace_id,
+                        combined,
+                        combine_content_gates(gates),
+                    )
+                    .await
+                    .into_iter();
+                for (expected, sender) in routes {
+                    let slice: Vec<_> = results.by_ref().take(expected).collect();
+                    let _ = sender.send(pad_missing_results(slice, expected));
+                }
+                result_receiver
+            }
+            WindowRole::Joiner(result_receiver) => result_receiver,
+        };
+        match result_receiver.await {
+            Ok(results) => results,
+            // The opener was cancelled before distributing results; the
+            // window closed behind it, so the submission failed rather than
+            // committed and the caller may retry.
+            Err(_) => (0..candidate_count)
+                .map(|_| {
+                    Err(RuntimeError::Core(CoreError::Internal(
+                        "commit window abandoned before its flush completed".to_owned(),
+                    )))
+                })
+                .collect(),
+        }
     }
 
     /// Publishes already-classified namespace mutation candidates as one

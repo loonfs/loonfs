@@ -14,6 +14,10 @@ pub const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
 pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
 /// Default decoded-byte budget for cached WAL-tail projections.
 pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 1024 * 1024;
+/// Default commit window, in milliseconds: how long a direct publish holds
+/// its namespace's window open so concurrent publishes can join the same
+/// flush — one WAL segment, one head CAS. Zero disables coalescing.
+pub const DEFAULT_COMMIT_WINDOW_MS: u64 = 15;
 
 /// Configuration for one runtime core, assembled by the handle builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +26,9 @@ pub(crate) struct FsConfig {
     pub writer_id: String,
     /// Writer version reported in mutation context.
     pub writer_version: String,
+    /// Commit window for direct publishes, in milliseconds; zero disables
+    /// coalescing.
+    pub commit_window_ms: u64,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
     /// Tracing mode label.
