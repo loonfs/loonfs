@@ -17,10 +17,11 @@
 //! - paces successive head compare-and-swap attempts per namespace.
 //!
 //! Use it when one process hosts many concurrent writers to the same
-//! namespaces: the reference server constructs a registry over its shared
-//! [`Fs`], and an embedded host with many in-process writer agents can do
-//! exactly the same. A solo writer does not need it — the direct [`Fs`]
-//! mutation methods publish immediately, while this front-end deliberately
+//! namespaces: the reference server constructs a registry over its
+//! [`FsWriter`](crate::FsWriter), and an embedded host with many in-process
+//! writer agents can do exactly the same. A solo writer does not need it —
+//! the direct [`FsWriter`](crate::FsWriter) mutation methods publish
+//! immediately, while this front-end deliberately
 //! trades latency for batching: every submission waits out a 100ms
 //! coalescing window (`COALESCING_DELAY`) so concurrent requests share one
 //! publication, and publications for one namespace are paced at least 1s
@@ -28,8 +29,9 @@
 //! into larger batches instead of thrashing head compare-and-swaps.
 
 use crate::content_tokens::ContentAdmission;
+use crate::fs::FsCore;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Fs, RuntimeError};
+use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
@@ -62,7 +64,7 @@ async fn coalescing_delay() {
 #[derive(Clone)]
 pub struct PublisherRegistry {
     inner: Arc<Mutex<HashMap<NamespaceId, NamespacePublisher>>>,
-    fs: Fs,
+    fs: FsCore,
 }
 
 impl PublisherRegistry {
@@ -159,7 +161,7 @@ impl PublisherRegistry {
 #[derive(Clone)]
 struct NamespacePublisher {
     namespace_id: NamespaceId,
-    fs: Fs,
+    fs: FsCore,
     state: Arc<Mutex<NamespacePublisherState>>,
 }
 
@@ -208,7 +210,7 @@ struct InFlightRequest {
 }
 
 impl NamespacePublisher {
-    fn new(namespace_id: NamespaceId, fs: Fs) -> Self {
+    fn new(namespace_id: NamespaceId, fs: FsCore) -> Self {
         Self {
             namespace_id,
             fs,
@@ -865,8 +867,10 @@ mod tests {
     // Publisher tests use panic in async result helpers for precise diagnostics.
 
     use super::*;
+    use crate::background::{BackgroundWork, FsBackgroundWork};
+    use crate::config::FsConfig;
     use crate::{
-        BeginUploadRequest, CreateNamespaceOptions, ErrorCode, FsConfig, RuntimeCacheConfig,
+        BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
         SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
     };
     use async_trait::async_trait;
@@ -1216,8 +1220,8 @@ mod tests {
         }
     }
 
-    fn test_fs(store: SharedStore) -> Fs {
-        Fs::open(
+    fn test_fs(store: SharedStore) -> FsCore {
+        FsCore::open_with_background(
             store,
             FsConfig {
                 writer_id: "writer-a".to_owned(),
@@ -1226,6 +1230,7 @@ mod tests {
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,
             },
+            BackgroundWork::new(FsBackgroundWork::ManualOnly, None),
         )
         .expect("open runtime")
     }
@@ -1241,7 +1246,7 @@ mod tests {
             .expect("build writer")
     }
 
-    async fn create_namespace(fs: &Fs, namespace_id: &NamespaceId) {
+    async fn create_namespace(fs: &FsCore, namespace_id: &NamespaceId) {
         fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("bootstrap");

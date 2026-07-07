@@ -15,9 +15,9 @@ pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
 /// Default decoded-byte budget for cached WAL-tail projections.
 pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
-/// Configuration for an embedded runtime instance.
+/// Configuration for one runtime core, assembled by the handle builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsConfig {
+pub(crate) struct FsConfig {
     /// Writer id used for namespace epoch acquisition and commits.
     pub writer_id: String,
     /// Writer version reported in mutation context.
@@ -28,19 +28,6 @@ pub struct FsConfig {
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing.
     pub trace_store_kind: TraceStoreKind,
-}
-
-impl FsConfig {
-    /// Builds a config with default runtime settings.
-    pub fn new(writer_id: impl Into<String>) -> Self {
-        Self {
-            writer_id: writer_id.into(),
-            writer_version: default_writer_version(),
-            runtime_cache: RuntimeCacheConfig::default(),
-            trace_mode: TraceMode::Embedded,
-            trace_store_kind: TraceStoreKind::Unknown,
-        }
-    }
 }
 
 /// Cache configuration for the embedded runtime.

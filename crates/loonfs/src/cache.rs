@@ -1,10 +1,10 @@
 //! Runtime caching: control-object reads, WAL-tail projections, and
-//! per-namespace commit-engine serialization, plus the cache-management half of [`Fs`].
+//! per-namespace commit-engine serialization, plus the cache-management half of [`FsCore`].
 //!
 //! Every cache revalidates against durable state before its contents are
 //! used; nothing here weakens read-after-write consistency.
 
-use crate::fs::{should_invalidate_after_result, Fs};
+use crate::fs::{should_invalidate_after_result, FsCore};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
@@ -239,7 +239,7 @@ impl RuntimeControlCache {
     }
 }
 
-impl Fs {
+impl FsCore {
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,

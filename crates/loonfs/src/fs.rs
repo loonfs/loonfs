@@ -1,25 +1,23 @@
-//! The embedded runtime handle: [`Fs`], its builder, and the public
-//! operation surface, each method a thin, cache-aware delegation to
-//! `loonfs-core`.
+//! The shared runtime core behind the purpose-specific handles: caches,
+//! writer session identity, and the operation surface, each method a thin,
+//! cache-aware delegation to `loonfs-core`.
 
-use crate::background::{BackgroundWork, FsBackgroundWork};
+use crate::background::BackgroundWork;
 use crate::cache::{CommitEngineCache, RuntimeCacheStatsInner, RuntimeControlCache};
-use crate::config::{default_writer_version, validate_config};
+use crate::config::{validate_config, FsConfig};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
-use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
     ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
     CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsConfig, InodeId,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, InodeId,
     ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ObjectStore, ObjectStoreMetricsRecorder,
-    PutFileOptions, RestoreRevisionOptions, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats,
-    UploadContentResponse,
+    NamespaceStatusResponse, NamespaceSummary, ObjectStore, PutFileOptions, RestoreRevisionOptions,
+    RevisionNo, RuntimeCacheStats, UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -34,19 +32,16 @@ use loonfs_core::cache::{
     WalTailProjectionCacheConfig,
 };
 use loonfs_core::{MutationContext, NamespaceEngine};
-use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Embedded filesystem runtime.
+/// Shared runtime core. [`FsWriter`](crate::FsWriter),
+/// [`FsReader`](crate::FsReader), and [`FsAdmin`](crate::FsAdmin) each wrap
+/// one; handles derived from the same core share its caches and store.
 ///
-/// `Fs` is cheap to clone. Clones share caches and the underlying object store.
-///
-/// This all-purpose handle is transitional: new code should open a
-/// purpose-specific [`FsWriter`](crate::FsWriter),
-/// [`FsReader`](crate::FsReader), or [`FsAdmin`](crate::FsAdmin) instead.
+/// `FsCore` is cheap to clone.
 #[derive(Clone)]
-pub struct Fs {
+pub(crate) struct FsCore {
     pub(crate) inner: Arc<FsInner>,
 }
 
@@ -81,109 +76,7 @@ impl FsInner {
     }
 }
 
-/// Builder for [`Fs`].
-pub struct FsBuilder {
-    store: SharedObjectStore,
-    writer_id: Option<String>,
-    writer_version: String,
-    runtime_cache: RuntimeCacheConfig,
-    trace_mode: TraceMode,
-    trace_store_kind: TraceStoreKind,
-    metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
-}
-
-impl FsBuilder {
-    /// Starts an embedded runtime builder.
-    pub fn new(store: SharedObjectStore) -> Self {
-        Self {
-            store,
-            writer_id: None,
-            writer_version: default_writer_version(),
-            runtime_cache: RuntimeCacheConfig::default(),
-            trace_mode: TraceMode::Embedded,
-            trace_store_kind: TraceStoreKind::Unknown,
-            metrics_recorder: None,
-        }
-    }
-
-    /// Sets the writer id used by namespace mutations.
-    pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
-        self.writer_id = Some(writer_id.into());
-        self
-    }
-
-    /// Sets the writer version used in mutation context.
-    pub fn writer_version(mut self, writer_version: impl Into<String>) -> Self {
-        self.writer_version = writer_version.into();
-        self
-    }
-
-    /// Sets runtime cache behavior.
-    pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
-        self.runtime_cache = runtime_cache;
-        self
-    }
-
-    /// Sets the tracing mode label.
-    pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
-        self.trace_mode = trace_mode;
-        self
-    }
-
-    /// Sets the object-store kind label used by tracing and metrics.
-    pub fn trace_store_kind(mut self, trace_store_kind: TraceStoreKind) -> Self {
-        self.trace_store_kind = trace_store_kind;
-        self
-    }
-
-    /// Installs object-store metrics collection for this runtime.
-    ///
-    /// The runtime wraps the provided object store before opening `Fs`; callers do not need to
-    /// manually construct an instrumented store.
-    pub fn metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
-        self.metrics_recorder = Some(recorder);
-        self
-    }
-
-    /// Opens the runtime.
-    pub fn build(self) -> Result<Fs> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
-        let trace_store_kind = self.trace_store_kind;
-        let store = match self.metrics_recorder {
-            Some(recorder) => Arc::new(
-                InstrumentedObjectStore::new(self.store, recorder)
-                    .store_kind(trace_store_kind.as_str()),
-            ) as SharedObjectStore,
-            None => self.store,
-        };
-        Fs::open(
-            store,
-            FsConfig {
-                writer_id,
-                writer_version: self.writer_version,
-                runtime_cache: self.runtime_cache,
-                trace_mode: self.trace_mode,
-                trace_store_kind,
-            },
-        )
-    }
-}
-
-impl Fs {
-    /// Opens an embedded runtime from an object store and config.
-    pub fn open(store: SharedObjectStore, config: FsConfig) -> Result<Self> {
-        // The all-purpose handle keeps post-publish maintenance on, spawned
-        // on whichever runtime drives the triggering write. Purpose-specific
-        // handles pin their owning runtime instead.
-        Self::open_with_background(
-            store,
-            config,
-            BackgroundWork::new(FsBackgroundWork::Enabled, None),
-        )
-    }
-
+impl FsCore {
     pub(crate) fn open_with_background(
         store: SharedObjectStore,
         config: FsConfig,
@@ -217,13 +110,8 @@ impl Fs {
         })
     }
 
-    /// Starts a runtime builder.
-    pub fn builder(store: SharedObjectStore) -> FsBuilder {
-        FsBuilder::new(store)
-    }
-
     /// Returns this runtime's config.
-    pub fn config(&self) -> &FsConfig {
+    pub(crate) fn config(&self) -> &FsConfig {
         &self.inner.config
     }
 
@@ -236,7 +124,7 @@ impl Fs {
     ///
     /// With `options.allow_existing`, an already-existing namespace is
     /// treated as success.
-    pub async fn create_namespace(
+    pub(crate) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
@@ -254,7 +142,7 @@ impl Fs {
     /// Forks `source` into `target` at the source's current head.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    pub async fn fork_namespace(
+    pub(crate) async fn fork_namespace(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
@@ -278,7 +166,7 @@ impl Fs {
     /// swap stay committed; reads, writes, forks, and re-creation of the id
     /// fail with `namespace_deleted` afterward. Deletion does not reclaim
     /// storage; reclamation is future maintenance work.
-    pub async fn delete_namespace(
+    pub(crate) async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: DeleteNamespaceOptions,
@@ -304,7 +192,7 @@ impl Fs {
     /// constant. Callers should still gate on the document rather than on
     /// the backend kind, so the same logic works against remote deployments
     /// that implement less.
-    pub fn capabilities(&self) -> CapabilityDocument {
+    pub(crate) fn capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
@@ -320,7 +208,7 @@ impl Fs {
 
     /// Summarizes a namespace's current head: manifest, latest checkpoint,
     /// WAL tail, and retention floor.
-    pub async fn namespace_status(
+    pub(crate) async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse> {
@@ -351,7 +239,7 @@ impl Fs {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn maintenance_tick_namespace(
+    pub(crate) async fn maintenance_tick_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
@@ -432,7 +320,7 @@ impl Fs {
     ///
     /// Never runs implicitly: callers opt in here or through
     /// [`MaintenanceTickOptions::gc`].
-    pub async fn gc_namespace(
+    pub(crate) async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
         config: &crate::GcConfig,
@@ -461,7 +349,7 @@ impl Fs {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub async fn stat_path(
+    pub(crate) async fn stat_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -485,7 +373,7 @@ impl Fs {
     /// Lists the children of a directory path.
     ///
     /// Entries-only convenience over [`Self::list_path_entries`].
-    pub async fn list_path(
+    pub(crate) async fn list_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -501,7 +389,7 @@ impl Fs {
     /// The envelope and every entry come from one consistent head, so an
     /// empty directory still reports which state answered the question. Entries
     /// are returned in canonical name-key order, matching paged listings.
-    pub async fn list_path_entries(
+    pub(crate) async fn list_path_entries(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -535,7 +423,7 @@ impl Fs {
     }
 
     /// Lists one page of a directory together with the head the page was read from.
-    pub async fn list_path_entries_page(
+    pub(crate) async fn list_path_entries_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -586,7 +474,7 @@ impl Fs {
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
-    pub async fn read_file_bytes(
+    pub(crate) async fn read_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -602,7 +490,7 @@ impl Fs {
     }
 
     /// Lists the revision history of a file path.
-    pub async fn list_file_revisions(
+    pub(crate) async fn list_file_revisions(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -618,7 +506,7 @@ impl Fs {
     }
 
     /// Lists one page of a file path's revision history.
-    pub async fn list_file_revisions_page(
+    pub(crate) async fn list_file_revisions_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -642,7 +530,7 @@ impl Fs {
 
     /// Lists a file's revision history by inode id, independent of its
     /// current path.
-    pub async fn list_file_revisions_for_inode(
+    pub(crate) async fn list_file_revisions_for_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -658,7 +546,7 @@ impl Fs {
     }
 
     /// Lists one page of a file inode's revision history.
-    pub async fn list_file_revisions_for_inode_page(
+    pub(crate) async fn list_file_revisions_for_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -684,7 +572,7 @@ impl Fs {
     }
 
     /// Reads the content of one historical file revision by path.
-    pub async fn read_file_revision_bytes(
+    pub(crate) async fn read_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -701,7 +589,7 @@ impl Fs {
     }
 
     /// Reads the content of one historical file revision by inode id.
-    pub async fn read_file_revision_bytes_for_inode(
+    pub(crate) async fn read_file_revision_bytes_for_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -734,7 +622,7 @@ impl Fs {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_bytes(
+    pub(crate) async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -782,7 +670,7 @@ impl Fs {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub async fn put_file_content_ref(
+    pub(crate) async fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -810,7 +698,7 @@ impl Fs {
     }
 
     /// Creates a directory at an absolute path.
-    pub async fn create_directory(
+    pub(crate) async fn create_directory(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -830,7 +718,7 @@ impl Fs {
     ///
     /// Deletion is tombstone-first: the commit hides the path without erasing
     /// history. Physical reclamation is background garbage collection.
-    pub async fn delete_path(
+    pub(crate) async fn delete_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -848,7 +736,7 @@ impl Fs {
     }
 
     /// Moves a path within the same namespace.
-    pub async fn move_path(
+    pub(crate) async fn move_path(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -869,7 +757,7 @@ impl Fs {
 
     /// Copies a file to a new path in the same namespace. The new file
     /// reuses the source revision's content reference: no bytes are copied.
-    pub async fn copy_path(
+    pub(crate) async fn copy_path(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -888,7 +776,7 @@ impl Fs {
     }
 
     /// Restores a prior file revision by appending a new current revision.
-    pub async fn restore_file_revision(
+    pub(crate) async fn restore_file_revision(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -912,7 +800,7 @@ impl Fs {
     /// The commit appends a new current revision from `source_revision_no`
     /// and fails if the inode's current revision is no longer
     /// `base_revision_no`.
-    pub async fn restore_file_revision_for_inode(
+    pub(crate) async fn restore_file_revision_for_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -938,7 +826,7 @@ impl Fs {
     }
 
     /// Starts a durable upload session for a namespace.
-    pub async fn begin_upload(
+    pub(crate) async fn begin_upload(
         &self,
         namespace_id: &NamespaceId,
         request: BeginUploadRequest,
@@ -950,7 +838,7 @@ impl Fs {
     }
 
     /// Starts a direct_put upload session and returns the internal target for server-side signing.
-    pub async fn begin_direct_put_upload_target(
+    pub(crate) async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
         content_ref: ContentRef,
@@ -962,7 +850,7 @@ impl Fs {
     }
 
     /// Uploads whole-file content into an upload session.
-    pub async fn upload_content(
+    pub(crate) async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -975,7 +863,7 @@ impl Fs {
     }
 
     /// Completes an upload session when the expected content ref matches.
-    pub async fn complete_upload(
+    pub(crate) async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -991,7 +879,7 @@ impl Fs {
     ///
     /// This is the lower-level surface for clients that need their own commit
     /// ids, preconditions, and operation lists.
-    pub async fn commit_operations(
+    pub(crate) async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
@@ -1012,7 +900,7 @@ impl Fs {
 
     /// Submits explicit semantic commit requests as one publication attempt,
     /// returning one result per request in order.
-    pub async fn commit_operations_batch(
+    pub(crate) async fn commit_operations_batch(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
@@ -1054,7 +942,7 @@ impl Fs {
     ///
     /// Server code uses this to push path intents and explicit commits
     /// through one namespace publisher; results match candidates in order.
-    pub async fn publish_namespace_mutations_batch(
+    pub(crate) async fn publish_namespace_mutations_batch(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -1165,7 +1053,7 @@ impl Fs {
     /// Call this to quiesce before shutdown, or in tests that assert on
     /// post-maintenance state. Panicked ticks surface as a runtime-task
     /// error.
-    pub async fn wait_for_background_maintenance(&self) -> Result<()> {
+    pub(crate) async fn wait_for_background_maintenance(&self) -> Result<()> {
         self.inner.background.drain().await
     }
 
@@ -1175,7 +1063,7 @@ impl Fs {
     }
 
     /// Snapshots the runtime cache counters.
-    pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
+    pub(crate) fn runtime_cache_stats(&self) -> RuntimeCacheStats {
         self.inner.cache_stats.snapshot(
             self.inner.metadata_table_cache.stats(),
             self.inner.wal_tail_projection_cache.stats(),
@@ -1183,7 +1071,7 @@ impl Fs {
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.
-    pub async fn list_changes_after(
+    pub(crate) async fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -1218,7 +1106,7 @@ impl Fs {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_checkpoint(
+    pub(crate) async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
@@ -1234,7 +1122,7 @@ impl Fs {
 
     /// Advances the namespace retention floor when a verified checkpoint
     /// makes it safe.
-    pub async fn advance_retention_floor(
+    pub(crate) async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
@@ -1285,7 +1173,7 @@ impl Fs {
 /// on completion, panic, or a task discarded with its runtime — releases the
 /// namespace for the next scheduling decision.
 struct BackgroundTickClaim {
-    fs: Fs,
+    fs: FsCore,
     namespace_id: NamespaceId,
 }
 

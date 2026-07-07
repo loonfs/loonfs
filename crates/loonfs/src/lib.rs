@@ -25,8 +25,7 @@
 //!
 //! LoonFS never creates a hidden maintenance runtime: any background work a
 //! handle starts is spawned on that handle's owning runtime, and each handle
-//! has an async `close()` that settles what it owns. The all-purpose [`Fs`]
-//! handle remains as a transitional facade; new code should pick a handle.
+//! has an async `close()` that settles what it owns.
 #![warn(missing_docs)]
 
 mod background;
@@ -67,7 +66,7 @@ pub use loonfs_core::{
 /// Integration seam: the vocabulary for handing classified mutation work to
 /// the runtime's batch publication surface. The server's filesystem
 /// handlers build [`publish::PathMutationIntent`]s for the [`publisher`]
-/// front-end, and [`Fs::publish_namespace_mutations_batch`] accepts
+/// front-end, and [`FsWriter::publish_namespace_mutations_batch`] accepts
 /// [`publish::NamespaceMutationCandidate`]s directly. Most embedded users
 /// never need this module.
 pub mod publish {
@@ -91,11 +90,10 @@ pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore, S
 pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;
 pub use config::{
-    FsConfig, RuntimeCacheConfig, DEFAULT_MAX_CACHED_NAMESPACES,
+    RuntimeCacheConfig, DEFAULT_MAX_CACHED_NAMESPACES,
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS, DEFAULT_MAX_WAL_TAIL_SEGMENTS,
 };
-pub use fs::{Fs, FsBuilder};
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use options::{
     CopyOptions, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,

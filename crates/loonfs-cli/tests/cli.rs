@@ -1391,18 +1391,13 @@ fn embedded_capability_document() -> loonfs::CapabilityDocument {
     let store = std::sync::Arc::new(
         loonfs_objectstore::local_fs_store::LocalFsStore::new(temp_dir.path()).expect("store"),
     ) as loonfs::SharedObjectStore;
-    let fs = loonfs::Fs::open(
-        store,
-        loonfs::FsConfig {
-            writer_id: "cli-capability-conformance".to_owned(),
-            writer_version: "test".to_owned(),
-            runtime_cache: loonfs::RuntimeCacheConfig::default(),
-            trace_mode: loonfs::TraceMode::Embedded,
-            trace_store_kind: loonfs::TraceStoreKind::LocalFs,
-        },
-    )
-    .expect("open runtime");
-    fs.capabilities()
+    let reader = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(loonfs::FsReader::builder_with_store(store).build())
+        .expect("build reader");
+    reader.capabilities()
 }
 
 fn assert_cli_command_path_exists(harness: &Harness, command_path: &[&str]) {
