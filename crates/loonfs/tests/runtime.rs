@@ -1627,7 +1627,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 }
 
 #[test]
-fn put_file_bytes_validates_content_ref_before_publish() {
+fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -1646,8 +1646,65 @@ fn put_file_bytes_validates_content_ref_before_publish() {
     )
     .expect("put file bytes");
 
+    // The put writes the blob exactly once and never reads it back: the
+    // write's own ack is the durability proof the head CAS waits on, so
+    // validation issues no probe for content the put itself is writing.
+    assert_eq!(raw_store.content_blob_put_count(), 1);
     assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 1);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
+}
+
+#[test]
+fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = open_runtime(object_store, "content-write-failure-test");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    let commit_id = CommitId::parse("overlap-put-retry").expect("valid commit id");
+    raw_store.fail_content_blob_puts();
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"overlap survives",
+        PutFileOptions {
+            behavior: PutBehavior::NoReplace,
+            commit_id: Some(commit_id.clone()),
+        },
+    )
+    .expect_err("put should surface the failed content write");
+
+    // The content result gates the head CAS, so the failed write aborted the
+    // publish with the head unmoved and nothing visible.
+    let error = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect_err("failed put should leave the path unbound");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
+    ));
+
+    // The failed attempt never committed, so the same commit id retries
+    // cleanly instead of resolving as a duplicate.
+    raw_store.allow_content_blob_puts();
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"overlap survives",
+        PutFileOptions {
+            behavior: PutBehavior::NoReplace,
+            commit_id: Some(commit_id),
+        },
+    )
+    .expect("same-commit-id retry should land");
+    let read = fs
+        .read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        .expect("read retried file");
+    assert_eq!(read.bytes, b"overlap survives");
 }
 
 #[test]
@@ -2514,6 +2571,7 @@ struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
     content_blob_checksum_heads: AtomicUsize,
+    content_blob_puts: AtomicUsize,
 }
 
 impl ContentBlobGetCountingStore {
@@ -2522,12 +2580,14 @@ impl ContentBlobGetCountingStore {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             content_blob_gets: AtomicUsize::new(0),
             content_blob_checksum_heads: AtomicUsize::new(0),
+            content_blob_puts: AtomicUsize::new(0),
         }
     }
 
     fn reset_content_blob_counters(&self) {
         self.content_blob_gets.store(0, Ordering::SeqCst);
         self.content_blob_checksum_heads.store(0, Ordering::SeqCst);
+        self.content_blob_puts.store(0, Ordering::SeqCst);
     }
 
     fn content_blob_get_count(&self) -> usize {
@@ -2536,6 +2596,10 @@ impl ContentBlobGetCountingStore {
 
     fn content_blob_checksum_head_count(&self) -> usize {
         self.content_blob_checksum_heads.load(Ordering::SeqCst)
+    }
+
+    fn content_blob_put_count(&self) -> usize {
+        self.content_blob_puts.load(Ordering::SeqCst)
     }
 }
 
@@ -2580,6 +2644,80 @@ impl ObjectStore for ContentBlobGetCountingStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_puts.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct FailContentBlobPutsStore {
+    inner: LocalFsStore,
+    fail_content_blob_puts: AtomicBool,
+}
+
+impl FailContentBlobPutsStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            fail_content_blob_puts: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_content_blob_puts(&self) {
+        self.fail_content_blob_puts.store(true, Ordering::SeqCst);
+    }
+
+    fn allow_content_blob_puts(&self) {
+        self.fail_content_blob_puts.store(false, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl ObjectStore for FailContentBlobPutsStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key.starts_with("content-stores/")
+            && key.contains("/blobs/")
+            && self.fail_content_blob_puts.load(Ordering::SeqCst)
+        {
+            return Err(ObjectStoreError::transport(
+                key,
+                "injected content write failure",
+            ));
+        }
         self.inner.put(key, bytes, mode).await
     }
 
