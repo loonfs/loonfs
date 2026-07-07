@@ -69,8 +69,7 @@ use axum::body::Bytes;
 use futures::stream::BoxStream;
 use loonfs::ErrorCode;
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, PutFileOptions, RuntimeCacheConfig,
-    TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
@@ -179,7 +178,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
 async fn runtime_created_state_is_readable_through_http() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let fs = test_runtime(store.clone(), "runtime-writer");
+    let fs = test_runtime(store.clone(), "runtime-writer").await;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -215,7 +214,7 @@ async fn runtime_created_state_is_readable_through_http() {
 async fn http_created_state_is_readable_through_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let fs = test_runtime(store.clone(), "runtime-reader");
+    let fs = test_runtime(store.clone(), "runtime-reader").await;
     let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
 
     tokio::task::spawn_blocking(move || {
@@ -233,6 +232,7 @@ async fn http_created_state_is_readable_through_runtime() {
     .expect("join blocking task");
 
     let file = fs
+        .reader()
         .read_file_bytes(
             &NamespaceId::parse("demo").expect("valid namespace id"),
             "/notes/from-http.txt",
@@ -511,18 +511,15 @@ async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestH
     }
 }
 
-fn test_runtime(store: SharedStore, writer_id: &str) -> Fs {
-    Fs::open(
-        store,
-        FsConfig {
-            writer_id: writer_id.to_owned(),
-            writer_version: format!("{writer_id}/0.1.0"),
-            runtime_cache: RuntimeCacheConfig::default(),
-            trace_mode: TraceMode::Remote,
-            trace_store_kind: TraceStoreKind::LocalFs,
-        },
-    )
-    .expect("open runtime")
+async fn test_runtime(store: SharedStore, writer_id: &str) -> FsWriter {
+    FsWriter::builder_with_store(store)
+        .writer_id(writer_id)
+        .writer_version(format!("{writer_id}/0.1.0"))
+        .trace_mode(TraceMode::Remote)
+        .trace_store_kind(TraceStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build writer")
 }
 
 fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
@@ -547,16 +544,17 @@ async fn bootstrap_namespace(
     store: &SharedStore,
     writer_id: &str,
     namespace_id: &NamespaceId,
-) -> Fs {
-    let fs = test_runtime(store.clone(), writer_id);
-    fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
+) -> FsWriter {
+    let writer = test_runtime(store.clone(), writer_id).await;
+    writer
+        .create_namespace(namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("bootstrap namespace");
-    fs
+    writer
 }
 
 async fn write_file_bytes(
-    fs: &Fs,
+    fs: &FsWriter,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
@@ -576,7 +574,7 @@ async fn write_file_bytes(
 }
 
 async fn delete_path_recursive(
-    fs: &Fs,
+    fs: &FsWriter,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     commit_id: &str,

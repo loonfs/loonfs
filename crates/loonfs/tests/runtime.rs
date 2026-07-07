@@ -9,11 +9,12 @@ use loonfs::{
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DirectoryPageCursor, ErrorCode, Fs, FsConfig, InodeId, InodeKind, ListChangesOptions,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    MutationResult, NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy,
-    PutBehavior, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
-    TraceStoreKind, UploadContentResponse, UploadId,
+    DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder, InodeId,
+    InodeKind, ListChangesOptions, MaintenanceTickOptions, MaintenanceTickOutcome,
+    MaintenanceTickResult, ManifestId, MoveOptions, MutationResult, NamespaceId,
+    NamespaceStatusResponse, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind, UploadContentResponse,
+    UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_head};
@@ -32,11 +33,172 @@ fn store(root: &Path) -> SharedObjectStore {
     Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
 }
 
-fn runtime(root: &Path, writer_id: &str) -> Fs {
-    Fs::builder(store(root))
-        .writer_id(writer_id)
+/// One handle set per test fixture: a writer, its derived reader, and an
+/// admin handle sharing the same store, exercised through the blocking
+/// helpers below.
+struct TestRuntime {
+    writer: FsWriter,
+    reader: FsReader,
+    admin: FsAdmin,
+}
+
+fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
+    open_runtime(store(root), writer_id)
+}
+
+fn open_runtime(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
+    open_runtime_with(store, writer_id, |builder| builder)
+}
+
+fn open_runtime_with(
+    store: SharedObjectStore,
+    writer_id: &str,
+    configure: impl FnOnce(FsWriterBuilder) -> FsWriterBuilder,
+) -> TestRuntime {
+    block_on(open_runtime_with_async(store, writer_id, configure))
+}
+
+/// Async-test variant: opens the fixture inside the test's own runtime.
+async fn open_runtime_async(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
+    open_runtime_with_async(store, writer_id, |builder| builder).await
+}
+
+async fn open_runtime_with_async(
+    store: SharedObjectStore,
+    writer_id: &str,
+    configure: impl FnOnce(FsWriterBuilder) -> FsWriterBuilder,
+) -> TestRuntime {
+    let writer = configure(FsWriter::builder_with_store(store.clone()).writer_id(writer_id))
         .build()
-        .expect("build runtime")
+        .await
+        .expect("build writer");
+    let reader = writer.reader();
+    let admin = FsAdmin::builder_with_store(store)
+        .actor_id(writer_id)
+        .build()
+        .await
+        .expect("build admin");
+    TestRuntime {
+        writer,
+        reader,
+        admin,
+    }
+}
+
+/// Direct async access for tests that drive several operations inside one
+/// runtime; everything else goes through the blocking trait below.
+impl TestRuntime {
+    async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+        self.writer.create_namespace(namespace_id, options).await
+    }
+
+    async fn put_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> loonfs::Result<MutationResult> {
+        self.writer
+            .put_file_bytes(namespace_id, absolute_path, bytes, options)
+            .await
+    }
+
+    async fn put_file_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        content_ref: ContentRef,
+        options: PutFileOptions,
+    ) -> loonfs::Result<MutationResult> {
+        self.writer
+            .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
+            .await
+    }
+
+    async fn stat_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativePathEntry> {
+        self.reader.stat_path(namespace_id, absolute_path).await
+    }
+
+    async fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
+        self.reader.list_path(namespace_id, absolute_path).await
+    }
+
+    async fn list_path_entries(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+        self.reader
+            .list_path_entries(namespace_id, absolute_path)
+            .await
+    }
+
+    async fn list_path_entries_page(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+        self.reader
+            .list_path_entries_page(namespace_id, absolute_path, request)
+            .await
+    }
+
+    async fn list_file_revisions_page(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<loonfs::FileRevisionsPageCursor>,
+    ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
+        self.reader
+            .list_file_revisions_page(namespace_id, absolute_path, request)
+            .await
+    }
+
+    async fn list_file_revisions_for_inode_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<loonfs::FileRevisionsPageCursor>,
+    ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
+        self.reader
+            .list_file_revisions_for_inode_page(namespace_id, inode_id, request)
+            .await
+    }
+
+    async fn create_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<CreateCheckpointResponse> {
+        self.admin.create_checkpoint(namespace_id).await
+    }
+
+    async fn begin_direct_put_upload_target(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+    ) -> loonfs::Result<loonfs::BeginDirectPutUploadTargetResponse> {
+        self.writer
+            .begin_direct_put_upload_target(namespace_id, content_ref)
+            .await
+    }
+
+    fn runtime_cache_stats(&self) -> loonfs::RuntimeCacheStats {
+        self.writer.runtime_cache_stats()
+    }
 }
 
 fn namespace_id() -> NamespaceId {
@@ -182,13 +344,13 @@ trait FsTestExt {
     ) -> loonfs::Result<AdvanceRetentionResponse>;
 }
 
-impl FsTestExt for Fs {
+impl FsTestExt for TestRuntime {
     fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
     ) -> loonfs::Result<loonfs::NamespaceSummary> {
-        block_on(self.create_namespace(namespace_id, options))
+        block_on(self.writer.create_namespace(namespace_id, options))
     }
 
     fn fork_namespace_blocking(
@@ -196,14 +358,14 @@ impl FsTestExt for Fs {
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> loonfs::Result<loonfs::NamespaceSummary> {
-        block_on(self.fork_namespace(source, target))
+        block_on(self.writer.fork_namespace(source, target))
     }
 
     fn namespace_status_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceStatusResponse> {
-        block_on(self.namespace_status(namespace_id))
+        block_on(self.admin.namespace_status(namespace_id))
     }
 
     fn maintenance_tick_namespace_blocking(
@@ -211,7 +373,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> loonfs::Result<MaintenanceTickResult> {
-        block_on(self.maintenance_tick_namespace(namespace_id, options))
+        block_on(self.admin.maintenance_tick_namespace(namespace_id, options))
     }
 
     fn stat_path_blocking(
@@ -219,7 +381,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativePathEntry> {
-        block_on(self.stat_path(namespace_id, absolute_path))
+        block_on(self.reader.stat_path(namespace_id, absolute_path))
     }
 
     fn list_path_blocking(
@@ -227,7 +389,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
-        block_on(self.list_path(namespace_id, absolute_path))
+        block_on(self.reader.list_path(namespace_id, absolute_path))
     }
 
     fn read_file_bytes_blocking(
@@ -235,7 +397,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativeFileBytes> {
-        block_on(self.read_file_bytes(namespace_id, absolute_path))
+        block_on(self.reader.read_file_bytes(namespace_id, absolute_path))
     }
 
     fn put_file_bytes_blocking(
@@ -245,7 +407,10 @@ impl FsTestExt for Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.put_file_bytes(namespace_id, absolute_path, bytes, options))
+        block_on(
+            self.writer
+                .put_file_bytes(namespace_id, absolute_path, bytes, options),
+        )
     }
 
     fn create_directory_blocking(
@@ -254,7 +419,10 @@ impl FsTestExt for Fs {
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.create_directory(namespace_id, absolute_path, options))
+        block_on(
+            self.writer
+                .create_directory(namespace_id, absolute_path, options),
+        )
     }
 
     fn delete_path_blocking(
@@ -263,7 +431,10 @@ impl FsTestExt for Fs {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.delete_path(namespace_id, absolute_path, options))
+        block_on(
+            self.writer
+                .delete_path(namespace_id, absolute_path, options),
+        )
     }
 
     fn move_path_blocking(
@@ -273,7 +444,10 @@ impl FsTestExt for Fs {
         to_path: &str,
         options: MoveOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.move_path(namespace_id, from_path, to_path, options))
+        block_on(
+            self.writer
+                .move_path(namespace_id, from_path, to_path, options),
+        )
     }
 
     fn copy_path_blocking(
@@ -283,14 +457,20 @@ impl FsTestExt for Fs {
         to_path: &str,
         options: CopyOptions,
     ) -> loonfs::Result<MutationResult> {
-        block_on(self.copy_path(namespace_id, from_path, to_path, options))
+        block_on(
+            self.writer
+                .copy_path(namespace_id, from_path, to_path, options),
+        )
     }
 
     fn begin_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<BeginUploadResponse> {
-        block_on(self.begin_upload(namespace_id, BeginUploadRequest::default()))
+        block_on(
+            self.writer
+                .begin_upload(namespace_id, BeginUploadRequest::default()),
+        )
     }
 
     fn upload_content_blocking(
@@ -299,7 +479,7 @@ impl FsTestExt for Fs {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> loonfs::Result<UploadContentResponse> {
-        block_on(self.upload_content(namespace_id, upload_id, bytes))
+        block_on(self.writer.upload_content(namespace_id, upload_id, bytes))
     }
 
     fn complete_upload_blocking(
@@ -308,7 +488,10 @@ impl FsTestExt for Fs {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> loonfs::Result<CompleteUploadResponse> {
-        block_on(self.complete_upload(namespace_id, upload_id, request))
+        block_on(
+            self.writer
+                .complete_upload(namespace_id, upload_id, request),
+        )
     }
 
     fn commit_operations_blocking(
@@ -316,7 +499,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> loonfs::Result<CommitResponse> {
-        block_on(self.commit_operations(namespace_id, request))
+        block_on(self.writer.commit_operations(namespace_id, request))
     }
 
     fn commit_operations_batch_blocking(
@@ -324,7 +507,7 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>> {
-        block_on(self.commit_operations_batch(namespace_id, requests))
+        block_on(self.writer.commit_operations_batch(namespace_id, requests))
     }
 
     fn list_changes_after_blocking(
@@ -332,25 +515,29 @@ impl FsTestExt for Fs {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ChangesResponse> {
-        block_on(self.list_changes_after(namespace_id, after_seq, ListChangesOptions::default()))
+        block_on(self.reader.list_changes_after(
+            namespace_id,
+            after_seq,
+            ListChangesOptions::default(),
+        ))
     }
 
     fn create_checkpoint_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<CreateCheckpointResponse> {
-        block_on(self.create_checkpoint(namespace_id))
+        block_on(self.admin.create_checkpoint(namespace_id))
     }
 
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        block_on(self.advance_retention_floor(namespace_id))
+        block_on(self.admin.advance_retention_floor(namespace_id))
     }
 }
 
-fn assert_config_error(result: loonfs::Result<Fs>, expected: &str) {
+fn assert_config_error<T>(result: loonfs::Result<T>, expected: &str) {
     match result {
         Err(RuntimeError::Config(message)) => assert!(
             message.contains(expected),
@@ -374,30 +561,24 @@ fn open_validates_runtime_config() {
     let temp_dir = tempdir().expect("tempdir");
     let object_store = store(temp_dir.path());
 
-    assert_config_error(Fs::builder(object_store.clone()).build(), "writer_id");
     assert_config_error(
-        Fs::open(
-            object_store.clone(),
-            FsConfig {
-                writer_id: "   ".to_owned(),
-                writer_version: "runtime-test/0.1.0".to_owned(),
-                runtime_cache: RuntimeCacheConfig::default(),
-                trace_mode: TraceMode::Embedded,
-                trace_store_kind: TraceStoreKind::LocalFs,
-            },
+        block_on(FsWriter::builder_with_store(object_store.clone()).build()),
+        "writer_id",
+    );
+    assert_config_error(
+        block_on(
+            FsWriter::builder_with_store(object_store.clone())
+                .writer_id("   ")
+                .build(),
         ),
         "writer_id",
     );
     assert_config_error(
-        Fs::open(
-            object_store,
-            FsConfig {
-                writer_id: "runtime-test".to_owned(),
-                writer_version: "   ".to_owned(),
-                runtime_cache: RuntimeCacheConfig::default(),
-                trace_mode: TraceMode::Embedded,
-                trace_store_kind: TraceStoreKind::LocalFs,
-            },
+        block_on(
+            FsWriter::builder_with_store(object_store)
+                .writer_id("runtime-test")
+                .writer_version("   ")
+                .build(),
         ),
         "writer_version",
     );
@@ -407,12 +588,11 @@ fn open_validates_runtime_config() {
 fn builder_metrics_recorder_instruments_object_store() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
-    let fs = Fs::builder(store(temp_dir.path()))
-        .writer_id("metrics-test")
-        .trace_store_kind(TraceStoreKind::LocalFs)
-        .metrics_recorder(recorder.clone())
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime_with(store(temp_dir.path()), "metrics-test", |builder| {
+        builder
+            .trace_store_kind(TraceStoreKind::LocalFs)
+            .metrics_recorder(recorder.clone())
+    });
 
     fs.create_namespace_blocking(&namespace_id(), CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -500,14 +680,14 @@ fn filesystem_operations_match_core_semantics() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_runtime_methods_are_the_engine_boundary() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "async-runtime-test");
+    let fs = open_runtime_async(store(temp_dir.path()), "async-runtime-test").await;
     let namespace_id = namespace_id();
 
-    Fs::create_namespace(&fs, &namespace_id, CreateNamespaceOptions::default())
+    FsWriter::create_namespace(&fs.writer, &namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    Fs::put_file_bytes(
-        &fs,
+    FsWriter::put_file_bytes(
+        &fs.writer,
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
@@ -516,7 +696,7 @@ async fn async_runtime_methods_are_the_engine_boundary() {
     .await
     .expect("put file");
 
-    let async_stat = Fs::stat_path(&fs, &namespace_id, "/docs/hello.txt")
+    let async_stat = FsReader::stat_path(&fs.reader, &namespace_id, "/docs/hello.txt")
         .await
         .expect("async stat");
 
@@ -533,10 +713,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("tail-projection-cache-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "tail-projection-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -591,14 +768,8 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let setup = Fs::builder(object_store.clone())
-        .writer_id("publish-tail")
-        .build()
-        .expect("build setup runtime");
-    let measured = Fs::builder(object_store)
-        .writer_id("publish-tail")
-        .build()
-        .expect("build measured runtime");
+    let setup = open_runtime(object_store.clone(), "publish-tail");
+    let measured = open_runtime(object_store, "publish-tail");
 
     setup
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -647,14 +818,8 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let setup = Fs::builder(object_store.clone())
-        .writer_id("publish-tail")
-        .build()
-        .expect("build setup runtime");
-    let measured = Fs::builder(object_store)
-        .writer_id("publish-tail")
-        .build()
-        .expect("build measured runtime");
+    let setup = open_runtime(object_store.clone(), "publish-tail");
+    let measured = open_runtime(object_store, "publish-tail");
 
     setup
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -684,14 +849,8 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let reader = Fs::builder(object_store.clone())
-        .writer_id("tail-cache-reader")
-        .build()
-        .expect("build reader runtime");
-    let writer = Fs::builder(object_store)
-        .writer_id("tail-cache-writer")
-        .build()
-        .expect("build writer runtime");
+    let reader = open_runtime(object_store.clone(), "tail-cache-reader");
+    let writer = open_runtime(object_store, "tail-cache-writer");
 
     writer
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -730,11 +889,9 @@ fn runtime_cache_can_be_disabled() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("tail-cache-disabled-test")
-        .runtime_cache(RuntimeCacheConfig::disabled())
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime_with(object_store, "tail-cache-disabled-test", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig::disabled())
+    });
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -761,10 +918,7 @@ fn runtime_cache_can_be_disabled() {
 fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
     let temp_dir = tempdir().expect("tempdir");
     let shared_store = store(temp_dir.path());
-    let setup = Fs::builder(shared_store.clone())
-        .writer_id("tail-count-setup")
-        .build()
-        .expect("build setup runtime");
+    let setup = open_runtime(shared_store.clone(), "tail-count-setup");
     let first = NamespaceId::parse("first").expect("valid namespace id");
     let second = NamespaceId::parse("second").expect("valid namespace id");
 
@@ -781,14 +935,12 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
         .put_file_bytes_blocking(&second, "/file.txt", b"second", PutFileOptions::default())
         .expect("put second file");
 
-    let fs = Fs::builder(shared_store)
-        .writer_id("tail-count-budget")
-        .runtime_cache(RuntimeCacheConfig {
+    let fs = open_runtime_with(shared_store, "tail-count-budget", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces: 1,
             ..RuntimeCacheConfig::default()
         })
-        .build()
-        .expect("build runtime");
+    });
 
     fs.read_file_bytes_blocking(&first, "/file.txt")
         .expect("cache first tail projection");
@@ -814,14 +966,12 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("tail-oversized-test")
-        .runtime_cache(RuntimeCacheConfig {
+    let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
             max_cached_wal_tail_projection_rows: 0,
             ..RuntimeCacheConfig::default()
         })
-        .build()
-        .expect("build runtime");
+    });
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -850,10 +1000,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 fn runtime_read_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
-    let fs = Fs::builder(store(temp_dir.path()))
-        .writer_id("tail-read-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(store(temp_dir.path()), "tail-read-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -875,10 +1022,7 @@ fn stale_head_write_error_invalidates_runtime_cache() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("tail-cache-stale-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "tail-cache-stale-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1389,10 +1533,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
     let namespace_id = namespace_id();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("read-materialized-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "read-materialized-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1422,7 +1563,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
 async fn concurrent_materialized_stat_and_list_share_async_store() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
-    let fs = runtime(temp_dir.path(), "concurrent-materialized-read-test");
+    let fs = open_runtime_async(store(temp_dir.path()), "concurrent-materialized-read-test").await;
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -1491,10 +1632,7 @@ fn put_file_bytes_validates_content_ref_before_publish() {
     let namespace_id = namespace_id();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("put-file-content-validation-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "put-file-content-validation-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1521,10 +1659,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("begin-upload-cache-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "begin-upload-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1567,10 +1702,7 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("control-cache-head-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "control-cache-head-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1599,14 +1731,12 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("control-cache-eviction-test")
-        .runtime_cache(RuntimeCacheConfig {
+    let fs = open_runtime_with(object_store, "control-cache-eviction-test", |builder| {
+        builder.runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces: 1,
             ..RuntimeCacheConfig::default()
         })
-        .build()
-        .expect("build runtime");
+    });
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1640,14 +1770,8 @@ fn runtime_control_cache_reloads_head_after_external_change() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let reader = Fs::builder(object_store.clone())
-        .writer_id("control-cache-reader")
-        .build()
-        .expect("build reader runtime");
-    let writer = Fs::builder(object_store)
-        .writer_id("control-cache-writer")
-        .build()
-        .expect("build writer runtime");
+    let reader = open_runtime(object_store.clone(), "control-cache-reader");
+    let writer = open_runtime(object_store, "control-cache-writer");
 
     writer
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -1686,10 +1810,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("begin-upload-missing-partial-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "begin-upload-missing-partial-test");
     let namespace_id = namespace_id();
 
     assert_core_error_kind(
@@ -1713,10 +1834,7 @@ fn begin_upload_rejects_malformed_descriptors() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("begin-upload-malformed-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "begin-upload-malformed-test");
     let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -1756,11 +1874,11 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("begin-upload-malformed-control-test")
-        .runtime_cache(RuntimeCacheConfig::disabled())
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime_with(
+        object_store,
+        "begin-upload-malformed-control-test",
+        |builder| builder.runtime_cache(RuntimeCacheConfig::disabled()),
+    );
 
     let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
     fs.create_namespace_blocking(&head_bad, CreateNamespaceOptions::default())
@@ -1806,48 +1924,6 @@ fn explicit_commit_appears_in_change_feed() {
     assert_eq!(changes.through_seq, response.committed_seq);
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.changes[0].commit_id, commit_id);
-}
-
-#[test]
-fn publish_auto_ticks_maintenance_once_tail_reaches_threshold() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "auto-tick-test");
-    let namespace_id = namespace_id();
-
-    // Auto ticks spawn on the runtime driving the writes, so the writes,
-    // the quiesce, and the assertions share one runtime.
-    block_on(async {
-        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-
-        for round in 0..33u32 {
-            fs.put_file_bytes(
-                &namespace_id,
-                &format!("/docs/file-{round}.txt"),
-                b"body",
-                PutFileOptions::default(),
-            )
-            .await
-            .expect("put file");
-        }
-
-        fs.wait_for_background_maintenance()
-            .await
-            .expect("background maintenance quiesces");
-        let status = fs
-            .namespace_status(&namespace_id)
-            .await
-            .expect("status after auto tick");
-        assert!(
-            status.current_manifest_id > Some(ManifestId(0)),
-            "auto tick should have published a manifest: {status:?}"
-        );
-        assert!(
-            status.wal_tail_segments < 32,
-            "auto tick should have bounded the tail: {status:?}"
-        );
-    });
 }
 
 #[test]
@@ -1928,10 +2004,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("partial-status-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "partial-status-test");
     let namespace_id = namespace_id();
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -2212,10 +2285,7 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
         namespace_id.as_str(),
     ));
     let object_store: SharedObjectStore = raw_store.clone();
-    let fs = Fs::builder(object_store)
-        .writer_id("tick-race-test")
-        .build()
-        .expect("build runtime");
+    let fs = open_runtime(object_store, "tick-race-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");

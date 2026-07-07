@@ -27,10 +27,11 @@ pub use reader::{FsReader, FsReaderBuilder};
 pub use writer::{FsWriter, FsWriterBuilder};
 
 use crate::background::BackgroundWork;
-use crate::fs::Fs;
+use crate::config::FsConfig;
+use crate::fs::FsCore;
 use crate::{
-    FsConfig, ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeError,
-    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::sync::Arc;
@@ -77,7 +78,7 @@ impl HandleBuilderCore {
         writer_id: String,
         writer_version: String,
         background: BackgroundWork,
-    ) -> Result<Fs> {
+    ) -> Result<FsCore> {
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = TraceStoreKind::from(config.kind());
@@ -95,7 +96,7 @@ impl HandleBuilderCore {
             ) as SharedObjectStore,
             None => store,
         };
-        Fs::open_with_background(
+        FsCore::open_with_background(
             store,
             FsConfig {
                 writer_id,

@@ -1,13 +1,10 @@
 //! Pins the capability registry's three copies to each other: the constants
-//! in `loonfs-api`, the document built by [`Fs::capabilities`], and the
+//! in `loonfs-api`, the document the runtime handles advertise, and the
 //! normative text in `docs/specs/api.md`. If any copy drifts, this fails.
 #![allow(clippy::panic)]
 // Spec parsing panics with precise messages when a section is missing.
 
-use loonfs::{
-    CapabilityDocument, Fs, FsConfig, RuntimeCacheConfig, SharedObjectStore, TraceMode,
-    TraceStoreKind,
-};
+use loonfs::{CapabilityDocument, FsReader, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -18,18 +15,13 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 fn embedded_capabilities() -> CapabilityDocument {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let fs = Fs::open(
-        store,
-        FsConfig {
-            writer_id: "capability-conformance".to_owned(),
-            writer_version: "test".to_owned(),
-            runtime_cache: RuntimeCacheConfig::default(),
-            trace_mode: TraceMode::Embedded,
-            trace_store_kind: TraceStoreKind::LocalFs,
-        },
-    )
-    .expect("open runtime");
-    fs.capabilities()
+    let reader = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(FsReader::builder_with_store(store).build())
+        .expect("build reader");
+    reader.capabilities()
 }
 
 fn spec_section<'a>(spec: &'a str, start: &str, end: &str) -> &'a str {
@@ -58,7 +50,7 @@ fn embedded_capability_document_matches_the_spec_example() {
     document.validate().expect("document is well-formed");
     assert_eq!(
         document, expected,
-        "Fs::capabilities() drifted from the api.md section 2.1 example"
+        "the advertised capability document drifted from the api.md section 2.1 example"
     );
 }
 

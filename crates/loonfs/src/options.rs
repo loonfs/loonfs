@@ -1,4 +1,4 @@
-//! Per-operation option and result types for the [`Fs`] surface.
+//! Per-operation option and result types for the runtime handle surface.
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
