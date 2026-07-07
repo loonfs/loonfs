@@ -53,7 +53,8 @@ async fn coalescing_delay() {
     tokio::time::sleep(COALESCING_DELAY).await;
 }
 
-/// Shared front door to the per-namespace publishers of one [`Fs`].
+/// Shared front door to the per-namespace publishers of one
+/// [`FsWriter`](crate::FsWriter).
 ///
 /// Cloning is cheap; clones share the same per-namespace publishers, so
 /// every writer in the process should submit through clones of one
@@ -61,15 +62,20 @@ async fn coalescing_delay() {
 #[derive(Clone)]
 pub struct PublisherRegistry {
     inner: Arc<Mutex<HashMap<NamespaceId, NamespacePublisher>>>,
-    fs: Arc<Fs>,
+    fs: Fs,
 }
 
 impl PublisherRegistry {
-    /// Creates a registry whose publishers submit batches through `fs`.
-    pub fn new(fs: Arc<Fs>) -> Self {
+    /// Creates a registry whose publishers submit batches through `writer`.
+    ///
+    /// The registry lives in the writer's runtime ownership domain: batches
+    /// publish through the writer's session, and its
+    /// [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs any
+    /// post-publish maintenance.
+    pub fn new(writer: crate::FsWriter) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
-            fs,
+            fs: writer.core().clone(),
         }
     }
 
@@ -153,7 +159,7 @@ impl PublisherRegistry {
 #[derive(Clone)]
 struct NamespacePublisher {
     namespace_id: NamespaceId,
-    fs: Arc<Fs>,
+    fs: Fs,
     state: Arc<Mutex<NamespacePublisherState>>,
 }
 
@@ -202,7 +208,7 @@ struct InFlightRequest {
 }
 
 impl NamespacePublisher {
-    fn new(namespace_id: NamespaceId, fs: Arc<Fs>) -> Self {
+    fn new(namespace_id: NamespaceId, fs: Fs) -> Self {
         Self {
             namespace_id,
             fs,
@@ -1210,20 +1216,29 @@ mod tests {
         }
     }
 
-    fn test_fs(store: SharedStore) -> Arc<Fs> {
-        Arc::new(
-            Fs::open(
-                store,
-                FsConfig {
-                    writer_id: "writer-a".to_owned(),
-                    writer_version: "test".to_owned(),
-                    runtime_cache: RuntimeCacheConfig::default(),
-                    trace_mode: TraceMode::Remote,
-                    trace_store_kind: TraceStoreKind::LocalFs,
-                },
-            )
-            .expect("open runtime"),
+    fn test_fs(store: SharedStore) -> Fs {
+        Fs::open(
+            store,
+            FsConfig {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "test".to_owned(),
+                runtime_cache: RuntimeCacheConfig::default(),
+                trace_mode: TraceMode::Remote,
+                trace_store_kind: TraceStoreKind::LocalFs,
+            },
         )
+        .expect("open runtime")
+    }
+
+    async fn test_writer(store: SharedStore) -> crate::FsWriter {
+        crate::FsWriter::builder_with_store(store)
+            .writer_id("writer-a")
+            .writer_version("test")
+            .trace_mode(TraceMode::Remote)
+            .trace_store_kind(TraceStoreKind::LocalFs)
+            .build()
+            .await
+            .expect("build writer")
     }
 
     async fn create_namespace(fs: &Fs, namespace_id: &NamespaceId) {
@@ -1674,9 +1689,9 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let fs = test_fs(store.clone());
-        create_namespace(&fs, &namespace_id).await;
-        let registry = PublisherRegistry::new(fs);
+        let writer = test_writer(store.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = PublisherRegistry::new(writer);
 
         let request_a = CommitRequest {
             commit_id: CommitId::parse("req-a").expect("valid commit id"),
@@ -1716,9 +1731,9 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let fs = test_fs(store.clone());
-        create_namespace(&fs, &namespace_id).await;
-        let upload = fs
+        let writer = test_writer(store.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let upload = writer
             .begin_upload(
                 &namespace_id,
                 BeginUploadRequest {
@@ -1728,11 +1743,11 @@ mod tests {
             )
             .await
             .expect("begin upload");
-        let staged = fs
+        let staged = writer
             .upload_content(&namespace_id, &upload.upload_id, b"hello")
             .await
             .expect("stage content");
-        let registry = PublisherRegistry::new(fs);
+        let registry = PublisherRegistry::new(writer);
 
         let explicit = CommitRequest {
             commit_id: CommitId::parse("explicit-commit").expect("valid commit id"),
