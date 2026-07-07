@@ -17,11 +17,11 @@ mod resolve;
 use clap::Parser;
 use std::process::ExitCode;
 
-pub fn main() -> ExitCode {
+pub async fn main() -> ExitCode {
     let cli = args::Cli::parse();
     let runtime = args::RuntimeBehavior::detect(&cli);
 
-    match commands::run(cli, runtime) {
+    match commands::run(cli, runtime).await {
         Ok(output) => match render::render_success(&output, runtime.json) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {

@@ -10,17 +10,16 @@ use crate::args::{
 };
 use crate::error::CliError;
 use loonfs_api::{InodeKind, RevisionNo};
-use loonfs_client::NamespacePath;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 // --- filesystem ---
 
-pub(crate) fn run_filesystem_ls(
+pub(crate) async fn run_filesystem_ls(
     kind: CommandKind,
     args: FilesystemLsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(
         &context.namespace,
         args.path.as_deref().unwrap_or("/"),
@@ -34,14 +33,19 @@ pub(crate) fn run_filesystem_ls(
             error,
         )
     })?;
-    let entries = context.target.backend().list_path(&spec).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let entries = context
+        .target
+        .backend()
+        .list_path(&spec)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
@@ -50,20 +54,46 @@ pub(crate) fn run_filesystem_ls(
     })
 }
 
-pub(crate) fn run_filesystem_stat(
+pub(crate) async fn run_filesystem_stat(
     kind: CommandKind,
     args: FilesystemPathArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_path_lookup(kind, args, |backend, spec| {
-        backend.stat_path(spec).map(CommandData::PathEntry)
+    let context = resolve_command_context(kind, &args.target).await?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let entry = context
+        .target
+        .backend()
+        .stat_path(&spec)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::PathEntry(entry),
     })
 }
 
-pub(crate) fn run_filesystem_cat(
+pub(crate) async fn run_filesystem_cat(
     kind: CommandKind,
     args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
         fail(
             kind,
@@ -74,11 +104,14 @@ pub(crate) fn run_filesystem_cat(
     })?;
     let revision_no = args.revision.map(RevisionNo);
     let bytes = match revision_no {
-        Some(revision_no) => context
-            .target
-            .backend()
-            .read_file_revision_bytes(&spec, revision_no),
-        None => context.target.backend().read_file_bytes(&spec),
+        Some(revision_no) => {
+            context
+                .target
+                .backend()
+                .read_file_revision_bytes(&spec, revision_no)
+                .await
+        }
+        None => context.target.backend().read_file_bytes(&spec).await,
     }
     .map_err(|error| {
         fail(
@@ -97,12 +130,12 @@ pub(crate) fn run_filesystem_cat(
     })
 }
 
-pub(crate) fn run_filesystem_get(
+pub(crate) async fn run_filesystem_get(
     kind: CommandKind,
     args: FilesystemGetArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     if runtime.json && args.local_destination.as_deref() == Some("-") {
         return Err(fail(
             kind,
@@ -120,14 +153,19 @@ pub(crate) fn run_filesystem_get(
             error,
         )
     })?;
-    let entry = context.target.backend().stat_path(&spec).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let entry = context
+        .target
+        .backend()
+        .stat_path(&spec)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
     if entry.inode_kind == InodeKind::Directory {
         return Err(fail(
             kind,
@@ -142,11 +180,14 @@ pub(crate) fn run_filesystem_get(
 
     let revision_no = args.revision.map(RevisionNo);
     let bytes = match revision_no {
-        Some(revision_no) => context
-            .target
-            .backend()
-            .read_file_revision_bytes(&spec, revision_no),
-        None => context.target.backend().read_file_bytes(&spec),
+        Some(revision_no) => {
+            context
+                .target
+                .backend()
+                .read_file_revision_bytes(&spec, revision_no)
+                .await
+        }
+        None => context.target.backend().read_file_bytes(&spec).await,
     }
     .map_err(|error| {
         fail(
@@ -192,11 +233,11 @@ pub(crate) fn run_filesystem_get(
     })
 }
 
-pub(crate) fn run_filesystem_revisions(
+pub(crate) async fn run_filesystem_revisions(
     kind: CommandKind,
     args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
         fail(
             kind,
@@ -209,6 +250,7 @@ pub(crate) fn run_filesystem_revisions(
         .target
         .backend()
         .list_file_revisions(&spec, args.limit, args.cursor.as_deref())
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -230,11 +272,11 @@ pub(crate) fn run_filesystem_revisions(
     })
 }
 
-pub(crate) fn run_filesystem_put(
+pub(crate) async fn run_filesystem_put(
     kind: CommandKind,
     args: FilesystemPutArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let local_path = PathBuf::from(&args.local_path);
     if local_path == Path::new("-") {
         return Err(fail(
@@ -297,6 +339,7 @@ pub(crate) fn run_filesystem_put(
         .target
         .backend()
         .put_file_bytes(&spec, &bytes, args.force)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -317,11 +360,11 @@ pub(crate) fn run_filesystem_put(
     })
 }
 
-pub(crate) fn run_filesystem_rm(
+pub(crate) async fn run_filesystem_rm(
     kind: CommandKind,
     args: FilesystemPathArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
         fail(
             kind,
@@ -334,6 +377,7 @@ pub(crate) fn run_filesystem_rm(
         .target
         .backend()
         .delete_path(&spec)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -354,11 +398,11 @@ pub(crate) fn run_filesystem_rm(
     })
 }
 
-pub(crate) fn run_filesystem_restore(
+pub(crate) async fn run_filesystem_restore(
     kind: CommandKind,
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
         fail(
             kind,
@@ -371,6 +415,7 @@ pub(crate) fn run_filesystem_restore(
         .target
         .backend()
         .restore_file_revision(&spec, RevisionNo(args.revision))
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -391,11 +436,11 @@ pub(crate) fn run_filesystem_restore(
     })
 }
 
-pub(crate) fn run_filesystem_mkdir(
+pub(crate) async fn run_filesystem_mkdir(
     kind: CommandKind,
     args: FilesystemPathArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
         fail(
             kind,
@@ -408,6 +453,7 @@ pub(crate) fn run_filesystem_mkdir(
         .target
         .backend()
         .create_directory(&spec)
+        .await
         .map_err(|error| {
             fail(
                 kind,
@@ -428,63 +474,26 @@ pub(crate) fn run_filesystem_mkdir(
     })
 }
 
-pub(crate) fn run_filesystem_mv(
+pub(crate) async fn run_filesystem_mv(
     kind: CommandKind,
     args: FilesystemTransferArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, args, false)
+    run_filesystem_transfer(kind, args, false).await
 }
 
-pub(crate) fn run_filesystem_cp(
+pub(crate) async fn run_filesystem_cp(
     kind: CommandKind,
     args: FilesystemTransferArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, args, true)
+    run_filesystem_transfer(kind, args, true).await
 }
 
-fn run_filesystem_path_lookup<F>(
-    kind: CommandKind,
-    args: FilesystemPathArgs,
-    op: F,
-) -> Result<CommandOutput, CommandFailure>
-where
-    F: FnOnce(
-        &dyn crate::backend::Backend,
-        &NamespacePath,
-    ) -> Result<CommandData, crate::backend::BackendError>,
-{
-    let context = resolve_command_context(kind, &args.target)?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let data = op(context.target.backend(), &spec).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data,
-    })
-}
-
-fn run_filesystem_transfer(
+async fn run_filesystem_transfer(
     kind: CommandKind,
     args: FilesystemTransferArgs,
     copy: bool,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target)?;
+    let context = resolve_command_context(kind, &args.target).await?;
     let from = namespace_path(&context.namespace, &args.source_path, false).map_err(|error| {
         fail(
             kind,
@@ -503,14 +512,19 @@ fn run_filesystem_transfer(
     })?;
 
     let result = if copy {
-        let entry = context.target.backend().stat_path(&from).map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        let entry = context
+            .target
+            .backend()
+            .stat_path(&from)
+            .await
+            .map_err(|error| {
+                fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    error,
+                )
+            })?;
         if entry.inode_kind == InodeKind::Directory {
             return Err(fail(
                 kind,
@@ -522,9 +536,9 @@ fn run_filesystem_transfer(
                 )),
             ));
         }
-        context.target.backend().copy_path(&from, &to)
+        context.target.backend().copy_path(&from, &to).await
     } else {
-        context.target.backend().move_path(&from, &to)
+        context.target.backend().move_path(&from, &to).await
     }
     .map_err(|error| {
         fail(
