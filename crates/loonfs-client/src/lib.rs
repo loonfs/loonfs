@@ -21,8 +21,9 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
     CommitId, ContentRef, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MutationResult, NamespaceId,
+    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, MutationResult, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
@@ -556,6 +557,35 @@ impl Client {
             self.base_url
         );
         self.request_json::<(), AdvanceRetentionResponse>(self.agent.post(&url), None)
+    }
+
+    /// Runs one bounded maintenance step against a namespace (admin plane).
+    /// Absent request fields use the server's defaults; garbage collection
+    /// runs only when the request opts in.
+    pub fn maintenance_tick(
+        &self,
+        namespace: &str,
+        request: &MaintenanceTickRequest,
+    ) -> Result<MaintenanceTickResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/maintenance/tick",
+            self.base_url
+        );
+        self.request_json(self.agent.post(&url), Some(request))
+    }
+
+    /// Runs one mark-and-sweep garbage-collection pass (admin plane).
+    /// Nothing sweeps without this explicit call or a maintenance-tick
+    /// opt-in.
+    pub fn gc_namespace(
+        &self,
+        namespace: &str,
+        request: &GcRequest,
+    ) -> Result<GcResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/admin/namespaces/{namespace}/gc", self.base_url);
+        self.request_json(self.agent.post(&url), Some(request))
     }
 
     fn apply_filesystem_operation(

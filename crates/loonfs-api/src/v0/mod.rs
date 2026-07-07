@@ -26,8 +26,9 @@ pub use operations::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
     FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, ListFileRevisionsResponse, MutationResult, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, RestoreFileRevisionRequest,
+    GcResponse, ListFileRevisionsResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
+    PutBehavior, RestoreFileRevisionRequest,
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 pub use uploads::{

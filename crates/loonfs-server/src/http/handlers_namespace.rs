@@ -11,7 +11,8 @@ use loonfs::{ChangeSeq, CreateNamespaceOptions, DeleteNamespaceOptions};
 use loonfs_api::ApiError;
 use loonfs_api::{
     AdvanceRetentionResponse, CreateCheckpointResponse, CreateNamespaceRequest,
-    ForkNamespaceRequest, GcRequest, GcResponse, FEATURE_UPLOADS_DIRECT_PUT,
+    ForkNamespaceRequest, GcRequest, GcResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    FEATURE_UPLOADS_DIRECT_PUT,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -285,26 +286,47 @@ pub(super) async fn gc_namespace(
 ) -> Result<Json<GcResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
-    let request = request.unwrap_or_default();
-    let defaults = loonfs::GcConfig::default();
-    let config = loonfs::GcConfig {
-        grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
-        reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
-    };
+    let config = loonfs::gc_config_from_request(request.unwrap_or_default());
     let report = state
         .admin
         .gc_namespace(&namespace_id, &config)
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(GcResponse {
-        namespace_id,
-        deleted_wal_segments: report.deleted_wal_segments,
-        deleted_metadata_tables: report.deleted_metadata_tables,
-        deleted_manifests: report.deleted_manifests,
-        deleted_checkpoint_records: report.deleted_checkpoint_records,
-        released_pins: report.released_pins,
-        reaped_abandoned_objects: report.reaped_abandoned_objects,
-        retained_candidates: report.retained_candidates,
-        degraded_retention: report.degraded_retention,
-    }))
+    Ok(Json(loonfs::gc_response_from_report(namespace_id, report)))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/maintenance/tick",
+        tag = "admin",
+        summary = "Run maintenance tick",
+        description = "Runs one bounded maintenance step: publishes a checkpoint once the visible WAL tail reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing a checkpoint race is an outcome, not an error.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        request_body(content = MaintenanceTickRequest, description = "Optional threshold and GC overrides"),
+        responses(
+            (status = 200, description = "Maintenance tick completed", body = MaintenanceTickResponse),
+            (status = 400, description = "Invalid namespace id or options", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn maintenance_tick(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+    OptionalAppJson(request): OptionalAppJson<MaintenanceTickRequest>,
+) -> Result<Json<MaintenanceTickResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let options = loonfs::MaintenanceTickOptions::from_request(request.unwrap_or_default());
+    let result = state
+        .admin
+        .maintenance_tick_namespace(&namespace_id, options)
+        .await
+        .map_err(ApiResponseError::runtime)?;
+    Ok(Json(result.into_response()))
 }

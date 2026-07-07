@@ -20,8 +20,9 @@ use crate::{Client, ClientError, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
-    CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode, ListFileRevisionsResponse,
-    MutationResult, NamespaceStatusResponse, NamespaceSummary, RevisionNo,
+    CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode, GcRequest, GcResponse,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MutationResult,
+    NamespaceStatusResponse, NamespaceSummary, RevisionNo,
 };
 use thiserror::Error;
 
@@ -203,6 +204,20 @@ pub trait Backend {
         &self,
         namespace_id: &str,
     ) -> Result<AdvanceRetentionResponse, BackendError>;
+    /// Runs one bounded maintenance step: a checkpoint once the WAL tail
+    /// reaches the threshold, optionally followed by a GC pass.
+    async fn maintenance_tick(
+        &self,
+        namespace_id: &str,
+        request: MaintenanceTickRequest,
+    ) -> Result<MaintenanceTickResponse, BackendError>;
+    /// Runs one mark-and-sweep garbage-collection pass. Nothing sweeps
+    /// without this explicit call or a maintenance-tick opt-in.
+    async fn gc_namespace(
+        &self,
+        namespace_id: &str,
+        request: GcRequest,
+    ) -> Result<GcResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
     async fn list_changes(
         &self,
@@ -395,6 +410,26 @@ impl Backend for RemoteBackend {
     ) -> Result<AdvanceRetentionResponse, BackendError> {
         let namespace_id = namespace_id.to_owned();
         self.wire(move |client| client.advance_retention(&namespace_id))
+            .await
+    }
+
+    async fn maintenance_tick(
+        &self,
+        namespace_id: &str,
+        request: MaintenanceTickRequest,
+    ) -> Result<MaintenanceTickResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.maintenance_tick(&namespace_id, &request))
+            .await
+    }
+
+    async fn gc_namespace(
+        &self,
+        namespace_id: &str,
+        request: GcRequest,
+    ) -> Result<GcResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.gc_namespace(&namespace_id, &request))
             .await
     }
 

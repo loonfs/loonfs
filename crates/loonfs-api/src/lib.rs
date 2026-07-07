@@ -71,7 +71,8 @@ pub use v0::{
     CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
     DeleteNamespaceResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
     FilesystemOperationResponse, ForkNamespaceRequest, GcRequest, GcResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MoveBehavior, MutationResult,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, MutationResult,
     NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest,
 };
 

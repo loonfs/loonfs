@@ -5,7 +5,7 @@ use crate::profiles::ProfileSummary;
 use loonfs_api::v0::ChangesResponse;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, CreateCheckpointResponse,
-    DeleteNamespaceResponse, FileRevision, NamespaceSummary,
+    DeleteNamespaceResponse, FileRevision, GcResponse, MaintenanceTickResponse, NamespaceSummary,
 };
 use serde::Serialize;
 
@@ -47,6 +47,8 @@ pub(crate) enum CommandData {
     NamespaceDeleted(DeleteNamespaceResponse),
     CheckpointCreated(CreateCheckpointResponse),
     RetentionAdvanced(AdvanceRetentionResponse),
+    MaintenanceTicked(MaintenanceTickResponse),
+    GarbageCollected(GcResponse),
     Changes(ChangesResponse),
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
