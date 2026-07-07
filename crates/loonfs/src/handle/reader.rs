@@ -3,7 +3,7 @@
 use super::HandleBuilderCore;
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
-use crate::fs::Fs;
+use crate::fs::FsCore;
 use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, ChangesResponse,
     DirectoryPageCursor, FileRevisionsPageCursor, InodeId, ListChangesOptions,
@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// Tokio runtime that will drive its reads. `FsReader` is cheap to clone.
 #[derive(Clone)]
 pub struct FsReader {
-    core: Fs,
+    core: FsCore,
 }
 
 impl FsReader {
@@ -46,7 +46,7 @@ impl FsReader {
     }
 
     /// Wraps a shared runtime core; used by [`FsWriter::reader`](crate::FsWriter::reader).
-    pub(super) fn from_core(core: Fs) -> Self {
+    pub(super) fn from_core(core: FsCore) -> Self {
         Self { core }
     }
 

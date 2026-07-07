@@ -3,7 +3,7 @@
 use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
-use crate::fs::Fs;
+use crate::fs::FsCore;
 use crate::publish::NamespaceMutationCandidate;
 use crate::{
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse,
@@ -33,7 +33,7 @@ use std::sync::Arc;
 /// background-work state.
 #[derive(Clone)]
 pub struct FsWriter {
-    core: Fs,
+    core: FsCore,
 }
 
 impl FsWriter {
@@ -64,7 +64,7 @@ impl FsWriter {
 
     /// Shared runtime core, for in-crate front-ends like the batching
     /// publisher.
-    pub(crate) fn core(&self) -> &Fs {
+    pub(crate) fn core(&self) -> &FsCore {
         &self.core
     }
 

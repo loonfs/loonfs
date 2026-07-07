@@ -3,7 +3,7 @@
 use super::HandleBuilderCore;
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
-use crate::fs::Fs;
+use crate::fs::FsCore;
 use crate::{
     AdvanceRetentionResponse, CreateCheckpointResponse, GcConfig, GcReport, MaintenanceTickOptions,
     MaintenanceTickResult, NamespaceId, NamespaceStatusResponse, ObjectStoreMetricsRecorder,
@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// `actor_id` for tracing, reports, and auditability.
 #[derive(Clone)]
 pub struct FsAdmin {
-    core: Fs,
+    core: FsCore,
 }
 
 impl FsAdmin {
