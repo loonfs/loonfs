@@ -1863,6 +1863,115 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_and_rebinds() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    create_directory_path(&store, &namespace_id, "/wide", &context, Some("mkdir-wide"))
+        .expect("create wide");
+    create_directory_path(
+        &store,
+        &namespace_id,
+        "/other",
+        &context,
+        Some("mkdir-other"),
+    )
+    .expect("create other");
+
+    // More names than one raw scan chunk, so group boundaries cross
+    // manifest pages; a few names rebound several times, so groups carry
+    // more than one row.
+    for index in 0..70u32 {
+        let path = format!("/wide/file-{index:03}.txt");
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            &path,
+            b"first",
+            PutBehavior::NoReplace,
+            &context,
+            Some(&format!("put-{index:03}")),
+        )
+        .expect("put file");
+    }
+    for index in [3u32, 35, 68] {
+        let path = format!("/wide/file-{index:03}.txt");
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            &path,
+            b"rebound",
+            PutBehavior::Replace,
+            &context,
+            Some(&format!("rebind-{index:03}")),
+        )
+        .expect("rebind file");
+    }
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint wide dir");
+
+    // Tail-only mutations over checkpointed state: a delete whose unbind
+    // lives only in the WAL tail, and a rename into another directory whose
+    // current binding lives outside the listed parent.
+    delete_path(
+        &store,
+        &namespace_id,
+        "/wide/file-010.txt",
+        &context,
+        Some("delete-tail-unbind"),
+    )
+    .expect("delete over checkpointed bind");
+    move_path(
+        &store,
+        &namespace_id,
+        "/wide/file-020.txt",
+        "/other/moved-away.txt",
+        &context,
+        Some("move-cross-directory"),
+    )
+    .expect("move into other directory");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/wide/file-005.txt",
+        b"tail-rebound",
+        PutBehavior::Replace,
+        &context,
+        Some("tail-rebind-005"),
+    )
+    .expect("tail rebind over checkpointed bind");
+
+    let mut listed = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page =
+            list_path_page(&store, &namespace_id, "/wide", 16, cursor.clone()).expect("list page");
+        listed.extend(page.items.iter().map(|entry| entry.display_name.clone()));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let expected: Vec<String> = (0..70u32)
+        .filter(|index| *index != 10 && *index != 20)
+        .map(|index| format!("file-{index:03}.txt"))
+        .collect();
+    assert_eq!(listed, expected);
+
+    // The tail rebind is the visible revision, not the checkpointed one.
+    let rebound = read_file_bytes(&store, &namespace_id, "/wide/file-005.txt")
+        .expect("read tail-rebound file");
+    assert_eq!(rebound.bytes, b"tail-rebound");
+    // The moved child is visible under its new parent only.
+    let moved =
+        read_file_bytes(&store, &namespace_id, "/other/moved-away.txt").expect("read moved file");
+    assert_eq!(moved.bytes, b"first");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_driven_directory_page_merges_manifest_and_tail_visible_children() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
