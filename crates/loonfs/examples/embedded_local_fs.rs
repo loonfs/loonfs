@@ -1,37 +1,49 @@
 use loonfs::{
-    CreateNamespaceOptions, Fs, NamespaceId, PutBehavior, PutFileOptions, SharedObjectStore,
+    CreateNamespaceOptions, FsWriter, NamespaceId, PutBehavior, PutFileOptions, StoreConfig,
 };
-use loonfs_objectstore::local_fs_store::LocalFsStore;
-use std::sync::Arc;
 
 #[allow(clippy::print_stdout)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This example intentionally prints the file content it just read.
     let root = std::env::temp_dir().join("loonfs-embedded-local-fs-example");
-    let store: SharedObjectStore = Arc::new(LocalFsStore::new(root)?);
-    let fs = Fs::builder(store).writer_id("embedded-example").build()?;
+
+    // Short-lived embedders keep the default ManualOnly policy: writes never
+    // schedule background maintenance behind the caller's back. A long-lived
+    // server would opt into FsBackgroundWork::Enabled instead.
+    let writer = FsWriter::builder(StoreConfig::LocalFs {
+        root: root.to_string_lossy().into_owned(),
+        key_prefix: None,
+    })
+    .writer_id("embedded-example")
+    .build()
+    .await?;
 
     let namespace_id = NamespaceId::parse("demo")?;
-    fs.create_namespace(
-        &namespace_id,
-        CreateNamespaceOptions {
-            allow_existing: true,
-        },
-    )
-    .await?;
-    fs.put_file_bytes(
-        &namespace_id,
-        "/hello.txt",
-        b"hello from embedded LoonFS\n",
-        PutFileOptions {
-            behavior: PutBehavior::Replace,
-            commit_id: None,
-        },
-    )
-    .await?;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions {
+                allow_existing: true,
+            },
+        )
+        .await?;
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/hello.txt",
+            b"hello from embedded LoonFS\n",
+            PutFileOptions {
+                behavior: PutBehavior::Replace,
+                commit_id: None,
+            },
+        )
+        .await?;
 
-    let file = fs.read_file_bytes(&namespace_id, "/hello.txt").await?;
+    let reader = writer.reader();
+    let file = reader.read_file_bytes(&namespace_id, "/hello.txt").await?;
     println!("{}", String::from_utf8_lossy(&file.bytes));
+
+    writer.close().await?;
     Ok(())
 }
