@@ -5,6 +5,7 @@
 //! when you want LoonFS in-process, or when building the reference server.
 #![warn(missing_docs)]
 
+mod background;
 mod cache;
 mod config;
 mod fs;
@@ -62,6 +63,7 @@ pub use loonfs_objectstore::metrics::{
 };
 pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore};
 
+pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;
 pub use config::{
     FsConfig, RuntimeCacheConfig, DEFAULT_MAX_CACHED_NAMESPACES,
