@@ -1,7 +1,7 @@
 //! Verified row scans over a loaded manifest's tables, with per-segment
 //! caching and prefix-window pruning.
 
-use super::cache::MetadataTableCache;
+use super::cache::{DecodedSegmentRowSet, MetadataTableCache};
 use super::error::ManifestLoadError;
 use super::load::{
     load_manifest_segment_rows_with_cache, metadata_file_object_key, MetadataSstSeqExpectation,
@@ -45,7 +45,7 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     /// or re-decodes a segment it already saw. Entries share the decoded
     /// allocation with the table cache and with concurrent readers; the memo
     /// itself retains pointers, not copies.
-    pub(super) segment_cache: Mutex<HashMap<String, Arc<Vec<MetadataRow>>>>,
+    pub(super) segment_cache: Mutex<HashMap<String, Arc<DecodedSegmentRowSet>>>,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -211,24 +211,11 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             .await?;
             next_descriptor_index = chunk_end;
 
-            rows.extend(
-                loaded_segments
-                    .iter()
-                    .flat_map(|segment_rows| segment_rows.iter())
-                    .filter_map(|row| {
-                        let row_key = row.row_key_for_family(family);
-                        if row_key.as_str() < lower_bound {
-                            return None;
-                        }
-                        if upper_bound
-                            .map(|upper_bound| row_key.as_str() >= upper_bound)
-                            .unwrap_or(false)
-                        {
-                            return None;
-                        }
-                        Some((row_key, row.clone()))
-                    }),
-            );
+            rows.extend(loaded_segments.iter().flat_map(|segment_rows| {
+                segment_rows
+                    .rows_in_key_range(lower_bound, upper_bound)
+                    .map(|(row_key, row)| (row_key.to_owned(), row.clone()))
+            }));
             rows.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
         }
 
@@ -271,12 +258,12 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             );
         }
 
+        let prefix_upper_bound = string_prefix_upper_bound(prefix);
         for segment_rows in loaded_segments {
             output.rows.extend(
                 segment_rows
-                    .iter()
-                    .filter(|row| row.row_key_for_family(family).starts_with(prefix))
-                    .cloned(),
+                    .rows_in_key_range(prefix, prefix_upper_bound.as_deref())
+                    .map(|(_, row)| row.clone()),
             );
         }
         Ok(())
@@ -288,7 +275,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
-    ) -> Result<Arc<Vec<MetadataRow>>, ManifestLoadError> {
+    ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
         if let Some(rows) = self
             .segment_cache
             .lock()

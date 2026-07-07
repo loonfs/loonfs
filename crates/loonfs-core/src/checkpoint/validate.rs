@@ -1,6 +1,7 @@
 //! Pure validation of loaded manifests and SST segments against their
 //! descriptors: identity, checksums, ranges, ordering, and row shape.
 
+use super::cache::DecodedSegmentRowSet;
 use super::error::ManifestLoadError;
 use super::row::{manifest_row_commit_seq, manifest_row_kind, manifest_row_matches_family};
 use loonfs_api::wire::manifest::{
@@ -141,7 +142,7 @@ pub(super) fn validate_manifest_segment(
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     segment: &MetadataSstEnvelope,
-) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+) -> Result<DecodedSegmentRowSet, ManifestLoadError> {
     if segment.payload.namespace_id != descriptor.owner_namespace_id {
         return Err(ManifestLoadError::SegmentNamespaceMismatch {
             object_key: descriptor.object_key.clone(),
@@ -225,6 +226,8 @@ pub(super) fn validate_manifest_segment(
             ),
         });
     }
+    // `validate_manifest_page` pinned every stored row key to its row, so
+    // the collected keys are authoritative and scans can reuse them.
     let row_keys = collected_rows
         .iter()
         .map(|row| row.row_key_for_family(family))
@@ -253,7 +256,15 @@ pub(super) fn validate_manifest_segment(
         });
     }
 
-    Ok(collected_rows)
+    // The builder writes segments in row-key order; verifying once here lets
+    // every scan binary-search this block instead of filtering all rows. An
+    // unsorted segment stays valid — scans fall back to a full filter.
+    let sorted_by_row_key = row_keys.windows(2).all(|pair| pair[0] <= pair[1]);
+    Ok(DecodedSegmentRowSet {
+        rows: collected_rows,
+        row_keys,
+        sorted_by_row_key,
+    })
 }
 
 pub(super) fn validate_manifest_page(

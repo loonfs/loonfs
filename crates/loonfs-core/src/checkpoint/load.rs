@@ -9,7 +9,8 @@
 //!    inspection/debug path that loads every referenced row into `MetadataState`.
 
 use super::cache::{
-    DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
+    DecodedMetadataTableBlock, DecodedSegmentRowSet, MetadataTableBlockKind, MetadataTableCache,
+    MetadataTableCacheKey,
 };
 use super::error::ManifestLoadError;
 #[cfg(test)]
@@ -47,7 +48,8 @@ use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 #[cfg(test)]
@@ -474,23 +476,28 @@ where
             );
         }
 
-        for (descriptor, rows) in descriptors.into_iter().zip(loaded_segments) {
+        for (descriptor, row_set) in descriptors.into_iter().zip(loaded_segments) {
             match table.family {
                 MetadataTableFamily::DirentryBinds => {
-                    direntry_bind_rows.extend(rows.iter().cloned());
+                    direntry_bind_rows.extend(row_set.rows.iter().cloned());
                 }
                 MetadataTableFamily::DirentryChildBinds => {
-                    direntry_child_bind_rows.extend(rows.iter().cloned());
+                    direntry_child_bind_rows.extend(row_set.rows.iter().cloned());
                 }
                 MetadataTableFamily::Revisions => {
-                    revision_rows.extend(rows.iter().cloned());
+                    revision_rows.extend(row_set.rows.iter().cloned());
                 }
                 MetadataTableFamily::RevisionsByInodeDesc => {
-                    revision_by_inode_desc_rows.extend(rows.iter().cloned());
+                    revision_by_inode_desc_rows.extend(row_set.rows.iter().cloned());
                 }
                 _ => {}
             }
-            append_rows_to_metadata(metadata_state, table.family, &descriptor.object_key, &rows)?;
+            append_rows_to_metadata(
+                metadata_state,
+                table.family,
+                &descriptor.object_key,
+                &row_set.rows,
+            )?;
         }
     }
 
@@ -512,7 +519,7 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
-) -> Result<Arc<Vec<MetadataRow>>, ManifestLoadError> {
+) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
     load_manifest_segment_rows_with_cache(
         store,
         None,
@@ -524,6 +531,16 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// Concurrent segment decodes each hold multi-megabyte payload and row
+/// buffers, so wide preload waves are bounded here: store fetches stay fully
+/// concurrent, only the decode step queues.
+const MAX_CONCURRENT_SEGMENT_DECODES: usize = 4;
+
+fn segment_decode_permits() -> &'static Semaphore {
+    static PERMITS: OnceLock<Semaphore> = OnceLock::new();
+    PERMITS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_SEGMENT_DECODES))
+}
+
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -531,26 +548,13 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     cache_mode: MetadataTableCacheMode,
-) -> Result<Arc<Vec<MetadataRow>>, ManifestLoadError> {
+) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
     let expected_segment_seq = context.expected_segment_seq(descriptor)?;
     let cache_key = MetadataTableCacheKey {
         table_digest: descriptor.payload_checksum.clone(),
         block_kind: MetadataTableBlockKind::SegmentPayload,
         block_offset: 0,
     };
-    if cache_mode != MetadataTableCacheMode::Bypass {
-        if let Some(block) = table_cache.and_then(|cache| cache.get(&cache_key)) {
-            validate_cached_manifest_block(family, expected_segment_seq, descriptor, &block)?;
-            validate_manifest_row_seq_range(
-                &descriptor.object_key,
-                &block.rows,
-                context.row_seq_min,
-                context.row_seq_max(descriptor),
-            )?;
-            return Ok(block.rows);
-        }
-    }
-
     let fetch = || async {
         let Some(bytes) = store
             .get(&descriptor.object_key, None)
@@ -564,16 +568,22 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
                 object_key: descriptor.object_key.clone(),
             });
         };
+        let permit = segment_decode_permits()
+            .acquire()
+            .await
+            .expect("segment decode semaphore is never closed");
         let segment = decode_metadata_sst_envelope_zstd(&bytes).map_err(|err| {
             ManifestLoadError::SegmentCodec {
                 object_key: descriptor.object_key.clone(),
                 message: err.to_string(),
             }
         })?;
-        let rows = validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
+        let row_set =
+            validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
+        drop(permit);
         Ok(DecodedMetadataTableBlock {
-            decoded_byte_len: decoded_manifest_block_weight(family, &rows),
-            rows: Arc::new(rows),
+            decoded_byte_len: decoded_manifest_block_weight(family, &row_set.rows),
+            row_set: Arc::new(row_set),
             segment_seq: expected_segment_seq,
             family,
             segment_index: descriptor.segment_index,
@@ -583,13 +593,20 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
             max_key: descriptor.max_key.clone(),
         })
     };
-    // Waiters may share a block another caller fetched, so every path
-    // re-validates the block against this caller's own expectations, exactly
-    // as the cache-hit path above does.
+    // The winner of the single-flight cell consults the cache and populates
+    // it on a miss; waiters share its block. Every path then re-validates the
+    // block against this caller's own expectations, so a shared or cached
+    // block is held to exactly the standard of a freshly fetched one.
     let block = match table_cache {
         Some(cache) => {
             cache
-                .fetch_deduplicated(&descriptor.object_key, fetch)
+                .get_or_fetch(
+                    &descriptor.object_key,
+                    &cache_key,
+                    cache_mode != MetadataTableCacheMode::Bypass,
+                    cache_mode == MetadataTableCacheMode::Populate,
+                    fetch,
+                )
                 .await?
         }
         None => fetch().await?,
@@ -597,16 +614,11 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     validate_cached_manifest_block(family, expected_segment_seq, descriptor, &block)?;
     validate_manifest_row_seq_range(
         &descriptor.object_key,
-        &block.rows,
+        &block.row_set.rows,
         context.row_seq_min,
         context.row_seq_max(descriptor),
     )?;
-    if cache_mode == MetadataTableCacheMode::Populate {
-        if let Some(cache) = table_cache {
-            cache.insert(cache_key, block.clone());
-        }
-    }
-    Ok(block.rows)
+    Ok(block.row_set)
 }
 
 pub(super) fn validate_cached_manifest_block(
