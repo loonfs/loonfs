@@ -40,7 +40,7 @@ pub(super) async fn config(
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let mut capabilities = state.fs.capabilities();
+    let mut capabilities = state.reader.capabilities();
     capabilities.features.insert(
         FEATURE_UPLOADS_DIRECT_PUT.to_owned(),
         state.transfer_issuer.is_some(),
@@ -74,7 +74,7 @@ pub(super) async fn create_namespace(
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(request.namespace_id)?;
     let summary = state
-        .fs
+        .writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -107,7 +107,7 @@ pub(super) async fn namespace_status(
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let status = state
-        .fs
+        .admin
         .namespace_status(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -185,7 +185,7 @@ pub(super) async fn fork_namespace(
     let source_namespace_id = namespace.into_id()?;
     let new_namespace_id = parse_namespace_id(request.new_namespace_id)?;
     let summary = state
-        .fs
+        .writer
         .fork_namespace(&source_namespace_id, &new_namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
@@ -219,7 +219,7 @@ pub(super) async fn create_checkpoint(
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let response = state
-        .fs
+        .admin
         .create_checkpoint(&namespace_id)
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -252,7 +252,7 @@ pub(super) async fn advance_retention(
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let response = state
-        .fs
+        .admin
         .advance_retention_floor(&namespace_id)
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -292,7 +292,7 @@ pub(super) async fn gc_namespace(
         reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
     };
     let report = state
-        .fs
+        .admin
         .gc_namespace(&namespace_id, &config)
         .await
         .map_err(ApiResponseError::runtime)?;

@@ -62,6 +62,12 @@ impl FsWriter {
         FsReader::from_core(self.core.clone())
     }
 
+    /// Shared runtime core, for in-crate front-ends like the batching
+    /// publisher.
+    pub(crate) fn core(&self) -> &Fs {
+        &self.core
+    }
+
     /// Returns the capability document for this embedded build (API spec,
     /// "Capability discovery").
     pub fn capabilities(&self) -> CapabilityDocument {

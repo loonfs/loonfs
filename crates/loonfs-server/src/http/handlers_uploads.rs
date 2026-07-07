@@ -66,7 +66,7 @@ pub(super) async fn begin_upload(
     }
 
     let response = state
-        .fs
+        .writer
         .begin_upload(&namespace_id, request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -93,7 +93,7 @@ async fn begin_direct_put_upload(
     };
 
     let prepared = state
-        .fs
+        .writer
         .begin_direct_put_upload_target(&namespace_id, content_ref)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -223,7 +223,7 @@ pub(super) async fn upload_content(
     let upload_id = parse_upload_id(&upload_id)?;
     let bytes = body.to_vec();
     let response = state
-        .fs
+        .writer
         .upload_content(&namespace_id, &upload_id, &bytes)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -264,7 +264,7 @@ pub(super) async fn complete_upload(
     let namespace_id = namespace.into_id()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let mut response = state
-        .fs
+        .writer
         .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;

@@ -47,8 +47,8 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use loonfs::publisher::PublisherRegistry;
 use loonfs::{
-    ErrorCode, Fs, JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, SharedObjectStore,
-    TraceMode, TraceStoreKind,
+    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, JsonlObjectStoreMetricsRecorder,
+    ObjectStoreMetricsRecorder, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::presign::ObjectTransferIssuer;
@@ -60,52 +60,58 @@ use thiserror::Error;
 type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 
+/// Purpose-specific handles over one shared store client: read endpoints go
+/// through `reader`, mutations through `writer` (and its publisher),
+/// maintenance endpoints through `admin`.
 #[derive(Clone)]
 struct AppState {
     config: Arc<ServerConfig>,
-    fs: Arc<Fs>,
+    writer: FsWriter,
+    reader: FsReader,
+    admin: FsAdmin,
     publisher: PublisherRegistry,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 }
 
-pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
+pub async fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
     let store = config.object_store()?;
     let transfer_issuer = store.transfer_issuer();
     let store = Arc::new(store) as SharedStore;
-    app_with_store_and_transfer_issuer(config, store, transfer_issuer)
+    app_with_store_and_transfer_issuer(config, store, transfer_issuer).await
 }
 
 #[cfg(test)]
-fn app_with_store(config: ServerConfig, store: SharedStore) -> Result<Router, ServerConfigError> {
-    app_with_store_and_transfer_issuer(config, store, None)
+async fn app_with_store(
+    config: ServerConfig,
+    store: SharedStore,
+) -> Result<Router, ServerConfigError> {
+    app_with_store_and_transfer_issuer(config, store, None).await
 }
 
-fn app_with_store_and_transfer_issuer(
+async fn app_with_store_and_transfer_issuer(
     config: ServerConfig,
     store: SharedStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 ) -> Result<Router, ServerConfigError> {
-    let fs = Arc::new(build_fs(&config, store)?);
-    Ok(app_with_fs(config, fs, transfer_issuer))
-}
-
-fn app_with_fs(
-    config: ServerConfig,
-    fs: Arc<Fs>,
-    transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
-) -> Router {
+    let (writer, reader, admin) = build_handles(&config, store).await?;
     let config = Arc::new(config);
-    let publisher = PublisherRegistry::new(fs.clone());
+    let publisher = PublisherRegistry::new(writer.clone());
     let state = AppState {
         config,
-        fs,
+        writer,
+        reader,
+        admin,
         publisher,
         transfer_issuer,
     };
+    Ok(router(state))
+}
+
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        // Module-qualified because `app_with_fs`'s `config` parameter shadows
-        // an imported bare handler name in this scope.
+        // Module-qualified because handler modules also export a bare
+        // `config` name in this scope.
         .route("/v0/config", get(handlers_namespace::config))
         .route("/v0/namespaces", post(create_namespace))
         .route(
@@ -165,37 +171,61 @@ fn app_with_fs(
         .with_state(state)
 }
 
-fn build_fs(config: &ServerConfig, store: SharedStore) -> Result<Fs, ServerConfigError> {
-    build_fs_with_metrics_jsonl_path(
+/// Opens the server's runtime handles inside the serving runtime.
+///
+/// The long-lived server writer opts into background maintenance; the
+/// reader shares its caches so read endpoints observe writes immediately;
+/// the admin handle drives the explicit maintenance endpoints under its own
+/// actor identity. All three deliberately share one provider client inside
+/// this one runtime ownership domain.
+async fn build_handles(
+    config: &ServerConfig,
+    store: SharedStore,
+) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
+    build_handles_with_metrics_jsonl_path(
         config,
         store,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
     )
+    .await
 }
 
-fn build_fs_with_metrics_jsonl_path(
+async fn build_handles_with_metrics_jsonl_path(
     config: &ServerConfig,
     store: SharedStore,
     metrics_jsonl_path: Option<OsString>,
-) -> Result<Fs, ServerConfigError> {
+) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
+    let metrics_recorder = object_store_metrics_recorder(metrics_jsonl_path)?;
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
-    let mut builder = Fs::builder(store)
+    let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
+        field: "runtime",
+        reason: error.to_string(),
+    };
+
+    let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .writer_version(config.writer_version.clone())
+        .background_work(FsBackgroundWork::Enabled)
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
-
-    if let Some(recorder) = object_store_metrics_recorder(metrics_jsonl_path)? {
-        builder = builder.metrics_recorder(recorder);
+    if let Some(recorder) = metrics_recorder.clone() {
+        writer_builder = writer_builder.metrics_recorder(recorder);
     }
+    let writer = writer_builder.build().await.map_err(runtime_error)?;
+    let reader = writer.reader();
 
-    builder
-        .build()
-        .map_err(|error| ServerConfigError::InvalidField {
-            field: "runtime",
-            reason: error.to_string(),
-        })
+    let mut admin_builder = FsAdmin::builder_with_store(store)
+        .actor_id(format!("{}-admin", config.writer_id))
+        .actor_version(config.writer_version.clone())
+        .trace_mode(TraceMode::Remote)
+        .trace_store_kind(trace_store_kind);
+    if let Some(recorder) = metrics_recorder {
+        admin_builder = admin_builder.metrics_recorder(recorder);
+    }
+    let admin = admin_builder.build().await.map_err(runtime_error)?;
+
+    Ok((writer, reader, admin))
 }
 
 fn object_store_metrics_recorder(
@@ -242,7 +272,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
         addr: config.bind.clone(),
         source,
     })?;
-    let app = app(config)?;
+    let app = app(config).await?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServeError::Bind { addr: bind, source })?;

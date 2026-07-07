@@ -102,7 +102,7 @@ pub(super) async fn list_entries(
     let namespace_id = namespace.into_id()?;
     let path = query.path;
     let listing = state
-        .fs
+        .reader
         .list_path_entries_page(
             &namespace_id,
             &path,
@@ -147,7 +147,7 @@ pub(super) async fn stat_entry(
     let namespace_id = namespace.into_id()?;
     let path = query.path;
     let entry = state
-        .fs
+        .reader
         .stat_path(&namespace_id, &path)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -193,11 +193,11 @@ pub(super) async fn get_content(
     let file = match revision_no {
         Some(revision_no) => {
             state
-                .fs
+                .reader
                 .read_file_revision_bytes(&namespace_id, &path, revision_no)
                 .await
         }
-        None => state.fs.read_file_bytes(&namespace_id, &path).await,
+        None => state.reader.read_file_bytes(&namespace_id, &path).await,
     }
     .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, file.bytes).into_response())
@@ -236,7 +236,7 @@ pub(super) async fn list_path_revisions(
     let namespace_id = namespace.into_id()?;
     let path = query.path;
     let response = state
-        .fs
+        .reader
         .list_file_revisions_page(
             &namespace_id,
             &path,
@@ -284,7 +284,7 @@ pub(super) async fn list_inode_revisions(
     let namespace_id = namespace.into_id()?;
     let inode_id = parse_inode_id(&inode_id)?;
     let response = state
-        .fs
+        .reader
         .list_file_revisions_for_inode_page(
             &namespace_id,
             inode_id,
@@ -334,7 +334,7 @@ pub(super) async fn get_inode_revision_content(
     let inode_id = parse_inode_id(&inode_id)?;
     let revision_no = parse_revision_no(&revision_no)?;
     let bytes = state
-        .fs
+        .reader
         .read_file_revision_bytes_for_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
@@ -606,7 +606,7 @@ pub(super) async fn list_changes(
     let after_seq = loonfs_api::ChangeSeq(query.after_seq);
     let limit = resolve_page_limit(query.limit)?;
     let response = state
-        .fs
+        .reader
         .list_changes_after(
             &namespace_id,
             after_seq,

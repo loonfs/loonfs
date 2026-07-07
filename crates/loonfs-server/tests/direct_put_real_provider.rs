@@ -267,7 +267,7 @@ async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app(config).expect("build app");
+    let router = app(config).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });

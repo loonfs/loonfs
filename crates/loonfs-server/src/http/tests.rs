@@ -61,7 +61,7 @@ fn error_status_mapping_matches_the_api_spec_table() {
 }
 
 use super::error::status_for_core_error_code;
-use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
+use super::{app_with_store, build_handles_with_metrics_jsonl_path, SharedStore};
 use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
@@ -148,8 +148,8 @@ impl ObjectStore for StaleHeadOnceStore {
     }
 }
 
-#[test]
-fn build_fs_installs_jsonl_object_store_metrics_recorder() {
+#[tokio::test]
+async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let store_dir = tempdir().expect("store tempdir");
     let metrics_dir = tempdir().expect("metrics tempdir");
     let store = Arc::new(LocalFsStore::new(store_dir.path()).expect("store")) as SharedStore;
@@ -157,19 +157,16 @@ fn build_fs_installs_jsonl_object_store_metrics_recorder() {
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
     {
-        let fs = build_fs_with_metrics_jsonl_path(
+        let (writer, _reader, _admin) = build_handles_with_metrics_jsonl_path(
             &config,
             store,
             Some(metrics_path.clone().into_os_string()),
         )
-        .expect("build fs");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(
-                fs.create_namespace(&namespace_id("metrics"), CreateNamespaceOptions::default()),
-            )
+        .await
+        .expect("build handles");
+        writer
+            .create_namespace(&namespace_id("metrics"), CreateNamespaceOptions::default())
+            .await
             .expect("create namespace");
     }
 
@@ -500,7 +497,7 @@ async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestH
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).expect("build app");
+    let router = app_with_store(config, store).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
