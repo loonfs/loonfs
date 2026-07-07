@@ -325,12 +325,41 @@ pub(crate) struct ChangesArgs {
 pub(crate) enum AdminCommand {
     Checkpoint(AdminNamespaceArgs),
     RetentionAdvance(AdminNamespaceArgs),
+    Tick(AdminTickArgs),
+    Gc(AdminGcArgs),
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct AdminNamespaceArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminTickArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Publish a checkpoint when the visible WAL tail reaches this many
+    /// segments (server default when omitted).
+    #[arg(long)]
+    pub max_wal_tail_segments: Option<u64>,
+    /// Run a garbage-collection pass after the tick's checkpoint work.
+    #[arg(long)]
+    pub gc: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminGcArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Objects younger than this are never deleted (server default when
+    /// omitted).
+    #[arg(long)]
+    pub grace_window_ms: Option<u64>,
+    /// Abandoned bootstrap trees older than this may be reaped (server
+    /// default when omitted).
+    #[arg(long)]
+    pub reap_window_ms: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,6 +417,8 @@ pub(crate) enum CommandKind {
     Changes,
     AdminCheckpoint,
     AdminRetentionAdvance,
+    AdminTick,
+    AdminGc,
     ConfigPath,
     ConfigShow,
     Version,
@@ -422,6 +453,8 @@ impl CommandKind {
             CommandKind::Changes => "changes",
             CommandKind::AdminCheckpoint => "admin_checkpoint",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
+            CommandKind::AdminTick => "admin_tick",
+            CommandKind::AdminGc => "admin_gc",
             CommandKind::ConfigPath => "config_path",
             CommandKind::ConfigShow => "config_show",
             CommandKind::Version => "version",
@@ -467,6 +500,8 @@ impl Cli {
             Command::Admin { command } => match command {
                 AdminCommand::Checkpoint(_) => CommandKind::AdminCheckpoint,
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
+                AdminCommand::Tick(_) => CommandKind::AdminTick,
+                AdminCommand::Gc(_) => CommandKind::AdminGc,
             },
             Command::Config { command } => match command {
                 ConfigCommand::Path => CommandKind::ConfigPath,

@@ -1,8 +1,24 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;
+use loonfs_api::{GcResponse, MaintenanceTickOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
+
+fn gc_summary(report: &GcResponse) -> String {
+    let mut summary = format!(
+        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained)",
+        report.deleted_wal_segments,
+        report.deleted_metadata_tables,
+        report.deleted_manifests,
+        report.deleted_checkpoint_records,
+        report.retained_candidates
+    );
+    if report.degraded_retention {
+        summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
+    }
+    summary
+}
 
 const FORMAT_VERSION: u32 = 1;
 
@@ -156,6 +172,38 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             "advanced retention floor for {} to seq {}; changes before this floor are no longer replayable",
             response.namespace_id, response.retention_floor_seq.0
         ),
+        CommandData::MaintenanceTicked(response) => {
+            let outcome = match &response.outcome {
+                MaintenanceTickOutcome::NotNeeded => format!(
+                    "not needed (wal tail {} segments)",
+                    response.status_before.wal_tail_segments
+                ),
+                MaintenanceTickOutcome::CheckpointPublished { checkpoint_seq } => {
+                    format!("checkpoint published @ seq {}", checkpoint_seq.0)
+                }
+                MaintenanceTickOutcome::CheckpointSuperseded {
+                    attempted_seq,
+                    current_manifest_id,
+                } => format!(
+                    "checkpoint @ seq {} superseded (current manifest {})",
+                    attempted_seq.0, current_manifest_id
+                ),
+                MaintenanceTickOutcome::CheckpointPublishRaceLost { observed_head_seq } => {
+                    format!(
+                        "checkpoint race lost (head moved past seq {})",
+                        observed_head_seq.0
+                    )
+                }
+            };
+            let mut line = format!("maintenance tick for {}: {outcome}", response.namespace_id);
+            if let Some(gc) = &response.gc {
+                line.push_str(&format!("; {}", gc_summary(gc)));
+            }
+            line
+        }
+        CommandData::GarbageCollected(response) => {
+            format!("gc for {}: {}", response.namespace_id, gc_summary(response))
+        }
         CommandData::Changes(response) => {
             let mut lines = vec![
                 format!(

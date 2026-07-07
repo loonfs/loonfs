@@ -962,7 +962,12 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
         ),
         (
             "admin/v0",
-            &[&["admin", "checkpoint"], &["admin", "retention-advance"]],
+            &[
+                &["admin", "checkpoint"],
+                &["admin", "retention-advance"],
+                &["admin", "tick"],
+                &["admin", "gc"],
+            ],
         ),
     ];
     // Advertised feature key -> the CLI command path exercising it. Keys are
@@ -1103,6 +1108,27 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(retention_data["namespace_id"], "demo");
         assert_eq!(retention_data["retention_floor_seq"], 2);
 
+        // The checkpoint above already covers the head, so a tick reports
+        // not-needed identically in both modes.
+        let tick = harness.run(&["--json", "admin", "tick", "--profile", profile]);
+        assert_success(&tick);
+        let tick_data = json_data(&tick);
+        assert_eq!(tick_data["kind"], "maintenance_ticked");
+        assert_eq!(tick_data["namespace_id"], "demo");
+        assert_eq!(tick_data["outcome"]["kind"], "not_needed");
+        assert_eq!(tick_data["status_before"]["namespace_id"], "demo");
+        assert!(tick_data.get("gc").is_none());
+
+        // A fresh namespace has nothing eligible to sweep.
+        let gc = harness.run(&["--json", "admin", "gc", "--profile", profile]);
+        assert_success(&gc);
+        let gc_data = json_data(&gc);
+        assert_eq!(gc_data["kind"], "garbage_collected");
+        assert_eq!(gc_data["namespace_id"], "demo");
+        assert_eq!(gc_data["deleted_wal_segments"], 0);
+        assert_eq!(gc_data["deleted_manifests"], 0);
+        assert_eq!(gc_data["degraded_retention"], false);
+
         // Admin failures surface the registry code in both modes.
         let missing = harness.run(&[
             "--json",
@@ -1120,6 +1146,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             sorted_object_keys(&changes_data),
             sorted_object_keys(&checkpoint_data),
             sorted_object_keys(&retention_data),
+            sorted_object_keys(&tick_data),
+            sorted_object_keys(&gc_data),
         ));
     }
 

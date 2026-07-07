@@ -1,9 +1,15 @@
-//! Per-operation option and result types for the runtime handle surface.
+//! Per-operation option and result types for the runtime handle surface,
+//! plus the wire conversions the server and embedded hosts share so both
+//! transports report identical maintenance shapes.
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, EffectiveLimit, ManifestId, MoveBehavior,
-    NamespaceId, NamespaceStatusResponse, PutBehavior,
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, EffectiveLimit, GcConfig, GcReport, ManifestId,
+    MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
+};
+use loonfs_api::v0::{
+    GcRequest, GcResponse, MaintenanceTickOutcome as WireMaintenanceTickOutcome,
+    MaintenanceTickRequest, MaintenanceTickResponse,
 };
 
 /// Options for one maintenance tick.
@@ -22,6 +28,43 @@ impl Default for MaintenanceTickOptions {
             max_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
             gc: None,
         }
+    }
+}
+
+impl MaintenanceTickOptions {
+    /// Resolves wire-level tick overrides onto the runtime defaults.
+    pub fn from_request(request: MaintenanceTickRequest) -> Self {
+        let defaults = Self::default();
+        Self {
+            max_wal_tail_segments: request
+                .max_wal_tail_segments
+                .unwrap_or(defaults.max_wal_tail_segments),
+            gc: request.gc.map(gc_config_from_request),
+        }
+    }
+}
+
+/// Resolves wire-level GC window overrides onto the conservative defaults.
+pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
+    let defaults = GcConfig::default();
+    GcConfig {
+        grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
+        reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
+    }
+}
+
+/// Wire response for one GC report against a namespace.
+pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> GcResponse {
+    GcResponse {
+        namespace_id,
+        deleted_wal_segments: report.deleted_wal_segments,
+        deleted_metadata_tables: report.deleted_metadata_tables,
+        deleted_manifests: report.deleted_manifests,
+        deleted_checkpoint_records: report.deleted_checkpoint_records,
+        released_pins: report.released_pins,
+        reaped_abandoned_objects: report.reaped_abandoned_objects,
+        retained_candidates: report.retained_candidates,
+        degraded_retention: report.degraded_retention,
     }
 }
 
@@ -60,6 +103,36 @@ pub struct MaintenanceTickResult {
     pub outcome: MaintenanceTickOutcome,
     /// Garbage-collection report when the tick opted into sweeping.
     pub gc: Option<crate::GcReport>,
+}
+
+impl MaintenanceTickResult {
+    /// Wire response for this tick.
+    pub fn into_response(self) -> MaintenanceTickResponse {
+        let namespace_id = self.namespace_id;
+        MaintenanceTickResponse {
+            gc: self
+                .gc
+                .map(|report| gc_response_from_report(namespace_id.clone(), report)),
+            namespace_id,
+            status_before: self.status_before,
+            outcome: match self.outcome {
+                MaintenanceTickOutcome::NotNeeded => WireMaintenanceTickOutcome::NotNeeded,
+                MaintenanceTickOutcome::CheckpointPublished { checkpoint_seq } => {
+                    WireMaintenanceTickOutcome::CheckpointPublished { checkpoint_seq }
+                }
+                MaintenanceTickOutcome::CheckpointSuperseded {
+                    attempted_seq,
+                    current_manifest_id,
+                } => WireMaintenanceTickOutcome::CheckpointSuperseded {
+                    attempted_seq,
+                    current_manifest_id,
+                },
+                MaintenanceTickOutcome::CheckpointPublishRaceLost { observed_head_seq } => {
+                    WireMaintenanceTickOutcome::CheckpointPublishRaceLost { observed_head_seq }
+                }
+            },
+        }
+    }
 }
 
 /// Options for creating a namespace; feeds core's

@@ -9,16 +9,18 @@ use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use async_trait::async_trait;
 use loonfs::{
-    BootstrapNamespaceError, ChangesResponse, CopyOptions, CoreError, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, ListChangesOptions, MoveOptions,
+    gc_config_from_request, gc_response_from_report, BootstrapNamespaceError, ChangesResponse,
+    CopyOptions, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader,
+    FsWriter, ListChangesOptions, MaintenanceTickOptions, MaintenanceTickResult, MoveOptions,
     PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
-    CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit, ListFileRevisionsResponse,
-    MoveBehavior, MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    PaginationPolicy, PutBehavior, RevisionNo,
+    CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit, GcRequest, GcResponse,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
+    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
+    PutBehavior, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -297,6 +299,34 @@ impl Backend for EmbeddedBackend {
         self.admin
             .advance_retention_floor(&parsed)
             .await
+            .map_err(map_runtime_error)
+    }
+
+    async fn maintenance_tick(
+        &self,
+        namespace_id: &str,
+        request: MaintenanceTickRequest,
+    ) -> Result<MaintenanceTickResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        let options = MaintenanceTickOptions::from_request(request);
+        self.admin
+            .maintenance_tick_namespace(&parsed, options)
+            .await
+            .map(MaintenanceTickResult::into_response)
+            .map_err(map_runtime_error)
+    }
+
+    async fn gc_namespace(
+        &self,
+        namespace_id: &str,
+        request: GcRequest,
+    ) -> Result<GcResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        let config = gc_config_from_request(request);
+        self.admin
+            .gc_namespace(&parsed, &config)
+            .await
+            .map(|report| gc_response_from_report(parsed, report))
             .map_err(map_runtime_error)
     }
 

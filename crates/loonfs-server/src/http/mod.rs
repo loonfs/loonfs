@@ -34,7 +34,7 @@ use self::handlers_filesystem::{
 };
 use self::handlers_namespace::{
     advance_retention, create_checkpoint, create_namespace, delete_namespace, fork_namespace,
-    gc_namespace, namespace_status,
+    gc_namespace, maintenance_tick, namespace_status,
 };
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
@@ -175,6 +175,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/admin/namespaces/:namespace/retention/advance",
             post(advance_retention),
+        )
+        .route(
+            "/v0/admin/namespaces/:namespace/maintenance/tick",
+            post(maintenance_tick),
         )
         .route("/v0/admin/namespaces/:namespace/gc", post(gc_namespace))
         .with_state(state)
