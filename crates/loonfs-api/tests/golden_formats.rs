@@ -3,8 +3,10 @@
 
 //! Golden-byte fixtures for durable LoonFS encodings.
 //!
-//! Encoder drift means a format change. Either revert it, or bump the format
-//! version and regenerate with `UPDATE_GOLDEN=1 cargo test`.
+//! Encoder drift means the durable format changed: either revert it, or bump
+//! the family's format version and regenerate with `UPDATE_GOLDEN=1 cargo
+//! test`. A fixture that stops decoding means a compatibility break with
+//! already-written data.
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,

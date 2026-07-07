@@ -19,7 +19,10 @@ pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 
-/// A deployment's self-description.
+/// A deployment's self-description (API spec, "Capability discovery").
+///
+/// Clients gate on [`supports`] / [`has_profile`] rather than on backend kind,
+/// and treat a `not_supported` error as authoritative when the two disagree.
 ///
 /// [`supports`]: CapabilityDocument::supports
 /// [`has_profile`]: CapabilityDocument::has_profile

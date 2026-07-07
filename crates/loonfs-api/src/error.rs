@@ -44,7 +44,9 @@ macro_rules! error_codes {
     ($($variant:ident => $wire:literal),+ $(,)?) => {
         /// Stable machine-readable error reason.
         ///
-        /// Complete registry of `code` values carried by API errors.
+        /// Complete registry of `code` values carried by API errors. Codes are
+        /// permanent wire contracts once released; clients must tolerate codes
+        /// they do not recognize.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[non_exhaustive]
         pub enum ErrorCode {

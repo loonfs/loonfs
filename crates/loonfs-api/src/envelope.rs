@@ -6,6 +6,10 @@
 use serde::Deserialize;
 
 /// Identifying prefix of a durable envelope document.
+///
+/// Decoded before the full document so unknown kinds and unsupported format
+/// versions fail with a precise error; `kind` stays a string rather than an
+/// enum so future kinds remain reportable.
 #[derive(Debug, Deserialize)]
 pub(crate) struct EnvelopeProbe {
     pub(crate) kind: String,

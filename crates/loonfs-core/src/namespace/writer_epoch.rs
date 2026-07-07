@@ -30,7 +30,9 @@ pub enum WriterEpochAcquireError {
 /// Acquires the namespace writer epoch for a writer session.
 ///
 /// Acquisition bumps the epoch and fences other sessions at their next publish.
-/// An idempotent retry by the same session returns the existing epoch.
+/// An idempotent retry by the same session returns the existing epoch. A fenced
+/// session must not reacquire on its own; reacquisition is an explicit caller
+/// decision.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

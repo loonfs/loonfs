@@ -125,8 +125,9 @@ pub struct ContentStoreDescriptorState {
 
 /// Lifecycle of a durable checkpoint record.
 ///
-/// Active records are GC roots; dead records are tombstones retained only for
-/// the grace window.
+/// Active, unexpired records are long-term GC roots; dead records are
+/// collectable tombstones. Any record younger than the GC grace window is a
+/// root regardless of state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointRecordLifecycle {
@@ -209,7 +210,8 @@ pub struct AcquiredWriter {
 /// Lifecycle state recorded in the namespace head.
 ///
 /// Initialization is derived from object presence; this records terminal
-/// deletion, which keeps the id reserved.
+/// deletion, which keeps the id reserved. Decoding an unrecognized state fails
+/// closed instead of serving the namespace.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceState {

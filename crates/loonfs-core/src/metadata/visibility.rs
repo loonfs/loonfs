@@ -69,7 +69,8 @@ pub(crate) fn unbind_matches_binding(
 /// Raw row lookups scoped to one read sequence.
 ///
 /// The provided methods implement the composite visibility rules. Overrides
-/// may use caches or indexes, but must preserve these rule bodies.
+/// may add a cache or an index fast path, but must delegate to this module's
+/// rule bodies on the slow path — never re-derive the rules.
 pub(crate) trait MetadataVisibilityReads {
     type Error;
 

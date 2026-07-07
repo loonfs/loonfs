@@ -2098,7 +2098,7 @@
       },
       "CapabilityDocument": {
         "type": "object",
-        "description": "A deployment's self-description.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
+        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nClients gate on [`supports`] / [`has_profile`] rather than on backend kind,\nand treat a `not_supported` error as authoritative when the two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
         "required": [
           "protocol_version",
           "profiles"

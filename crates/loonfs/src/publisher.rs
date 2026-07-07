@@ -1,8 +1,13 @@
-//! Concurrent-write front-end for the embedded runtime.
+//! Opt-in concurrent-write front-end for the embedded runtime.
 //!
 //! Each namespace gets one publisher that batches mutations, deduplicates
 //! in-flight commit ids, sequences deletes as barriers, and retries ambiguous
 //! head updates with the same commit ids.
+//!
+//! Batching deliberately trades latency for fewer head compare-and-swaps:
+//! submissions wait out `COALESCING_DELAY` and per-namespace publications are
+//! paced `MIN_NAMESPACE_CAS_INTERVAL` apart. Solo writers should use the
+//! direct mutation methods instead.
 
 use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
@@ -689,7 +694,11 @@ impl NamespacePublisher {
     }
 }
 
-/// Cleans up a namespace publisher if its publish task exits unexpectedly.
+/// Keeps a namespace publisher serviceable if its publish task dies.
+///
+/// On abnormal exit this guard fails the taken waiters with an unknown outcome
+/// (the panic may have struck either side of the head compare-and-swap),
+/// clears the publishing flag, and restarts any queued batch.
 struct PublishAbortGuard {
     publisher: NamespacePublisher,
     taken_commit_ids: Vec<CommitId>,

@@ -60,6 +60,10 @@ impl MetadataState {
     }
 
     /// Appends the metadata row encoded by one committed WAL delta.
+    ///
+    /// Durable replay and the commit-validation overlay both append through
+    /// this one mapping, so the effects a batch validates against cannot
+    /// diverge from what replay persists.
     pub(crate) fn apply_committed_wal_delta_mut(
         &mut self,
         committed_seq: ChangeSeq,

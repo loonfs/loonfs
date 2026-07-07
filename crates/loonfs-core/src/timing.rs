@@ -1,6 +1,8 @@
 //! Local monotonic timer used only for self-enforced publish budgets.
 //!
-//! Commit validity never depends on wall-clock or monotonic time.
+//! Budgets bound a writer's segment-write-to-CAS window so the GC grace window
+//! stays deterministically safe. Commit validity never depends on wall-clock
+//! or monotonic time.
 
 use std::sync::OnceLock;
 use std::time::Instant;

@@ -1,7 +1,9 @@
-//! Listing-based mark-and-sweep garbage collection.
+//! Listing-based mark-and-sweep garbage collection (format spec, "Garbage
+//! collection").
 //!
-//! GC runs only when explicitly requested. When safety is uncertain, this
-//! module retains objects.
+//! GC runs only when explicitly requested. The grace window and delete-time
+//! re-verification close the create-vs-collect and publish-in-flight races;
+//! when safety is uncertain, this module retains objects.
 
 use crate::checkpoint::{load_namespace_manifest_envelope, read_checkpoint_record};
 use crate::context::MutationContext;

@@ -4,8 +4,9 @@ use std::fmt;
 
 /// Kind of content reference.
 ///
-/// Unknown kinds round-trip as [`ContentRefKind::Unsupported`], but writers
-/// reject them when creating new metadata.
+/// Unknown kinds round-trip as [`ContentRefKind::Unsupported`] so readers that
+/// relay rows they do not understand cannot destroy newer kinds; commit
+/// validation rejects newly created references with an unsupported kind.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentRefKind {
     /// Whole-file v0 content addressed by SHA-256.
