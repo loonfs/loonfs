@@ -1665,6 +1665,23 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     assert_eq!(raw_store.content_blob_put_count(), 1);
     assert_eq!(raw_store.content_blob_get_count(), 0);
     assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
+
+    // A replace put rides the same overlapped path: new blob, no probe.
+    raw_store.reset_content_blob_counters();
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/direct.txt",
+        b"replaced bytes",
+        PutFileOptions {
+            behavior: PutBehavior::Replace,
+            commit_id: None,
+        },
+    )
+    .expect("replace file bytes");
+
+    assert_eq!(raw_store.content_blob_put_count(), 1);
+    assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
 #[test]
