@@ -54,7 +54,10 @@ pub(super) struct MetadataTableCacheKey {
 
 #[derive(Debug, Clone)]
 pub(super) struct DecodedMetadataTableBlock {
-    pub(super) rows: Vec<MetadataRow>,
+    /// Decoded rows are shared, never re-cloned per reader: cache hits,
+    /// single-flight waiters, and per-scan session caches all hold the same
+    /// allocation, so concurrent wide scans cannot multiply resident copies.
+    pub(super) rows: Arc<Vec<MetadataRow>>,
     pub(super) segment_seq: ChangeSeq,
     pub(super) family: MetadataTableFamily,
     pub(super) segment_index: u32,
@@ -145,6 +148,15 @@ impl MetadataTableCache {
             inserts: self.stats.inserts.load(Ordering::SeqCst),
             evictions: self.stats.evictions.load(Ordering::SeqCst),
         }
+    }
+
+    /// Whether inserts are bounded by a decoded-byte budget. A byte-budgeted
+    /// cache admits scans of any width safely: eviction is sized by decoded
+    /// bytes, so one wide scan cannot pin more memory than the budget. Without
+    /// a byte budget only entry count bounds the cache, and wide admissions
+    /// would flush it.
+    pub(super) fn byte_budgeted(&self) -> bool {
+        self.config.max_decoded_bytes.is_some()
     }
 
     pub(super) fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
@@ -454,10 +466,11 @@ mod tests {
     };
     use loonfs_api::wire::manifest::{MetadataSegmentKey, MetadataTableFamily};
     use loonfs_api::ChangeSeq;
+    use std::sync::Arc;
 
     fn block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
         DecodedMetadataTableBlock {
-            rows: Vec::new(),
+            rows: Arc::new(Vec::new()),
             segment_seq: ChangeSeq(1),
             family: MetadataTableFamily::Inodes,
             segment_index: 0,
@@ -521,6 +534,19 @@ mod tests {
         assert!(cache.get(&key("a")).is_some());
         assert!(cache.get(&key("b")).is_some());
         assert_eq!(cache.stats().evictions, 0);
+    }
+
+    #[test]
+    fn cache_hits_share_the_decoded_row_allocation() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let inserted = block(64);
+        let rows = Arc::clone(&inserted.rows);
+        cache.insert(key("a"), inserted);
+        let hit = cache.get(&key("a")).expect("inserted block should hit");
+        assert!(
+            Arc::ptr_eq(&hit.rows, &rows),
+            "a cache hit should share the decoded rows, not clone them"
+        );
     }
 
     #[tokio::test]

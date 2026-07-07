@@ -47,7 +47,7 @@ use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::Instrument;
 
 #[cfg(test)]
@@ -512,7 +512,7 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
-) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+) -> Result<Arc<Vec<MetadataRow>>, ManifestLoadError> {
     load_manifest_segment_rows_with_cache(
         store,
         None,
@@ -531,7 +531,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     cache_mode: MetadataTableCacheMode,
-) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+) -> Result<Arc<Vec<MetadataRow>>, ManifestLoadError> {
     let expected_segment_seq = context.expected_segment_seq(descriptor)?;
     let cache_key = MetadataTableCacheKey {
         table_digest: descriptor.payload_checksum.clone(),
@@ -573,7 +573,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         let rows = validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
         Ok(DecodedMetadataTableBlock {
             decoded_byte_len: decoded_manifest_block_weight(family, &rows),
-            rows,
+            rows: Arc::new(rows),
             segment_seq: expected_segment_seq,
             family,
             segment_index: descriptor.segment_index,

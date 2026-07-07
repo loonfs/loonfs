@@ -27,6 +27,7 @@ use super::runs::{
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
     DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
 };
+use super::scan::SMALL_SCAN_CACHE_SEGMENT_LIMIT;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
@@ -2098,7 +2099,80 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
 }
 
 #[tokio::test]
-async fn large_table_scan_does_not_insert_metadata_cache_blocks() {
+async fn byte_budgeted_cache_admits_large_table_scans() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..8 {
+        let path = format!("/docs/file-{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+            .await
+            .expect("write file");
+    }
+    let policy = MetadataLsmPolicy {
+        max_rows_per_segment: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("manifest");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    // The default cache config carries a decoded-byte budget, so a scan wider
+    // than the small-scan limit populates the cache instead of reading through.
+    let cache = super::MetadataTableCache::new(Default::default());
+    let tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load tables");
+
+    let revisions = tables
+        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+        .await
+        .expect("scan revisions");
+    let after_first = cache.stats();
+    assert!(revisions.len() >= 8);
+    assert!(
+        after_first.inserts >= 8,
+        "a wide scan against a byte-budgeted cache should admit every segment"
+    );
+
+    // A fresh view has no per-view segment memo; only the shared cache can
+    // answer, so the repeated scan must issue no segment fetches.
+    let fresh_tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load fresh tables");
+    store.reset_metadata_sst_gets();
+    let repeated = fresh_tables
+        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+        .await
+        .expect("repeated scan");
+    let after_repeat = cache.stats();
+
+    assert_eq!(repeated, revisions);
+    assert_eq!(
+        store.metadata_sst_gets(),
+        0,
+        "a warm wide scan should be served entirely from the cache"
+    );
+    assert!(after_repeat.hits > after_first.hits);
+}
+
+#[tokio::test]
+async fn count_bounded_cache_keeps_large_table_scans_read_only() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2120,7 +2194,14 @@ async fn large_table_scan_does_not_insert_metadata_cache_blocks() {
         .await
         .expect("manifest");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = super::MetadataTableCache::new(Default::default());
+    // Without a byte budget only entry count bounds the cache, so one wide
+    // scan admitting all its segments could flush every resident block; wide
+    // scans stay read-only under that configuration.
+    let cache = super::MetadataTableCache::new(MetadataTableCacheConfig {
+        enabled: true,
+        max_blocks: 256,
+        max_decoded_bytes: None,
+    });
     let tables = super::load_verified_manifest_tables_with_cache(
         &store,
         Some(&cache),
@@ -2166,7 +2247,14 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         .await
         .expect("manifest");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    let cache = super::MetadataTableCache::new(Default::default());
+    // A count-bounded cache keeps wide scans read-only, so nothing is ever
+    // admitted and single-flight deduplication is the only fetch sharing —
+    // exactly the property this test pins.
+    let cache = super::MetadataTableCache::new(MetadataTableCacheConfig {
+        enabled: true,
+        max_blocks: 256,
+        max_decoded_bytes: None,
+    });
     let load_tables = || {
         super::load_verified_manifest_tables_with_cache(
             &store,
@@ -2266,6 +2354,88 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
         .collect::<Vec<_>>();
 
     assert_eq!(display_names, vec!["a.txt", "b.txt"]);
+}
+
+#[tokio::test]
+async fn byte_budgeted_cache_admits_large_range_scans() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..8 {
+        let path = format!("/docs/file-{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+            .await
+            .expect("write file");
+    }
+    let policy = MetadataLsmPolicy {
+        max_rows_per_segment: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("manifest");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let cache = super::MetadataTableCache::new(Default::default());
+    let tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load tables");
+
+    // The list preload path: one page-shaped range scan over a directory
+    // whose bind rows span more segments than the small-scan limit.
+    let docs_inode_id = InodeId(2);
+    let lower_bound = format!("direntry-{:020}-", docs_inode_id.0);
+    let upper_bound = super::string_prefix_upper_bound(&lower_bound);
+    let page = tables
+        .scan_range_page(
+            ApiMetadataTableFamily::DirentryBinds,
+            &lower_bound,
+            upper_bound.as_deref(),
+            8,
+        )
+        .await
+        .expect("scan range page");
+    let after_first = cache.stats();
+    assert_eq!(page.len(), 8);
+    assert!(
+        after_first.inserts > SMALL_SCAN_CACHE_SEGMENT_LIMIT,
+        "a wide range scan against a byte-budgeted cache should admit its segments"
+    );
+
+    let fresh_tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load fresh tables");
+    store.reset_metadata_sst_gets();
+    let repeated = fresh_tables
+        .scan_range_page(
+            ApiMetadataTableFamily::DirentryBinds,
+            &lower_bound,
+            upper_bound.as_deref(),
+            8,
+        )
+        .await
+        .expect("repeated scan range page");
+
+    assert_eq!(repeated, page);
+    assert_eq!(
+        store.metadata_sst_gets(),
+        0,
+        "a warm range scan should be served entirely from the cache"
+    );
 }
 
 #[tokio::test]
