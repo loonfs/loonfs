@@ -1813,32 +1813,41 @@ fn publish_auto_ticks_maintenance_once_tail_reaches_threshold() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "auto-tick-test");
     let namespace_id = namespace_id();
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
 
-    for round in 0..33u32 {
-        fs.put_file_bytes_blocking(
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body",
-            PutFileOptions::default(),
-        )
-        .expect("put file");
-    }
+    // Auto ticks spawn on the runtime driving the writes, so the writes,
+    // the quiesce, and the assertions share one runtime.
+    block_on(async {
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
 
-    // The tick runs on the maintenance worker thread; quiesce, then assert.
-    fs.wait_for_background_maintenance();
-    let status = fs
-        .namespace_status_blocking(&namespace_id)
-        .expect("status after auto tick");
-    assert!(
-        status.current_manifest_id > Some(ManifestId(0)),
-        "auto tick should have published a manifest: {status:?}"
-    );
-    assert!(
-        status.wal_tail_segments < 32,
-        "auto tick should have bounded the tail: {status:?}"
-    );
+        for round in 0..33u32 {
+            fs.put_file_bytes(
+                &namespace_id,
+                &format!("/docs/file-{round}.txt"),
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("put file");
+        }
+
+        fs.wait_for_background_maintenance()
+            .await
+            .expect("background maintenance quiesces");
+        let status = fs
+            .namespace_status(&namespace_id)
+            .await
+            .expect("status after auto tick");
+        assert!(
+            status.current_manifest_id > Some(ManifestId(0)),
+            "auto tick should have published a manifest: {status:?}"
+        );
+        assert!(
+            status.wal_tail_segments < 32,
+            "auto tick should have bounded the tail: {status:?}"
+        );
+    });
 }
 
 #[test]
