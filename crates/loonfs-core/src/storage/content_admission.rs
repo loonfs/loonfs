@@ -17,6 +17,27 @@ pub struct ContentAdmission {
 }
 
 impl ContentAdmission {
+    /// Admits a content ref whose durable write runs as a peer of the publish
+    /// that commits it, so batch validation does not probe object storage for
+    /// a blob that may not have landed yet. Callers must pair this with a
+    /// [`crate::publish::ContentDurabilityGate`] on the same publish: the
+    /// admission removes the probe, and the gate holds the head CAS until the
+    /// write's own ack proves durability.
+    pub fn for_in_flight_content_write(
+        namespace_id: NamespaceId,
+        content_ref: ContentRef,
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            namespace_id,
+            content_ref,
+            // Generous on purpose: it must outlive buffered commit windows
+            // and stale-head retries. The gate, not this clock, is the
+            // durability authority.
+            expires_at_ms: now_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),
+        }
+    }
+
     pub(crate) fn admits(
         &self,
         namespace_id: &NamespaceId,

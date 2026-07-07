@@ -79,6 +79,7 @@ pub mod publish {
         NamespaceCommitEnginePublishResult, NamespaceMutationCandidate, PublishOptions,
     };
     pub use crate::path::write::PathMutationIntent;
+    pub use crate::protocol::ContentDurabilityGate;
 }
 
 #[cfg(any(test, feature = "inspection"))]

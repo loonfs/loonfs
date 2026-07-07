@@ -5,6 +5,7 @@
 use crate::background::BackgroundWork;
 use crate::cache::{CommitEngineCache, RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_config, FsConfig};
+use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
 use crate::{
@@ -636,21 +637,54 @@ impl FsCore {
         // invalid or root path cannot orphan an already-written content blob;
         // core re-checks the same invariant when the intent is planned.
         loonfs_core::path::validate_path_for_mutation(absolute_path)?;
-        let store = self.store();
-        let stored = loonfs_core::content::store_bytes_as_content(&store, namespace_id, bytes)
+        // The content reference derives from the bytes alone, so the durable
+        // content write runs as a peer of publish validation and the WAL
+        // write: both futures are driven together below. The admission tells
+        // batch validation not to probe for a blob that is still in flight;
+        // the head CAS instead gates on the write's own ack through the
+        // channel. A failed content write leaves only a GC-covered orphan
+        // behind an unmoved head.
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        let content_admission = ContentAdmission::for_in_flight_content_write(
+            namespace_id.clone(),
+            content_ref.clone(),
+            current_time_ms(),
+        );
+        let (content_result_sender, content_result_receiver) = futures::channel::oneshot::channel();
+        let content_store = self.inner.store.clone();
+        let content_namespace_id = namespace_id.clone();
+        let content_write = async move {
+            let result = loonfs_core::content::store_bytes_as_content(
+                &content_store,
+                &content_namespace_id,
+                bytes,
+            )
             .await
-            .map_err(RuntimeError::from);
-        let content_ref = stored?.content_ref;
-        self.publish_path_intent(
+            .map(|_| ());
+            // A receiver dropped before the gate point means the publish
+            // failed earlier; the content object is then a GC-covered orphan.
+            let _ = content_result_sender.send(result);
+        };
+        let content_gate: loonfs_core::publish::ContentDurabilityGate = Box::pin(async move {
+            content_result_receiver.await.map_err(|_| {
+                CoreError::Internal("content write finished without a result".to_owned())
+            })?
+        });
+        let publish = self.publish_candidate_gated(
             namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                absolute_path: absolute_path.to_owned(),
-                content_ref,
-                behavior: options.behavior,
+            NamespaceMutationCandidate::PathWithContentAdmission {
+                intent: PathMutationIntent::PutFile {
+                    commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                    absolute_path: absolute_path.to_owned(),
+                    content_ref,
+                    behavior: options.behavior,
+                },
+                admissions: vec![content_admission],
             },
-        )
-        .await
+            Some(content_gate),
+        );
+        let ((), published) = futures::join!(content_write, publish);
+        published
     }
 
     /// Publishes a file revision that points at an already-durable content
@@ -920,11 +954,18 @@ impl FsCore {
         namespace_id: &NamespaceId,
         intent: PathMutationIntent,
     ) -> Result<MutationResult> {
+        self.publish_candidate_gated(namespace_id, NamespaceMutationCandidate::Path(intent), None)
+            .await
+    }
+
+    async fn publish_candidate_gated(
+        &self,
+        namespace_id: &NamespaceId,
+        candidate: NamespaceMutationCandidate,
+        content_gate: Option<loonfs_core::publish::ContentDurabilityGate>,
+    ) -> Result<MutationResult> {
         let mut results = self
-            .publish_namespace_mutations_batch(
-                namespace_id,
-                vec![NamespaceMutationCandidate::Path(intent)],
-            )
+            .publish_namespace_mutations_batch_gated(namespace_id, vec![candidate], content_gate)
             .await;
         let response = results.pop().unwrap_or_else(|| {
             Err(RuntimeError::Core(CoreError::Internal(
@@ -947,6 +988,16 @@ impl FsCore {
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
+        self.publish_namespace_mutations_batch_gated(namespace_id, candidates, None)
+            .await
+    }
+
+    pub(crate) async fn publish_namespace_mutations_batch_gated(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+        content_gate: Option<loonfs_core::publish::ContentDurabilityGate>,
+    ) -> Vec<Result<CommitResponse>> {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
         let store = self.store();
         if self.commit_engine_cache_enabled() {
@@ -962,6 +1013,7 @@ impl FsCore {
                         &context,
                         cache_config.max_cached_wal_tail_projection_rows,
                         cache_config.max_cached_wal_tail_projection_decoded_bytes,
+                        content_gate,
                     )
                     .await
             };
@@ -993,7 +1045,7 @@ impl FsCore {
 
         let results: Vec<_> = self
             .namespace_engine_with_store(namespace_id, store)
-            .publish_namespace_mutations_batch(candidates)
+            .publish_namespace_mutations_batch_gated(candidates, content_gate)
             .await
             .into_iter()
             .map(|result| result.map_err(RuntimeError::Core))
