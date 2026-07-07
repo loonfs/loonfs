@@ -2143,6 +2143,70 @@ async fn large_table_scan_does_not_insert_metadata_cache_blocks() {
 }
 
 #[tokio::test]
+async fn concurrent_scans_share_one_fetch_per_segment() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..8 {
+        let path = format!("/docs/file-{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+            .await
+            .expect("write file");
+    }
+    let policy = MetadataLsmPolicy {
+        max_rows_per_segment: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+        .await
+        .expect("manifest");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let cache = super::MetadataTableCache::new(Default::default());
+    let load_tables = || {
+        super::load_verified_manifest_tables_with_cache(
+            &store,
+            Some(&cache),
+            &namespace_id,
+            &manifest_object_id,
+        )
+    };
+
+    // The scan touches more segments than the small-scan populate limit, so
+    // every fresh view re-fetches each segment: a solo pass measures the
+    // true per-scan fetch count.
+    let solo_tables = load_tables().await.expect("load solo tables");
+    store.reset_metadata_sst_gets();
+    let solo = solo_tables
+        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
+        .await
+        .expect("solo scan");
+    let solo_fetches = store.metadata_sst_gets();
+    assert!(solo.len() >= 8);
+    assert!(solo_fetches >= 8, "solo scan should fetch every segment");
+
+    // Concurrent requests each load their own tables view; only the shared
+    // cache's single-flight can deduplicate their segment fetches.
+    let first_tables = load_tables().await.expect("load first tables");
+    let second_tables = load_tables().await.expect("load second tables");
+    store.reset_metadata_sst_gets();
+    let (first, second) = tokio::join!(
+        first_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
+        second_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
+    );
+    let paired_fetches = store.metadata_sst_gets();
+    assert_eq!(first.expect("first scan"), second.expect("second scan"));
+    assert_eq!(
+        paired_fetches, solo_fetches,
+        "concurrent scans over one shared cache should share one fetch per segment"
+    );
+}
+
+#[tokio::test]
 async fn table_range_page_merges_base_and_l0_in_row_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -4573,7 +4637,7 @@ impl MetadataSstGetCountingStore {
     }
 
     fn record_if_metadata_sst(&self, key: &str) {
-        if key.contains("/tables/metadata/") && key.ends_with(".sst.zst") {
+        if key.contains("/metadata/tables/") && key.ends_with(".sst.zst") {
             *self
                 .metadata_sst_gets
                 .lock()

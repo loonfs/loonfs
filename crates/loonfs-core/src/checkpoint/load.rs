@@ -551,50 +551,62 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         }
     }
 
-    let Some(bytes) = store
-        .get(&descriptor.object_key, None)
-        .await
-        .map_err(|err| ManifestLoadError::ReadSegment {
-            object_key: descriptor.object_key.clone(),
-            message: err.to_string(),
-        })?
-    else {
-        return Err(ManifestLoadError::MissingSegment {
-            object_key: descriptor.object_key.clone(),
-        });
+    let fetch = || async {
+        let Some(bytes) = store
+            .get(&descriptor.object_key, None)
+            .await
+            .map_err(|err| ManifestLoadError::ReadSegment {
+                object_key: descriptor.object_key.clone(),
+                message: err.to_string(),
+            })?
+        else {
+            return Err(ManifestLoadError::MissingSegment {
+                object_key: descriptor.object_key.clone(),
+            });
+        };
+        let segment = decode_metadata_sst_envelope_zstd(&bytes).map_err(|err| {
+            ManifestLoadError::SegmentCodec {
+                object_key: descriptor.object_key.clone(),
+                message: err.to_string(),
+            }
+        })?;
+        let rows = validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
+        Ok(DecodedMetadataTableBlock {
+            decoded_byte_len: decoded_manifest_block_weight(family, &rows),
+            rows,
+            segment_seq: expected_segment_seq,
+            family,
+            segment_index: descriptor.segment_index,
+            segment_key: descriptor.segment_key.clone(),
+            row_count: descriptor.row_count,
+            min_key: descriptor.min_key.clone(),
+            max_key: descriptor.max_key.clone(),
+        })
     };
-    let segment = decode_metadata_sst_envelope_zstd(&bytes).map_err(|err| {
-        ManifestLoadError::SegmentCodec {
-            object_key: descriptor.object_key.clone(),
-            message: err.to_string(),
+    // Waiters may share a block another caller fetched, so every path
+    // re-validates the block against this caller's own expectations, exactly
+    // as the cache-hit path above does.
+    let block = match table_cache {
+        Some(cache) => {
+            cache
+                .fetch_deduplicated(&descriptor.object_key, fetch)
+                .await?
         }
-    })?;
-    let rows = validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
+        None => fetch().await?,
+    };
+    validate_cached_manifest_block(family, expected_segment_seq, descriptor, &block)?;
     validate_manifest_row_seq_range(
         &descriptor.object_key,
-        &rows,
+        &block.rows,
         context.row_seq_min,
         context.row_seq_max(descriptor),
     )?;
     if cache_mode == MetadataTableCacheMode::Populate {
         if let Some(cache) = table_cache {
-            cache.insert(
-                cache_key,
-                DecodedMetadataTableBlock {
-                    rows: rows.clone(),
-                    segment_seq: expected_segment_seq,
-                    family,
-                    segment_index: descriptor.segment_index,
-                    segment_key: descriptor.segment_key.clone(),
-                    row_count: descriptor.row_count,
-                    min_key: descriptor.min_key.clone(),
-                    max_key: descriptor.max_key.clone(),
-                    decoded_byte_len: decoded_manifest_block_weight(family, &rows),
-                },
-            );
+            cache.insert(cache_key, block.clone());
         }
     }
-    Ok(rows)
+    Ok(block.rows)
 }
 
 pub(super) fn validate_cached_manifest_block(
