@@ -3291,7 +3291,7 @@
         "description": "Filesystem item kind.",
         "enum": [
           "file",
-          "directory"
+          "dir"
         ]
       },
       "ListFileRevisionsResponse": {

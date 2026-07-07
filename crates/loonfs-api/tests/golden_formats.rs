@@ -19,12 +19,10 @@ use loonfs_api::wire::manifest::{
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstCodecError, MetadataSstEnvelope,
     MetadataSstPayload, MetadataTableFamily, NamespaceManifestCodecError,
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
-    METADATA_SST_FORMAT_VERSION, NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCodecError,
     WalCommitDelta, WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
-    WAL_FORMAT_VERSION,
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
@@ -567,20 +565,22 @@ fn with_cbor_document_entry(
 #[test]
 fn wal_decode_rejects_future_format_version_cleanly() {
     let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
-    let future_version = WAL_FORMAT_VERSION + 1;
     let bumped = with_cbor_document_entry(&document, "format_version", |value| {
-        *value = ciborium::Value::from(future_version);
+        *value = ciborium::Value::from(2);
     });
 
     let err = decode_wal_segment_envelope_zstd(&rezstd(&bumped))
         .expect_err("future version must be rejected");
-    match err {
-        WalCodecError::UnsupportedFormatVersion { found, supported } => {
-            assert_eq!(found, future_version);
-            assert_eq!(supported, WAL_FORMAT_VERSION);
-        }
-        other => panic!("unexpected error: {other}"),
-    }
+    assert!(
+        matches!(
+            err,
+            WalCodecError::UnsupportedFormatVersion {
+                found: 2,
+                supported: 1,
+            }
+        ),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -682,20 +682,22 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 #[test]
 fn metadata_sst_decode_rejects_future_format_version_cleanly() {
     let document = unzstd(&encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("sst"));
-    let future_version = METADATA_SST_FORMAT_VERSION + 1;
     let bumped = with_cbor_document_entry(&document, "format_version", |value| {
-        *value = ciborium::Value::from(future_version);
+        *value = ciborium::Value::from(2);
     });
 
     let err = decode_metadata_sst_envelope_zstd(&rezstd(&bumped))
         .expect_err("future version must be rejected");
-    match err {
-        MetadataSstCodecError::UnsupportedFormatVersion { found, supported } => {
-            assert_eq!(found, future_version);
-            assert_eq!(supported, METADATA_SST_FORMAT_VERSION);
-        }
-        other => panic!("unexpected error: {other}"),
-    }
+    assert!(
+        matches!(
+            err,
+            MetadataSstCodecError::UnsupportedFormatVersion {
+                found: 2,
+                supported: 1,
+            }
+        ),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -723,18 +725,20 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    let future_version = NAMESPACE_MANIFEST_FORMAT_VERSION + 1;
-    document["format_version"] = serde_json::Value::from(future_version);
+    document["format_version"] = serde_json::Value::from(2);
     let bumped = serde_json::to_vec(&document).expect("encode document");
 
     let err = decode_namespace_manifest_json(&bumped).expect_err("future version must be rejected");
-    match err {
-        NamespaceManifestCodecError::UnsupportedFormatVersion { found, supported } => {
-            assert_eq!(found, future_version);
-            assert_eq!(supported, NAMESPACE_MANIFEST_FORMAT_VERSION);
-        }
-        other => panic!("unexpected error: {other}"),
-    }
+    assert!(
+        matches!(
+            err,
+            NamespaceManifestCodecError::UnsupportedFormatVersion {
+                found: 2,
+                supported: 1,
+            }
+        ),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

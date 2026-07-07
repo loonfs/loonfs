@@ -360,7 +360,7 @@ fn metadata_state_serialized_shape_preserves_row_field_names() {
         serde_json::json!({
             "inodes": [{
                 "inode_id": 1,
-                "inode_kind": "directory",
+                "inode_kind": "dir",
                 "created_seq": 0
             }],
             "direntry_binds": [],
