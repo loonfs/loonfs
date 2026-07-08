@@ -21,7 +21,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub(super) const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
-pub(super) const MAX_MATERIALIZED_TABLE_FETCHES: usize = 8;
+/// Segment fetches issued per wave during a scan. Wide directories touch
+/// hundreds of segments per page; deeper waves amortize the per-wave await
+/// without unbounded fan-out.
+pub(super) const MAX_MATERIALIZED_TABLE_FETCHES: usize = 16;
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::OnceCell;
+
+/// Default decoded-byte budget for cached metadata table blocks. The byte
+/// budget is the primary limit: one wide directory's segment working set
+/// must fit, or warm listings re-fetch segments superlinearly.
+pub const DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
+/// Secondary block-count bound behind the byte budget; it only binds under
+/// pathological many-tiny-block shapes.
+pub const DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataTableCacheConfig {
@@ -17,8 +26,8 @@ impl Default for MetadataTableCacheConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_blocks: 256,
-            max_decoded_bytes: None,
+            max_blocks: DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
+            max_decoded_bytes: Some(DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES),
         }
     }
 }
@@ -61,6 +70,9 @@ pub struct MetadataTableCache {
     config: MetadataTableCacheConfig,
     inner: Mutex<MetadataTableCacheInner>,
     stats: MetadataTableCacheStatsInner,
+    /// One cell per in-flight segment fetch, keyed by object key, so
+    /// concurrent readers share a single store GET per segment.
+    in_flight: Mutex<HashMap<String, Arc<OnceCell<DecodedMetadataTableBlock>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -84,7 +96,46 @@ impl MetadataTableCache {
             config,
             inner: Mutex::new(MetadataTableCacheInner::default()),
             stats: MetadataTableCacheStatsInner::default(),
+            in_flight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Runs `fetch` once per object key across concurrent callers: waiters
+    /// share the winner's decoded block instead of issuing duplicate store
+    /// GETs. A failed or cancelled fetch leaves the cell empty, so the next
+    /// caller retries.
+    pub(super) async fn fetch_deduplicated<E, F, Fut>(
+        &self,
+        object_key: &str,
+        fetch: F,
+    ) -> Result<DecodedMetadataTableBlock, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<DecodedMetadataTableBlock, E>>,
+    {
+        let cell = {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .expect("metadata table cache in-flight lock poisoned");
+            Arc::clone(
+                in_flight
+                    .entry(object_key.to_owned())
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        let result = cell.get_or_try_init(fetch).await.cloned();
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .expect("metadata table cache in-flight lock poisoned");
+        if in_flight
+            .get(object_key)
+            .is_some_and(|current| Arc::ptr_eq(current, &cell))
+        {
+            in_flight.remove(object_key);
+        }
+        result
     }
 
     pub fn stats(&self) -> MetadataTableCacheStats {
@@ -392,5 +443,99 @@ impl WalTailProjectionCacheInner {
     fn touch(&mut self, key: &WalTailProjectionCacheKey) {
         self.order.retain(|candidate| candidate != key);
         self.order.push_back(key.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
+        MetadataTableCacheConfig, MetadataTableCacheKey,
+    };
+    use loonfs_api::wire::manifest::{MetadataSegmentKey, MetadataTableFamily};
+    use loonfs_api::ChangeSeq;
+
+    fn block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
+        DecodedMetadataTableBlock {
+            rows: Vec::new(),
+            segment_seq: ChangeSeq(1),
+            family: MetadataTableFamily::Inodes,
+            segment_index: 0,
+            segment_key: MetadataSegmentKey::Full,
+            row_count: 0,
+            min_key: String::new(),
+            max_key: String::new(),
+            decoded_byte_len,
+        }
+    }
+
+    fn key(digest: &str) -> MetadataTableCacheKey {
+        MetadataTableCacheKey {
+            table_digest: digest.to_owned(),
+            block_kind: MetadataTableBlockKind::SegmentPayload,
+            block_offset: 0,
+        }
+    }
+
+    #[test]
+    fn default_config_budgets_bytes_as_the_primary_limit() {
+        let config = MetadataTableCacheConfig::default();
+        assert_eq!(
+            config.max_decoded_bytes,
+            Some(super::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES)
+        );
+        assert_eq!(
+            config.max_blocks,
+            super::DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS
+        );
+    }
+
+    #[test]
+    fn byte_budget_evicts_before_the_block_bound() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+            enabled: true,
+            max_blocks: 100,
+            max_decoded_bytes: Some(1000),
+        });
+        cache.insert(key("a"), block(600));
+        cache.insert(key("b"), block(600));
+        assert!(
+            cache.get(&key("a")).is_none(),
+            "oldest block should evict once the byte budget is exceeded"
+        );
+        assert!(cache.get(&key("b")).is_some());
+        assert_eq!(cache.stats().evictions, 1);
+    }
+
+    #[test]
+    fn replacing_a_block_reaccounts_its_decoded_bytes() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+            enabled: true,
+            max_blocks: 100,
+            max_decoded_bytes: Some(1000),
+        });
+        cache.insert(key("a"), block(600));
+        cache.insert(key("a"), block(100));
+        // 600 was released on replace: another 600 fits without eviction.
+        cache.insert(key("b"), block(600));
+        assert!(cache.get(&key("a")).is_some());
+        assert!(cache.get(&key("b")).is_some());
+        assert_eq!(cache.stats().evictions, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_deduplicated_retries_after_a_failed_fetch() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let failed: Result<_, String> = cache
+            .fetch_deduplicated("segment-key", || async { Err("transport".to_owned()) })
+            .await;
+        assert!(failed.is_err());
+        let recovered: Result<_, String> = cache
+            .fetch_deduplicated("segment-key", || async { Ok(block(1)) })
+            .await;
+        assert!(
+            recovered.is_ok(),
+            "a failed fetch should leave nothing behind for the next caller"
+        );
     }
 }

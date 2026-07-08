@@ -53,6 +53,7 @@ pub mod cache {
         ManifestLoadError, ManifestLoadFailureClass, MetadataLsmPolicy, MetadataTableCache,
         MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
         WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+        DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
     };
     pub use crate::namespace::status::{
         load_namespace_head_summary, probe_namespace_head_etag, NamespaceHeadEtagProbe,
