@@ -6,7 +6,7 @@ use super::error::ManifestLoadError;
 use super::load::{
     load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter,
     metadata_file_object_key, MetadataSstSeqExpectation, MetadataTableCacheMode,
-    MetadataTableLoadContext,
+    MetadataTableLoadContext, SessionBlockMemo,
 };
 use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
@@ -41,6 +41,9 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) table_cache: Option<&'a MetadataTableCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: NamespaceManifestEnvelope,
+    /// Per-view memo of decoded blocks: one operation never re-fetches a
+    /// block it already saw, with or without a shared cache attached.
+    pub(super) block_memo: SessionBlockMemo,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -53,6 +56,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         key: &str,
         filter_probe: &str,
+        readahead: bool,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         Ok(self
             .scan_prefix_with_cache_mode(
@@ -60,6 +64,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 key,
                 MetadataTableCacheMode::Populate,
                 Some(filter_probe),
+                readahead,
             )
             .await?
             .into_iter()
@@ -73,7 +78,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let matching_segment_count = self.matching_segment_count(family, prefix)?;
         let cache_mode = self.scan_cache_mode(matching_segment_count);
-        self.scan_prefix_with_cache_mode(family, prefix, cache_mode, None)
+        self.scan_prefix_with_cache_mode(family, prefix, cache_mode, None, true)
             .await
     }
 
@@ -87,10 +92,11 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         prefix: &str,
         filter_probe: &str,
+        readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let matching_segment_count = self.matching_segment_count(family, prefix)?;
         let cache_mode = self.scan_cache_mode(matching_segment_count);
-        self.scan_prefix_with_cache_mode(family, prefix, cache_mode, Some(filter_probe))
+        self.scan_prefix_with_cache_mode(family, prefix, cache_mode, Some(filter_probe), readahead)
             .await
     }
 
@@ -120,12 +126,13 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        self.scan_range_page_rows(family, lower_bound, upper_bound, limit, None)
+        self.scan_range_page_rows(family, lower_bound, upper_bound, limit, None, true)
             .await
     }
 
     /// [`Self::scan_range_page`] for a point lookup within one filter key's
     /// range; see [`Self::scan_prefix_for_lookup`] for the probe contract.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn scan_range_page_for_lookup(
         &self,
         family: MetadataTableFamily,
@@ -133,12 +140,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         upper_bound: Option<&str>,
         limit: usize,
         filter_probe: &str,
+        readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        self.scan_range_page_rows(family, lower_bound, upper_bound, limit, Some(filter_probe))
-            .await
+        self.scan_range_page_rows(
+            family,
+            lower_bound,
+            upper_bound,
+            limit,
+            Some(filter_probe),
+            readahead,
+        )
+        .await
     }
 
     async fn scan_prefix_with_cache_mode(
@@ -147,6 +162,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         prefix: &str,
         cache_mode: MetadataTableCacheMode,
         filter_probe: Option<&str>,
+        readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let mut rows = Vec::new();
         for run in runs_in_scan_order(&self.manifest.payload) {
@@ -165,6 +181,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                     cache_mode,
                 },
                 filter_probe,
+                readahead,
             )
             .await?;
         }
@@ -181,8 +198,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         cache_mode: MetadataTableCacheMode,
         filter_probe: &str,
     ) -> Result<bool, ManifestLoadError> {
-        let filter =
-            load_segment_filter(self.store, self.table_cache, descriptor, cache_mode).await?;
+        let filter = load_segment_filter(
+            self.store,
+            self.table_cache,
+            &self.block_memo,
+            descriptor,
+            cache_mode,
+        )
+        .await?;
         if filter.may_contain(filter_probe) {
             return Ok(true);
         }
@@ -215,6 +238,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         Ok(count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn scan_range_page_rows(
         &self,
         family: MetadataTableFamily,
@@ -222,6 +246,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         upper_bound: Option<&str>,
         limit: usize,
         filter_probe: Option<&str>,
+        readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let mut matching_descriptors = Vec::new();
         for run in runs_in_scan_order(&self.manifest.payload) {
@@ -294,6 +319,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                             cache_mode,
                             lower_bound,
                             upper_bound,
+                            readahead,
                         )
                     }),
             )
@@ -312,6 +338,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn scan_manifest_tables(
         &self,
         family: MetadataTableFamily,
@@ -320,6 +347,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         tables: &[MetadataTableManifest],
         output: MetadataTableScanOutput<'_>,
         filter_probe: Option<&str>,
+        readahead: bool,
     ) -> Result<(), ManifestLoadError> {
         let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
         let mut matching_descriptors = Vec::new();
@@ -353,6 +381,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                         output.cache_mode,
                         prefix,
                         prefix_upper_bound.as_deref(),
+                        readahead,
                     )
                 }))
                 .await?,
@@ -401,6 +430,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         Ok(admitted)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn segment_rows(
         &self,
         context: MetadataTableLoadContext<'_>,
@@ -409,16 +439,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         cache_mode: MetadataTableCacheMode,
         lower_bound: &str,
         upper_bound: Option<&str>,
+        readahead: bool,
     ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
         load_manifest_segment_rows_in_key_range_with_cache(
             self.store,
             self.table_cache,
+            &self.block_memo,
             context,
             family,
             descriptor,
             cache_mode,
             lower_bound,
             upper_bound,
+            readahead,
         )
         .await
     }

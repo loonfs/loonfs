@@ -2703,6 +2703,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             ApiMetadataTableFamily::DirentryBinds,
             &prefix,
             &filter_probe,
+            false,
         )
         .await
         .expect("filtered lookup");
@@ -2754,7 +2755,7 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
 
     let key = "inode-00000000000000000001";
     assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key, false)
         .await
         .expect("get inode")
         .is_some());
@@ -3993,6 +3994,72 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     assert_eq!(
         record.manifest_payload_checksum,
         manifest_without_checkpoint.payload_checksum
+    );
+}
+
+#[tokio::test]
+async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    let manifest_object_id = {
+        checkpoint_then_reorganize(
+            &store,
+            &namespace_id,
+            &context,
+            MetadataLsmPolicy::default(),
+        )
+        .await;
+        current_manifest_object_id(&store, &namespace_id).await
+    };
+
+    // The cold-boot shape: a view with no shared cache attached. Repeating
+    // a lookup must not re-fetch — the per-view memo is the only reuse this
+    // configuration has, and without it a cold list degrades from one fetch
+    // per block to one fetch per lookup.
+    let tables = super::load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    store.reset_metadata_sst_gets();
+    let key = "inode-00000000000000000001";
+    assert!(tables
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key, false)
+        .await
+        .expect("first lookup")
+        .is_some());
+    let first_lookup_gets = store.metadata_sst_gets();
+    assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
+
+    assert!(tables
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key, false)
+        .await
+        .expect("repeated lookup")
+        .is_some());
+    let other = "inode-00000000000000000002";
+    assert!(tables
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, other, other, false)
+        .await
+        .expect("second-key lookup")
+        .is_some());
+    assert_eq!(
+        store.metadata_sst_gets(),
+        first_lookup_gets,
+        "later lookups through the same view should reuse decoded blocks"
     );
 }
 
