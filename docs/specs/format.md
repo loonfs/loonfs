@@ -618,8 +618,10 @@ It may reference one or more immutable metadata runs and may include
 standalone checkpoint records under `checkpoints/` pin manifest versions for
 retention, fork, or stable read workflows. Each run is internally segmented without overlapping segment
 key ranges; different runs may overlap and readers apply the normal metadata
-visibility rules across all referenced runs. Readers load the referenced runs,
-then replay only the visible WAL chain after the manifest's `head_seq`.
+visibility rules across all referenced runs. Within a segment, rows are stored
+in ascending row-key order (adjacent equal keys permitted); readers reject a
+segment whose rows are out of order as malformed. Readers load the referenced
+runs, then replay only the visible WAL chain after the manifest's `head_seq`.
 
 The WAL preserves ordered history even when multiple logical commits are
 stored in one segment. Each logical commit records the commit identity, optional

@@ -2950,6 +2950,83 @@ async fn manifest_rejects_missing_revision_desc_index() {
 }
 
 #[tokio::test]
+async fn manifest_rejects_segment_rows_out_of_row_key_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/other.txt",
+        b"other\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write other");
+
+    let manifest = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    let materialized =
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+            .await
+            .expect("load manifest before corruption");
+    let mut manifest = materialized.manifest;
+    let manifest_id = manifest.payload.manifest_id;
+    let mut inode_rows =
+        manifest_rows_for_family(&materialized.metadata_state, ApiMetadataTableFamily::Inodes);
+    // Swap two middle rows: the segment's min/max keys stay truthful, so the
+    // only violation the rewritten segment carries is its row order.
+    assert!(inode_rows.len() >= 3, "need middle rows to disorder");
+    inode_rows.swap(1, 2);
+    let descriptor = manifest
+        .payload
+        .metadata_files
+        .iter_mut()
+        .find(|metadata_file| {
+            metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
+                && metadata_file.family == ApiMetadataTableFamily::Inodes
+        })
+        .expect("inodes metadata file");
+    rewrite_manifest_segment(
+        &store,
+        &namespace_id,
+        manifest.payload.head_seq,
+        ApiMetadataTableFamily::Inodes,
+        descriptor,
+        inode_rows,
+        &context.writer_version,
+    )
+    .await;
+    overwrite_manifest(&store, &namespace_id, manifest).await;
+
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
+        Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
+            assert!(
+                message.contains("row-key order"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected out-of-order segment rejection, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn manifest_rejects_revision_desc_index_missing_row() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
