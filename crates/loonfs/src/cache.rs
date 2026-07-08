@@ -139,6 +139,10 @@ pub struct RuntimeCacheStats {
     pub metadata_table_cache_inserts: usize,
     /// Blocks evicted from the decoded metadata-table cache.
     pub metadata_table_cache_evictions: usize,
+    /// Segments skipped by their bloom filter before any index or data read.
+    pub metadata_table_cache_filter_skips: usize,
+    /// Segments whose filter admitted a lookup that matched no rows.
+    pub metadata_table_cache_filter_false_positives: usize,
 }
 
 #[derive(Debug, Default)]
@@ -173,6 +177,9 @@ impl RuntimeCacheStatsInner {
             metadata_table_cache_misses: metadata_table_cache.misses,
             metadata_table_cache_inserts: metadata_table_cache.inserts,
             metadata_table_cache_evictions: metadata_table_cache.evictions,
+            metadata_table_cache_filter_skips: metadata_table_cache.filter_skips,
+            metadata_table_cache_filter_false_positives: metadata_table_cache
+                .filter_false_positives,
         }
     }
 

@@ -24,7 +24,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
 ) -> Result<Option<InodeRecord>> {
     let key = format!("inode-{:020}", inode_id.0);
     Ok(tables
-        .get(MetadataTableFamily::Inodes, &key)
+        .get_for_lookup(MetadataTableFamily::Inodes, &key, &key)
         .await
         .map_err(manifest_error_to_core)?
         .and_then(inode_from_manifest_row))
@@ -87,9 +87,10 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     name_key: &str,
 ) -> Result<Vec<DirentryBindRecord>> {
     let encoded_name_key = hex_encode_row_key_component(name_key);
-    let prefix = format!("direntry-{:020}-{encoded_name_key}-", parent_inode_id.0);
+    let filter_probe = format!("direntry-{:020}-{encoded_name_key}", parent_inode_id.0);
+    let prefix = format!("{filter_probe}-");
     Ok(tables
-        .scan_prefix(MetadataTableFamily::DirentryBinds, &prefix)
+        .scan_prefix_for_lookup(MetadataTableFamily::DirentryBinds, &prefix, &filter_probe)
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
@@ -101,9 +102,14 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     child_inode_id: InodeId,
 ) -> Result<Vec<DirentryBindRecord>> {
-    let prefix = format!("direntry-child-{:020}-", child_inode_id.0);
+    let filter_probe = format!("direntry-child-{:020}", child_inode_id.0);
+    let prefix = format!("{filter_probe}-");
     Ok(tables
-        .scan_prefix(MetadataTableFamily::DirentryChildBinds, &prefix)
+        .scan_prefix_for_lookup(
+            MetadataTableFamily::DirentryChildBinds,
+            &prefix,
+            &filter_probe,
+        )
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
@@ -116,15 +122,16 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
     direntry: &DirentryBindRecord,
 ) -> Result<Vec<DirentryUnbindRecord>> {
     let encoded_name_key = hex_encode_row_key_component(&direntry.name_key);
+    let filter_probe = format!(
+        "direntry-unbind-{:020}-{encoded_name_key}",
+        direntry.parent_inode_id.0
+    );
     let prefix = format!(
-        "direntry-unbind-{:020}-{}-{:020}-{:010}-",
-        direntry.parent_inode_id.0,
-        encoded_name_key,
-        direntry.bind_seq.0,
-        direntry.bind_delta_index
+        "{filter_probe}-{:020}-{:010}-",
+        direntry.bind_seq.0, direntry.bind_delta_index
     );
     Ok(tables
-        .scan_prefix(MetadataTableFamily::DirentryUnbinds, &prefix)
+        .scan_prefix_for_lookup(MetadataTableFamily::DirentryUnbinds, &prefix, &filter_probe)
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
@@ -218,12 +225,14 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
     revision_no: RevisionNo,
 ) -> Result<Option<RevisionRecord>> {
     let exact_prefix = revision_by_inode_desc_exact_revision_prefix(inode_id, revision_no);
+    let filter_probe = revision_by_inode_desc_filter_probe(inode_id);
     Ok(tables
-        .scan_range_page(
+        .scan_range_page_for_lookup(
             MetadataTableFamily::RevisionsByInodeDesc,
             &exact_prefix,
             string_prefix_upper_bound(&exact_prefix).as_deref(),
             1,
+            &filter_probe,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -242,15 +251,17 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
         return Ok(Vec::new());
     }
     let inode_prefix = revision_by_inode_desc_inode_prefix(inode_id);
+    let filter_probe = revision_by_inode_desc_filter_probe(inode_id);
     let lower_bound = start_after
         .map(|position| resume_after_row_key(&revision_by_inode_desc_row_key(inode_id, position)))
         .unwrap_or_else(|| inode_prefix.clone());
     Ok(tables
-        .scan_range_page(
+        .scan_range_page_for_lookup(
             MetadataTableFamily::RevisionsByInodeDesc,
             &lower_bound,
             string_prefix_upper_bound(&inode_prefix).as_deref(),
             limit,
+            &filter_probe,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -263,9 +274,10 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     root_inode_id: InodeId,
 ) -> Result<Vec<SubtreeTombstoneRecord>> {
-    let prefix = format!("tombstone-{:020}-", root_inode_id.0);
+    let filter_probe = format!("tombstone-{:020}", root_inode_id.0);
+    let prefix = format!("{filter_probe}-");
     Ok(tables
-        .scan_prefix(MetadataTableFamily::Tombstones, &prefix)
+        .scan_prefix_for_lookup(MetadataTableFamily::Tombstones, &prefix, &filter_probe)
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
@@ -278,9 +290,10 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
 ) -> Result<Option<CommitReceiptRecord>> {
     let encoded_commit_id = hex_encode_row_key_component(commit_id.as_str());
-    let prefix = format!("commit-receipt-{encoded_commit_id}-");
+    let filter_probe = format!("commit-receipt-{encoded_commit_id}");
+    let prefix = format!("{filter_probe}-");
     Ok(tables
-        .scan_prefix(MetadataTableFamily::CommitReceipts, &prefix)
+        .scan_prefix_for_lookup(MetadataTableFamily::CommitReceipts, &prefix, &filter_probe)
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
@@ -305,6 +318,12 @@ fn resume_after_row_key(row_key: &str) -> String {
 
 fn revision_by_inode_desc_inode_prefix(inode_id: InodeId) -> String {
     format!("revision-by-inode-desc-{:020}-", inode_id.0)
+}
+
+/// The filter key for revision-by-inode lookups; must match
+/// `MetadataRow::filter_key_for_family` for the family byte-for-byte.
+fn revision_by_inode_desc_filter_probe(inode_id: InodeId) -> String {
+    format!("revision-by-inode-desc-{:020}", inode_id.0)
 }
 
 fn revision_by_inode_desc_exact_revision_prefix(

@@ -4,8 +4,9 @@
 use super::cache::{DecodedSegmentRowSet, MetadataTableCache};
 use super::error::ManifestLoadError;
 use super::load::{
-    load_manifest_segment_rows_in_key_range_with_cache, metadata_file_object_key,
-    MetadataSstSeqExpectation, MetadataTableCacheMode, MetadataTableLoadContext,
+    load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter,
+    metadata_file_object_key, MetadataSstSeqExpectation, MetadataTableCacheMode,
+    MetadataTableLoadContext,
 };
 use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
@@ -47,13 +48,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         &self.manifest
     }
 
-    pub(crate) async fn get(
+    pub(crate) async fn get_for_lookup(
         &self,
         family: MetadataTableFamily,
         key: &str,
+        filter_probe: &str,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         Ok(self
-            .scan_prefix_with_cache_mode(family, key, MetadataTableCacheMode::Populate)
+            .scan_prefix_with_cache_mode(
+                family,
+                key,
+                MetadataTableCacheMode::Populate,
+                Some(filter_probe),
+            )
             .await?
             .into_iter()
             .find(|row| row.row_key_for_family(family) == key))
@@ -66,7 +73,24 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let matching_segment_count = self.matching_segment_count(family, prefix)?;
         let cache_mode = self.scan_cache_mode(matching_segment_count);
-        self.scan_prefix_with_cache_mode(family, prefix, cache_mode)
+        self.scan_prefix_with_cache_mode(family, prefix, cache_mode, None)
+            .await
+    }
+
+    /// [`Self::scan_prefix`] for a point lookup: `filter_probe` is the
+    /// family's exact filter key for the value being looked up, so each
+    /// candidate segment's bloom filter is consulted before its index or
+    /// data — a negative skips the segment without fetching either. Scans
+    /// coarser than the filter key must use [`Self::scan_prefix`] instead.
+    pub(crate) async fn scan_prefix_for_lookup(
+        &self,
+        family: MetadataTableFamily,
+        prefix: &str,
+        filter_probe: &str,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        let matching_segment_count = self.matching_segment_count(family, prefix)?;
+        let cache_mode = self.scan_cache_mode(matching_segment_count);
+        self.scan_prefix_with_cache_mode(family, prefix, cache_mode, Some(filter_probe))
             .await
     }
 
@@ -96,7 +120,24 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        self.scan_range_page_rows(family, lower_bound, upper_bound, limit)
+        self.scan_range_page_rows(family, lower_bound, upper_bound, limit, None)
+            .await
+    }
+
+    /// [`Self::scan_range_page`] for a point lookup within one filter key's
+    /// range; see [`Self::scan_prefix_for_lookup`] for the probe contract.
+    pub(crate) async fn scan_range_page_for_lookup(
+        &self,
+        family: MetadataTableFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+        filter_probe: &str,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.scan_range_page_rows(family, lower_bound, upper_bound, limit, Some(filter_probe))
             .await
     }
 
@@ -105,6 +146,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         prefix: &str,
         cache_mode: MetadataTableCacheMode,
+        filter_probe: Option<&str>,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let mut rows = Vec::new();
         for run in runs_in_scan_order(&self.manifest.payload) {
@@ -122,10 +164,42 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                     rows: &mut rows,
                     cache_mode,
                 },
+                filter_probe,
             )
             .await?;
         }
         Ok(rows)
+    }
+
+    /// Whether a lookup should touch this segment at all: false only when
+    /// the segment's bloom filter proves the probe key absent. A skipped
+    /// segment costs one tiny cached filter read instead of index and data
+    /// fetches.
+    async fn segment_filter_admits(
+        &self,
+        descriptor: &MetadataFileRef,
+        cache_mode: MetadataTableCacheMode,
+        filter_probe: &str,
+    ) -> Result<bool, ManifestLoadError> {
+        let filter =
+            load_segment_filter(self.store, self.table_cache, descriptor, cache_mode).await?;
+        if filter.may_contain(filter_probe) {
+            return Ok(true);
+        }
+        if let Some(cache) = self.table_cache {
+            cache.record_filter_skip();
+        }
+        Ok(false)
+    }
+
+    /// Counts a segment whose filter admitted the probe but whose rows had
+    /// no match — the filter's false-positive rate as observed by lookups.
+    fn record_filter_false_positive_if_empty(&self, matched_rows: usize) {
+        if matched_rows == 0 {
+            if let Some(cache) = self.table_cache {
+                cache.record_filter_false_positive();
+            }
+        }
     }
 
     fn matching_segment_count(
@@ -147,6 +221,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
+        filter_probe: Option<&str>,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let mut matching_descriptors = Vec::new();
         for run in runs_in_scan_order(&self.manifest.payload) {
@@ -167,9 +242,22 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                         expected: expected_key,
                     });
                 }
-                if descriptor_may_intersect_range(descriptor, lower_bound, upper_bound) {
-                    matching_descriptors.push((context, descriptor.clone()));
+                if !descriptor_may_intersect_range(descriptor, lower_bound, upper_bound) {
+                    continue;
                 }
+                if let Some(filter_probe) = filter_probe {
+                    if !self
+                        .segment_filter_admits(
+                            descriptor,
+                            MetadataTableCacheMode::Populate,
+                            filter_probe,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
+                }
+                matching_descriptors.push((context, descriptor.clone()));
             }
         }
         matching_descriptors.sort_by(|(_, left), (_, right)| {
@@ -231,6 +319,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         context: MetadataTableLoadContext<'_>,
         tables: &[MetadataTableManifest],
         output: MetadataTableScanOutput<'_>,
+        filter_probe: Option<&str>,
     ) -> Result<(), ManifestLoadError> {
         let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
         let mut matching_descriptors = Vec::new();
@@ -248,6 +337,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             }
             matching_descriptors.push(descriptor);
         }
+        let matching_descriptors = self
+            .filter_admitted_descriptors(matching_descriptors, output.cache_mode, filter_probe)
+            .await?;
 
         let prefix_upper_bound = string_prefix_upper_bound(prefix);
         let mut loaded_segments = Vec::new();
@@ -268,13 +360,45 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         }
 
         for segment_rows in loaded_segments {
+            let matched = output.rows.len();
             output.rows.extend(
                 segment_rows
                     .rows_in_key_range(prefix, prefix_upper_bound.as_deref())
                     .map(|(_, row)| row.clone()),
             );
+            if filter_probe.is_some() {
+                self.record_filter_false_positive_if_empty(output.rows.len() - matched);
+            }
         }
         Ok(())
+    }
+
+    /// Drops the descriptors whose bloom filter rules the probe out; with no
+    /// probe every descriptor is admitted untouched.
+    async fn filter_admitted_descriptors<'d>(
+        &self,
+        descriptors: Vec<&'d MetadataFileRef>,
+        cache_mode: MetadataTableCacheMode,
+        filter_probe: Option<&str>,
+    ) -> Result<Vec<&'d MetadataFileRef>, ManifestLoadError> {
+        let Some(filter_probe) = filter_probe else {
+            return Ok(descriptors);
+        };
+        let mut admitted = Vec::with_capacity(descriptors.len());
+        for chunk in descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
+            let checks = try_join_all(chunk.iter().map(|descriptor| {
+                self.segment_filter_admits(descriptor, cache_mode, filter_probe)
+            }))
+            .await?;
+            admitted.extend(
+                chunk
+                    .iter()
+                    .zip(checks)
+                    .filter(|(_, admits)| *admits)
+                    .map(|(descriptor, _)| *descriptor),
+            );
+        }
+        Ok(admitted)
     }
 
     async fn segment_rows(
