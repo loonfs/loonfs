@@ -577,6 +577,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             list_page_direntry_child_scan_calls = tracing::field::Empty,
             list_page_scan_prefix_calls = tracing::field::Empty,
             list_page_scan_range_page_calls = tracing::field::Empty,
+            list_page_preload_unbind_range_scans = tracing::field::Empty,
+            list_page_preload_child_lookups = tracing::field::Empty,
         );
         let entries = async {
             let mut entries = Vec::with_capacity(children.len());
@@ -623,6 +625,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         build_span.record(
             "list_page_scan_range_page_calls",
             counters.scan_range_page_calls,
+        );
+        build_span.record(
+            "list_page_preload_unbind_range_scans",
+            counters.list_preload_unbind_range_scans,
+        );
+        build_span.record(
+            "list_page_preload_child_lookups",
+            counters.list_preload_child_lookups,
         );
 
         Ok(Page {
