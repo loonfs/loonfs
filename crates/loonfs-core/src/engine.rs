@@ -690,11 +690,25 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<CoreResult<CommitResponse>> {
-        crate::commit_engine::publish_namespace_mutations_batch(
+        self.publish_namespace_mutations_batch_gated(candidates, None)
+            .await
+    }
+
+    /// [`Self::publish_namespace_mutations_batch`] with a content durability
+    /// gate awaited between the WAL write and the head CAS; the gate is a
+    /// future, so it rides an explicit parameter instead of an options
+    /// struct.
+    pub async fn publish_namespace_mutations_batch_gated(
+        &self,
+        candidates: Vec<NamespaceMutationCandidate>,
+        content_gate: Option<crate::publish::ContentDurabilityGate>,
+    ) -> Vec<CoreResult<CommitResponse>> {
+        crate::commit_engine::publish_namespace_mutations_batch_gated(
             &self.store,
             &self.namespace_id,
             candidates,
             &self.mutation_context(),
+            content_gate,
         )
         .await
     }

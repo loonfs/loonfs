@@ -386,6 +386,18 @@ impl FsWriterBuilder {
         self
     }
 
+    /// Sets the commit window for direct publishes, in milliseconds.
+    ///
+    /// A direct publish holds its namespace's window open this long so
+    /// concurrent publishes join the same flush — one WAL segment, one head
+    /// CAS — with each caller still awaiting its own durable, visible
+    /// result. Defaults to [`crate::DEFAULT_COMMIT_WINDOW_MS`]; zero
+    /// disables coalescing and publishes each submission immediately.
+    pub fn commit_window_ms(mut self, commit_window_ms: u64) -> Self {
+        self.core.commit_window_ms = commit_window_ms;
+        self
+    }
+
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;

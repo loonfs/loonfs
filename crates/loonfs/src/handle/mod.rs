@@ -48,6 +48,7 @@ enum StoreSource {
 /// trace/metrics wiring.
 struct HandleBuilderCore {
     source: StoreSource,
+    commit_window_ms: u64,
     runtime_cache: RuntimeCacheConfig,
     trace_mode: TraceMode,
     trace_store_kind: Option<TraceStoreKind>,
@@ -66,6 +67,7 @@ impl HandleBuilderCore {
     fn new(source: StoreSource) -> Self {
         Self {
             source,
+            commit_window_ms: crate::config::DEFAULT_COMMIT_WINDOW_MS,
             runtime_cache: RuntimeCacheConfig::default(),
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
@@ -101,6 +103,7 @@ impl HandleBuilderCore {
             FsConfig {
                 writer_id,
                 writer_version,
+                commit_window_ms: self.commit_window_ms,
                 runtime_cache: self.runtime_cache,
                 trace_mode: self.trace_mode,
                 trace_store_kind,

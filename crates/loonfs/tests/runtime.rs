@@ -213,6 +213,19 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
+async fn wal_segment_count(store: &SharedObjectStore, namespace_id: &NamespaceId) -> usize {
+    use futures::StreamExt;
+    store
+        .list_prefix_stream(&format!(
+            "namespaces/{}/wal/segments/",
+            namespace_id.as_str()
+        ))
+        .map(|key| key.expect("list wal segments"))
+        .collect::<Vec<_>>()
+        .await
+        .len()
+}
+
 fn page_limit(limit: u32) -> loonfs::EffectiveLimit {
     PaginationPolicy::from_values(limit, limit)
         .expect("valid pagination policy")
@@ -1627,7 +1640,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 }
 
 #[test]
-fn put_file_bytes_validates_content_ref_before_publish() {
+fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -1646,8 +1659,238 @@ fn put_file_bytes_validates_content_ref_before_publish() {
     )
     .expect("put file bytes");
 
+    // The put writes the blob exactly once and never reads it back: the
+    // write's own ack is the durability proof the head CAS waits on, so
+    // validation issues no probe for content the put itself is writing.
+    assert_eq!(raw_store.content_blob_put_count(), 1);
     assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 1);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
+}
+
+#[test]
+fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = open_runtime(object_store, "content-write-failure-test");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    let commit_id = CommitId::parse("overlap-put-retry").expect("valid commit id");
+    raw_store.fail_next_content_blob_puts(1);
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"overlap survives",
+        PutFileOptions {
+            behavior: PutBehavior::NoReplace,
+            commit_id: Some(commit_id.clone()),
+        },
+    )
+    .expect_err("put should surface the failed content write");
+
+    // The content result gates the head CAS, so the failed write aborted the
+    // publish with the head unmoved and nothing visible.
+    let error = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect_err("failed put should leave the path unbound");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
+    ));
+
+    // The failed attempt never committed, so the same commit id retries
+    // cleanly instead of resolving as a duplicate.
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"overlap survives",
+        PutFileOptions {
+            behavior: PutBehavior::NoReplace,
+            commit_id: Some(commit_id),
+        },
+    )
+    .expect("same-commit-id retry should land");
+    let read = fs
+        .read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        .expect("read retried file");
+    assert_eq!(read.bytes, b"overlap survives");
+}
+
+#[test]
+fn concurrent_puts_coalesce_into_one_wal_segment() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let object_store = store(temp_dir.path());
+    block_on(async {
+        let fs = open_runtime_async(object_store.clone(), "commit-window-test").await;
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let segments_before = wal_segment_count(&object_store, &namespace_id).await;
+
+        let puts = tokio::join!(
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"alpha",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/b.txt",
+                b"beta",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/c.txt",
+                b"gamma",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/d.txt",
+                b"delta",
+                PutFileOptions::default()
+            ),
+        );
+        puts.0.expect("put a");
+        puts.1.expect("put b");
+        puts.2.expect("put c");
+        puts.3.expect("put d");
+
+        // All four submissions entered one commit window and flushed as a
+        // single batch: one WAL segment, one head CAS.
+        let segments_after = wal_segment_count(&object_store, &namespace_id).await;
+        assert_eq!(segments_after - segments_before, 1);
+
+        for (path, bytes) in [
+            ("/docs/a.txt", b"alpha" as &[u8]),
+            ("/docs/b.txt", b"beta"),
+            ("/docs/c.txt", b"gamma"),
+            ("/docs/d.txt", b"delta"),
+        ] {
+            let read = fs
+                .reader
+                .read_file_bytes(&namespace_id, path)
+                .await
+                .expect("read coalesced file");
+            assert_eq!(read.bytes, bytes);
+        }
+    });
+}
+
+#[test]
+fn commit_window_zero_publishes_each_submission_immediately() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let object_store = store(temp_dir.path());
+    block_on(async {
+        let fs = open_runtime_with_async(object_store.clone(), "window-zero-test", |builder| {
+            builder.commit_window_ms(0)
+        })
+        .await;
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let segments_before = wal_segment_count(&object_store, &namespace_id).await;
+
+        let puts = tokio::join!(
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"alpha",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/b.txt",
+                b"beta",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/c.txt",
+                b"gamma",
+                PutFileOptions::default()
+            ),
+        );
+        puts.0.expect("put a");
+        puts.1.expect("put b");
+        puts.2.expect("put c");
+
+        // With coalescing disabled each publish serializes through the
+        // namespace's engine and writes its own WAL segment.
+        let segments_after = wal_segment_count(&object_store, &namespace_id).await;
+        assert_eq!(segments_after - segments_before, 3);
+    });
+}
+
+#[test]
+fn commit_window_flush_aborts_every_member_when_one_content_write_fails() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    block_on(async {
+        let fs = open_runtime_async(object_store, "window-abort-test").await;
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+
+        // Exactly one of the two concurrent content writes fails; the
+        // combined durability gate cannot prove the flush, so the whole
+        // window aborts before the head CAS.
+        raw_store.fail_next_content_blob_puts(1);
+        let (a, b) = tokio::join!(
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"alpha",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/b.txt",
+                b"beta",
+                PutFileOptions::default()
+            ),
+        );
+        a.expect_err("window abort should fail the first member");
+        b.expect_err("window abort should fail the second member");
+        for path in ["/docs/a.txt", "/docs/b.txt"] {
+            let error = fs
+                .reader
+                .stat_path(&namespace_id, path)
+                .await
+                .expect_err("aborted put should leave the path unbound");
+            assert!(matches!(
+                error,
+                RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
+            ));
+        }
+
+        // Both members retry cleanly once the store recovers.
+        let (a, b) = tokio::join!(
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"alpha",
+                PutFileOptions::default()
+            ),
+            fs.put_file_bytes(
+                &namespace_id,
+                "/docs/b.txt",
+                b"beta",
+                PutFileOptions::default()
+            ),
+        );
+        a.expect("retried put a");
+        b.expect("retried put b");
+    });
 }
 
 #[test]
@@ -2514,6 +2757,7 @@ struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
     content_blob_checksum_heads: AtomicUsize,
+    content_blob_puts: AtomicUsize,
 }
 
 impl ContentBlobGetCountingStore {
@@ -2522,12 +2766,14 @@ impl ContentBlobGetCountingStore {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             content_blob_gets: AtomicUsize::new(0),
             content_blob_checksum_heads: AtomicUsize::new(0),
+            content_blob_puts: AtomicUsize::new(0),
         }
     }
 
     fn reset_content_blob_counters(&self) {
         self.content_blob_gets.store(0, Ordering::SeqCst);
         self.content_blob_checksum_heads.store(0, Ordering::SeqCst);
+        self.content_blob_puts.store(0, Ordering::SeqCst);
     }
 
     fn content_blob_get_count(&self) -> usize {
@@ -2536,6 +2782,10 @@ impl ContentBlobGetCountingStore {
 
     fn content_blob_checksum_head_count(&self) -> usize {
         self.content_blob_checksum_heads.load(Ordering::SeqCst)
+    }
+
+    fn content_blob_put_count(&self) -> usize {
+        self.content_blob_puts.load(Ordering::SeqCst)
     }
 }
 
@@ -2580,6 +2830,86 @@ impl ObjectStore for ContentBlobGetCountingStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_puts.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct FailContentBlobPutsStore {
+    inner: LocalFsStore,
+    fail_remaining: AtomicUsize,
+}
+
+impl FailContentBlobPutsStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            fail_remaining: AtomicUsize::new(0),
+        }
+    }
+
+    /// Arms the store to fail the next `count` content-blob puts, then
+    /// recover.
+    fn fail_next_content_blob_puts(&self, count: usize) {
+        self.fail_remaining.store(count, Ordering::SeqCst);
+    }
+
+    fn should_fail_content_blob_put(&self) -> bool {
+        self.fail_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
+#[async_trait]
+impl ObjectStore for FailContentBlobPutsStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key.starts_with("content-stores/")
+            && key.contains("/blobs/")
+            && self.should_fail_content_blob_put()
+        {
+            return Err(ObjectStoreError::transport(
+                key,
+                "injected content write failure",
+            ));
+        }
         self.inner.put(key, bytes, mode).await
     }
 
