@@ -1697,16 +1697,22 @@ fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands
 
     let commit_id = CommitId::parse("overlap-put-retry").expect("valid commit id");
     raw_store.fail_next_content_blob_puts(1);
-    fs.put_file_bytes_blocking(
-        &namespace_id,
-        "/docs/report.txt",
-        b"overlap survives",
-        PutFileOptions {
-            behavior: PutBehavior::NoReplace,
-            commit_id: Some(commit_id.clone()),
-        },
-    )
-    .expect_err("put should surface the failed content write");
+    let error = fs
+        .put_file_bytes_blocking(
+            &namespace_id,
+            "/docs/report.txt",
+            b"overlap survives",
+            PutFileOptions {
+                behavior: PutBehavior::NoReplace,
+                commit_id: Some(commit_id.clone()),
+            },
+        )
+        .expect_err("put should surface the failed content write");
+    // A solo put reports its own write's error, not window plumbing.
+    assert!(
+        error.to_string().contains("injected content write failure"),
+        "unexpected error: {error}"
+    );
 
     // The content result gates the head CAS, so the failed write aborted the
     // publish with the head unmoved and nothing visible.
@@ -1876,8 +1882,25 @@ fn commit_window_flush_aborts_every_member_when_one_content_write_fails() {
                 PutFileOptions::default()
             ),
         );
-        a.expect_err("window abort should fail the first member");
-        b.expect_err("window abort should fail the second member");
+        let first = a.expect_err("window abort should fail the first member");
+        let second = b.expect_err("window abort should fail the second member");
+        // Each member's error says what happened to it: whichever upload the
+        // store failed reports the injected write error, and the member whose
+        // upload succeeded is told a batched peer failed and a retry is safe.
+        let messages = [first.to_string(), second.to_string()];
+        let own_failures = messages
+            .iter()
+            .filter(|message| message.contains("injected content write failure"))
+            .count();
+        let peer_failures = messages
+            .iter()
+            .filter(|message| message.contains("batched with this one"))
+            .count();
+        assert_eq!(
+            (own_failures, peer_failures),
+            (1, 1),
+            "unexpected member errors: {messages:?}"
+        );
         for path in ["/docs/a.txt", "/docs/b.txt"] {
             let error = fs
                 .reader

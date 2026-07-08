@@ -15,16 +15,31 @@
 //! Failure semantics follow the batch they join: if any member's content
 //! durability gate fails — including a submitter cancelled mid-window, which
 //! abandons its content write — the flush aborts before the head CAS and
-//! every member sees the rejection. An opener cancelled before flushing
-//! closes the window and fails the members that joined it.
+//! every member is rejected. Each member's error says what happened to it:
+//! the member whose own content write failed gets that write's error, and
+//! the members whose writes succeeded get a distinct error saying a write
+//! batched with theirs failed, nothing was committed, and a retry is safe.
+//! An opener cancelled before flushing closes the window and fails the
+//! members that joined it.
 
 use crate::publish::NamespaceMutationCandidate;
 use crate::{CommitResponse, CoreError, NamespaceId, Result, RuntimeError};
 use futures::channel::oneshot;
 use loonfs_core::publish::ContentDurabilityGate;
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::time::Duration;
+
+/// Error the combined gate hands the batch when any member's content write
+/// fails. Core stamps it on every aborted member; distribution rewrites it
+/// per member, so callers never see this text — each gets its own write's
+/// error or [`WINDOW_PEER_FAILURE_MESSAGE`].
+const WINDOW_GATE_FAILURE_MESSAGE: &str = "a content write in this commit window failed";
+
+/// Error a member receives when its own content write succeeded but the
+/// flush aborted because another member's failed.
+const WINDOW_PEER_FAILURE_MESSAGE: &str =
+    "a write batched with this one in its commit window failed; nothing was committed; retry";
 
 #[allow(clippy::disallowed_methods)]
 pub(crate) async fn commit_window_delay(window: Duration) {
@@ -132,20 +147,98 @@ impl Drop for OpenerGuard<'_> {
     }
 }
 
-/// Combines the entries' durability gates into the flush's single gate: the
-/// batch's head CAS waits until every member's concurrent content write has
-/// acked, and fails — aborting the whole batch — if any of them fail.
-pub(crate) fn combine_content_gates(
-    gates: Vec<ContentDurabilityGate>,
-) -> Option<ContentDurabilityGate> {
-    let mut gates = gates;
-    match gates.len() {
-        0 => None,
-        1 => gates.pop(),
-        _ => Some(Box::pin(async move {
-            futures::future::try_join_all(gates).await.map(|_| ())
-        })),
+/// Content-write failures the flush's combined gate observed, one slot per
+/// window member. Filled before the gate resolves, so the opener may read
+/// them once the publish returns.
+pub(crate) struct WindowGateFailures {
+    slots: Arc<Mutex<Vec<Option<CoreError>>>>,
+}
+
+impl WindowGateFailures {
+    pub(crate) fn take(&self) -> Vec<Option<CoreError>> {
+        // Poisoning is propagated as a panic, matching the window map: a
+        // half-updated failure record could misattribute members' errors.
+        std::mem::take(
+            &mut *self
+                .slots
+                .lock()
+                .expect("window gate failure slots lock poisoned"),
+        )
     }
+}
+
+/// Combines the members' durability gates into the flush's single gate: the
+/// batch's head CAS waits until every member's concurrent content write has
+/// acked, and fails — aborting the whole batch — if any of them fail. Each
+/// failure is recorded against its member (no fail-fast), so distribution
+/// can tell the failing member its own error and the rest that a batched
+/// peer failed. A solo member keeps its raw gate: its own error already
+/// reaches the right caller, and core traces keep the real failure.
+pub(crate) fn combine_member_content_gates(
+    member_gates: Vec<(usize, ContentDurabilityGate)>,
+    member_count: usize,
+) -> (Option<ContentDurabilityGate>, WindowGateFailures) {
+    let failures = WindowGateFailures {
+        slots: Arc::new(Mutex::new(vec![None; member_count])),
+    };
+    let mut member_gates = member_gates;
+    if member_gates.is_empty() || member_count == 1 {
+        return (member_gates.pop().map(|(_, gate)| gate), failures);
+    }
+    let slots = Arc::clone(&failures.slots);
+    let gate: ContentDurabilityGate = Box::pin(async move {
+        let results = futures::future::join_all(
+            member_gates
+                .into_iter()
+                .map(|(member_index, gate)| async move { (member_index, gate.await) }),
+        )
+        .await;
+        let mut any_failed = false;
+        {
+            let mut slots = slots
+                .lock()
+                .expect("window gate failure slots lock poisoned");
+            for (member_index, result) in results {
+                if let Err(error) = result {
+                    any_failed = true;
+                    if let Some(slot) = slots.get_mut(member_index) {
+                        *slot = Some(error);
+                    }
+                }
+            }
+        }
+        if any_failed {
+            Err(CoreError::Internal(WINDOW_GATE_FAILURE_MESSAGE.to_owned()))
+        } else {
+            Ok(())
+        }
+    });
+    (Some(gate), failures)
+}
+
+/// Rewrites one member's share of an aborted flush: results stamped with the
+/// combined gate's error become the member's own content-write error, or the
+/// batched-peer error when this member's write succeeded. Every other result
+/// — successes, and errors the member earned itself during validation — is
+/// left untouched.
+pub(crate) fn attribute_window_gate_failure(
+    results: WindowResults,
+    own_failure: Option<&CoreError>,
+) -> WindowResults {
+    results
+        .into_iter()
+        .map(|result| match result {
+            Err(RuntimeError::Core(CoreError::Internal(message)))
+                if message == WINDOW_GATE_FAILURE_MESSAGE =>
+            {
+                Err(RuntimeError::Core(match own_failure {
+                    Some(own_failure) => own_failure.clone(),
+                    None => CoreError::Internal(WINDOW_PEER_FAILURE_MESSAGE.to_owned()),
+                }))
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Pads a distributed result slice when the publish returned fewer results
