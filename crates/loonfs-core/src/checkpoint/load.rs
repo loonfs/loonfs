@@ -23,7 +23,7 @@ use super::scan::ManifestMaterializationForInspection;
 use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{
     validate_manifest_materialization_ranges, validate_manifest_row_seq_range,
-    validate_manifest_segment, validate_namespace_manifest,
+    validate_namespace_manifest,
 };
 #[cfg(test)]
 use crate::metadata::{
@@ -36,8 +36,12 @@ use futures::future::try_join_all;
 use loonfs_api::manifest_object_id_manifest_id;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{
-    decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json, MetadataFileRef,
-    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    decode_namespace_manifest_json, MetadataFileRef, MetadataRow, MetadataTableFamily,
+    NamespaceManifestEnvelope,
+};
+use loonfs_api::wire::sst_blocks::{
+    decode_data_block, decode_index_block, index_blocks_for_key_range, DecodedDataBlock,
+    SegmentIndexEntry,
 };
 #[cfg(test)]
 use loonfs_api::ManifestId;
@@ -45,11 +49,10 @@ use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 #[cfg(test)]
 use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
+use loonfs_objectstore::ByteRange;
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::Semaphore;
+use std::sync::Arc;
 use tracing::Instrument;
 
 #[cfg(test)]
@@ -182,7 +185,6 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         table_cache,
         manifest_object_key: manifest_key,
         manifest,
-        segment_cache: Mutex::new(HashMap::new()),
     };
     Ok(tables)
 }
@@ -531,16 +533,17 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Concurrent segment decodes each hold multi-megabyte payload and row
-/// buffers, so wide preload waves are bounded here: store fetches stay fully
-/// concurrent, only the decode step queues.
-const MAX_CONCURRENT_SEGMENT_DECODES: usize = 4;
+/// Widest block selection served by per-block single-flight fetches; wider
+/// selections bulk-fetch their missing spans with coalesced ranged GETs.
+const NARROW_BLOCK_FETCH_LIMIT: usize = 4;
+/// Longest single ranged GET issued while bulk-reading a block span; longer
+/// spans split into consecutive requests.
+const MAX_BULK_FETCH_BYTES: u64 = 4 * 1024 * 1024;
 
-fn segment_decode_permits() -> &'static Semaphore {
-    static PERMITS: OnceLock<Semaphore> = OnceLock::new();
-    PERMITS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_SEGMENT_DECODES))
-}
-
+/// Loads a segment's full row set: every data block, in key order, checked
+/// against the descriptor's row count and key bounds. Production reads go
+/// through the key-range loader; full materialization is inspection-only.
+#[cfg(test)]
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -549,59 +552,167 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     descriptor: &MetadataFileRef,
     cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
-    let expected_segment_seq = context.expected_segment_seq(descriptor)?;
-    let cache_key = MetadataTableCacheKey {
-        table_digest: descriptor.payload_checksum.clone(),
-        block_kind: MetadataTableBlockKind::SegmentPayload,
-        block_offset: 0,
-    };
-    let fetch = || async {
-        let Some(bytes) = store
-            .get(&descriptor.object_key, None)
-            .await
-            .map_err(|err| ManifestLoadError::ReadSegment {
+    let row_set = load_manifest_segment_rows_in_key_range_with_cache(
+        store,
+        table_cache,
+        context,
+        family,
+        descriptor,
+        cache_mode,
+        "",
+        None,
+    )
+    .await?;
+    if row_set.rows.len() as u64 != descriptor.row_count {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+            object_key: descriptor.object_key.clone(),
+            message: format!(
+                "row count mismatch: expected {}, actual {}",
+                descriptor.row_count,
+                row_set.rows.len()
+            ),
+        });
+    }
+    if let (Some(first), Some(last)) = (row_set.row_keys.first(), row_set.row_keys.last()) {
+        if descriptor.min_key != *first || descriptor.max_key != *last {
+            return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: descriptor.object_key.clone(),
-                message: err.to_string(),
-            })?
-        else {
-            return Err(ManifestLoadError::MissingSegment {
-                object_key: descriptor.object_key.clone(),
+                message: "descriptor min/max key mismatch".to_owned(),
             });
-        };
-        let permit = segment_decode_permits()
-            .acquire()
-            .await
-            .expect("segment decode semaphore is never closed");
-        let segment = decode_metadata_sst_envelope_zstd(&bytes).map_err(|err| {
-            ManifestLoadError::SegmentCodec {
-                object_key: descriptor.object_key.clone(),
-                message: err.to_string(),
-            }
-        })?;
-        let row_set =
-            validate_manifest_segment(expected_segment_seq, family, descriptor, &segment)?;
-        drop(permit);
-        Ok(DecodedMetadataTableBlock {
-            decoded_byte_len: decoded_manifest_block_weight(family, &row_set.rows),
-            row_set: Arc::new(row_set),
-            segment_seq: expected_segment_seq,
-            family,
-            segment_index: descriptor.segment_index,
-            segment_key: descriptor.segment_key.clone(),
-            row_count: descriptor.row_count,
-            min_key: descriptor.min_key.clone(),
-            max_key: descriptor.max_key.clone(),
+        }
+    }
+    Ok(row_set)
+}
+
+/// Loads the rows of one segment whose keys can fall in
+/// `[lower_bound, upper_bound)`: index first, then only the data blocks the
+/// index says can match. Callers trim edge blocks with
+/// [`DecodedSegmentRowSet::rows_in_key_range`].
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    context: MetadataTableLoadContext<'_>,
+    family: MetadataTableFamily,
+    descriptor: &MetadataFileRef,
+    cache_mode: MetadataTableCacheMode,
+    lower_bound: &str,
+    upper_bound: Option<&str>,
+) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
+    context.expected_segment_seq(descriptor)?;
+    let index = load_segment_index(store, table_cache, descriptor, cache_mode).await?;
+    let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
+    let entries = &index[needed];
+
+    let blocks = if entries.len() <= NARROW_BLOCK_FETCH_LIMIT {
+        futures::future::try_join_all(entries.iter().map(|entry| {
+            load_segment_data_block(store, table_cache, family, descriptor, entry, cache_mode)
+        }))
+        .await?
+    } else {
+        load_segment_data_block_span(store, table_cache, family, descriptor, entries, cache_mode)
+            .await?
+    };
+
+    let mut rows = Vec::new();
+    let mut row_keys = Vec::new();
+    for block in blocks {
+        row_keys.extend(block.row_keys.iter().cloned());
+        rows.extend(block.rows.iter().cloned());
+    }
+    validate_manifest_row_seq_range(
+        &descriptor.object_key,
+        &rows,
+        context.row_seq_min,
+        context.row_seq_max(descriptor),
+    )?;
+    Ok(Arc::new(DecodedSegmentRowSet { rows, row_keys }))
+}
+
+fn segment_block_cache_key(
+    descriptor: &MetadataFileRef,
+    block_kind: MetadataTableBlockKind,
+    block_offset: u64,
+) -> MetadataTableCacheKey {
+    MetadataTableCacheKey {
+        table_digest: descriptor.payload_checksum.clone(),
+        block_kind,
+        block_offset,
+    }
+}
+
+/// Fetches exactly the byte range a handle names.
+async fn fetch_section_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, ManifestLoadError> {
+    let Some(bytes) = store
+        .get(
+            object_key,
+            Some(ByteRange {
+                start_inclusive: offset,
+                end_exclusive: offset + len,
+            }),
+        )
+        .await
+        .map_err(|err| ManifestLoadError::ReadSegment {
+            object_key: object_key.to_owned(),
+            message: err.to_string(),
+        })?
+    else {
+        return Err(ManifestLoadError::MissingSegment {
+            object_key: object_key.to_owned(),
+        });
+    };
+    if bytes.len() as u64 != len {
+        return Err(ManifestLoadError::ReadSegment {
+            object_key: object_key.to_owned(),
+            message: format!("ranged read returned {} bytes, expected {len}", bytes.len()),
+        });
+    }
+    Ok(bytes.to_vec())
+}
+
+fn segment_codec_error(object_key: &str, err: impl std::fmt::Display) -> ManifestLoadError {
+    ManifestLoadError::SegmentCodec {
+        object_key: object_key.to_owned(),
+        message: err.to_string(),
+    }
+}
+
+async fn load_segment_index<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    descriptor: &MetadataFileRef,
+    cache_mode: MetadataTableCacheMode,
+) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
+    let handle = descriptor.index_block;
+    let cache_key = segment_block_cache_key(
+        descriptor,
+        MetadataTableBlockKind::SegmentIndex,
+        handle.offset,
+    );
+    let fetch = || async {
+        let bytes = fetch_section_bytes(
+            store,
+            &descriptor.object_key,
+            handle.offset,
+            handle.stored_len as u64,
+        )
+        .await?;
+        let entries = decode_index_block(&bytes, &handle)
+            .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
+        Ok(DecodedMetadataTableBlock::Index {
+            decoded_byte_len: handle.decoded_len as usize,
+            entries: Arc::new(entries),
         })
     };
-    // The winner of the single-flight cell consults the cache and populates
-    // it on a miss; waiters share its block. Every path then re-validates the
-    // block against this caller's own expectations, so a shared or cached
-    // block is held to exactly the standard of a freshly fetched one.
     let block = match table_cache {
         Some(cache) => {
             cache
                 .get_or_fetch(
-                    &descriptor.object_key,
                     &cache_key,
                     cache_mode != MetadataTableCacheMode::Bypass,
                     cache_mode == MetadataTableCacheMode::Populate,
@@ -611,60 +722,168 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         }
         None => fetch().await?,
     };
-    validate_cached_manifest_block(family, expected_segment_seq, descriptor, &block)?;
-    validate_manifest_row_seq_range(
-        &descriptor.object_key,
-        &block.row_set.rows,
-        context.row_seq_min,
-        context.row_seq_max(descriptor),
-    )?;
-    Ok(block.row_set)
+    match block {
+        DecodedMetadataTableBlock::Index { entries, .. } => Ok(entries),
+        DecodedMetadataTableBlock::Data { .. } => Err(segment_codec_error(
+            &descriptor.object_key,
+            "cache returned a data block for an index key",
+        )),
+    }
 }
 
-pub(super) fn validate_cached_manifest_block(
+async fn load_segment_data_block<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
     family: MetadataTableFamily,
-    expected_segment_seq: ChangeSeq,
     descriptor: &MetadataFileRef,
-    block: &DecodedMetadataTableBlock,
-) -> Result<(), ManifestLoadError> {
-    if block.segment_seq != expected_segment_seq {
-        return Err(ManifestLoadError::SegmentSeqMismatch {
-            object_key: descriptor.object_key.clone(),
-            expected: expected_segment_seq,
-            actual: block.segment_seq,
-        });
+    entry: &SegmentIndexEntry,
+    cache_mode: MetadataTableCacheMode,
+) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
+    let handle = entry.block;
+    let cache_key = segment_block_cache_key(
+        descriptor,
+        MetadataTableBlockKind::SegmentData,
+        handle.offset,
+    );
+    let fetch = || async {
+        let bytes = fetch_section_bytes(
+            store,
+            &descriptor.object_key,
+            handle.offset,
+            handle.stored_len as u64,
+        )
+        .await?;
+        Ok(decoded_data_cache_block(
+            family,
+            decode_data_block(&bytes, &handle)
+                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
+        ))
+    };
+    let block = match table_cache {
+        Some(cache) => {
+            cache
+                .get_or_fetch(
+                    &cache_key,
+                    cache_mode != MetadataTableCacheMode::Bypass,
+                    cache_mode == MetadataTableCacheMode::Populate,
+                    fetch,
+                )
+                .await?
+        }
+        None => fetch().await?,
+    };
+    match block {
+        DecodedMetadataTableBlock::Data { block, .. } => Ok(block),
+        DecodedMetadataTableBlock::Index { .. } => Err(segment_codec_error(
+            &descriptor.object_key,
+            "cache returned an index block for a data key",
+        )),
     }
-    if block.family != family {
-        return Err(ManifestLoadError::SegmentFamilyMismatch {
-            object_key: descriptor.object_key.clone(),
-            expected: family,
-            actual: block.family,
-        });
+}
+
+fn decoded_data_cache_block(
+    family: MetadataTableFamily,
+    block: DecodedDataBlock,
+) -> DecodedMetadataTableBlock {
+    DecodedMetadataTableBlock::Data {
+        decoded_byte_len: decoded_manifest_block_weight(family, &block.rows),
+        block: Arc::new(block),
     }
-    if block.segment_index != descriptor.segment_index {
-        return Err(ManifestLoadError::SegmentIndexMismatch {
-            object_key: descriptor.object_key.clone(),
-            expected: descriptor.segment_index,
-            actual: block.segment_index,
-        });
+}
+
+/// Bulk path for wide selections: consult the cache per block, group the
+/// misses into consecutive spans, and fetch each span with coalesced ranged
+/// GETs instead of one request per block. Duplicate concurrent span fetches
+/// are possible and benign; the narrow path keeps single-flight for the hot
+/// point lookups.
+async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    family: MetadataTableFamily,
+    descriptor: &MetadataFileRef,
+    entries: &[SegmentIndexEntry],
+    cache_mode: MetadataTableCacheMode,
+) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
+    let consult = cache_mode != MetadataTableCacheMode::Bypass;
+    let populate = cache_mode == MetadataTableCacheMode::Populate;
+    let mut blocks: Vec<Option<Arc<DecodedDataBlock>>> = vec![None; entries.len()];
+    if let (Some(cache), true) = (table_cache, consult) {
+        for (position, entry) in entries.iter().enumerate() {
+            let cache_key = segment_block_cache_key(
+                descriptor,
+                MetadataTableBlockKind::SegmentData,
+                entry.block.offset,
+            );
+            if let Some(DecodedMetadataTableBlock::Data { block, .. }) = cache.get(&cache_key) {
+                blocks[position] = Some(block);
+            }
+        }
     }
-    if block.segment_key != descriptor.segment_key {
-        return Err(ManifestLoadError::SegmentKeyMismatch {
-            object_key: descriptor.object_key.clone(),
-            expected: descriptor.segment_key.clone(),
-            actual: block.segment_key.clone(),
-        });
+
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = 0;
+    while cursor < entries.len() {
+        if blocks[cursor].is_some() {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        let mut span_bytes = 0u64;
+        while cursor < entries.len()
+            && blocks[cursor].is_none()
+            && span_bytes + u64::from(entries[cursor].block.stored_len) <= MAX_BULK_FETCH_BYTES
+        {
+            span_bytes += u64::from(entries[cursor].block.stored_len);
+            cursor += 1;
+        }
+        // A single block larger than the fetch cap still fetches alone.
+        if cursor == start {
+            cursor += 1;
+        }
+        spans.push((start, cursor));
     }
-    if descriptor.row_count != block.row_count
-        || descriptor.min_key != block.min_key
-        || descriptor.max_key != block.max_key
-    {
-        return Err(ManifestLoadError::SegmentDescriptorMismatch {
-            object_key: descriptor.object_key.clone(),
-            message: "cached segment descriptor mismatch".to_owned(),
-        });
+
+    let fetched = futures::future::try_join_all(spans.iter().map(|(start, end)| {
+        let span = &entries[*start..*end];
+        let first = &span[0].block;
+        let last = &span[span.len() - 1].block;
+        let span_len = last.offset + u64::from(last.stored_len) - first.offset;
+        fetch_section_bytes(store, &descriptor.object_key, first.offset, span_len)
+    }))
+    .await?;
+
+    for ((start, end), bytes) in spans.into_iter().zip(fetched) {
+        let base_offset = entries[start].block.offset;
+        for (position, entry) in entries[start..end].iter().enumerate() {
+            let handle = entry.block;
+            let begin = (handle.offset - base_offset) as usize;
+            let stored = &bytes[begin..begin + handle.stored_len as usize];
+            let decoded = Arc::new(
+                decode_data_block(stored, &handle)
+                    .map_err(|err| segment_codec_error(&descriptor.object_key, err))?,
+            );
+            if let (Some(cache), true) = (table_cache, populate) {
+                let cache_key = segment_block_cache_key(
+                    descriptor,
+                    MetadataTableBlockKind::SegmentData,
+                    handle.offset,
+                );
+                cache.insert(
+                    cache_key,
+                    DecodedMetadataTableBlock::Data {
+                        decoded_byte_len: decoded_manifest_block_weight(family, &decoded.rows),
+                        block: Arc::clone(&decoded),
+                    },
+                );
+            }
+            blocks[start + position] = Some(decoded);
+        }
     }
-    Ok(())
+
+    Ok(blocks
+        .into_iter()
+        .map(|block| block.expect("every selected block is either cached or span-fetched"))
+        .collect())
 }
 
 pub(super) fn decoded_manifest_block_weight(

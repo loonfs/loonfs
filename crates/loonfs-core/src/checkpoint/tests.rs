@@ -45,11 +45,11 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, encode_metadata_sst_envelope_zstd,
-    encode_namespace_manifest_json, MetadataFileRef, MetadataPage, MetadataRow, MetadataSegmentKey,
-    MetadataSstEnvelope, MetadataSstPayload, MetadataTableFamily as ApiMetadataTableFamily,
-    NamespaceManifestEnvelope, NamespaceManifestPayload,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
+    MetadataSegmentKey, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
+    NamespaceManifestPayload,
 };
+use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 use loonfs_api::{
     ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId, ManifestObjectId,
     NameKey, NamespaceId, PutBehavior, RevisionNo,
@@ -1291,14 +1291,7 @@ async fn base_rebuild_rejects_divergent_revision_index() {
         content_ref.digest =
             "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned();
     }
-    rewrite_revision_index_segment(
-        &store,
-        &namespace_id,
-        &mut manifest,
-        revision_index_rows,
-        &context.writer_version,
-    )
-    .await;
+    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     // L0 appends never re-read the base run; the base rebuild that folds
@@ -1817,7 +1810,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         &namespace_id,
         first,
         CHECKPOINT_BASE_RUN_LEVEL,
-        &context.writer_version,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
         MetadataTableSegmentation::Full,
     )
@@ -1828,7 +1820,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         &namespace_id,
         materialization.head.seq,
         CHECKPOINT_L0_RUN_LEVEL,
-        &context.writer_version,
         |family| {
             super::row::manifest_rows_for_family_after_seq(
                 &materialization.metadata_state,
@@ -1963,7 +1954,7 @@ async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
 }
 
 #[tokio::test]
-async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
+async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1999,7 +1990,9 @@ async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
                 && metadata_file.family == ApiMetadataTableFamily::Revisions
         })
         .expect("revision metadata file");
-    descriptor.segment_key = MetadataSegmentKey::RowKeyRange { shard: u32::MAX };
+    // The descriptor is the only description of a segment; its index CRC
+    // is what binds the manifest to the object's exact bytes.
+    descriptor.index_block.crc32c ^= 0xffff_ffff;
 
     let manifest_key =
         metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id);
@@ -2016,8 +2009,13 @@ async fn manifest_rejects_segment_descriptor_payload_key_mismatch() {
         .expect("overwrite manifest");
 
     match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
-        Err(ManifestLoadError::SegmentKeyMismatch { .. }) => {}
-        other => panic!("expected segment key mismatch, got {other:?}"),
+        Err(ManifestLoadError::SegmentCodec { message, .. }) => {
+            assert!(
+                message.contains("checksum"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected index checksum rejection, got {other:?}"),
     }
 }
 
@@ -2828,7 +2826,6 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         ApiMetadataTableFamily::DirentryChildBinds,
         child_descriptor,
         child_index_rows,
-        &context.writer_version,
     )
     .await;
 
@@ -2854,50 +2851,32 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
 async fn rewrite_manifest_segment(
     store: &LocalFsStore,
     _namespace_id: &NamespaceId,
-    run_seq: ChangeSeq,
+    _run_seq: ChangeSeq,
     family: ApiMetadataTableFamily,
     descriptor: &mut MetadataFileRef,
     rows: Vec<MetadataRow>,
-    writer_version: &str,
 ) {
-    let row_keys = rows
-        .iter()
-        .map(|row| row.row_key_for_family(family))
-        .collect::<Vec<_>>();
-    let min_key = row_keys.first().cloned().unwrap_or_default();
-    let max_key = row_keys.last().cloned().unwrap_or_default();
-    let page = MetadataPage {
-        page_index: 0,
-        min_key: min_key.clone(),
-        max_key: max_key.clone(),
-        row_keys,
-        rows,
-    };
-    let payload = MetadataSstPayload {
-        namespace_id: descriptor.owner_namespace_id.clone(),
-        table_id: descriptor.table_id.clone(),
-        run_seq,
-        level: descriptor.level,
-        family,
-        segment_index: descriptor.segment_index,
-        segment_key: descriptor.segment_key.clone(),
-        row_count: page.rows.len() as u64,
-        min_key,
-        max_key,
-        pages: vec![page],
-    };
-    let envelope =
-        MetadataSstEnvelope::from_payload(writer_version, payload).expect("rewritten segment");
-    let encoded = encode_metadata_sst_envelope_zstd(&envelope).expect("encode rewritten segment");
+    let mut builder = SegmentBlocksBuilder::default();
+    for row in &rows {
+        let row_key = row.row_key_for_family(family);
+        let filter_key = row.filter_key_for_family(family);
+        builder
+            .push(&row_key, &filter_key, row)
+            .expect("rewritten rows should encode");
+    }
+    let built = builder.finish().expect("rewritten segment");
     store
-        .put_overwrite(&descriptor.object_key, Bytes::from(encoded))
+        .put_overwrite(&descriptor.object_key, Bytes::from(built.bytes.clone()))
         .await
         .expect("overwrite segment");
 
-    descriptor.row_count = envelope.payload.row_count;
-    descriptor.min_key = envelope.payload.min_key.clone();
-    descriptor.max_key = envelope.payload.max_key.clone();
-    descriptor.payload_checksum = envelope.payload_checksum.clone();
+    descriptor.row_count = built.row_count;
+    descriptor.min_key = built.min_key;
+    descriptor.max_key = built.max_key;
+    descriptor.object_len = built.bytes.len() as u64;
+    descriptor.index_block = built.index;
+    descriptor.filter_block = built.filter;
+    descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
 }
 
 fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
@@ -2950,83 +2929,6 @@ async fn manifest_rejects_missing_revision_desc_index() {
 }
 
 #[tokio::test]
-async fn manifest_rejects_segment_rows_out_of_row_key_order() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/hello.txt",
-        b"hello\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write hello");
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/other.txt",
-        b"other\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write other");
-
-    let manifest = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("checkpoint");
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
-            .await
-            .expect("load manifest before corruption");
-    let mut manifest = materialized.manifest;
-    let manifest_id = manifest.payload.manifest_id;
-    let mut inode_rows =
-        manifest_rows_for_family(&materialized.metadata_state, ApiMetadataTableFamily::Inodes);
-    // Swap two middle rows: the segment's min/max keys stay truthful, so the
-    // only violation the rewritten segment carries is its row order.
-    assert!(inode_rows.len() >= 3, "need middle rows to disorder");
-    inode_rows.swap(1, 2);
-    let descriptor = manifest
-        .payload
-        .metadata_files
-        .iter_mut()
-        .find(|metadata_file| {
-            metadata_file.level == CHECKPOINT_BASE_RUN_LEVEL
-                && metadata_file.family == ApiMetadataTableFamily::Inodes
-        })
-        .expect("inodes metadata file");
-    rewrite_manifest_segment(
-        &store,
-        &namespace_id,
-        manifest.payload.head_seq,
-        ApiMetadataTableFamily::Inodes,
-        descriptor,
-        inode_rows,
-        &context.writer_version,
-    )
-    .await;
-    overwrite_manifest(&store, &namespace_id, manifest).await;
-
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
-        Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
-            assert!(
-                message.contains("row-key order"),
-                "unexpected message: {message}"
-            );
-        }
-        other => panic!("expected out-of-order segment rejection, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn manifest_rejects_revision_desc_index_missing_row() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3059,14 +2961,7 @@ async fn manifest_rejects_revision_desc_index_missing_row() {
     let (manifest_id, mut manifest, mut revision_index_rows) =
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     revision_index_rows.pop().expect("revision index row");
-    rewrite_revision_index_segment(
-        &store,
-        &namespace_id,
-        &mut manifest,
-        revision_index_rows,
-        &context.writer_version,
-    )
-    .await;
+    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
@@ -3116,14 +3011,7 @@ async fn manifest_rejects_revision_desc_index_extra_row() {
         },
         other => other,
     });
-    rewrite_revision_index_segment(
-        &store,
-        &namespace_id,
-        &mut manifest,
-        revision_index_rows,
-        &context.writer_version,
-    )
-    .await;
+    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
@@ -3158,14 +3046,7 @@ async fn manifest_rejects_revision_desc_index_changed_content_ref() {
         content_ref.digest =
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
     }
-    rewrite_revision_index_segment(
-        &store,
-        &namespace_id,
-        &mut manifest,
-        revision_index_rows,
-        &context.writer_version,
-    )
-    .await;
+    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     assert_revision_index_mismatch(
@@ -3201,14 +3082,7 @@ async fn manifest_rejects_revision_desc_index_duplicate_rows() {
             .expect("revision index row")
             .clone(),
     );
-    rewrite_revision_index_segment(
-        &store,
-        &namespace_id,
-        &mut manifest,
-        revision_index_rows,
-        &context.writer_version,
-    )
-    .await;
+    rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
     match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
@@ -3248,7 +3122,6 @@ async fn rewrite_revision_index_segment(
     namespace_id: &NamespaceId,
     manifest: &mut NamespaceManifestEnvelope,
     mut rows: Vec<MetadataRow>,
-    writer_version: &str,
 ) {
     rows.sort_by_key(|row| row.row_key_for_family(ApiMetadataTableFamily::RevisionsByInodeDesc));
     let descriptor = manifest
@@ -3267,7 +3140,6 @@ async fn rewrite_revision_index_segment(
         ApiMetadataTableFamily::RevisionsByInodeDesc,
         descriptor,
         rows,
-        writer_version,
     )
     .await;
 }
@@ -3953,7 +3825,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         materialization_before.head.seq,
         CHECKPOINT_BASE_RUN_LEVEL,
         &materialization_before.metadata_state,
-        &context.writer_version,
         MetadataLsmPolicy::default().max_rows_per_segment,
     )
     .await

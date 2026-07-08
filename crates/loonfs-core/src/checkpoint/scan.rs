@@ -4,8 +4,8 @@
 use super::cache::{DecodedSegmentRowSet, MetadataTableCache};
 use super::error::ManifestLoadError;
 use super::load::{
-    load_manifest_segment_rows_with_cache, metadata_file_object_key, MetadataSstSeqExpectation,
-    MetadataTableCacheMode, MetadataTableLoadContext,
+    load_manifest_segment_rows_in_key_range_with_cache, metadata_file_object_key,
+    MetadataSstSeqExpectation, MetadataTableCacheMode, MetadataTableLoadContext,
 };
 use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
@@ -17,8 +17,7 @@ use loonfs_api::wire::manifest::{
 use loonfs_objectstore::ObjectStore;
 #[cfg(test)]
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Widest scan a cache without a byte budget may populate. A count-bounded
 /// cache evicts per entry, so admitting a wide scan would flush it; a
@@ -41,11 +40,6 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) table_cache: Option<&'a MetadataTableCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: NamespaceManifestEnvelope,
-    /// Per-view memo of decoded segments, so one operation never re-fetches
-    /// or re-decodes a segment it already saw. Entries share the decoded
-    /// allocation with the table cache and with concurrent readers; the memo
-    /// itself retains pointers, not copies.
-    pub(super) segment_cache: Mutex<HashMap<String, Arc<DecodedSegmentRowSet>>>,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -205,7 +199,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
                     .map(|(context, descriptor)| {
-                        self.segment_rows(*context, family, descriptor, cache_mode)
+                        self.segment_rows(
+                            *context,
+                            family,
+                            descriptor,
+                            cache_mode,
+                            lower_bound,
+                            upper_bound,
+                        )
                     }),
             )
             .await?;
@@ -248,17 +249,24 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             matching_descriptors.push(descriptor);
         }
 
+        let prefix_upper_bound = string_prefix_upper_bound(prefix);
         let mut loaded_segments = Vec::new();
         for chunk in matching_descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
             loaded_segments.extend(
                 try_join_all(chunk.iter().map(|descriptor| {
-                    self.segment_rows(context, family, descriptor, output.cache_mode)
+                    self.segment_rows(
+                        context,
+                        family,
+                        descriptor,
+                        output.cache_mode,
+                        prefix,
+                        prefix_upper_bound.as_deref(),
+                    )
                 }))
                 .await?,
             );
         }
 
-        let prefix_upper_bound = string_prefix_upper_bound(prefix);
         for segment_rows in loaded_segments {
             output.rows.extend(
                 segment_rows
@@ -275,29 +283,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
     ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
-        if let Some(rows) = self
-            .segment_cache
-            .lock()
-            .expect("manifest segment cache lock poisoned")
-            .get(&descriptor.object_key)
-        {
-            return Ok(Arc::clone(rows));
-        }
-        let rows = load_manifest_segment_rows_with_cache(
+        load_manifest_segment_rows_in_key_range_with_cache(
             self.store,
             self.table_cache,
             context,
             family,
             descriptor,
             cache_mode,
+            lower_bound,
+            upper_bound,
         )
-        .await?;
-        self.segment_cache
-            .lock()
-            .expect("manifest segment cache lock poisoned")
-            .insert(descriptor.object_key.clone(), Arc::clone(&rows));
-        Ok(rows)
+        .await
     }
 }
 

@@ -253,8 +253,20 @@ pub fn decode_index_block(
     handle: &BlockHandle,
 ) -> Result<Vec<SegmentIndexEntry>, SstBlockCodecError> {
     let payload = decode_section(stored, handle, true)?;
-    ciborium::de::from_reader(payload.as_slice())
-        .map_err(|error| SstBlockCodecError::Codec(error.to_string()))
+    let entries: Vec<SegmentIndexEntry> = ciborium::de::from_reader(payload.as_slice())
+        .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+    // Ascending block order is a format requirement; key-range narrowing
+    // binary-searches the last keys, so an out-of-order index is malformed.
+    if let Some(pair) = entries
+        .windows(2)
+        .find(|pair| pair[0].last_key > pair[1].last_key)
+    {
+        return Err(SstBlockCodecError::Malformed(format!(
+            "index blocks out of key order: `{}` follows `{}`",
+            pair[1].last_key, pair[0].last_key
+        )));
+    }
+    Ok(entries)
 }
 
 /// Decodes one data block from exactly the bytes its handle names.
@@ -302,6 +314,13 @@ pub fn decode_data_block(
         let row_bytes = take_slice(entries, &mut cursor, row_len)?;
         let row: MetadataRow = ciborium::de::from_reader(row_bytes)
             .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
+        // Ascending row-key order is a format requirement; readers
+        // binary-search on it, so an out-of-order block is malformed.
+        if key.as_str() < previous_key.as_str() {
+            return Err(SstBlockCodecError::Malformed(format!(
+                "rows out of row-key order: `{key}` follows `{previous_key}`"
+            )));
+        }
         previous_key.clear();
         previous_key.push_str(&key);
         row_keys.push(key);
@@ -701,5 +720,65 @@ mod tests {
         assert_eq!(first.bytes, second.bytes);
         assert_eq!(first.index, second.index);
         assert_eq!(first.filter, second.filter);
+    }
+
+    #[test]
+    fn decoding_rejects_out_of_order_rows_in_a_block() {
+        // A hostile block with descending keys and a valid CRC: encode two
+        // full-key entries in the wrong order through the private helpers.
+        let mut entries = Vec::new();
+        for inode in [9u64, 3u64] {
+            let (key, _, row) = inode_row(inode);
+            let mut row_bytes = Vec::new();
+            ciborium::ser::into_writer(&row, &mut row_bytes).expect("encode row");
+            write_varint(&mut entries, 0);
+            write_varint(&mut entries, key.len() as u64);
+            entries.extend_from_slice(key.as_bytes());
+            write_varint(&mut entries, row_bytes.len() as u64);
+            entries.extend_from_slice(&row_bytes);
+        }
+        let mut payload = entries;
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        let mut bytes = Vec::new();
+        let handle = append_section(&mut bytes, &payload, true).expect("append section");
+
+        let error =
+            decode_data_block(&bytes, &handle).expect_err("descending rows should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("row-key order")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_out_of_order_index_entries() {
+        let block = BlockHandle {
+            offset: 0,
+            stored_len: 1,
+            decoded_len: 1,
+            crc32c: 0,
+        };
+        let entries = vec![
+            SegmentIndexEntry {
+                last_key: "inode-00000000000000000009".to_owned(),
+                block,
+            },
+            SegmentIndexEntry {
+                last_key: "inode-00000000000000000003".to_owned(),
+                block,
+            },
+        ];
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(&entries, &mut payload).expect("encode index");
+        let mut bytes = Vec::new();
+        let handle = append_section(&mut bytes, &payload, true).expect("append section");
+
+        let error =
+            decode_index_block(&bytes, &handle).expect_err("descending index should be rejected");
+        assert!(
+            matches!(&error, SstBlockCodecError::Malformed(message) if message.contains("key order")),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -1112,8 +1112,9 @@ namespace-to-content-store relationship.
 
 ### 4.1 Durable envelope layout
 
-Every durable LoonFS object is an envelope document with the same leading
-fields, followed by the payload as an opaque sub-document:
+Every durable LoonFS object except metadata segments (section 4.2.1) is an
+envelope document with the same leading fields, followed by the payload as
+an opaque sub-document:
 
 | Field | Meaning |
 | --- | --- |
@@ -1139,7 +1140,7 @@ Two rules make these envelopes evolvable:
 | Family | `kind` | Encoding | Current version |
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
-| Metadata SST | `metadata_sst` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
+| Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, descriptors, GC pin, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 
@@ -1147,6 +1148,26 @@ JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
 payload as a byte string. Control-object versions are tracked per kind so one
 kind's payload schema can change without invalidating the others.
+
+#### 4.2.1 Metadata segments
+
+A metadata segment object is not an envelope: it is a sequence of
+independently readable sections — prefix-compressed data blocks holding rows
+in ascending row-key order, one bloom filter block over per-family lookup
+prefixes, then one index block naming each data block's last key and byte
+range. There is no footer and no self-describing header; the referencing
+manifest's segment descriptor carries the object length and the index and
+filter block handles, and is the only entry point into the object. Each
+section's CRC32C is computed over its stored (compressed) bytes and lives in
+the handle that names it — index entries for data blocks, the manifest
+descriptor for the index and filter — so a reader verifies every ranged read
+before decoding it, and the manifest transitively binds the object's exact
+bytes. The descriptor also records a whole-object `sha256` digest for
+publication conflict checks and offline verification; the read path never
+consults it. Readers reject out-of-order rows, out-of-order index entries,
+and checksum failures as malformed. The segment format is versioned by the
+manifest that references it (`namespace_manifest` `format_version`), since a
+segment is unreachable except through a manifest.
 
 ### 4.3 Evolution rules
 
