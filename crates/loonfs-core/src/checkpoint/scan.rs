@@ -303,6 +303,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                             cache_mode,
                             lower_bound,
                             upper_bound,
+                            filter_probe.is_none(),
                         )
                     }),
             )
@@ -362,6 +363,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                         output.cache_mode,
                         prefix,
                         prefix_upper_bound.as_deref(),
+                        filter_probe.is_none(),
                     )
                 }))
                 .await?,
@@ -410,6 +412,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         Ok(admitted)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn segment_rows(
         &self,
         context: MetadataTableLoadContext<'_>,
@@ -418,6 +421,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         cache_mode: MetadataTableCacheMode,
         lower_bound: &str,
         upper_bound: Option<&str>,
+        readahead: bool,
     ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
         load_manifest_segment_rows_in_key_range_with_cache(
             self.store,
@@ -429,6 +433,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             cache_mode,
             lower_bound,
             upper_bound,
+            readahead,
         )
         .await
     }
