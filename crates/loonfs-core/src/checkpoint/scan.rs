@@ -6,7 +6,7 @@ use super::error::ManifestLoadError;
 use super::load::{
     load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter,
     metadata_file_object_key, MetadataSstSeqExpectation, MetadataTableCacheMode,
-    MetadataTableLoadContext,
+    MetadataTableLoadContext, SessionBlockMemo,
 };
 use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
@@ -41,6 +41,9 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) table_cache: Option<&'a MetadataTableCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: NamespaceManifestEnvelope,
+    /// Per-view memo of decoded blocks: one operation never re-fetches a
+    /// block it already saw, with or without a shared cache attached.
+    pub(super) block_memo: SessionBlockMemo,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -181,8 +184,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         cache_mode: MetadataTableCacheMode,
         filter_probe: &str,
     ) -> Result<bool, ManifestLoadError> {
-        let filter =
-            load_segment_filter(self.store, self.table_cache, descriptor, cache_mode).await?;
+        let filter = load_segment_filter(
+            self.store,
+            self.table_cache,
+            &self.block_memo,
+            descriptor,
+            cache_mode,
+        )
+        .await?;
         if filter.may_contain(filter_probe) {
             return Ok(true);
         }
@@ -413,6 +422,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         load_manifest_segment_rows_in_key_range_with_cache(
             self.store,
             self.table_cache,
+            &self.block_memo,
             context,
             family,
             descriptor,
