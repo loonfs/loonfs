@@ -9,7 +9,7 @@ use super::build::{
 };
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::{
-    build_namespace_manifest_from_metadata_state, create_checkpoint, create_checkpoint_with_policy,
+    build_namespace_manifest_from_metadata_state, create_checkpoint,
     drop_rows_below_retention_floor, load_checkpoint_projection_metadata_state,
     ManifestMetadataSource,
 };
@@ -83,6 +83,65 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .envelope
         .state
         .floor_seq
+}
+
+/// Checkpoints, then folds every L0 run into the base through
+/// reorganization units, returning the resulting current manifest id. The
+/// old synchronous rebuild produced this shape in one checkpoint call;
+/// tests that need a compacted base with a specific segmentation policy use
+/// this instead.
+async fn checkpoint_then_reorganize<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+) -> ManifestId {
+    create_checkpoint(store, namespace_id, context)
+        .await
+        .expect("create checkpoint");
+    drain_reorganization(store, namespace_id, context, policy).await
+}
+
+/// Runs reorganization units until nothing is left to fold, with the
+/// trigger forced so even one L0 run folds.
+async fn drain_reorganization<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+) -> ManifestId {
+    let fold_policy = MetadataLsmPolicy {
+        max_l0_runs: 1,
+        ..policy
+    };
+    loop {
+        let report = super::reorganize_metadata_step(store, namespace_id, context, fold_policy)
+            .await
+            .expect("reorganization step");
+        match report.outcome {
+            super::MetadataReorganizeOutcome::UnitPublished { .. }
+            | super::MetadataReorganizeOutcome::Superseded => continue,
+            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+        }
+    }
+    read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state
+        .manifest_id
+}
+
+async fn current_manifest_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> ManifestId {
+    read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state
+        .manifest_id
 }
 
 async fn current_manifest_object_id<S: ObjectStore + ?Sized>(
@@ -858,11 +917,21 @@ async fn base_rebuild_drops_commit_receipts_below_retention_floor() {
             .expect("create checkpoint");
         last_manifest_id = Some(checkpoint.manifest_id);
     }
+    // Checkpoints only append; dropping happens when reorganization folds
+    // the runs against the advanced floor.
+    let _ = last_manifest_id.expect("manifest id");
+    let reorganized_manifest_id = drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
 
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        last_manifest_id.expect("manifest id"),
+        reorganized_manifest_id,
     )
     .await
     .expect("load manifest");
@@ -1052,6 +1121,15 @@ async fn restore_below_the_floor_fails_with_revision_not_found() {
             .await
             .expect("create checkpoint");
     }
+    // The superseded revision is reclaimed when reorganization folds the
+    // runs against the advanced floor, not at checkpoint time.
+    drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
 
     let error = restore_file_revision(
         &store,
@@ -1119,11 +1197,21 @@ async fn base_rebuild_drops_revisions_superseded_below_floor() {
             .expect("create checkpoint");
         last_manifest_id = Some(checkpoint.manifest_id);
     }
+    // Checkpoints only append; dropping happens when reorganization folds
+    // the runs against the advanced floor.
+    let _ = last_manifest_id.expect("manifest id");
+    let reorganized_manifest_id = drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
 
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        last_manifest_id.expect("manifest id"),
+        reorganized_manifest_id,
     )
     .await
     .expect("load manifest");
@@ -1189,11 +1277,21 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
             .expect("create checkpoint");
         last_manifest_id = Some(checkpoint.manifest_id);
     }
+    // Checkpoints only append; dropping happens when reorganization folds
+    // the runs against the advanced floor.
+    let _ = last_manifest_id.expect("manifest id");
+    let reorganized_manifest_id = drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
 
     let materialized = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,
-        last_manifest_id.expect("manifest id"),
+        reorganized_manifest_id,
     )
     .await
     .expect("load manifest");
@@ -1294,29 +1392,40 @@ async fn base_rebuild_rejects_divergent_revision_index() {
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    // L0 appends never re-read the base run; the base rebuild that folds
-    // every run back together is the production point that must reject it.
-    let mut rebuild_error = None;
-    for round in 0..12u32 {
-        write_file_bytes(
-            &store,
-            &namespace_id,
-            &format!("/docs/file-{round}.txt"),
-            b"body\n",
-            &context,
-            None,
-        )
+    // L0 appends never re-read the base run; the reorganization merge that
+    // folds every run back together is the production point that must
+    // reject it.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/another.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("write");
-        match create_checkpoint(&store, &namespace_id, &context).await {
-            Ok(_) => {}
+        .expect("l0 checkpoint");
+    let fold_policy = MetadataLsmPolicy {
+        max_l0_runs: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    let mut rebuild_error = None;
+    for _unit in 0..8 {
+        match super::reorganize_metadata_step(&store, &namespace_id, &context, fold_policy).await {
+            Ok(report) => match report.outcome {
+                super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+                _ => continue,
+            },
             Err(error) => {
                 rebuild_error = Some(error);
                 break;
             }
         }
     }
-    match rebuild_error.expect("base rebuild should reject the divergent index") {
+    match rebuild_error.expect("reorganization should reject the divergent index") {
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::RevisionIndexMismatch { .. },
         )) => {}
@@ -1526,11 +1635,21 @@ async fn manifest_materialization_uses_written_segments() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
+    let reorganized_manifest_id = drain_reorganization(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
 
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(1))
-            .await
-            .expect("load materialized manifest");
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        reorganized_manifest_id,
+    )
+    .await
+    .expect("load materialized manifest");
     let current = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -1603,18 +1722,23 @@ async fn manifest_l0_run_materialization_matches_checkpoint_projection() {
             .await
             .expect("load second manifest");
 
+    // Checkpoints only append: the base run stays the bootstrap seed's and
+    // each checkpoint contributes one L0 run.
     assert_eq!(
         second_materialized.manifest.payload.base_seq,
-        first.checkpoint_seq
+        first_materialized.manifest.payload.base_seq
     );
     assert_eq!(
         base_run(&second_materialized.manifest).tables,
         base_run(&first_materialized.manifest).tables
     );
     let l0_runs = l0_runs(&second_materialized.manifest);
-    assert_eq!(l0_runs.len(), 1);
-    assert_eq!(l0_runs[0].run_seq, second.checkpoint_seq);
-    assert_eq!(l0_runs[0].level, CHECKPOINT_L0_RUN_LEVEL);
+    assert_eq!(l0_runs.len(), 2);
+    assert_eq!(l0_runs[0].run_seq, first.checkpoint_seq);
+    assert_eq!(l0_runs[1].run_seq, second.checkpoint_seq);
+    assert!(l0_runs
+        .iter()
+        .all(|run| run.level == CHECKPOINT_L0_RUN_LEVEL));
     for response in [&first, &second] {
         let record = read_checkpoint_record(&store, &namespace_id, &response.checkpoint_id)
             .await
@@ -1888,11 +2012,13 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(4))
             .await
             .expect("load chained manifest");
-    assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(1));
+    // Always-append checkpoints keep the seed base (seq 0) and chain one
+    // L0 run per checkpoint, the first included.
+    assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(0));
     let l0_runs = l0_runs(&materialized.manifest);
-    assert_eq!(l0_runs.len(), 3);
+    assert_eq!(l0_runs.len(), 4);
     for (offset, run) in l0_runs.iter().enumerate() {
-        let seq = ChangeSeq(offset as u64 + 2);
+        let seq = ChangeSeq(offset as u64 + 1);
         assert_eq!(run.run_seq, seq);
         assert_eq!(run.level, CHECKPOINT_L0_RUN_LEVEL);
     }
@@ -1911,7 +2037,7 @@ async fn metadata_lsm_policy_default_matches_l0_run_cap() {
 }
 
 #[tokio::test]
-async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
+async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1925,31 +2051,60 @@ async fn manifest_policy_compacts_when_l0_runs_exceed_threshold() {
         .expect("bootstrap");
 
     for index in 1..=4 {
-        write_file_and_checkpoint_with_policy(&store, &namespace_id, &context, index, policy).await;
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    let capped = load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(3))
-        .await
-        .expect("load capped manifest");
-    assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
-    assert_eq!(l0_runs(&capped.manifest).len(), 2);
+    // Checkpoints never compact: well past the policy threshold every
+    // delta run is still chained and the base is still the seed's.
+    let appended = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load appended manifest");
+    assert_eq!(l0_runs(&appended.manifest).len(), 4);
+    assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 
-    let compacted =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(4))
+    // Reorganization folds one family group per unit, each publishing its
+    // own manifest — the manifest chain is the progress record.
+    let mut units = 0usize;
+    let mut last_manifest_id = None;
+    loop {
+        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
             .await
-            .expect("load compacted manifest");
+            .expect("reorganization step");
+        match report.outcome {
+            super::MetadataReorganizeOutcome::UnitPublished { manifest_id, .. } => {
+                units += 1;
+                if let Some(previous) = last_manifest_id {
+                    assert!(manifest_id > previous, "units must advance the manifest");
+                }
+                last_manifest_id = Some(manifest_id);
+            }
+            super::MetadataReorganizeOutcome::Superseded => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+        }
+    }
+    assert!(units >= 2, "several family groups should fold, got {units}");
+
+    let drained = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load drained manifest");
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(compacted.manifest.payload.base_seq, ChangeSeq(4));
-    assert!(l0_runs(&compacted.manifest).is_empty());
-    assert_eq!(
-        runs_from_metadata_files(&compacted.manifest.payload).len(),
-        1
-    );
+    assert!(l0_runs(&drained.manifest).is_empty());
+    assert_eq!(drained.manifest.payload.base_seq, ChangeSeq(4));
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
-        &compacted.metadata_state
+        &drained.metadata_state
     ));
 }
 
@@ -1973,13 +2128,20 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     .await
     .expect("write hello");
 
-    let manifest = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("checkpoint");
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
-            .await
-            .expect("load manifest");
+    let reorganized_manifest_id = checkpoint_then_reorganize(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        reorganized_manifest_id,
+    )
+    .await
+    .expect("load manifest");
     let mut manifest = materialized.manifest;
     let descriptor = manifest
         .payload
@@ -2042,11 +2204,9 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         .await
         .expect("materialization before checkpoint");
 
-    let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("manifest");
+    let manifest_id = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
             .await
             .expect("load manifest");
 
@@ -2116,9 +2276,7 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
         max_rows_per_segment: 1,
         ..MetadataLsmPolicy::default()
     };
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("manifest");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     // The default cache config carries a decoded-byte budget, so a scan wider
     // than the small-scan limit populates the cache instead of reading through.
@@ -2188,9 +2346,7 @@ async fn count_bounded_cache_keeps_large_table_scans_read_only() {
         max_rows_per_segment: 1,
         ..MetadataLsmPolicy::default()
     };
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("manifest");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     // Without a byte budget only entry count bounds the cache, so one wide
     // scan admitting all its segments could flush every resident block; wide
@@ -2241,9 +2397,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         max_rows_per_segment: 1,
         ..MetadataLsmPolicy::default()
     };
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("manifest");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     // A count-bounded cache keeps wide scans read-only, so nothing is ever
     // admitted and single-flight deduplication is the only fetch sharing —
@@ -2312,15 +2466,11 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
         max_rows_per_segment: 1,
         ..MetadataLsmPolicy::default()
     };
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("first checkpoint");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     write_file_bytes(&store, &namespace_id, "/docs/b.txt", b"b\n", &context, None)
         .await
         .expect("write b");
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("second checkpoint");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let tables = super::load_verified_manifest_tables_with_cache(
         &store,
@@ -2374,9 +2524,7 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
         max_rows_per_segment: 1,
         ..MetadataLsmPolicy::default()
     };
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("manifest");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let cache = super::MetadataTableCache::new(Default::default());
     let tables = super::load_verified_manifest_tables_with_cache(
@@ -2455,14 +2603,12 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
         max_rows_per_segment: 1,
         ..MetadataLsmPolicy::default()
     };
-    let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("manifest");
+    let manifest_id = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
     let before = cache.stats();
 
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
             .await
             .expect("load materialized manifest");
     let after = cache.stats();
@@ -2652,11 +2798,10 @@ async fn whole_run_compaction_rewrites_base_segments() {
     .await
     .expect("write cold");
 
-    let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("first checkpoint");
+    let first_manifest_id =
+        checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_id)
             .await
             .expect("load first manifest");
     let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
@@ -2671,9 +2816,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     )
     .await
     .expect("write hot l0");
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("l0 checkpoint");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     write_file_bytes(
         &store,
         &namespace_id,
@@ -2684,11 +2827,12 @@ async fn whole_run_compaction_rewrites_base_segments() {
     )
     .await
     .expect("write hot compact");
-    let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+    let compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
+    let compacted_manifest_id = drain_reorganization(&store, &namespace_id, &context, policy).await;
     let compacted_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_id)
             .await
             .expect("load compacted manifest");
     let materialization_after = load_current_projection(&store, &namespace_id)
@@ -2740,11 +2884,10 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
             .expect("write initial file");
     }
 
-    let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("first checkpoint");
+    let first_manifest_id =
+        checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_id)
             .await
             .expect("load first manifest");
     let revision_keys_before = base_segment_object_keys_for_family(
@@ -2763,9 +2906,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
     )
     .await
     .expect("write l0 revision");
-    create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
-        .await
-        .expect("l0 checkpoint");
+    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     write_file_bytes(
         &store,
         &namespace_id,
@@ -2776,11 +2917,12 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
     )
     .await
     .expect("write compaction revision");
-    let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+    let _compacted = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("compacted checkpoint");
+    let compacted_manifest_id = drain_reorganization(&store, &namespace_id, &context, policy).await;
     let compacted_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_id)
             .await
             .expect("load compacted manifest");
     let revision_keys_after = base_segment_object_keys_for_family(
@@ -2792,9 +2934,12 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         .expect("materialization");
 
     assert!(l0_runs(&compacted_materialized.manifest).is_empty());
-    assert_eq!(
-        runs_from_metadata_files(&compacted_materialized.manifest.payload).len(),
-        1
+    // Groups untouched since the first fold keep their older base run, so
+    // several base runs may coexist; what matters is that no delta remains.
+    assert!(
+        runs_from_metadata_files(&compacted_materialized.manifest.payload)
+            .iter()
+            .all(|run| run.level == CHECKPOINT_BASE_RUN_LEVEL)
     );
     assert!(revision_keys_after
         .iter()
@@ -2826,11 +2971,15 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
     .await
     .expect("write hello");
 
-    let manifest = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("checkpoint");
+    let manifest_id = checkpoint_then_reorganize(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
             .await
             .expect("load manifest");
     let base = base_run(&materialized.manifest);
@@ -2851,9 +3000,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .delete(&deleted_key)
         .await
         .expect("delete child index");
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
-        .await
-    {
+    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id).await {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
         }
@@ -2891,11 +3038,15 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
     .await
     .expect("write other");
 
-    let manifest = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("checkpoint");
+    let manifest_id = checkpoint_then_reorganize(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataLsmPolicy::default(),
+    )
+    .await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_id)
             .await
             .expect("load manifest before corruption");
     let mut manifest = materialized.manifest;
@@ -3196,11 +3347,13 @@ async fn revision_index_test_materialization(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> (ManifestId, NamespaceManifestEnvelope, Vec<MetadataRow>) {
-    let manifest = create_checkpoint(store, namespace_id, context)
-        .await
-        .expect("checkpoint");
+    // The corruptions below target base-run segments, which only exist
+    // once reorganization has folded the checkpoint's L0 runs.
+    let manifest_id =
+        checkpoint_then_reorganize(store, namespace_id, context, MetadataLsmPolicy::default())
+            .await;
     let materialized =
-        load_manifest_materialization_for_inspection(store, namespace_id, manifest.manifest_id)
+        load_manifest_materialization_for_inspection(store, namespace_id, manifest_id)
             .await
             .expect("load manifest before corruption");
     let revision_index_rows = manifest_rows_for_family(
@@ -3354,7 +3507,76 @@ fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
 }
 
 #[tokio::test]
-async fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
+async fn reorganization_resumes_from_the_manifest_after_interruption() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: 1,
+        ..MetadataLsmPolicy::default()
+    };
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 1..=3 {
+        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+    }
+
+    // One unit runs, then the process "crashes": nothing is carried over
+    // but the published manifest.
+    let first_report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("first unit");
+    let super::MetadataReorganizeOutcome::UnitPublished {
+        families: first_families,
+        ..
+    } = first_report.outcome
+    else {
+        panic!("expected a published unit, got {:?}", first_report.outcome);
+    };
+
+    // A checkpoint lands in between, adding a fresh delta run.
+    write_file_and_checkpoint(&store, &namespace_id, &context, 9).await;
+
+    // A fresh sequence of steps reads the live manifest and finishes the
+    // job, including the delta the interleaved checkpoint added.
+    let mut folded_groups = vec![first_families];
+    loop {
+        let report = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+            .await
+            .expect("resumed unit");
+        match report.outcome {
+            super::MetadataReorganizeOutcome::UnitPublished { families, .. } => {
+                folded_groups.push(families);
+            }
+            super::MetadataReorganizeOutcome::Superseded => {
+                panic!("no concurrent publisher exists in this test")
+            }
+            super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+        }
+    }
+    assert!(folded_groups.len() >= 2);
+
+    let drained = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load drained manifest");
+    let materialization_after = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("materialization");
+    assert!(l0_runs(&drained.manifest).is_empty());
+    assert!(metadata_states_equivalent(
+        &materialization_after.metadata_state,
+        &drained.metadata_state
+    ));
+}
+
+#[tokio::test]
+async fn checkpoints_chain_l0_runs_past_the_default_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3362,27 +3584,21 @@ async fn manifest_l0_run_cap_collapses_back_to_base_manifest() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-
     for index in 1..=10 {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    let capped = load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(9))
-        .await
-        .expect("load capped manifest");
-    assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
-    assert_eq!(l0_runs(&capped.manifest).len(), MAX_CHECKPOINT_L0_RUNS);
-
-    let collapsed =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(10))
-            .await
-            .expect("load collapsed manifest");
-    assert_eq!(collapsed.manifest.payload.base_seq, ChangeSeq(10));
-    assert!(l0_runs(&collapsed.manifest).is_empty());
-    assert_eq!(
-        runs_from_metadata_files(&collapsed.manifest.payload).len(),
-        1
-    );
+    // The default cap is a reorganization trigger, never a checkpoint
+    // behavior: publication keeps appending regardless.
+    let appended = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        current_manifest_id(&store, &namespace_id).await,
+    )
+    .await
+    .expect("load appended manifest");
+    assert!(l0_runs(&appended.manifest).len() > MAX_CHECKPOINT_L0_RUNS);
+    assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 }
 
 #[tokio::test]
@@ -3579,14 +3795,9 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         ),
     );
 
-    let checkpoint = create_checkpoint_with_policy(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
-    )
-    .await
-    .expect("create checkpoint should retry allocation");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint should retry allocation");
 
     assert_eq!(checkpoint.manifest_id, ManifestId(1));
     let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
@@ -3765,14 +3976,9 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     .await
     .expect("publish manifest");
 
-    let checkpoint = create_checkpoint_with_policy(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataLsmPolicy::default(),
-    )
-    .await
-    .expect("create checkpoint");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
 
     // With standalone records, pinning a basis that already covers the head
     // writes a checkpoint file against it instead of building a new
@@ -3840,7 +4046,8 @@ async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
         load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_id)
             .await
             .expect("load checkpoint manifest");
-    assert_eq!(l0_runs(&materialized.manifest).len(), 1);
+    // One L0 run per checkpoint, the first included.
+    assert_eq!(l0_runs(&materialized.manifest).len(), 2);
 }
 
 #[tokio::test]
@@ -4549,24 +4756,6 @@ async fn write_file_and_checkpoint(
         .await
         .expect("write file");
     create_checkpoint(store, namespace_id, context)
-        .await
-        .expect("create checkpoint")
-        .checkpoint_seq
-}
-
-async fn write_file_and_checkpoint_with_policy(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-    index: u64,
-    policy: MetadataLsmPolicy,
-) -> ChangeSeq {
-    let path = format!("/docs/file-{index}.txt");
-    let bytes = format!("file {index}\n");
-    write_file_bytes(store, namespace_id, &path, bytes.as_bytes(), context, None)
-        .await
-        .expect("write file");
-    create_checkpoint_with_policy(store, namespace_id, context, policy)
         .await
         .expect("create checkpoint")
         .checkpoint_seq

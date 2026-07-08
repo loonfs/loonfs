@@ -25,6 +25,7 @@ mod error;
 mod load;
 mod publish;
 pub(crate) mod record;
+mod reorganize;
 mod retention;
 mod row;
 mod runs;
@@ -39,10 +40,11 @@ pub use self::cache::{
     DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
+pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{
-    build_initial_namespace_manifest, create_checkpoint, create_checkpoint_with_policy_and_owner,
+    build_initial_namespace_manifest, create_checkpoint, create_checkpoint_with_owner,
 };
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,
@@ -50,5 +52,6 @@ pub(crate) use self::load::{
 };
 pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::record::{read_checkpoint_record, verify_checkpoint_basis};
+pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{string_prefix_upper_bound, VerifiedMetadataTables};
