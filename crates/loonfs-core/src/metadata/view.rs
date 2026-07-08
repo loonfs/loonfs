@@ -16,6 +16,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
 
 const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
@@ -30,6 +31,7 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     wal_tail: Option<&'a MetadataState>,
     manifest: Option<&'a VerifiedMetadataTables<'store, S>>,
     in_memory_base: Option<&'a MetadataState>,
+    durable_cache: Option<&'a DurableVisibilityCache>,
 }
 
 pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
@@ -124,6 +126,7 @@ impl<'a> InMemoryMetadataView<'a> {
                 wal_tail: None,
                 manifest: None,
                 in_memory_base: Some(base),
+                durable_cache: None,
             },
         }
     }
@@ -146,6 +149,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 wal_tail: Some(wal_tail_rows),
                 manifest: Some(tables),
                 in_memory_base: None,
+                durable_cache: None,
             },
         }
     }
@@ -169,12 +173,25 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 wal_tail: self.sources.wal_tail,
                 manifest: self.sources.manifest,
                 in_memory_base: self.sources.in_memory_base,
+                durable_cache: self.sources.durable_cache,
             },
         }
     }
 
     fn visible_seq(&self) -> ChangeSeq {
         self.snapshot.visible_seq
+    }
+
+    /// Attaches a batch-scoped durable-layer memo. Only attach where every
+    /// composed view's `visible_seq` stays at or above the seq the durable
+    /// layers were loaded at, so memoized durable answers never go stale;
+    /// overlay rows are composed per lookup either way.
+    pub(crate) fn with_durable_cache(
+        mut self,
+        durable_cache: &'a DurableVisibilityCache,
+    ) -> MetadataView<'a, 'store, S> {
+        self.sources.durable_cache = Some(durable_cache);
+        self
     }
 
     fn row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
@@ -185,6 +202,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         ]
         .into_iter()
         .flatten()
+    }
+
+    fn overlay_state(&self) -> Option<&'a MetadataState> {
+        self.sources.overlay
+    }
+
+    fn durable_row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
+        [self.sources.wal_tail, self.sources.in_memory_base]
+            .into_iter()
+            .flatten()
     }
 
     fn manifest_tables(&self) -> Option<&'a VerifiedMetadataTables<'store, S>> {
@@ -264,16 +291,28 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, CoreError> {
         if let Some(inode) = self
-            .row_states()
-            .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()))
+            .overlay_state()
+            .and_then(|state| state.inode_at_seq(inode_id, self.visible_seq()))
         {
             return Ok(Some(inode));
         }
-        if let Some(tables) = self.manifest_tables() {
-            manifest_index::inode_at_seq(tables, inode_id).await
-        } else {
-            Ok(None)
+        if let Some(cache) = self.sources.durable_cache {
+            if let Some(cached) = cache.get(|inner| &mut inner.inodes, &inode_id) {
+                return Ok(cached);
+            }
         }
+        let mut durable = self
+            .durable_row_states()
+            .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()));
+        if durable.is_none() {
+            if let Some(tables) = self.manifest_tables() {
+                durable = manifest_index::inode_at_seq(tables, inode_id).await?;
+            }
+        }
+        if let Some(cache) = self.sources.durable_cache {
+            cache.insert(|inner| &mut inner.inodes, inode_id, durable.clone());
+        }
+        Ok(durable)
     }
 
     pub(crate) async fn latest_revision_head(
@@ -463,12 +502,36 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let mut bindings = if let Some(tables) = self.manifest_tables() {
-            manifest_index::direntry_binds_for_parent(tables, parent_inode_id).await?
+        let durable = if let Some(cached) = self
+            .sources
+            .durable_cache
+            .and_then(|cache| cache.get(|inner| &mut inner.binds_for_parent, &parent_inode_id))
+        {
+            cached
         } else {
-            Vec::new()
+            let mut durable = if let Some(tables) = self.manifest_tables() {
+                manifest_index::direntry_binds_for_parent(tables, parent_inode_id).await?
+            } else {
+                Vec::new()
+            };
+            durable.extend(self.durable_row_states().flat_map(|state| {
+                state
+                    .direntry_binds()
+                    .iter()
+                    .filter(move |direntry| direntry.parent_inode_id == parent_inode_id)
+                    .cloned()
+            }));
+            if let Some(cache) = self.sources.durable_cache {
+                cache.insert(
+                    |inner| &mut inner.binds_for_parent,
+                    parent_inode_id,
+                    durable.clone(),
+                );
+            }
+            durable
         };
-        bindings.extend(self.row_states().flat_map(|state| {
+        let mut bindings = durable;
+        bindings.extend(self.overlay_state().into_iter().flat_map(|state| {
             state
                 .direntry_binds()
                 .iter()
@@ -483,13 +546,43 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let mut bindings = if let Some(tables) = self.manifest_tables() {
-            manifest_index::direntry_binds_for_parent_name(tables, parent_inode_id, name_key)
-                .await?
-        } else {
-            Vec::new()
+        let cache_key = ParentNameCacheKey {
+            parent_inode_id,
+            name_key: name_key.to_owned(),
         };
-        bindings.extend(self.row_states().flat_map(|state| {
+        let durable = if let Some(cached) = self
+            .sources
+            .durable_cache
+            .and_then(|cache| cache.get(|inner| &mut inner.binds_for_parent_name, &cache_key))
+        {
+            cached
+        } else {
+            let mut durable = if let Some(tables) = self.manifest_tables() {
+                manifest_index::direntry_binds_for_parent_name(tables, parent_inode_id, name_key)
+                    .await?
+            } else {
+                Vec::new()
+            };
+            durable.extend(self.durable_row_states().flat_map(|state| {
+                state
+                    .direntry_binds()
+                    .iter()
+                    .filter(move |direntry| {
+                        direntry.parent_inode_id == parent_inode_id && direntry.name_key == name_key
+                    })
+                    .cloned()
+            }));
+            if let Some(cache) = self.sources.durable_cache {
+                cache.insert(
+                    |inner| &mut inner.binds_for_parent_name,
+                    cache_key,
+                    durable.clone(),
+                );
+            }
+            durable
+        };
+        let mut bindings = durable;
+        bindings.extend(self.overlay_state().into_iter().flat_map(|state| {
             state
                 .direntry_binds()
                 .iter()
@@ -505,12 +598,36 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         child_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let mut bindings = if let Some(tables) = self.manifest_tables() {
-            manifest_index::direntry_binds_for_child(tables, child_inode_id).await?
+        let durable = if let Some(cached) = self
+            .sources
+            .durable_cache
+            .and_then(|cache| cache.get(|inner| &mut inner.binds_for_child, &child_inode_id))
+        {
+            cached
         } else {
-            Vec::new()
+            let mut durable = if let Some(tables) = self.manifest_tables() {
+                manifest_index::direntry_binds_for_child(tables, child_inode_id).await?
+            } else {
+                Vec::new()
+            };
+            durable.extend(self.durable_row_states().flat_map(|state| {
+                state
+                    .direntry_binds()
+                    .iter()
+                    .filter(move |direntry| direntry.child_inode_id == child_inode_id)
+                    .cloned()
+            }));
+            if let Some(cache) = self.sources.durable_cache {
+                cache.insert(
+                    |inner| &mut inner.binds_for_child,
+                    child_inode_id,
+                    durable.clone(),
+                );
+            }
+            durable
         };
-        bindings.extend(self.row_states().flat_map(|state| {
+        let mut bindings = durable;
+        bindings.extend(self.overlay_state().into_iter().flat_map(|state| {
             state
                 .direntry_binds()
                 .iter()
@@ -524,12 +641,37 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
-        let mut unbinds = if let Some(tables) = self.manifest_tables() {
-            manifest_index::direntry_unbinds_for_binding(tables, direntry).await?
+        let cache_key = BindingCacheKey::from(direntry);
+        let durable = if let Some(cached) = self
+            .sources
+            .durable_cache
+            .and_then(|cache| cache.get(|inner| &mut inner.unbinds_for_binding, &cache_key))
+        {
+            cached
         } else {
-            Vec::new()
+            let mut durable = if let Some(tables) = self.manifest_tables() {
+                manifest_index::direntry_unbinds_for_binding(tables, direntry).await?
+            } else {
+                Vec::new()
+            };
+            durable.extend(self.durable_row_states().flat_map(|state| {
+                state
+                    .direntry_unbinds()
+                    .iter()
+                    .filter(move |unbind| unbind_matches_binding(unbind, direntry))
+                    .cloned()
+            }));
+            if let Some(cache) = self.sources.durable_cache {
+                cache.insert(
+                    |inner| &mut inner.unbinds_for_binding,
+                    cache_key,
+                    durable.clone(),
+                );
+            }
+            durable
         };
-        unbinds.extend(self.row_states().flat_map(|state| {
+        let mut unbinds = durable;
+        unbinds.extend(self.overlay_state().into_iter().flat_map(|state| {
             state
                 .direntry_unbinds()
                 .iter()
@@ -590,12 +732,36 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         root_inode_id: InodeId,
     ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
-        let mut tombstones = if let Some(tables) = self.manifest_tables() {
-            manifest_index::tombstones_for_root(tables, root_inode_id).await?
+        let durable = if let Some(cached) = self
+            .sources
+            .durable_cache
+            .and_then(|cache| cache.get(|inner| &mut inner.tombstones_for_root, &root_inode_id))
+        {
+            cached
         } else {
-            Vec::new()
+            let mut durable = if let Some(tables) = self.manifest_tables() {
+                manifest_index::tombstones_for_root(tables, root_inode_id).await?
+            } else {
+                Vec::new()
+            };
+            durable.extend(self.durable_row_states().flat_map(|state| {
+                state
+                    .subtree_tombstones()
+                    .iter()
+                    .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
+                    .cloned()
+            }));
+            if let Some(cache) = self.sources.durable_cache {
+                cache.insert(
+                    |inner| &mut inner.tombstones_for_root,
+                    root_inode_id,
+                    durable.clone(),
+                );
+            }
+            durable
         };
-        tombstones.extend(self.row_states().flat_map(|state| {
+        let mut tombstones = durable;
+        tombstones.extend(self.overlay_state().into_iter().flat_map(|state| {
             state
                 .subtree_tombstones()
                 .iter()
@@ -1289,6 +1455,81 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, Self::Error> {
         MetadataViewSession::visible_inode(self, inode_id).await
+    }
+}
+
+/// Batch-scoped memo of durable-layer lookups: everything except the
+/// mutation overlay (manifest tables, WAL tail, in-memory base). Publish
+/// batches attach one so repeated path walks across candidates scan each
+/// durable key once; the overlay — the only layer that changes between
+/// candidates — is composed per lookup on top.
+///
+/// Cached vectors are raw, unfiltered rows; callers apply their own seq
+/// filters, so answers hold regardless of the composed view's visible seq.
+#[derive(Debug, Default)]
+pub(crate) struct DurableVisibilityCache {
+    inner: Mutex<DurableVisibilityCacheInner>,
+}
+
+#[derive(Debug, Default)]
+struct DurableVisibilityCacheInner {
+    inodes: HashMap<InodeId, Option<InodeRecord>>,
+    binds_for_parent_name: HashMap<ParentNameCacheKey, Vec<DirentryBindRecord>>,
+    binds_for_parent: HashMap<InodeId, Vec<DirentryBindRecord>>,
+    binds_for_child: HashMap<InodeId, Vec<DirentryBindRecord>>,
+    unbinds_for_binding: HashMap<BindingCacheKey, Vec<DirentryUnbindRecord>>,
+    tombstones_for_root: HashMap<InodeId, Vec<SubtreeTombstoneRecord>>,
+    hits: u64,
+    misses: u64,
+}
+
+/// Hit/miss counts, pinning cache engagement in tests.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DurableVisibilityCacheStats {
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+}
+
+impl DurableVisibilityCache {
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> DurableVisibilityCacheStats {
+        let inner = self.lock();
+        DurableVisibilityCacheStats {
+            hits: inner.hits,
+            misses: inner.misses,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, DurableVisibilityCacheInner> {
+        self.inner
+            .lock()
+            .expect("durable visibility cache lock poisoned")
+    }
+
+    fn get<K: std::hash::Hash + Eq, V: Clone>(
+        &self,
+        map: impl FnOnce(&mut DurableVisibilityCacheInner) -> &mut HashMap<K, V>,
+        key: &K,
+    ) -> Option<V> {
+        let mut inner = self.lock();
+        let hit = map(&mut inner).get(key).cloned();
+        if hit.is_some() {
+            inner.hits += 1;
+        } else {
+            inner.misses += 1;
+        }
+        hit
+    }
+
+    fn insert<K: std::hash::Hash + Eq, V>(
+        &self,
+        map: impl FnOnce(&mut DurableVisibilityCacheInner) -> &mut HashMap<K, V>,
+        key: K,
+        value: V,
+    ) {
+        let mut inner = self.lock();
+        map(&mut inner).insert(key, value);
     }
 }
 
