@@ -1,4 +1,5 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -23,6 +24,9 @@ pub struct GcpGcsStoreConfig {
 #[derive(Debug)]
 pub struct GcpGcsStore {
     inner: ProviderObjectStore,
+    /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
+    /// the connector inside the client holds only a handle onto it.
+    _io_runtime: StoreIoRuntime,
 }
 
 impl GcpGcsStore {
@@ -38,7 +42,9 @@ impl GcpGcsStore {
             ));
         }
 
+        let io_runtime = StoreIoRuntime::new()?;
         let builder = GoogleCloudStorageBuilder::new()
+            .with_http_connector(io_runtime.connector())
             .with_bucket_name(config.bucket)
             .with_service_account_path(config.service_account_key_path);
 
@@ -53,7 +59,10 @@ impl GcpGcsStore {
             },
         )?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _io_runtime: io_runtime,
+        })
     }
 
     fn generation_as_compare_token(metadata: ObjectMetadata) -> ObjectMetadata {

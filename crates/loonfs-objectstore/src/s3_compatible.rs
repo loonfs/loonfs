@@ -1,4 +1,5 @@
 use crate::secret::SecretString;
+use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig, PutMode,
@@ -28,6 +29,9 @@ pub(crate) struct S3CompatibleConfig {
 pub(crate) struct S3CompatibleStore {
     provider_name: &'static str,
     inner: ProviderObjectStore,
+    /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
+    /// the connector inside the client holds only a handle onto it.
+    _io_runtime: StoreIoRuntime,
 }
 
 impl fmt::Debug for S3CompatibleStore {
@@ -49,7 +53,9 @@ impl S3CompatibleStore {
             })
             .transpose()?;
 
+        let io_runtime = StoreIoRuntime::new()?;
         let mut builder = AmazonS3Builder::new()
+            .with_http_connector(io_runtime.connector())
             .with_bucket_name(config.bucket)
             .with_region(config.region)
             .with_access_key_id(config.access_key_id.expose())
@@ -83,6 +89,7 @@ impl S3CompatibleStore {
         Ok(Self {
             provider_name: config.provider_name,
             inner,
+            _io_runtime: io_runtime,
         })
     }
 }

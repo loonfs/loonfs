@@ -350,6 +350,67 @@ async fn aws_s3_real_provider_conformance() {
     assert_provider_conformance(&store).await;
 }
 
+#[test]
+#[ignore = "requires real AWS S3 credentials"]
+fn aws_s3_store_survives_alternating_current_thread_runtimes() {
+    // Regression probe for the 30s stall: a provider client driven from two
+    // current-thread runtimes parked pooled connections until the client
+    // timeout fired. The store-owned IO runtime decouples HTTP driving from
+    // caller runtime topology, so alternating runtimes stays fast.
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+    let store = AwsS3Store::new(AwsS3StoreConfig {
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id.into(),
+        secret_access_key: config.secret_access_key.into(),
+        session_token: config.session_token.map(Into::into),
+        key_prefix: Some(config.prefix),
+        force_path_style: false,
+    })
+    .expect("create AWS S3 object store");
+
+    let runtime_a = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime a");
+    let runtime_b = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime b");
+
+    #[allow(clippy::disallowed_methods)]
+    // Wall-clock bounds a live-provider stall check; no protocol time depends on it.
+    let started = std::time::Instant::now();
+    for round in 0..5u32 {
+        let key = format!("runtime-affinity-probe/round-{round}.bin");
+        let bytes = Bytes::from(format!("round {round}"));
+        runtime_a
+            .block_on(store.put_overwrite(&key, bytes))
+            .expect("put on runtime a");
+        let head = runtime_b
+            .block_on(store.head(&key))
+            .expect("head on runtime b");
+        assert!(head.is_some(), "object should exist after put");
+        let body = runtime_a
+            .block_on(store.get(&key, None))
+            .expect("get on runtime a");
+        assert!(body.is_some(), "object body should read back");
+        runtime_b
+            .block_on(store.delete(&key))
+            .expect("delete on runtime b");
+    }
+    #[allow(clippy::disallowed_methods)]
+    // Same wall-clock boundary as above; 20 rounds of small ops complete in
+    // seconds unless a request parks until the 30s client timeout.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "alternating-runtime ops should never park until the client timeout; took {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_real_provider_conformance() {
