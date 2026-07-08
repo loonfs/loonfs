@@ -116,7 +116,7 @@ impl ServerConfig {
             config.metadata_table_cache.max_blocks = value;
         }
         if let Some(value) = self.runtime_cache.metadata_table_cache_max_decoded_bytes {
-            config.metadata_table_cache.max_decoded_bytes = Some(value);
+            config.metadata_table_cache.max_decoded_bytes = value;
         }
         config
     }

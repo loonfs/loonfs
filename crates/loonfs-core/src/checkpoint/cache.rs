@@ -20,7 +20,7 @@ pub const DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS: usize = 8192;
 pub struct MetadataTableCacheConfig {
     pub enabled: bool,
     pub max_blocks: usize,
-    pub max_decoded_bytes: Option<usize>,
+    pub max_decoded_bytes: usize,
 }
 
 impl Default for MetadataTableCacheConfig {
@@ -28,7 +28,7 @@ impl Default for MetadataTableCacheConfig {
         Self {
             enabled: true,
             max_blocks: DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
-            max_decoded_bytes: Some(DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES),
+            max_decoded_bytes: DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES,
         }
     }
 }
@@ -180,8 +180,6 @@ impl MetadataTableCache {
     pub(super) async fn get_or_fetch<E, F, Fut>(
         &self,
         cache_key: &MetadataTableCacheKey,
-        consult: bool,
-        populate: bool,
         fetch: F,
     ) -> Result<DecodedMetadataTableBlock, E>
     where
@@ -201,15 +199,11 @@ impl MetadataTableCache {
         };
         let result = cell
             .get_or_try_init(|| async {
-                if consult {
-                    if let Some(block) = self.get(cache_key) {
-                        return Ok(block);
-                    }
+                if let Some(block) = self.get(cache_key) {
+                    return Ok(block);
                 }
                 let block = fetch().await?;
-                if populate {
-                    self.insert(cache_key.clone(), block.clone());
-                }
+                self.insert(cache_key.clone(), block.clone());
                 Ok(block)
             })
             .await
@@ -248,15 +242,6 @@ impl MetadataTableCache {
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Whether inserts are bounded by a decoded-byte budget. A byte-budgeted
-    /// cache admits scans of any width safely: eviction is sized by decoded
-    /// bytes, so one wide scan cannot pin more memory than the budget. Without
-    /// a byte budget only entry count bounds the cache, and wide admissions
-    /// would flush it.
-    pub(super) fn byte_budgeted(&self) -> bool {
-        self.config.max_decoded_bytes.is_some()
-    }
-
     pub(super) fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
         if !self.config.enabled || self.config.max_blocks == 0 {
             return None;
@@ -293,11 +278,7 @@ impl MetadataTableCache {
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
         while inner.entries.len() > self.config.max_blocks
-            || self
-                .config
-                .max_decoded_bytes
-                .map(|max_decoded_bytes| inner.decoded_byte_len > max_decoded_bytes)
-                .unwrap_or(false)
+            || inner.decoded_byte_len > self.config.max_decoded_bytes
         {
             let Some(evicted) = inner.order.pop_front() else {
                 break;
@@ -588,7 +569,7 @@ mod tests {
         let config = MetadataTableCacheConfig::default();
         assert_eq!(
             config.max_decoded_bytes,
-            Some(super::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES)
+            super::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES
         );
         assert_eq!(
             config.max_blocks,
@@ -601,7 +582,7 @@ mod tests {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
             enabled: true,
             max_blocks: 100,
-            max_decoded_bytes: Some(1000),
+            max_decoded_bytes: 1000,
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
@@ -618,7 +599,7 @@ mod tests {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
             enabled: true,
             max_blocks: 100,
-            max_decoded_bytes: Some(1000),
+            max_decoded_bytes: 1000,
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("a"), block(100));
@@ -659,13 +640,11 @@ mod tests {
     async fn get_or_fetch_retries_after_a_failed_fetch() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let failed: Result<_, String> = cache
-            .get_or_fetch(&key("a"), true, true, || async {
-                Err("transport".to_owned())
-            })
+            .get_or_fetch(&key("a"), || async { Err("transport".to_owned()) })
             .await;
         assert!(failed.is_err());
         let recovered: Result<_, String> = cache
-            .get_or_fetch(&key("a"), true, true, || async { Ok(block(1)) })
+            .get_or_fetch(&key("a"), || async { Ok(block(1)) })
             .await;
         assert!(
             recovered.is_ok(),
@@ -677,11 +656,11 @@ mod tests {
     async fn get_or_fetch_counts_one_miss_and_populates_for_later_hits() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let fetched: Result<_, String> = cache
-            .get_or_fetch(&key("a"), true, true, || async { Ok(block(1)) })
+            .get_or_fetch(&key("a"), || async { Ok(block(1)) })
             .await;
         assert!(fetched.is_ok());
         let cached: Result<_, String> = cache
-            .get_or_fetch(&key("a"), true, true, || async {
+            .get_or_fetch(&key("a"), || async {
                 Err("a populated key must not re-fetch".to_owned())
             })
             .await;

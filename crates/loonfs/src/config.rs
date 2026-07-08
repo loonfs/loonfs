@@ -69,7 +69,7 @@ impl RuntimeCacheConfig {
             metadata_table_cache: MetadataTableCacheConfig {
                 enabled: false,
                 max_blocks: 0,
-                max_decoded_bytes: Some(0),
+                max_decoded_bytes: 0,
             },
         }
     }

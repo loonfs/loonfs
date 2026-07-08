@@ -399,13 +399,6 @@ pub(super) enum MetadataSstSeqExpectation {
     Descriptor,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum MetadataTableCacheMode {
-    Bypass,
-    Populate,
-    ReadOnly,
-}
-
 impl MetadataTableLoadContext<'_> {
     pub(super) fn expected_segment_seq(
         &self,
@@ -523,15 +516,7 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
-    load_manifest_segment_rows_with_cache(
-        store,
-        None,
-        context,
-        family,
-        descriptor,
-        MetadataTableCacheMode::Bypass,
-    )
-    .await
+    load_manifest_segment_rows_with_cache(store, None, context, family, descriptor).await
 }
 
 /// Per-view memo of decoded blocks, so one operation never re-fetches or
@@ -561,9 +546,6 @@ impl SessionBlockMemo {
     }
 }
 
-/// Widest block selection served by per-block single-flight fetches; wider
-/// selections bulk-fetch their missing spans with coalesced ranged GETs.
-const NARROW_BLOCK_FETCH_LIMIT: usize = 4;
 /// Blocks a range scan reads ahead within a segment. Paged scans ask for a
 /// couple of blocks at a time while marching through whole segments; without
 /// readahead every page pays its own small GETs, and request counts scale
@@ -585,7 +567,6 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
-    cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
     let row_set = load_manifest_segment_rows_in_key_range_with_cache(
         store,
@@ -594,7 +575,6 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         context,
         family,
         descriptor,
-        cache_mode,
         "",
         None,
         false,
@@ -633,13 +613,12 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
-    cache_mode: MetadataTableCacheMode,
     lower_bound: &str,
     upper_bound: Option<&str>,
     readahead: bool,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
     context.expected_segment_seq(descriptor)?;
-    let index = load_segment_index(store, table_cache, memo, descriptor, cache_mode).await?;
+    let index = load_segment_index(store, table_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
     // A paged scan marches onward through the segment: read ahead so the
@@ -653,44 +632,18 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     } else {
         needed.end
     };
-    let blocks = if extended_end - needed.start > NARROW_BLOCK_FETCH_LIMIT {
-        let fetched = load_segment_data_block_span(
-            store,
-            table_cache,
-            memo,
-            family,
-            descriptor,
-            &index[needed.start..extended_end],
-            cache_mode,
-        )
-        .await?;
-        fetched.into_iter().take(needed.len()).collect()
-    } else if needed.len() <= NARROW_BLOCK_FETCH_LIMIT {
-        let entries = &index[needed];
-        futures::future::try_join_all(entries.iter().map(|entry| {
-            load_segment_data_block(
-                store,
-                table_cache,
-                memo,
-                family,
-                descriptor,
-                entry,
-                cache_mode,
-            )
-        }))
-        .await?
-    } else {
-        load_segment_data_block_span(
-            store,
-            table_cache,
-            memo,
-            family,
-            descriptor,
-            &index[needed],
-            cache_mode,
-        )
-        .await?
-    };
+    let blocks: Vec<_> = load_segment_data_block_span(
+        store,
+        table_cache,
+        memo,
+        family,
+        descriptor,
+        &index[needed.start..extended_end],
+    )
+    .await?
+    .into_iter()
+    .take(needed.len())
+    .collect();
 
     let mut rows = Vec::new();
     let mut row_keys = Vec::new();
@@ -765,7 +718,6 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
     descriptor: &MetadataFileRef,
-    cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     let handle = descriptor.index_block;
     let cache_key =
@@ -789,16 +741,7 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
         })
     };
     let block = match table_cache {
-        Some(cache) => {
-            cache
-                .get_or_fetch(
-                    &cache_key,
-                    cache_mode != MetadataTableCacheMode::Bypass,
-                    cache_mode == MetadataTableCacheMode::Populate,
-                    fetch,
-                )
-                .await?
-        }
+        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
@@ -820,7 +763,6 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
     descriptor: &MetadataFileRef,
-    cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<SegmentFilter>, ManifestLoadError> {
     let handle = descriptor.filter_block;
     let cache_key =
@@ -844,16 +786,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         })
     };
     let block = match table_cache {
-        Some(cache) => {
-            cache
-                .get_or_fetch(
-                    &cache_key,
-                    cache_mode != MetadataTableCacheMode::Bypass,
-                    cache_mode == MetadataTableCacheMode::Populate,
-                    fetch,
-                )
-                .await?
-        }
+        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
@@ -872,7 +805,6 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     entry: &SegmentIndexEntry,
-    cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
     let handle = entry.block;
     let cache_key =
@@ -895,16 +827,7 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         ))
     };
     let block = match table_cache {
-        Some(cache) => {
-            cache
-                .get_or_fetch(
-                    &cache_key,
-                    cache_mode != MetadataTableCacheMode::Bypass,
-                    cache_mode == MetadataTableCacheMode::Populate,
-                    fetch,
-                )
-                .await?
-        }
+        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
@@ -941,10 +864,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     entries: &[SegmentIndexEntry],
-    cache_mode: MetadataTableCacheMode,
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
-    let consult = cache_mode != MetadataTableCacheMode::Bypass;
-    let populate = cache_mode == MetadataTableCacheMode::Populate;
     let mut blocks: Vec<Option<Arc<DecodedDataBlock>>> = vec![None; entries.len()];
     for (position, entry) in entries.iter().enumerate() {
         let cache_key =
@@ -953,7 +873,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             blocks[position] = Some(block);
             continue;
         }
-        if let (Some(cache), true) = (table_cache, consult) {
+        if let Some(cache) = table_cache {
             if let Some(DecodedMetadataTableBlock::Data { block, .. }) = cache.get(&cache_key) {
                 blocks[position] = Some(block);
             }
@@ -996,14 +916,11 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 span[0].block.offset,
             );
             let fetch = || async {
-                fetch_and_publish_span(store, table_cache, memo, family, descriptor, span, populate)
-                    .await
+                fetch_and_publish_span(store, table_cache, memo, family, descriptor, span).await
             };
             match table_cache {
                 Some(cache) => {
-                    cache
-                        .get_or_fetch(&first_key, consult, populate, fetch)
-                        .await?;
+                    cache.get_or_fetch(&first_key, fetch).await?;
                 }
                 None => {
                     fetch().await?;
@@ -1021,16 +938,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             continue;
         }
         blocks[position] = Some(
-            load_segment_data_block(
-                store,
-                table_cache,
-                memo,
-                family,
-                descriptor,
-                entry,
-                cache_mode,
-            )
-            .await?,
+            load_segment_data_block(store, table_cache, memo, family, descriptor, entry).await?,
         );
     }
 
@@ -1051,7 +959,6 @@ async fn fetch_and_publish_span<S: ObjectStore + ?Sized>(
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     span: &[SegmentIndexEntry],
-    populate: bool,
 ) -> Result<DecodedMetadataTableBlock, ManifestLoadError> {
     let first = &span[0].block;
     let last = &span[span.len() - 1].block;
@@ -1073,7 +980,7 @@ async fn fetch_and_publish_span<S: ObjectStore + ?Sized>(
             block: decoded,
         };
         memo.record(&cache_key, &cache_block);
-        if let (Some(cache), true) = (table_cache, populate) {
+        if let Some(cache) = table_cache {
             // The first block is what the single-flight cell publishes;
             // inserting it here too keeps the whole span uniformly cached.
             cache.insert(cache_key, cache_block.clone());
