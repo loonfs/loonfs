@@ -1,7 +1,7 @@
 //! Verified row scans over a loaded manifest's tables, with per-segment
 //! caching and prefix-window pruning.
 
-use super::cache::MetadataTableCache;
+use super::cache::{DecodedSegmentRowSet, MetadataTableCache};
 use super::error::ManifestLoadError;
 use super::load::{
     load_manifest_segment_rows_with_cache, metadata_file_object_key, MetadataSstSeqExpectation,
@@ -18,8 +18,11 @@ use loonfs_objectstore::ObjectStore;
 #[cfg(test)]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+/// Widest scan a cache without a byte budget may populate. A count-bounded
+/// cache evicts per entry, so admitting a wide scan would flush it; a
+/// byte-budgeted cache ignores this limit and admits every scan.
 pub(super) const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
 /// Segment fetches issued per wave during a scan. Wide directories touch
 /// hundreds of segments per page; deeper waves amortize the per-wave await
@@ -38,7 +41,11 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) table_cache: Option<&'a MetadataTableCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: NamespaceManifestEnvelope,
-    pub(super) segment_cache: Mutex<HashMap<String, Vec<MetadataRow>>>,
+    /// Per-view memo of decoded segments, so one operation never re-fetches
+    /// or re-decodes a segment it already saw. Entries share the decoded
+    /// allocation with the table cache and with concurrent readers; the memo
+    /// itself retains pointers, not copies.
+    pub(super) segment_cache: Mutex<HashMap<String, Arc<DecodedSegmentRowSet>>>,
 }
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
@@ -64,13 +71,25 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         prefix: &str,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         let matching_segment_count = self.matching_segment_count(family, prefix)?;
-        let cache_mode = if matching_segment_count <= SMALL_SCAN_CACHE_SEGMENT_LIMIT {
+        let cache_mode = self.scan_cache_mode(matching_segment_count);
+        self.scan_prefix_with_cache_mode(family, prefix, cache_mode)
+            .await
+    }
+
+    /// Cache admission for a scan matching `matching_segment_count` segments.
+    /// A byte-budgeted table cache admits every scan — byte-based eviction
+    /// makes wide admissions safe, and list preloads are exactly the wide
+    /// scans that must land in the cache. Without a byte budget, wide scans
+    /// stay read-only so they cannot flush a count-bounded cache.
+    fn scan_cache_mode(&self, matching_segment_count: usize) -> MetadataTableCacheMode {
+        let byte_budgeted = self
+            .table_cache
+            .is_some_and(MetadataTableCache::byte_budgeted);
+        if byte_budgeted || matching_segment_count <= SMALL_SCAN_CACHE_SEGMENT_LIMIT {
             MetadataTableCacheMode::Populate
         } else {
             MetadataTableCacheMode::ReadOnly
-        };
-        self.scan_prefix_with_cache_mode(family, prefix, cache_mode)
-            .await
+        }
     }
 
     pub(crate) async fn scan_range_page(
@@ -165,11 +184,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 .then(left.max_key.cmp(&right.max_key))
                 .then(left.object_key.cmp(&right.object_key))
         });
-        let cache_mode = if matching_descriptors.len() <= SMALL_SCAN_CACHE_SEGMENT_LIMIT {
-            MetadataTableCacheMode::Populate
-        } else {
-            MetadataTableCacheMode::ReadOnly
-        };
+        let cache_mode = self.scan_cache_mode(matching_descriptors.len());
 
         let mut rows = Vec::<(String, MetadataRow)>::new();
         let mut next_descriptor_index = 0;
@@ -196,18 +211,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             .await?;
             next_descriptor_index = chunk_end;
 
-            rows.extend(loaded_segments.into_iter().flatten().filter_map(|row| {
-                let row_key = row.row_key_for_family(family);
-                if row_key.as_str() < lower_bound {
-                    return None;
-                }
-                if upper_bound
-                    .map(|upper_bound| row_key.as_str() >= upper_bound)
-                    .unwrap_or(false)
-                {
-                    return None;
-                }
-                Some((row_key, row))
+            rows.extend(loaded_segments.iter().flat_map(|segment_rows| {
+                segment_rows
+                    .rows_in_key_range(lower_bound, upper_bound)
+                    .map(|(row_key, row)| (row_key.to_owned(), row.clone()))
             }));
             rows.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
         }
@@ -251,11 +258,12 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             );
         }
 
+        let prefix_upper_bound = string_prefix_upper_bound(prefix);
         for segment_rows in loaded_segments {
             output.rows.extend(
                 segment_rows
-                    .into_iter()
-                    .filter(|row| row.row_key_for_family(family).starts_with(prefix)),
+                    .rows_in_key_range(prefix, prefix_upper_bound.as_deref())
+                    .map(|(_, row)| row.clone()),
             );
         }
         Ok(())
@@ -267,14 +275,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         descriptor: &MetadataFileRef,
         cache_mode: MetadataTableCacheMode,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+    ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
         if let Some(rows) = self
             .segment_cache
             .lock()
             .expect("manifest segment cache lock poisoned")
             .get(&descriptor.object_key)
         {
-            return Ok(rows.clone());
+            return Ok(Arc::clone(rows));
         }
         let rows = load_manifest_segment_rows_with_cache(
             self.store,
@@ -288,7 +296,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         self.segment_cache
             .lock()
             .expect("manifest segment cache lock poisoned")
-            .insert(descriptor.object_key.clone(), rows.clone());
+            .insert(descriptor.object_key.clone(), Arc::clone(&rows));
         Ok(rows)
     }
 }

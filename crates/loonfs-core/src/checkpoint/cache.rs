@@ -52,9 +52,60 @@ pub(super) struct MetadataTableCacheKey {
     pub(super) block_offset: u64,
 }
 
+/// One segment's decoded rows with their stored row keys, shared behind one
+/// `Arc`: cache hits, single-flight waiters, and per-scan session caches all
+/// hold the same allocation, so concurrent wide scans cannot multiply
+/// resident copies.
+#[derive(Debug)]
+pub(super) struct DecodedSegmentRowSet {
+    pub(super) rows: Vec<MetadataRow>,
+    /// Stored row keys, parallel to `rows`, validated against
+    /// `row_key_for_family` at decode so scans never recompute them.
+    pub(super) row_keys: Vec<String>,
+    /// Whether `row_keys` is non-decreasing. The builder writes sorted
+    /// segments; the flag is verified at decode so scans may binary-search,
+    /// with a linear fallback for segments that decode unsorted.
+    pub(super) sorted_by_row_key: bool,
+}
+
+impl DecodedSegmentRowSet {
+    /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order.
+    /// A sorted row set narrows to the matching slice by binary search; an
+    /// unsorted one filters every row. Express a prefix scan as
+    /// `[prefix, string_prefix_upper_bound(prefix))`.
+    pub(super) fn rows_in_key_range<'a>(
+        &'a self,
+        lower_bound: &'a str,
+        upper_bound: Option<&'a str>,
+    ) -> impl Iterator<Item = (&'a str, &'a MetadataRow)> + 'a {
+        let range = if self.sorted_by_row_key {
+            let start = self
+                .row_keys
+                .partition_point(|key| key.as_str() < lower_bound);
+            let end = upper_bound.map_or(self.row_keys.len(), |upper_bound| {
+                self.row_keys
+                    .partition_point(|key| key.as_str() < upper_bound)
+            });
+            start..end.max(start)
+        } else {
+            0..self.row_keys.len()
+        };
+        self.row_keys[range.clone()]
+            .iter()
+            .zip(&self.rows[range])
+            .filter(move |(key, _)| {
+                key.as_str() >= lower_bound
+                    && upper_bound
+                        .map(|upper_bound| key.as_str() < upper_bound)
+                        .unwrap_or(true)
+            })
+            .map(|(key, row)| (key.as_str(), row))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct DecodedMetadataTableBlock {
-    pub(super) rows: Vec<MetadataRow>,
+    pub(super) row_set: Arc<DecodedSegmentRowSet>,
     pub(super) segment_seq: ChangeSeq,
     pub(super) family: MetadataTableFamily,
     pub(super) segment_index: u32,
@@ -100,13 +151,18 @@ impl MetadataTableCache {
         }
     }
 
-    /// Runs `fetch` once per object key across concurrent callers: waiters
-    /// share the winner's decoded block instead of issuing duplicate store
-    /// GETs. A failed or cancelled fetch leaves the cell empty, so the next
-    /// caller retries.
-    pub(super) async fn fetch_deduplicated<E, F, Fut>(
+    /// Resolves one segment access through the single-flight cell: the
+    /// winner consults the cache, fetches on a miss, and populates when
+    /// `populate` is set; concurrent waiters share the winner's block
+    /// instead of issuing duplicate lookups, fetches, or inserts, so hit and
+    /// miss counts measure deduplicated accesses. A failed or cancelled
+    /// fetch leaves the cell empty, so the next caller retries.
+    pub(super) async fn get_or_fetch<E, F, Fut>(
         &self,
         object_key: &str,
+        cache_key: &MetadataTableCacheKey,
+        consult: bool,
+        populate: bool,
         fetch: F,
     ) -> Result<DecodedMetadataTableBlock, E>
     where
@@ -124,7 +180,21 @@ impl MetadataTableCache {
                     .or_insert_with(|| Arc::new(OnceCell::new())),
             )
         };
-        let result = cell.get_or_try_init(fetch).await.cloned();
+        let result = cell
+            .get_or_try_init(|| async {
+                if consult {
+                    if let Some(block) = self.get(cache_key) {
+                        return Ok(block);
+                    }
+                }
+                let block = fetch().await?;
+                if populate {
+                    self.insert(cache_key.clone(), block.clone());
+                }
+                Ok(block)
+            })
+            .await
+            .cloned();
         let mut in_flight = self
             .in_flight
             .lock()
@@ -145,6 +215,15 @@ impl MetadataTableCache {
             inserts: self.stats.inserts.load(Ordering::SeqCst),
             evictions: self.stats.evictions.load(Ordering::SeqCst),
         }
+    }
+
+    /// Whether inserts are bounded by a decoded-byte budget. A byte-budgeted
+    /// cache admits scans of any width safely: eviction is sized by decoded
+    /// bytes, so one wide scan cannot pin more memory than the budget. Without
+    /// a byte budget only entry count bounds the cache, and wide admissions
+    /// would flush it.
+    pub(super) fn byte_budgeted(&self) -> bool {
+        self.config.max_decoded_bytes.is_some()
     }
 
     pub(super) fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
@@ -449,15 +528,20 @@ impl WalTailProjectionCacheInner {
 #[cfg(test)]
 mod tests {
     use super::{
-        DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
-        MetadataTableCacheConfig, MetadataTableCacheKey,
+        DecodedMetadataTableBlock, DecodedSegmentRowSet, MetadataTableBlockKind,
+        MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheKey,
     };
     use loonfs_api::wire::manifest::{MetadataSegmentKey, MetadataTableFamily};
     use loonfs_api::ChangeSeq;
+    use std::sync::Arc;
 
     fn block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
         DecodedMetadataTableBlock {
-            rows: Vec::new(),
+            row_set: Arc::new(DecodedSegmentRowSet {
+                rows: Vec::new(),
+                row_keys: Vec::new(),
+                sorted_by_row_key: true,
+            }),
             segment_seq: ChangeSeq(1),
             family: MetadataTableFamily::Inodes,
             segment_index: 0,
@@ -523,19 +607,58 @@ mod tests {
         assert_eq!(cache.stats().evictions, 0);
     }
 
+    #[test]
+    fn cache_hits_share_the_decoded_row_allocation() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let inserted = block(64);
+        let row_set = Arc::clone(&inserted.row_set);
+        cache.insert(key("a"), inserted);
+        let hit = cache.get(&key("a")).expect("inserted block should hit");
+        assert!(
+            Arc::ptr_eq(&hit.row_set, &row_set),
+            "a cache hit should share the decoded rows, not clone them"
+        );
+    }
+
     #[tokio::test]
-    async fn fetch_deduplicated_retries_after_a_failed_fetch() {
+    async fn get_or_fetch_retries_after_a_failed_fetch() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let failed: Result<_, String> = cache
-            .fetch_deduplicated("segment-key", || async { Err("transport".to_owned()) })
+            .get_or_fetch("segment-key", &key("a"), true, true, || async {
+                Err("transport".to_owned())
+            })
             .await;
         assert!(failed.is_err());
         let recovered: Result<_, String> = cache
-            .fetch_deduplicated("segment-key", || async { Ok(block(1)) })
+            .get_or_fetch("segment-key", &key("a"), true, true, || async {
+                Ok(block(1))
+            })
             .await;
         assert!(
             recovered.is_ok(),
             "a failed fetch should leave nothing behind for the next caller"
         );
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_counts_one_miss_and_populates_for_later_hits() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+        let fetched: Result<_, String> = cache
+            .get_or_fetch("segment-key", &key("a"), true, true, || async {
+                Ok(block(1))
+            })
+            .await;
+        assert!(fetched.is_ok());
+        let cached: Result<_, String> = cache
+            .get_or_fetch("segment-key", &key("a"), true, true, || async {
+                Err("a populated key must not re-fetch".to_owned())
+            })
+            .await;
+        assert!(cached.is_ok(), "the cached block should answer the access");
+
+        let stats = cache.stats();
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.inserts, 1);
+        assert_eq!(stats.hits, 1);
     }
 }
