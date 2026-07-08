@@ -1090,17 +1090,23 @@ impl FsCore {
             let publish = {
                 let context = self.mutation_context();
                 let cache_config = &self.inner.config.runtime_cache;
-                let mut engine = engine.lock().await;
-                engine
-                    .publish_batch_with_tail_cache_limits(
-                        &store,
-                        candidates,
-                        &context,
-                        cache_config.max_cached_wal_tail_projection_rows,
-                        cache_config.max_cached_wal_tail_projection_decoded_bytes,
-                        content_gate,
-                    )
-                    .await
+                // Boxing erases the engine's deeply nested publish future;
+                // without it, callers awaiting a put or commit (CLI, server,
+                // embedding crates) exceed rustc's type-recursion depth.
+                Box::pin(async {
+                    let mut engine = engine.lock().await;
+                    engine
+                        .publish_batch_with_tail_cache_limits(
+                            &store,
+                            candidates,
+                            &context,
+                            cache_config.max_cached_wal_tail_projection_rows,
+                            cache_config.max_cached_wal_tail_projection_decoded_bytes,
+                            content_gate,
+                        )
+                        .await
+                })
+                .await
             };
             {
                 let _span = tracing::info_span!(
@@ -1128,13 +1134,14 @@ impl FsCore {
             return results;
         }
 
-        let results: Vec<_> = self
-            .namespace_engine_with_store(namespace_id, store)
-            .publish_namespace_mutations_batch_gated(candidates, content_gate)
-            .await
-            .into_iter()
-            .map(|result| result.map_err(RuntimeError::Core))
-            .collect();
+        let engine = self.namespace_engine_with_store(namespace_id, store);
+        // Boxed for the same type-recursion reason as the cached-engine path.
+        let results: Vec<_> =
+            Box::pin(engine.publish_namespace_mutations_batch_gated(candidates, content_gate))
+                .await
+                .into_iter()
+                .map(|result| result.map_err(RuntimeError::Core))
+                .collect();
         {
             let _span = tracing::info_span!(
                 "publisher.batch_update_cache",
