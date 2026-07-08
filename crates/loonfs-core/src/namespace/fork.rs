@@ -1,6 +1,6 @@
 use super::bootstrap::BootstrapNamespaceError;
 use crate::checkpoint::{
-    create_checkpoint_with_policy_and_owner, load_verified_manifest_tables, read_checkpoint_record,
+    create_checkpoint_with_owner, load_verified_manifest_tables, read_checkpoint_record,
     write_namespace_manifest,
 };
 use crate::context::MutationContext;
@@ -62,11 +62,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 
     // Fork routes through a fork-owned source checkpoint: the pin will
     // reference the checkpoint only, and reachability resolves through it.
-    let checkpoint = create_checkpoint_with_policy_and_owner(
+    let checkpoint = create_checkpoint_with_owner(
         store,
         source_namespace_id,
         context,
-        crate::checkpoint::MetadataLsmPolicy::default(),
         Some(CheckpointOwner {
             kind: "fork".to_owned(),
             id: Some(new_namespace_id.as_str().to_owned()),

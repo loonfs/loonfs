@@ -262,6 +262,7 @@ impl FsCore {
         let status_before = self.namespace_status(namespace_id).await?;
         let observed_head_seq = status_before.head_seq;
         if status_before.wal_tail_segments < options.max_wal_tail_segments {
+            self.run_tick_reorganization(namespace_id).await?;
             let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
             return Ok(MaintenanceTickResult {
                 namespace_id: namespace_id.clone(),
@@ -274,6 +275,7 @@ impl FsCore {
         let checkpoint = match self.create_checkpoint(namespace_id).await {
             Ok(checkpoint) => checkpoint,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
+                self.run_tick_reorganization(namespace_id).await?;
                 let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
@@ -286,6 +288,7 @@ impl FsCore {
             }
             Err(error) => return Err(error),
         };
+        self.run_tick_reorganization(namespace_id).await?;
 
         let outcome = if checkpoint.current_manifest_id == Some(checkpoint.manifest_id) {
             MaintenanceTickOutcome::CheckpointPublished {
@@ -310,6 +313,37 @@ impl FsCore {
             outcome,
             gc,
         })
+    }
+
+    /// One bounded reorganization unit per tick: folds one family group of
+    /// L0 delta rows into the base when enough L0 runs have piled up (see
+    /// `loonfs-core`'s `reorganize_metadata`). Outcomes are observability,
+    /// not tick results: a superseded unit retries on a later tick.
+    async fn run_tick_reorganization(&self, namespace_id: &NamespaceId) -> Result<()> {
+        let report = self
+            .namespace_engine(namespace_id)
+            .reorganize_metadata()
+            .await
+            .map_err(RuntimeError::Core)?;
+        match &report.outcome {
+            loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {}
+            loonfs_core::MetadataReorganizeOutcome::UnitPublished {
+                families,
+                folded_l0_rows,
+                ..
+            } => {
+                self.invalidate_namespace_cache(namespace_id);
+                tracing::info!(
+                    families = ?families,
+                    folded_l0_rows,
+                    "metadata reorganization unit published"
+                );
+            }
+            loonfs_core::MetadataReorganizeOutcome::Superseded => {
+                tracing::info!("metadata reorganization unit superseded; will retry");
+            }
+        }
+        Ok(())
     }
 
     async fn run_tick_gc(
