@@ -30,6 +30,7 @@ base64 = "0.22"
 bytes = "1"
 ciborium = "0.2"
 clap = { version = "4.5", features = ["derive"] }
+crc32c = "0.6"
 http = "1"
 futures = "0.3"
 fs4 = "0.13"
@@ -51,6 +52,7 @@ unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 zstd = "0.13"
 
 [workspace.lints.rust]

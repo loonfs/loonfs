@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 ciborium.workspace = true
+# Durable-format checksums and filter hashing: both algorithm choices are
+# frozen format constants (docs/design/metadata-block-storage.md).
+crc32c.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
@@ -18,6 +21,7 @@ unicode-casefold.workspace = true
 unicode-normalization.workspace = true
 utoipa = { workspace = true, optional = true }
 uuid.workspace = true
+xxhash-rust.workspace = true
 zstd.workspace = true
 
 [features]
