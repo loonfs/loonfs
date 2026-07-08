@@ -26,6 +26,7 @@ mod changes;
 mod publish_view;
 mod uploads;
 
+pub use self::batch::ContentDurabilityGate;
 pub(crate) use self::batch::{
     commit_operations, commit_operations_batch,
     publish_namespace_mutations_batch_against_publish_view, PublishBatchAgainstViewResult,

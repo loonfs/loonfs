@@ -8,7 +8,9 @@ use crate::path::write::{
     path_intent_fingerprint_for_path_intent, PathMutationIntent, PlannedPathMutation,
     PublishPlanningSession,
 };
-use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
+use crate::protocol::{
+    load_publish_metadata_view, ContentDurabilityGate, PublishTailOptions, PublishTailProjection,
+};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::AcquiredWriter;
@@ -141,6 +143,7 @@ impl NamespaceCommitEngine {
             candidates,
             context,
             &PublishTailOptions::default(),
+            None,
         )
         .await
     }
@@ -151,6 +154,7 @@ impl NamespaceCommitEngine {
         candidates: Vec<NamespaceMutationCandidate>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
+        content_gate: Option<ContentDurabilityGate>,
     ) -> NamespaceCommitEnginePublishResult {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
@@ -227,6 +231,7 @@ impl NamespaceCommitEngine {
             context,
             &publish_view,
             self.timer.as_ref(),
+            content_gate,
         )
         .await;
         let wal_tail_segments =
@@ -244,12 +249,13 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
         max_tail_rows: usize,
         max_tail_decoded_bytes: Option<usize>,
+        content_gate: Option<ContentDurabilityGate>,
     ) -> NamespaceCommitEnginePublishResult {
         let options = PublishTailOptions {
             max_tail_rows,
             max_tail_decoded_bytes,
         };
-        self.publish_batch_with_tail_options(store, candidates, context, &options)
+        self.publish_batch_with_tail_options(store, candidates, context, &options, content_gate)
             .await
     }
 
@@ -399,9 +405,28 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse>> {
+    publish_namespace_mutations_batch_gated(store, namespace_id, candidates, context, None).await
+}
+
+/// [`publish_namespace_mutations_batch`] with a content durability gate: the
+/// gate is a future, so it rides an explicit parameter instead of an options
+/// struct, and it is awaited between the WAL write and the head CAS.
+pub(crate) async fn publish_namespace_mutations_batch_gated<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+    content_gate: Option<ContentDurabilityGate>,
+) -> Vec<Result<ApiCommitResponse>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     engine
-        .publish_batch(store, candidates, context)
+        .publish_batch_with_tail_options(
+            store,
+            candidates,
+            context,
+            &PublishTailOptions::default(),
+            content_gate,
+        )
         .await
         .results
 }

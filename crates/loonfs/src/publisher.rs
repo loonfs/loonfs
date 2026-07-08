@@ -1226,6 +1226,9 @@ mod tests {
             FsConfig {
                 writer_id: "writer-a".to_owned(),
                 writer_version: "test".to_owned(),
+                // The publisher under test is itself the coalescer; direct
+                // windows would only add latency to these tests.
+                commit_window_ms: 0,
                 runtime_cache: RuntimeCacheConfig::default(),
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,

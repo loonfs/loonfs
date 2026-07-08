@@ -21,6 +21,7 @@ use crate::storage::content::ContentValidationTracker;
 use crate::timing::MonotonicTimer;
 use crate::wal::{prepare_wal_segment, PreparedWalSegment};
 use bytes::Bytes;
+use futures::future::BoxFuture;
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
@@ -122,7 +123,7 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse>> {
-    commit_namespace_mutations_batch(store, namespace_id, candidates, context).await
+    commit_namespace_mutations_batch(store, namespace_id, candidates, context, None).await
 }
 
 async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
@@ -130,6 +131,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
+    content_gate: Option<ContentDurabilityGate>,
 ) -> Vec<Result<ApiCommitResponse>> {
     if candidates.is_empty() {
         return Vec::new();
@@ -185,10 +187,18 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         context,
         &publish_view,
         &timer,
+        content_gate,
     )
     .await
     .results
 }
+
+/// Awaited between the batch's WAL write and its head compare-and-swap:
+/// nothing becomes visible until separately-written content is durable.
+/// Failure aborts the batch through the same path as a failed WAL write —
+/// the orphaned WAL segment is never referenced by the head and is
+/// garbage-collection's to reclaim.
+pub type ContentDurabilityGate = BoxFuture<'static, Result<()>>;
 
 pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     S: ObjectStore + ?Sized,
@@ -199,6 +209,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     timer: &dyn MonotonicTimer,
+    content_gate: Option<ContentDurabilityGate>,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::new(Vec::new());
@@ -388,6 +399,17 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             return abort_batch(outcomes, &dedup, &accepted, &error);
         }
     };
+    if let Some(content_gate) = content_gate {
+        if let Err(error) = content_gate
+            .instrument(tracing::info_span!(
+                "loon.phase",
+                phase = "await_content_durability"
+            ))
+            .await
+        {
+            return abort_batch(outcomes, &dedup, &accepted, &error);
+        }
+    }
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
     if elapsed_ms > PUBLISH_BUDGET_MS {
         let error = CoreError::HeadPublish(CommitHeadPublishError::PublishBudgetExceeded {

@@ -30,6 +30,7 @@
 
 mod background;
 mod cache;
+mod commit_window;
 mod config;
 mod fs;
 mod handle;
@@ -90,7 +91,7 @@ pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore, S
 pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;
 pub use config::{
-    RuntimeCacheConfig, DEFAULT_MAX_CACHED_NAMESPACES,
+    RuntimeCacheConfig, DEFAULT_COMMIT_WINDOW_MS, DEFAULT_MAX_CACHED_NAMESPACES,
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
     DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS, DEFAULT_MAX_WAL_TAIL_SEGMENTS,
 };
