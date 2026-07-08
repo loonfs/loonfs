@@ -36,6 +36,7 @@ mod validate;
 pub use self::cache::{
     MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
     WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
+    DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::runs::MetadataLsmPolicy;
