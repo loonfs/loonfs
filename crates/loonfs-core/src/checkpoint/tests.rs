@@ -2472,6 +2472,104 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
 }
 
 #[tokio::test]
+async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // "beta" lands in the base run; a second checkpoint puts "alpha" and
+    // "gamma" in an L0 run. The L0 bind segment's key range then straddles
+    // "beta", so min/max pruning cannot exclude it — only its bloom filter
+    // can prove the name absent.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/beta.txt",
+        b"beta\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write beta");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("first checkpoint");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/alpha.txt",
+        b"alpha\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/gamma.txt",
+        b"gamma\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write gamma");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("second checkpoint");
+
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load tables");
+
+    // Resolve /docs, then look up beta's bind under it through the filtered
+    // scan the visibility adapter uses.
+    let docs_binds = tables
+        .scan_prefix(
+            ApiMetadataTableFamily::DirentryBinds,
+            "direntry-00000000000000000001-",
+        )
+        .await
+        .expect("scan root binds");
+    let docs_inode = docs_binds
+        .iter()
+        .find_map(|row| match row {
+            MetadataRow::DirentryBind { child_inode_id, .. } => Some(*child_inode_id),
+            _ => None,
+        })
+        .expect("docs directory bind");
+    let encoded_name = loonfs_api::wire::manifest::hex_encode_row_key_component("beta.txt");
+    let filter_probe = format!("direntry-{:020}-{encoded_name}", docs_inode.0);
+    let prefix = format!("{filter_probe}-");
+    let rows = tables
+        .scan_prefix_for_lookup(
+            ApiMetadataTableFamily::DirentryBinds,
+            &prefix,
+            &filter_probe,
+        )
+        .await
+        .expect("filtered lookup");
+
+    assert_eq!(rows.len(), 1, "beta's bind should still be found");
+    let stats = cache.stats();
+    assert!(
+        stats.filter_skips >= 1,
+        "the L0 bind segment should be skipped by its filter, stats: {stats:?}"
+    );
+}
+
+#[tokio::test]
 async fn metadata_cache_budget_counts_decoded_blocks() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2510,7 +2608,7 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
 
     let key = "inode-00000000000000000001";
     assert!(tables
-        .get(ApiMetadataTableFamily::Inodes, key)
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
         .await
         .expect("get inode")
         .is_some());

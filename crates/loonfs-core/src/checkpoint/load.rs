@@ -40,8 +40,8 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope,
 };
 use loonfs_api::wire::sst_blocks::{
-    decode_data_block, decode_index_block, index_blocks_for_key_range, DecodedDataBlock,
-    SegmentIndexEntry,
+    decode_data_block, decode_filter_block, decode_index_block, index_blocks_for_key_range,
+    DecodedDataBlock, SegmentFilter, SegmentIndexEntry,
 };
 #[cfg(test)]
 use loonfs_api::ManifestId;
@@ -689,11 +689,8 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
     cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     let handle = descriptor.index_block;
-    let cache_key = segment_block_cache_key(
-        descriptor,
-        MetadataTableBlockKind::SegmentIndex,
-        handle.offset,
-    );
+    let cache_key =
+        segment_block_cache_key(descriptor, MetadataTableBlockKind::Index, handle.offset);
     let fetch = || async {
         let bytes = fetch_section_bytes(
             store,
@@ -724,10 +721,59 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
     };
     match block {
         DecodedMetadataTableBlock::Index { entries, .. } => Ok(entries),
-        DecodedMetadataTableBlock::Data { .. } => Err(segment_codec_error(
+        DecodedMetadataTableBlock::Filter { .. } | DecodedMetadataTableBlock::Data { .. } => {
+            Err(segment_codec_error(
+                &descriptor.object_key,
+                "cache returned a non-index block for an index key",
+            ))
+        }
+    }
+}
+
+/// Loads a segment's bloom filter block through the cache: the cheap
+/// pre-index check a lookup consults to skip the segment entirely.
+pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    descriptor: &MetadataFileRef,
+    cache_mode: MetadataTableCacheMode,
+) -> Result<Arc<SegmentFilter>, ManifestLoadError> {
+    let handle = descriptor.filter_block;
+    let cache_key =
+        segment_block_cache_key(descriptor, MetadataTableBlockKind::Filter, handle.offset);
+    let fetch = || async {
+        let bytes = fetch_section_bytes(
+            store,
             &descriptor.object_key,
-            "cache returned a data block for an index key",
-        )),
+            handle.offset,
+            handle.stored_len as u64,
+        )
+        .await?;
+        let filter = decode_filter_block(&bytes, &handle)
+            .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
+        Ok(DecodedMetadataTableBlock::Filter {
+            decoded_byte_len: handle.decoded_len as usize,
+            filter: Arc::new(filter),
+        })
+    };
+    let block = match table_cache {
+        Some(cache) => {
+            cache
+                .get_or_fetch(
+                    &cache_key,
+                    cache_mode != MetadataTableCacheMode::Bypass,
+                    cache_mode == MetadataTableCacheMode::Populate,
+                    fetch,
+                )
+                .await?
+        }
+        None => fetch().await?,
+    };
+    match block {
+        DecodedMetadataTableBlock::Filter { filter, .. } => Ok(filter),
+        DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Data { .. } => Err(
+            segment_codec_error(&descriptor.object_key, "cache returned a non-filter block"),
+        ),
     }
 }
 
@@ -740,11 +786,8 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     cache_mode: MetadataTableCacheMode,
 ) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
     let handle = entry.block;
-    let cache_key = segment_block_cache_key(
-        descriptor,
-        MetadataTableBlockKind::SegmentData,
-        handle.offset,
-    );
+    let cache_key =
+        segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, handle.offset);
     let fetch = || async {
         let bytes = fetch_section_bytes(
             store,
@@ -774,10 +817,12 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     };
     match block {
         DecodedMetadataTableBlock::Data { block, .. } => Ok(block),
-        DecodedMetadataTableBlock::Index { .. } => Err(segment_codec_error(
-            &descriptor.object_key,
-            "cache returned an index block for a data key",
-        )),
+        DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Filter { .. } => {
+            Err(segment_codec_error(
+                &descriptor.object_key,
+                "cache returned a non-data block for a data key",
+            ))
+        }
     }
 }
 
@@ -811,7 +856,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         for (position, entry) in entries.iter().enumerate() {
             let cache_key = segment_block_cache_key(
                 descriptor,
-                MetadataTableBlockKind::SegmentData,
+                MetadataTableBlockKind::Data,
                 entry.block.offset,
             );
             if let Some(DecodedMetadataTableBlock::Data { block, .. }) = cache.get(&cache_key) {
@@ -865,7 +910,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             if let (Some(cache), true) = (table_cache, populate) {
                 let cache_key = segment_block_cache_key(
                     descriptor,
-                    MetadataTableBlockKind::SegmentData,
+                    MetadataTableBlockKind::Data,
                     handle.offset,
                 );
                 cache.insert(
