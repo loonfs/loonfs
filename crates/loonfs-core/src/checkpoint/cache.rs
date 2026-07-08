@@ -1,5 +1,6 @@
 use crate::metadata::MetadataState;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentKey, MetadataTableFamily};
+use loonfs_api::wire::manifest::MetadataRow;
+use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -42,7 +43,8 @@ pub struct MetadataTableCacheStats {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum MetadataTableBlockKind {
-    SegmentPayload,
+    SegmentIndex,
+    SegmentData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -89,17 +91,32 @@ impl DecodedSegmentRowSet {
     }
 }
 
+/// One decoded, CRC-verified section of a segment object. Index and data
+/// sections share the cache and its byte budget; the key's `block_kind`
+/// and `block_offset` make collisions between them impossible.
 #[derive(Debug, Clone)]
-pub(super) struct DecodedMetadataTableBlock {
-    pub(super) row_set: Arc<DecodedSegmentRowSet>,
-    pub(super) segment_seq: ChangeSeq,
-    pub(super) family: MetadataTableFamily,
-    pub(super) segment_index: u32,
-    pub(super) segment_key: MetadataSegmentKey,
-    pub(super) row_count: u64,
-    pub(super) min_key: String,
-    pub(super) max_key: String,
-    pub(super) decoded_byte_len: usize,
+pub(super) enum DecodedMetadataTableBlock {
+    Index {
+        entries: Arc<Vec<SegmentIndexEntry>>,
+        decoded_byte_len: usize,
+    },
+    Data {
+        block: Arc<DecodedDataBlock>,
+        decoded_byte_len: usize,
+    },
+}
+
+impl DecodedMetadataTableBlock {
+    pub(super) fn decoded_byte_len(&self) -> usize {
+        match self {
+            Self::Index {
+                decoded_byte_len, ..
+            }
+            | Self::Data {
+                decoded_byte_len, ..
+            } => *decoded_byte_len,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -107,9 +124,9 @@ pub struct MetadataTableCache {
     config: MetadataTableCacheConfig,
     inner: Mutex<MetadataTableCacheInner>,
     stats: MetadataTableCacheStatsInner,
-    /// One cell per in-flight segment fetch, keyed by object key, so
-    /// concurrent readers share a single store GET per segment.
-    in_flight: Mutex<HashMap<String, Arc<OnceCell<DecodedMetadataTableBlock>>>>,
+    /// One cell per in-flight block fetch, keyed by the block's cache key,
+    /// so concurrent readers share a single ranged GET per block.
+    in_flight: Mutex<HashMap<MetadataTableCacheKey, Arc<OnceCell<DecodedMetadataTableBlock>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -145,7 +162,6 @@ impl MetadataTableCache {
     /// fetch leaves the cell empty, so the next caller retries.
     pub(super) async fn get_or_fetch<E, F, Fut>(
         &self,
-        object_key: &str,
         cache_key: &MetadataTableCacheKey,
         consult: bool,
         populate: bool,
@@ -162,7 +178,7 @@ impl MetadataTableCache {
                 .expect("metadata table cache in-flight lock poisoned");
             Arc::clone(
                 in_flight
-                    .entry(object_key.to_owned())
+                    .entry(cache_key.clone())
                     .or_insert_with(|| Arc::new(OnceCell::new())),
             )
         };
@@ -186,10 +202,10 @@ impl MetadataTableCache {
             .lock()
             .expect("metadata table cache in-flight lock poisoned");
         if in_flight
-            .get(object_key)
+            .get(cache_key)
             .is_some_and(|current| Arc::ptr_eq(current, &cell))
         {
-            in_flight.remove(object_key);
+            in_flight.remove(cache_key);
         }
         result
     }
@@ -240,11 +256,11 @@ impl MetadataTableCache {
         if let Some(previous) = inner.entries.insert(key.clone(), block.clone()) {
             inner.decoded_byte_len = inner
                 .decoded_byte_len
-                .saturating_sub(previous.decoded_byte_len);
+                .saturating_sub(previous.decoded_byte_len());
         }
         inner.decoded_byte_len = inner
             .decoded_byte_len
-            .saturating_add(block.decoded_byte_len);
+            .saturating_add(block.decoded_byte_len());
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
         while inner.entries.len() > self.config.max_blocks
@@ -260,7 +276,7 @@ impl MetadataTableCache {
             if let Some(block) = inner.entries.remove(&evicted) {
                 inner.decoded_byte_len = inner
                     .decoded_byte_len
-                    .saturating_sub(block.decoded_byte_len);
+                    .saturating_sub(block.decoded_byte_len());
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -514,26 +530,18 @@ impl WalTailProjectionCacheInner {
 #[cfg(test)]
 mod tests {
     use super::{
-        DecodedMetadataTableBlock, DecodedSegmentRowSet, MetadataTableBlockKind,
-        MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheKey,
+        DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
+        MetadataTableCacheConfig, MetadataTableCacheKey,
     };
-    use loonfs_api::wire::manifest::{MetadataSegmentKey, MetadataTableFamily};
-    use loonfs_api::ChangeSeq;
+    use loonfs_api::wire::sst_blocks::DecodedDataBlock;
     use std::sync::Arc;
 
     fn block(decoded_byte_len: usize) -> DecodedMetadataTableBlock {
-        DecodedMetadataTableBlock {
-            row_set: Arc::new(DecodedSegmentRowSet {
-                rows: Vec::new(),
+        DecodedMetadataTableBlock::Data {
+            block: Arc::new(DecodedDataBlock {
                 row_keys: Vec::new(),
+                rows: Vec::new(),
             }),
-            segment_seq: ChangeSeq(1),
-            family: MetadataTableFamily::Inodes,
-            segment_index: 0,
-            segment_key: MetadataSegmentKey::Full,
-            row_count: 0,
-            min_key: String::new(),
-            max_key: String::new(),
             decoded_byte_len,
         }
     }
@@ -541,7 +549,7 @@ mod tests {
     fn key(digest: &str) -> MetadataTableCacheKey {
         MetadataTableCacheKey {
             table_digest: digest.to_owned(),
-            block_kind: MetadataTableBlockKind::SegmentPayload,
+            block_kind: MetadataTableBlockKind::SegmentData,
             block_offset: 0,
         }
     }
@@ -596,11 +604,22 @@ mod tests {
     fn cache_hits_share_the_decoded_row_allocation() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let inserted = block(64);
-        let row_set = Arc::clone(&inserted.row_set);
+        let rows = match &inserted {
+            DecodedMetadataTableBlock::Data { block: rows, .. } => Arc::clone(rows),
+            DecodedMetadataTableBlock::Index { .. } => {
+                unreachable!("fixture builds a data block")
+            }
+        };
         cache.insert(key("a"), inserted);
         let hit = cache.get(&key("a")).expect("inserted block should hit");
+        let shares_allocation = match &hit {
+            DecodedMetadataTableBlock::Data {
+                block: hit_rows, ..
+            } => Arc::ptr_eq(hit_rows, &rows),
+            DecodedMetadataTableBlock::Index { .. } => false,
+        };
         assert!(
-            Arc::ptr_eq(&hit.row_set, &row_set),
+            shares_allocation,
             "a cache hit should share the decoded rows, not clone them"
         );
     }
@@ -609,15 +628,13 @@ mod tests {
     async fn get_or_fetch_retries_after_a_failed_fetch() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let failed: Result<_, String> = cache
-            .get_or_fetch("segment-key", &key("a"), true, true, || async {
+            .get_or_fetch(&key("a"), true, true, || async {
                 Err("transport".to_owned())
             })
             .await;
         assert!(failed.is_err());
         let recovered: Result<_, String> = cache
-            .get_or_fetch("segment-key", &key("a"), true, true, || async {
-                Ok(block(1))
-            })
+            .get_or_fetch(&key("a"), true, true, || async { Ok(block(1)) })
             .await;
         assert!(
             recovered.is_ok(),
@@ -629,13 +646,11 @@ mod tests {
     async fn get_or_fetch_counts_one_miss_and_populates_for_later_hits() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let fetched: Result<_, String> = cache
-            .get_or_fetch("segment-key", &key("a"), true, true, || async {
-                Ok(block(1))
-            })
+            .get_or_fetch(&key("a"), true, true, || async { Ok(block(1)) })
             .await;
         assert!(fetched.is_ok());
         let cached: Result<_, String> = cache
-            .get_or_fetch("segment-key", &key("a"), true, true, || async {
+            .get_or_fetch(&key("a"), true, true, || async {
                 Err("a populated key must not re-fetch".to_owned())
             })
             .await;

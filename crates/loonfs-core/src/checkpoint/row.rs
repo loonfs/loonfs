@@ -112,6 +112,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
     }
 }
 
+#[cfg(test)]
 pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
     match row {
         MetadataRow::Inode { .. } => "inode",
@@ -121,36 +122,4 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::Tombstone { .. } => "tombstone",
         MetadataRow::CommitReceipt { .. } => "commit_receipt",
     }
-}
-
-pub(super) fn manifest_row_matches_family(row: &MetadataRow, family: MetadataTableFamily) -> bool {
-    matches!(
-        (family, row),
-        (MetadataTableFamily::Inodes, MetadataRow::Inode { .. })
-            | (
-                MetadataTableFamily::DirentryBinds,
-                MetadataRow::DirentryBind { .. }
-            )
-            | (
-                MetadataTableFamily::DirentryChildBinds,
-                MetadataRow::DirentryBind { .. }
-            )
-            | (
-                MetadataTableFamily::DirentryUnbinds,
-                MetadataRow::DirentryUnbind { .. }
-            )
-            | (MetadataTableFamily::Revisions, MetadataRow::Revision { .. })
-            | (
-                MetadataTableFamily::RevisionsByInodeDesc,
-                MetadataRow::Revision { .. },
-            )
-            | (
-                MetadataTableFamily::Tombstones,
-                MetadataRow::Tombstone { .. }
-            )
-            | (
-                MetadataTableFamily::CommitReceipts,
-                MetadataRow::CommitReceipt { .. }
-            )
-    )
 }

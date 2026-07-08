@@ -1,11 +1,11 @@
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
+use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId,
     ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
-use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
@@ -14,11 +14,6 @@ use thiserror::Error;
 /// Version 1: an uncompressed JSON envelope document carrying the payload as
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
-/// Version 1: a zstd-compressed CBOR envelope document carrying the payload
-/// as an opaque CBOR byte string. `payload_checksum` covers exactly those
-/// bytes; pages are not independently stored, so the payload checksum is the
-/// unit of integrity.
-pub const METADATA_SST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,20 +25,6 @@ impl NamespaceManifestKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NamespaceManifest => "metadata_manifest",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MetadataSstKind {
-    MetadataSst,
-}
-
-impl MetadataSstKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::MetadataSst => "metadata_table",
         }
     }
 }
@@ -81,8 +62,17 @@ pub struct MetadataFileRef {
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
-    /// Checksum of the referenced SST's payload bytes, in `sha256:<hex>`
-    /// form. Must equal the `payload_checksum` in the referenced envelope.
+    /// Total length of the segment object, in bytes.
+    pub object_len: u64,
+    /// Where the segment's index block lives and how to verify it. The
+    /// descriptor is the only entry point into a segment object — there is
+    /// no footer — so a reader starts here.
+    pub index_block: BlockHandle,
+    /// Where the segment's bloom filter block lives and how to verify it.
+    pub filter_block: BlockHandle,
+    /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
+    /// Not consulted by the ranged read path (block CRCs cover reads);
+    /// publication conflict checks and offline verification compare it.
     pub payload_checksum: String,
 }
 
@@ -94,17 +84,6 @@ pub struct NamespaceManifestFork {
     pub source_manifest_id: ManifestId,
     pub source_manifest_object_id: ManifestObjectId,
     pub source_head_seq: ChangeSeq,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataPage {
-    pub page_index: u32,
-    pub min_key: String,
-    pub max_key: String,
-    #[serde(default)]
-    pub row_keys: Vec<String>,
-    #[serde(default)]
-    pub rows: Vec<MetadataRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +232,53 @@ impl MetadataRow {
             }
         }
     }
+
+    /// The exact lookup prefix a point read probes for this row in `family`,
+    /// and therefore the key inserted into the segment's bloom filter. The
+    /// two sides must agree byte-for-byte — a filter is an exact-match
+    /// structure — so both are defined here, next to the row keys they
+    /// shorten. Range scans at coarser granularity (a whole directory, a
+    /// wave of names) do not consult filters.
+    pub fn filter_key_for_family(&self, family: MetadataTableFamily) -> String {
+        match self {
+            Self::Inode { .. } => self.row_key_for_family(family),
+            Self::DirentryBind {
+                parent_inode_id,
+                name_key,
+                child_inode_id,
+                ..
+            } => match family {
+                MetadataTableFamily::DirentryChildBinds => {
+                    format!("direntry-child-{:020}", child_inode_id.0)
+                }
+                _ => {
+                    let name_key = hex_encode_row_key_component(name_key.as_str());
+                    format!("direntry-{:020}-{name_key}", parent_inode_id.0)
+                }
+            },
+            Self::DirentryUnbind {
+                parent_inode_id,
+                name_key,
+                ..
+            } => {
+                let name_key = hex_encode_row_key_component(name_key.as_str());
+                format!("direntry-unbind-{:020}-{name_key}", parent_inode_id.0)
+            }
+            Self::Revision { inode_id, .. } => match family {
+                MetadataTableFamily::RevisionsByInodeDesc => {
+                    format!("revision-by-inode-desc-{:020}", inode_id.0)
+                }
+                _ => format!("revision-{:020}", inode_id.0),
+            },
+            Self::Tombstone { root_inode_id, .. } => {
+                format!("tombstone-{:020}", root_inode_id.0)
+            }
+            Self::CommitReceipt { commit_id, .. } => {
+                let commit_id = hex_encode_row_key_component(commit_id.as_str());
+                format!("commit-receipt-{commit_id}")
+            }
+        }
+    }
 }
 
 pub fn hex_encode_row_key_component(value: &str) -> String {
@@ -263,52 +289,6 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
         encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
     }
     encoded
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataSstPayload {
-    pub namespace_id: NamespaceId,
-    pub table_id: MetadataTableId,
-    pub run_seq: ChangeSeq,
-    pub level: u32,
-    pub family: MetadataTableFamily,
-    pub segment_index: u32,
-    pub segment_key: MetadataSegmentKey,
-    pub row_count: u64,
-    pub min_key: String,
-    pub max_key: String,
-    pub pages: Vec<MetadataPage>,
-}
-
-/// In-memory view of a metadata SST envelope.
-///
-/// This struct is not the durable layout; durable bytes are produced only by
-/// [`encode_metadata_sst_envelope_zstd`] and validated only by
-/// [`decode_metadata_sst_envelope_zstd`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataSstEnvelope {
-    pub kind: MetadataSstKind,
-    pub format_version: u32,
-    pub writer_version: String,
-    /// Digest of the encoded payload bytes exactly as stored in the durable
-    /// document, in `sha256:<hex>` form.
-    pub payload_checksum: String,
-    pub payload: MetadataSstPayload,
-}
-
-impl MetadataSstEnvelope {
-    pub fn from_payload(
-        writer_version: impl Into<String>,
-        payload: MetadataSstPayload,
-    ) -> Result<Self, MetadataSstCodecError> {
-        Ok(Self {
-            kind: MetadataSstKind::MetadataSst,
-            format_version: METADATA_SST_FORMAT_VERSION,
-            writer_version: writer_version.into(),
-            payload_checksum: metadata_sst_payload_checksum(&payload)?,
-            payload,
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,21 +367,6 @@ struct NamespaceManifestDocument {
     payload: Box<RawValue>,
 }
 
-/// Durable layout of a metadata SST object (before zstd compression), with
-/// the payload as an opaque CBOR byte string. See [`WAL_FORMAT_VERSION`] for
-/// the shared envelope rationale.
-///
-/// [`WAL_FORMAT_VERSION`]: crate::wal::WAL_FORMAT_VERSION
-#[derive(Serialize, Deserialize)]
-struct MetadataSstDocument {
-    kind: String,
-    format_version: u32,
-    writer_version: String,
-    payload_checksum: String,
-    #[serde(with = "serde_bytes")]
-    payload: Vec<u8>,
-}
-
 #[derive(Debug, Error)]
 pub enum NamespaceManifestCodecError {
     #[error("failed to encode namespace manifest payload to JSON: {0}")]
@@ -421,35 +386,6 @@ pub enum NamespaceManifestCodecError {
     #[error(
         "namespace manifest envelope checksum `{checksum}` does not match its payload `{actual}`: \
          rebuild the envelope with `NamespaceManifestEnvelope::from_payload`"
-    )]
-    StalePayloadChecksum { checksum: String, actual: String },
-}
-
-#[derive(Debug, Error)]
-pub enum MetadataSstCodecError {
-    #[error("failed to encode metadata SST payload to CBOR: {0}")]
-    PayloadEncode(String),
-    #[error("failed to encode metadata SST envelope to CBOR: {0}")]
-    EnvelopeEncode(String),
-    #[error("failed to decode metadata SST envelope from CBOR: {0}")]
-    EnvelopeDecode(String),
-    #[error("failed to decode metadata SST payload from CBOR: {0}")]
-    PayloadDecode(String),
-    #[error("failed to compress metadata SST envelope: {0}")]
-    Compress(String),
-    #[error("failed to decompress metadata SST envelope: {0}")]
-    Decompress(String),
-    #[error("unexpected metadata SST kind `{found}`: expected `{expected}`")]
-    UnexpectedKind { expected: String, found: String },
-    #[error(
-        "unsupported metadata SST format version `{found}`: this build supports `{supported}`"
-    )]
-    UnsupportedFormatVersion { found: u32, supported: u32 },
-    #[error("metadata SST payload checksum mismatch: expected {expected}, actual {actual}")]
-    ChecksumMismatch { expected: String, actual: String },
-    #[error(
-        "metadata SST envelope checksum `{checksum}` does not match its payload `{actual}`: \
-         rebuild the envelope with `MetadataSstEnvelope::from_payload`"
     )]
     StalePayloadChecksum { checksum: String, actual: String },
 }
@@ -533,101 +469,12 @@ pub fn decode_namespace_manifest_json(
     })
 }
 
-pub fn metadata_sst_payload_checksum(
-    payload: &MetadataSstPayload,
-) -> Result<String, MetadataSstCodecError> {
-    Ok(sha256_digest(&encode_metadata_sst_payload_cbor(payload)?))
-}
-
-pub fn encode_metadata_sst_payload_cbor(
-    payload: &MetadataSstPayload,
-) -> Result<Vec<u8>, MetadataSstCodecError> {
-    let mut encoded = Vec::new();
-    into_writer(payload, &mut encoded)
-        .map_err(|err| MetadataSstCodecError::PayloadEncode(err.to_string()))?;
-    Ok(encoded)
-}
-
-pub fn encode_metadata_sst_envelope_zstd(
-    envelope: &MetadataSstEnvelope,
-) -> Result<Vec<u8>, MetadataSstCodecError> {
-    if envelope.format_version != METADATA_SST_FORMAT_VERSION {
-        return Err(MetadataSstCodecError::UnsupportedFormatVersion {
-            found: envelope.format_version,
-            supported: METADATA_SST_FORMAT_VERSION,
-        });
-    }
-    let payload_bytes = encode_metadata_sst_payload_cbor(&envelope.payload)?;
-    let actual = sha256_digest(&payload_bytes);
-    if actual != envelope.payload_checksum {
-        return Err(MetadataSstCodecError::StalePayloadChecksum {
-            checksum: envelope.payload_checksum.clone(),
-            actual,
-        });
-    }
-
-    let document = MetadataSstDocument {
-        kind: envelope.kind.as_str().to_owned(),
-        format_version: envelope.format_version,
-        writer_version: envelope.writer_version.clone(),
-        payload_checksum: envelope.payload_checksum.clone(),
-        payload: payload_bytes,
-    };
-    let mut encoded = Vec::new();
-    into_writer(&document, &mut encoded)
-        .map_err(|err| MetadataSstCodecError::EnvelopeEncode(err.to_string()))?;
-    zstd::stream::encode_all(encoded.as_slice(), 0)
-        .map_err(|err| MetadataSstCodecError::Compress(err.to_string()))
-}
-
-pub fn decode_metadata_sst_envelope_zstd(
-    bytes: &[u8],
-) -> Result<MetadataSstEnvelope, MetadataSstCodecError> {
-    let decompressed = zstd::stream::decode_all(bytes)
-        .map_err(|err| MetadataSstCodecError::Decompress(err.to_string()))?;
-    let probe: EnvelopeProbe = from_reader(decompressed.as_slice())
-        .map_err(|err| MetadataSstCodecError::EnvelopeDecode(err.to_string()))?;
-    let expected_kind = MetadataSstKind::MetadataSst;
-    if probe.kind != expected_kind.as_str() {
-        return Err(MetadataSstCodecError::UnexpectedKind {
-            expected: expected_kind.as_str().to_owned(),
-            found: probe.kind,
-        });
-    }
-    if probe.format_version != METADATA_SST_FORMAT_VERSION {
-        return Err(MetadataSstCodecError::UnsupportedFormatVersion {
-            found: probe.format_version,
-            supported: METADATA_SST_FORMAT_VERSION,
-        });
-    }
-
-    let document: MetadataSstDocument = from_reader(decompressed.as_slice())
-        .map_err(|err| MetadataSstCodecError::EnvelopeDecode(err.to_string()))?;
-    let actual = sha256_digest(&document.payload);
-    if actual != document.payload_checksum {
-        return Err(MetadataSstCodecError::ChecksumMismatch {
-            expected: document.payload_checksum,
-            actual,
-        });
-    }
-    let payload: MetadataSstPayload = from_reader(document.payload.as_slice())
-        .map_err(|err| MetadataSstCodecError::PayloadDecode(err.to_string()))?;
-
-    Ok(MetadataSstEnvelope {
-        kind: expected_kind,
-        format_version: document.format_version,
-        writer_version: document.writer_version,
-        payload_checksum: document.payload_checksum,
-        payload,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef,
-        MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
-        NamespaceManifestPayload,
+        decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
+        MetadataFileRef, MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope,
+        NamespaceManifestFork, NamespaceManifestPayload,
     };
     use crate::{
         ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId,
@@ -833,6 +680,19 @@ mod tests {
             row_count: 0,
             min_key: String::new(),
             max_key: String::new(),
+            object_len: 0,
+            index_block: BlockHandle {
+                offset: 0,
+                stored_len: 0,
+                decoded_len: 0,
+                crc32c: 0,
+            },
+            filter_block: BlockHandle {
+                offset: 0,
+                stored_len: 0,
+                decoded_len: 0,
+                crc32c: 0,
+            },
             payload_checksum: "sha256:unused".to_owned(),
         }
     }

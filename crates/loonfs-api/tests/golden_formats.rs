@@ -26,10 +26,8 @@ use loonfs_api::wire::control::{
     WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
-    decode_metadata_sst_envelope_zstd, decode_namespace_manifest_json,
-    encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
-    MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstCodecError, MetadataSstEnvelope,
-    MetadataSstPayload, MetadataTableFamily, NamespaceManifestCodecError,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
+    MetadataSegmentKey, MetadataTableFamily, NamespaceManifestCodecError,
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::wire::wal::{
@@ -216,79 +214,6 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
     .expect("wal envelope")
 }
 
-fn sample_sst_envelope() -> MetadataSstEnvelope {
-    let rows = vec![
-        MetadataRow::Inode {
-            inode_id: InodeId(7),
-            inode_kind: InodeKind::Directory,
-            created_seq: ChangeSeq(2),
-        },
-        MetadataRow::DirentryBind {
-            parent_inode_id: InodeId(1),
-            name_key: name_key("docs"),
-            display_name: "Docs".to_owned(),
-            child_inode_id: InodeId(7),
-            bind_seq: ChangeSeq(2),
-            bind_delta_index: 1,
-        },
-        MetadataRow::DirentryUnbind {
-            parent_inode_id: InodeId(1),
-            name_key: name_key("old.txt"),
-            child_inode_id: InodeId(5),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
-            unbind_seq: ChangeSeq(2),
-            unbind_delta_index: 2,
-        },
-        MetadataRow::Revision {
-            inode_id: InodeId(5),
-            revision_no: RevisionNo(2),
-            committed_seq: ChangeSeq(2),
-            revision_delta_index: 3,
-            content_ref: sample_content_ref(),
-        },
-        MetadataRow::Tombstone {
-            root_inode_id: InodeId(9),
-            tombstone_seq: ChangeSeq(2),
-            tombstone_delta_index: 4,
-        },
-        MetadataRow::CommitReceipt {
-            commit_id: commit_id(),
-            semantic_commit_fingerprint:
-                "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
-                    .to_owned(),
-            committed_seq: ChangeSeq(2),
-            message: Some("golden commit".to_owned()),
-        },
-    ];
-    let row_keys = rows.iter().map(MetadataRow::row_key).collect::<Vec<_>>();
-    let page = MetadataPage {
-        page_index: 0,
-        min_key: row_keys.first().cloned().expect("min key"),
-        max_key: row_keys.last().cloned().expect("max key"),
-        row_keys,
-        rows,
-    };
-
-    MetadataSstEnvelope::from_payload(
-        WRITER_VERSION,
-        MetadataSstPayload {
-            namespace_id: namespace_id(),
-            table_id: table_id(),
-            run_seq: ChangeSeq(2),
-            level: 0,
-            family: MetadataTableFamily::Inodes,
-            segment_index: 0,
-            segment_key: MetadataSegmentKey::Full,
-            row_count: page.rows.len() as u64,
-            min_key: page.min_key.clone(),
-            max_key: page.max_key.clone(),
-            pages: vec![page],
-        },
-    )
-    .expect("sst envelope")
-}
-
 fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
     NamespaceManifestEnvelope::from_payload(
         WRITER_VERSION,
@@ -331,6 +256,19 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 row_count: 6,
                 min_key: "commit-receipt".to_owned(),
                 max_key: "tombstone".to_owned(),
+                object_len: 4_242,
+                index_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                    offset: 4_000,
+                    stored_len: 200,
+                    decoded_len: 400,
+                    crc32c: 0x1234_5678,
+                },
+                filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                    offset: 3_900,
+                    stored_len: 100,
+                    decoded_len: 100,
+                    crc32c: 0x9abc_def0,
+                },
                 payload_checksum: sha256_digest(b"sst payload"),
             }],
         },
@@ -380,20 +318,6 @@ fn wal_segment_golden_decodes_to_sample() {
     let decoded = decode_wal_segment_envelope_zstd(&rezstd(&read_golden("wal_segment.v1.cbor")))
         .expect("decode golden wal segment");
     assert_eq!(decoded, sample_wal_envelope());
-}
-
-#[test]
-fn metadata_sst_document_matches_golden_bytes() {
-    let encoded = encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("encode sst");
-    assert_matches_golden("metadata_table.v1.cbor", &unzstd(&encoded));
-}
-
-#[test]
-fn metadata_sst_golden_decodes_to_sample() {
-    let decoded =
-        decode_metadata_sst_envelope_zstd(&rezstd(&read_golden("metadata_table.v1.cbor")))
-            .expect("decode golden metadata sst");
-    assert_eq!(decoded, sample_sst_envelope());
 }
 
 #[test]
@@ -697,47 +621,6 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
         .expect_err("tampered payload must be rejected");
     assert!(
         matches!(err, ControlCodecError::ChecksumMismatch { .. }),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn metadata_sst_decode_rejects_future_format_version_cleanly() {
-    let document = unzstd(&encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("sst"));
-    let bumped = with_cbor_document_entry(&document, "format_version", |value| {
-        *value = ciborium::Value::from(2);
-    });
-
-    let err = decode_metadata_sst_envelope_zstd(&rezstd(&bumped))
-        .expect_err("future version must be rejected");
-    assert!(
-        matches!(
-            err,
-            MetadataSstCodecError::UnsupportedFormatVersion {
-                found: 2,
-                supported: 1,
-            }
-        ),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn metadata_sst_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
-    let document = unzstd(&encode_metadata_sst_envelope_zstd(&sample_sst_envelope()).expect("sst"));
-    let tampered = with_cbor_document_entry(&document, "payload", |value| {
-        let bytes = match value {
-            ciborium::Value::Bytes(bytes) => bytes,
-            other => panic!("payload should be a CBOR byte string, got {other:?}"),
-        };
-        let last = bytes.last_mut().expect("payload is non-empty");
-        *last ^= 0xff;
-    });
-
-    let err = decode_metadata_sst_envelope_zstd(&rezstd(&tampered))
-        .expect_err("tampered payload must be rejected");
-    assert!(
-        matches!(err, MetadataSstCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
     );
 }

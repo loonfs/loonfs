@@ -11,10 +11,10 @@ use crate::metadata::MetadataState;
 use crate::storage::content::write_immutable_object;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
-    encode_metadata_sst_envelope_zstd, MetadataFileRef, MetadataPage, MetadataRow,
-    MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload, MetadataTableFamily,
+    MetadataFileRef, MetadataRow, MetadataSegmentKey, MetadataTableFamily,
 };
-use loonfs_api::{ChangeSeq, MetadataTableId, NamespaceId};
+use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+use loonfs_api::{sha256_digest, ChangeSeq, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_table;
 use loonfs_objectstore::ObjectStore;
 
@@ -24,7 +24,6 @@ pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     run_seq: ChangeSeq,
     level: u32,
     metadata_state: &MetadataState,
-    writer_version: &str,
     max_rows_per_segment: usize,
 ) -> Result<Vec<MetadataTableManifest>> {
     build_manifest_tables_from_rows(
@@ -32,7 +31,6 @@ pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
         namespace_id,
         run_seq,
         level,
-        writer_version,
         |family| manifest_rows_for_family(metadata_state, family),
         MetadataTableSegmentation::Base {
             max_rows_per_segment,
@@ -66,14 +64,12 @@ pub(super) async fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
     run_seq: ChangeSeq,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
-    writer_version: &str,
 ) -> Result<Vec<MetadataTableManifest>> {
     build_manifest_tables_from_rows(
         store,
         namespace_id,
         run_seq,
         CHECKPOINT_L0_RUN_LEVEL,
-        writer_version,
         |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
         MetadataTableSegmentation::Full,
     )
@@ -103,7 +99,6 @@ pub(super) async fn build_manifest_tables_from_rows<S, RowsForFamily>(
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     level: u32,
-    writer_version: &str,
     mut rows_for_family: RowsForFamily,
     segmentation: MetadataTableSegmentation,
 ) -> Result<Vec<MetadataTableManifest>>
@@ -139,7 +134,6 @@ where
                 segment_key: segment_rows.segment_key,
                 rows: segment_rows.rows,
                 object_key,
-                writer_version,
             });
         }
 
@@ -180,52 +174,30 @@ pub(super) struct MetadataSstWriteRequest<'a> {
     segment_key: MetadataSegmentKey,
     rows: Vec<MetadataRow>,
     object_key: String,
-    writer_version: &'a str,
 }
 
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSstWriteRequest<'_>,
 ) -> Result<MetadataFileRef> {
-    let row_keys = request
-        .rows
-        .iter()
-        .map(|row| row.row_key_for_family(request.family))
-        .collect::<Vec<_>>();
-    let page = MetadataPage {
-        page_index: 0,
-        min_key: row_keys.first().cloned().unwrap_or_default(),
-        max_key: row_keys.last().cloned().unwrap_or_default(),
-        row_keys,
-        rows: request.rows,
-    };
-    let payload = MetadataSstPayload {
-        namespace_id: request.namespace_id.clone(),
-        table_id: request.table_id.clone(),
-        run_seq: request.run_seq,
-        level: request.level,
-        family: request.family,
-        segment_index: request.segment_index,
-        segment_key: request.segment_key,
-        row_count: page.rows.len() as u64,
-        min_key: page.min_key.clone(),
-        max_key: page.max_key.clone(),
-        pages: vec![page],
-    };
-    let envelope =
-        MetadataSstEnvelope::from_payload(request.writer_version, payload).map_err(|err| {
+    let mut builder = SegmentBlocksBuilder::default();
+    for row in &request.rows {
+        let row_key = row.row_key_for_family(request.family);
+        let filter_key = row.filter_key_for_family(request.family);
+        builder.push(&row_key, &filter_key, row).map_err(|err| {
             CoreError::Internal(format!(
-                "failed to build metadata SST envelope `{}`: {err}",
+                "failed to build metadata SST `{}`: {err}",
                 request.object_key
             ))
         })?;
-    let encoded = encode_metadata_sst_envelope_zstd(&envelope).map_err(|err| {
+    }
+    let built = builder.finish().map_err(|err| {
         CoreError::Internal(format!(
-            "failed to encode metadata SST `{}`: {err}",
+            "failed to build metadata SST `{}`: {err}",
             request.object_key
         ))
     })?;
-    write_immutable_object(store, &request.object_key, &encoded).await?;
+    write_immutable_object(store, &request.object_key, &built.bytes).await?;
     Ok(MetadataFileRef {
         owner_namespace_id: request.namespace_id.clone(),
         table_id: request.table_id,
@@ -234,11 +206,14 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         level: request.level,
         family: request.family,
         segment_index: request.segment_index,
-        segment_key: envelope.payload.segment_key.clone(),
-        row_count: envelope.payload.row_count,
-        min_key: envelope.payload.min_key.clone(),
-        max_key: envelope.payload.max_key.clone(),
-        payload_checksum: envelope.payload_checksum.clone(),
+        segment_key: request.segment_key,
+        row_count: built.row_count,
+        min_key: built.min_key,
+        max_key: built.max_key,
+        object_len: built.bytes.len() as u64,
+        index_block: built.index,
+        filter_block: built.filter,
+        payload_checksum: sha256_digest(&built.bytes),
     })
 }
 

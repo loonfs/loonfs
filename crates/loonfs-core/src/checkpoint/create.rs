@@ -439,7 +439,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
         initial_head.seq,
         CHECKPOINT_BASE_RUN_LEVEL,
         &metadata_state,
-        writer_version,
         MetadataLsmPolicy::default().max_rows_per_segment,
     )
     .await?;
@@ -499,7 +498,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             namespace_id,
             head_seq,
             projection,
-            writer_version,
             policy.max_rows_per_segment,
         )
         .await?;
@@ -515,7 +513,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
                     head_seq,
                     previous_manifest.payload.head_seq,
                     &projection.tail_state,
-                    writer_version,
                 )
                 .await?,
             ));
@@ -527,7 +524,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             namespace_id,
             head_seq,
             projection,
-            writer_version,
             policy.max_rows_per_segment,
         )
         .await?;
@@ -753,7 +749,6 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     projection: &CheckpointProjection<'_, S>,
-    writer_version: &str,
     max_rows_per_segment: usize,
 ) -> Result<Vec<super::runs::MetadataTableManifest>> {
     let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
@@ -828,7 +823,6 @@ async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
         namespace_id,
         run_seq,
         CHECKPOINT_BASE_RUN_LEVEL,
-        writer_version,
         |family| rows_by_family.remove(&family).unwrap_or_default(),
         MetadataTableSegmentation::Base {
             max_rows_per_segment,
@@ -885,7 +879,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
-                writer_version,
                 policy.max_rows_per_segment,
             )
             .await?;
@@ -902,7 +895,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                         head_seq,
                         previous.manifest.payload.head_seq,
                         metadata_state,
-                        writer_version,
                     )
                     .await?,
                 ));
@@ -916,7 +908,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
-                writer_version,
                 policy.max_rows_per_segment,
             )
             .await?;
@@ -930,7 +921,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                 head_seq,
                 CHECKPOINT_BASE_RUN_LEVEL,
                 metadata_state,
-                writer_version,
                 policy.max_rows_per_segment,
             )
             .await?;
