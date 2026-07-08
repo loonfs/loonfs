@@ -2703,6 +2703,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             ApiMetadataTableFamily::DirentryBinds,
             &prefix,
             &filter_probe,
+            false,
         )
         .await
         .expect("filtered lookup");
@@ -2754,7 +2755,7 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
 
     let key = "inode-00000000000000000001";
     assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key, false)
         .await
         .expect("get inode")
         .is_some());
@@ -4037,7 +4038,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     store.reset_metadata_sst_gets();
     let key = "inode-00000000000000000001";
     assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key, false)
         .await
         .expect("first lookup")
         .is_some());
@@ -4045,13 +4046,13 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
     assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key, false)
         .await
         .expect("repeated lookup")
         .is_some());
     let other = "inode-00000000000000000002";
     assert!(tables
-        .get_for_lookup(ApiMetadataTableFamily::Inodes, other, other)
+        .get_for_lookup(ApiMetadataTableFamily::Inodes, other, other, false)
         .await
         .expect("second-key lookup")
         .is_some());
