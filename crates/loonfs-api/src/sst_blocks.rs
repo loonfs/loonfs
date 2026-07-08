@@ -35,8 +35,13 @@ use std::io::Read;
 use thiserror::Error;
 use xxhash_rust::xxh64::xxh64;
 
-/// Target uncompressed size of one data block, in bytes.
-pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 8 * 1024;
+/// Target uncompressed size of one data block, in bytes. Sized for direct
+/// object-store reads: request round-trips dominate transfer time at this
+/// scale, so bulk read paths (directory listings read most rows of several
+/// families) want few large ranged GETs, and a lookup fetching one block
+/// still moves trivial bytes. Benchmarked over 8 KiB, which priced a full
+/// listing at one GET per tiny block.
+pub const DEFAULT_TARGET_BLOCK_BYTES: usize = 64 * 1024;
 /// Entries between restart points inside a data block.
 pub const RESTART_INTERVAL: usize = 16;
 /// Bloom filter sizing: bits reserved per inserted filter key.
