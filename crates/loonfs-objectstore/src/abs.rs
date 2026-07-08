@@ -1,5 +1,6 @@
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::secret::SecretString;
+use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -25,6 +26,9 @@ pub struct AzureAbsStoreConfig {
 #[derive(Debug)]
 pub struct AzureAbsStore {
     inner: ProviderObjectStore,
+    /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
+    /// the connector inside the client holds only a handle onto it.
+    _io_runtime: StoreIoRuntime,
 }
 
 impl AzureAbsStore {
@@ -45,7 +49,9 @@ impl AzureAbsStore {
             ));
         }
 
+        let io_runtime = StoreIoRuntime::new()?;
         let mut builder = MicrosoftAzureBuilder::new()
+            .with_http_connector(io_runtime.connector())
             .with_account(config.account_name)
             .with_container_name(config.container_name)
             .with_access_key(config.access_key.expose());
@@ -73,7 +79,10 @@ impl AzureAbsStore {
                 sha256_checksum_metadata: false,
             },
         )?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _io_runtime: io_runtime,
+        })
     }
 }
 

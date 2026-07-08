@@ -26,6 +26,7 @@ pub mod s3;
 mod s3_compatible;
 mod secret;
 mod store_config;
+mod store_io_runtime;
 
 /// Compatibility alias for [`local_fs_store`], kept so existing imports of
 /// `loonfs_objectstore::fs::LocalFsStore` keep resolving.
