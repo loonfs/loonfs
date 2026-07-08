@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub(super) const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
-pub(super) const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 4096;
+/// With block-granular reads the segment is no longer the read unit, so
+/// base segments are sized large to amortize their index and filter
+/// sections across many lookups (design doc, "Sizing").
+pub(super) const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 65_536;
 
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 #[cfg(test)]
