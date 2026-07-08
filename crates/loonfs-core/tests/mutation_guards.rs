@@ -1863,6 +1863,63 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/cycled.txt",
+        b"durable",
+        PutBehavior::NoReplace,
+        &context,
+        Some("put-durable"),
+    )
+    .expect("put durable file");
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint durable state");
+
+    // One batch: delete the checkpointed file, then recreate the same name
+    // with NoReplace. The recreate must observe the batch-local unbind over
+    // the durable binding, and the delete must observe the durable binding
+    // at all — both through the batch's cached durable layer.
+    let staged = block_on(loonfs_core::content::store_bytes_as_content(
+        &store,
+        &namespace_id,
+        b"recreated",
+    ))
+    .expect("stage recreated content");
+    let results = block_on(
+        namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch(vec![
+            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
+                absolute_path: "/docs/cycled.txt".to_owned(),
+                behavior: DeleteDirectoryBehavior::NonRecursive,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
+                absolute_path: "/docs/cycled.txt".to_owned(),
+                content_ref: staged.content_ref,
+                behavior: PutBehavior::NoReplace,
+            }),
+        ]),
+    );
+    results[0]
+        .as_ref()
+        .expect("delete of durable file succeeds");
+    results[1]
+        .as_ref()
+        .expect("no-replace recreate sees the in-batch unbind over the durable binding");
+
+    let recreated =
+        read_file_bytes(&store, &namespace_id, "/docs/cycled.txt").expect("read recreated file");
+    assert_eq!(recreated.bytes, b"recreated");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_and_rebinds() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

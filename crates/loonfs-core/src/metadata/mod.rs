@@ -41,7 +41,8 @@ pub use self::rows::{
 
 pub(crate) use self::rows::record_name_key;
 pub(crate) use self::view::{
-    InMemoryMetadataView, MetadataView, MetadataViewSession, VisibleChildEntry,
+    DurableVisibilityCache, InMemoryMetadataView, MetadataView, MetadataViewSession,
+    VisibleChildEntry,
 };
 pub(crate) use self::visibility::{unbind_matches_binding, BindingIdentity};
 
