@@ -1,6 +1,6 @@
 use crate::metadata::MetadataState;
 use loonfs_api::wire::manifest::MetadataRow;
-use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -39,12 +39,20 @@ pub struct MetadataTableCacheStats {
     pub misses: usize,
     pub inserts: usize,
     pub evictions: usize,
+    /// Segments a scan skipped because their bloom filter ruled the lookup
+    /// key out before any index or data fetch.
+    pub filter_skips: usize,
+    /// Segments whose filter admitted a lookup that then matched no rows.
+    /// Approximate: a lookup narrower than the filter key (an exact unbind,
+    /// a single revision) can count a true admission here.
+    pub filter_false_positives: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum MetadataTableBlockKind {
-    SegmentIndex,
-    SegmentData,
+    Index,
+    Filter,
+    Data,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -100,6 +108,10 @@ pub(super) enum DecodedMetadataTableBlock {
         entries: Arc<Vec<SegmentIndexEntry>>,
         decoded_byte_len: usize,
     },
+    Filter {
+        filter: Arc<SegmentFilter>,
+        decoded_byte_len: usize,
+    },
     Data {
         block: Arc<DecodedDataBlock>,
         decoded_byte_len: usize,
@@ -110,6 +122,9 @@ impl DecodedMetadataTableBlock {
     pub(super) fn decoded_byte_len(&self) -> usize {
         match self {
             Self::Index {
+                decoded_byte_len, ..
+            }
+            | Self::Filter {
                 decoded_byte_len, ..
             }
             | Self::Data {
@@ -142,6 +157,8 @@ struct MetadataTableCacheStatsInner {
     misses: AtomicUsize,
     inserts: AtomicUsize,
     evictions: AtomicUsize,
+    filter_skips: AtomicUsize,
+    filter_false_positives: AtomicUsize,
 }
 
 impl MetadataTableCache {
@@ -216,7 +233,19 @@ impl MetadataTableCache {
             misses: self.stats.misses.load(Ordering::SeqCst),
             inserts: self.stats.inserts.load(Ordering::SeqCst),
             evictions: self.stats.evictions.load(Ordering::SeqCst),
+            filter_skips: self.stats.filter_skips.load(Ordering::SeqCst),
+            filter_false_positives: self.stats.filter_false_positives.load(Ordering::SeqCst),
         }
+    }
+
+    pub(super) fn record_filter_skip(&self) {
+        self.stats.filter_skips.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn record_filter_false_positive(&self) {
+        self.stats
+            .filter_false_positives
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     /// Whether inserts are bounded by a decoded-byte budget. A byte-budgeted
@@ -549,7 +578,7 @@ mod tests {
     fn key(digest: &str) -> MetadataTableCacheKey {
         MetadataTableCacheKey {
             table_digest: digest.to_owned(),
-            block_kind: MetadataTableBlockKind::SegmentData,
+            block_kind: MetadataTableBlockKind::Data,
             block_offset: 0,
         }
     }
@@ -606,7 +635,7 @@ mod tests {
         let inserted = block(64);
         let rows = match &inserted {
             DecodedMetadataTableBlock::Data { block: rows, .. } => Arc::clone(rows),
-            DecodedMetadataTableBlock::Index { .. } => {
+            DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Filter { .. } => {
                 unreachable!("fixture builds a data block")
             }
         };
@@ -616,7 +645,9 @@ mod tests {
             DecodedMetadataTableBlock::Data {
                 block: hit_rows, ..
             } => Arc::ptr_eq(hit_rows, &rows),
-            DecodedMetadataTableBlock::Index { .. } => false,
+            DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Filter { .. } => {
+                false
+            }
         };
         assert!(
             shares_allocation,
