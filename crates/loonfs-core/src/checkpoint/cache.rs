@@ -60,45 +60,31 @@ pub(super) struct MetadataTableCacheKey {
 pub(super) struct DecodedSegmentRowSet {
     pub(super) rows: Vec<MetadataRow>,
     /// Stored row keys, parallel to `rows`, validated against
-    /// `row_key_for_family` at decode so scans never recompute them.
+    /// `row_key_for_family` and for ascending order at decode — a format
+    /// requirement — so scans never recompute keys and always binary-search.
     pub(super) row_keys: Vec<String>,
-    /// Whether `row_keys` is non-decreasing. The builder writes sorted
-    /// segments; the flag is verified at decode so scans may binary-search,
-    /// with a linear fallback for segments that decode unsorted.
-    pub(super) sorted_by_row_key: bool,
 }
 
 impl DecodedSegmentRowSet {
-    /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order.
-    /// A sorted row set narrows to the matching slice by binary search; an
-    /// unsorted one filters every row. Express a prefix scan as
-    /// `[prefix, string_prefix_upper_bound(prefix))`.
+    /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order,
+    /// found by binary search over the decode-validated key order. Express a
+    /// prefix scan as `[prefix, string_prefix_upper_bound(prefix))`.
     pub(super) fn rows_in_key_range<'a>(
         &'a self,
         lower_bound: &'a str,
         upper_bound: Option<&'a str>,
     ) -> impl Iterator<Item = (&'a str, &'a MetadataRow)> + 'a {
-        let range = if self.sorted_by_row_key {
-            let start = self
-                .row_keys
-                .partition_point(|key| key.as_str() < lower_bound);
-            let end = upper_bound.map_or(self.row_keys.len(), |upper_bound| {
-                self.row_keys
-                    .partition_point(|key| key.as_str() < upper_bound)
-            });
-            start..end.max(start)
-        } else {
-            0..self.row_keys.len()
-        };
+        let start = self
+            .row_keys
+            .partition_point(|key| key.as_str() < lower_bound);
+        let end = upper_bound.map_or(self.row_keys.len(), |upper_bound| {
+            self.row_keys
+                .partition_point(|key| key.as_str() < upper_bound)
+        });
+        let range = start..end.max(start);
         self.row_keys[range.clone()]
             .iter()
             .zip(&self.rows[range])
-            .filter(move |(key, _)| {
-                key.as_str() >= lower_bound
-                    && upper_bound
-                        .map(|upper_bound| key.as_str() < upper_bound)
-                        .unwrap_or(true)
-            })
             .map(|(key, row)| (key.as_str(), row))
     }
 }
@@ -540,7 +526,6 @@ mod tests {
             row_set: Arc::new(DecodedSegmentRowSet {
                 rows: Vec::new(),
                 row_keys: Vec::new(),
-                sorted_by_row_key: true,
             }),
             segment_seq: ChangeSeq(1),
             family: MetadataTableFamily::Inodes,
