@@ -133,6 +133,54 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
         .collect())
 }
 
+/// Every unbind row for `parent_inode_id` whose name key falls in
+/// `[first_name_key, last_name_key]`, paged internally to completeness: the
+/// caller treats absence from the result as "no unbind exists" for names in
+/// the range, so a partial scan would be a correctness bug, not a slow path.
+pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    parent_inode_id: InodeId,
+    first_name_key: &str,
+    last_name_key: &str,
+) -> Result<Vec<DirentryUnbindRecord>> {
+    const UNBIND_RANGE_SCAN_LIMIT: usize = 512;
+    let parent_prefix = format!("direntry-unbind-{:020}-", parent_inode_id.0);
+    let first_encoded = hex_encode_row_key_component(first_name_key);
+    let last_encoded = hex_encode_row_key_component(last_name_key);
+    let mut lower_bound = format!("{parent_prefix}{first_encoded}-");
+    let last_name_prefix = format!("{parent_prefix}{last_encoded}-");
+    let upper_bound = string_prefix_upper_bound(&last_name_prefix);
+
+    let mut unbinds = Vec::new();
+    loop {
+        let page = tables
+            .scan_range_page(
+                MetadataTableFamily::DirentryUnbinds,
+                &lower_bound,
+                upper_bound.as_deref(),
+                UNBIND_RANGE_SCAN_LIMIT,
+            )
+            .await
+            .map_err(manifest_error_to_core)?;
+        let page_len = page.len();
+        let last_row_key = page
+            .last()
+            .map(|row| row.row_key_for_family(MetadataTableFamily::DirentryUnbinds));
+        unbinds.extend(
+            page.into_iter()
+                .filter_map(direntry_unbind_from_manifest_row),
+        );
+        if page_len < UNBIND_RANGE_SCAN_LIMIT {
+            break;
+        }
+        let Some(last_row_key) = last_row_key else {
+            break;
+        };
+        lower_bound = resume_after_row_key(&last_row_key);
+    }
+    Ok(unbinds)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RevisionPagePosition {
     pub(super) revision_no: RevisionNo,

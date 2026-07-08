@@ -15,7 +15,7 @@ use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NamePoli
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
@@ -605,6 +605,41 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(tombstones)
     }
 
+    /// Every unbind for `parent_inode_id` with a name key in
+    /// `[first_name_key, last_name_key]`, merged across manifest tables and
+    /// row states. Complete over the range: callers treat absence as "no
+    /// unbind exists".
+    async fn direntry_unbinds_for_parent_name_range(
+        &self,
+        parent_inode_id: InodeId,
+        first_name_key: &str,
+        last_name_key: &str,
+    ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
+        let mut unbinds = if let Some(tables) = self.manifest_tables() {
+            manifest_index::direntry_unbinds_for_parent_name_range(
+                tables,
+                parent_inode_id,
+                first_name_key,
+                last_name_key,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        unbinds.extend(self.row_states().flat_map(|state| {
+            state
+                .direntry_unbinds()
+                .iter()
+                .filter(move |unbind| {
+                    unbind.parent_inode_id == parent_inode_id
+                        && unbind.name_key.as_str() >= first_name_key
+                        && unbind.name_key.as_str() <= last_name_key
+                })
+                .cloned()
+        }));
+        Ok(unbinds)
+    }
+
     fn tail_direntry_bind_page_candidates(
         &self,
         parent_inode_id: InodeId,
@@ -693,6 +728,8 @@ pub(crate) struct MetadataViewSessionCounters {
     pub(crate) direntry_child_scan_calls: u64,
     pub(crate) scan_prefix_calls: u64,
     pub(crate) scan_range_page_calls: u64,
+    pub(crate) list_preload_unbind_range_scans: u64,
+    pub(crate) list_preload_child_lookups: u64,
 }
 
 pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
@@ -701,6 +738,7 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     visible_inode_cache: HashMap<InodeId, Option<InodeRecord>>,
     bound_child_cache: HashMap<ParentNameCacheKey, Option<DirentryBindRecord>>,
     current_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
+    latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindRecord>>,
     latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
     active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
@@ -716,6 +754,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             visible_inode_cache: HashMap::new(),
             bound_child_cache: HashMap::new(),
             current_parent_binding_cache: HashMap::new(),
+            latest_parent_binding_cache: HashMap::new(),
             latest_revision_head_cache: HashMap::new(),
             active_tombstone_cache: HashMap::new(),
             covering_tombstone_cache: HashMap::new(),
@@ -745,17 +784,63 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         }
 
         let raw_scan_limit = limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT);
-        let mut manifest_after_row_key = None;
-        let mut manifest_exhausted = self.base.manifest_tables().is_none();
-        let mut manifest_candidates = VecDeque::<DirentryBindPageCandidate>::new();
-        let tail_candidates = self
-            .base
-            .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key);
-        let mut tail_index = 0;
-        let mut seen_name_keys = BTreeSet::new();
+        let mut stream = DirentryBindNameGroupStream::new(
+            self.base
+                .tail_direntry_bind_page_candidates(parent_inode_id, start_after_name_key),
+            self.base.manifest_tables().is_none(),
+        );
         let mut children = Vec::with_capacity(limit);
-        while children.len() < limit {
-            if manifest_candidates.is_empty() && !manifest_exhausted {
+        'pages: while children.len() < limit {
+            let groups = self
+                .next_candidate_name_groups(
+                    &mut stream,
+                    parent_inode_id,
+                    start_after_name_key,
+                    raw_scan_limit,
+                )
+                .await?;
+            if groups.is_empty() {
+                break;
+            }
+            self.preload_group_visibility(parent_inode_id, &groups)
+                .await?;
+            for group in &groups {
+                // One group per name key: the stream already deduplicated
+                // and ordered candidates, and the preload seeded the caches
+                // the canonical visibility rules read through.
+                let Some(active) = self.visible_child(parent_inode_id, &group.name_key).await?
+                else {
+                    continue;
+                };
+                let Some(inode) = self.visible_inode(active.child_inode_id).await? else {
+                    continue;
+                };
+                children.push(VisibleChildEntry {
+                    binding: active,
+                    inode,
+                });
+                if children.len() == limit {
+                    break 'pages;
+                }
+            }
+        }
+        Ok(children)
+    }
+
+    /// Pulls up to `group_limit` complete name-key groups from the merged
+    /// manifest+tail candidate stream, in row-key order. A group carries
+    /// every bind row for its name, so the group's newest visible row IS the
+    /// latest bound child for that name.
+    async fn next_candidate_name_groups(
+        &mut self,
+        stream: &mut DirentryBindNameGroupStream,
+        parent_inode_id: InodeId,
+        start_after_name_key: Option<&str>,
+        group_limit: usize,
+    ) -> Result<Vec<DirentryBindNameGroup>, CoreError> {
+        let mut groups: Vec<DirentryBindNameGroup> = Vec::new();
+        loop {
+            if stream.manifest_candidates.is_empty() && !stream.manifest_exhausted {
                 self.counters.scan_range_page_calls =
                     self.counters.scan_range_page_calls.saturating_add(1);
                 let page = if let Some(tables) = self.base.manifest_tables() {
@@ -763,62 +848,198 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         tables,
                         parent_inode_id,
                         start_after_name_key,
-                        manifest_after_row_key.as_deref(),
-                        raw_scan_limit,
+                        stream.manifest_after_row_key.as_deref(),
+                        group_limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT),
                     )
                     .await?
                 } else {
                     Vec::new()
                 };
                 if page.is_empty() {
-                    manifest_exhausted = true;
+                    stream.manifest_exhausted = true;
                 } else {
-                    manifest_after_row_key = page.last().map(|candidate| candidate.row_key.clone());
-                    manifest_candidates.extend(page.into_iter().map(|candidate| {
-                        DirentryBindPageCandidate {
+                    stream.manifest_after_row_key =
+                        page.last().map(|candidate| candidate.row_key.clone());
+                    stream
+                        .manifest_candidates
+                        .extend(page.into_iter().map(|candidate| DirentryBindPageCandidate {
                             row_key: candidate.row_key,
                             record: candidate.record,
+                        }));
+                }
+                continue;
+            }
+
+            let candidate = if let Some(pushed_back) = stream.pushed_back.take() {
+                pushed_back
+            } else {
+                let next_manifest = stream.manifest_candidates.front();
+                let next_tail = stream.tail_candidates.get(stream.tail_index);
+                let take_tail = match (next_manifest, next_tail) {
+                    (Some(manifest), Some(tail)) => tail.row_key < manifest.row_key,
+                    (None, Some(_)) => true,
+                    (Some(_), None) => false,
+                    (None, None) => {
+                        if stream.manifest_exhausted {
+                            break;
                         }
-                    }));
+                        continue;
+                    }
+                };
+                if take_tail {
+                    let candidate = stream.tail_candidates[stream.tail_index].clone();
+                    stream.tail_index += 1;
+                    candidate
+                } else {
+                    stream
+                        .manifest_candidates
+                        .pop_front()
+                        .expect("manifest candidate should exist")
+                }
+            };
+
+            match groups.last_mut() {
+                Some(group) if group.name_key == candidate.record.name_key => {
+                    group.rows.push(candidate.record);
+                }
+                _ => {
+                    // A full batch closes only at a name boundary, so the
+                    // finished group is guaranteed complete.
+                    if groups.len() == group_limit {
+                        stream.pushed_back = Some(candidate);
+                        break;
+                    }
+                    groups.push(DirentryBindNameGroup {
+                        name_key: candidate.record.name_key.clone(),
+                        rows: vec![candidate.record],
+                    });
                 }
             }
-
-            let next_manifest = manifest_candidates.front();
-            let next_tail = tail_candidates.get(tail_index);
-            let take_tail = match (next_manifest, next_tail) {
-                (Some(manifest), Some(tail)) => tail.row_key < manifest.row_key,
-                (None, Some(_)) => true,
-                (Some(_), None) => false,
-                (None, None) => break,
-            };
-            let candidate = if take_tail {
-                let candidate = tail_candidates[tail_index].clone();
-                tail_index += 1;
-                candidate
-            } else {
-                manifest_candidates
-                    .pop_front()
-                    .expect("manifest candidate should exist")
-            };
-
-            if !seen_name_keys.insert(candidate.record.name_key.clone()) {
-                continue;
-            }
-            let Some(active) = self
-                .visible_child(parent_inode_id, &candidate.record.name_key)
-                .await?
-            else {
-                continue;
-            };
-            let Some(inode) = self.visible_inode(active.child_inode_id).await? else {
-                continue;
-            };
-            children.push(VisibleChildEntry {
-                binding: active,
-                inode,
-            });
         }
-        Ok(children)
+        Ok(groups)
+    }
+
+    /// Seeds the session caches for one wave of name groups: the latest bind
+    /// per name from rows the stream already carried, unbind facts from one
+    /// range scan, and the child-keyed lookups batched concurrently. The
+    /// canonical visibility rules then decide over cache hits; anything the
+    /// preload cannot answer (cross-directory binding chases) falls back to
+    /// the ordinary per-key scans.
+    async fn preload_group_visibility(
+        &mut self,
+        parent_inode_id: InodeId,
+        groups: &[DirentryBindNameGroup],
+    ) -> Result<(), CoreError> {
+        let visible_seq = self.base.visible_seq();
+        let mut latest_binds = Vec::with_capacity(groups.len());
+        for group in groups {
+            let latest = group
+                .rows
+                .iter()
+                .filter(|direntry| direntry.bind_seq <= visible_seq)
+                .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+                .cloned();
+            self.bound_child_cache.insert(
+                ParentNameCacheKey {
+                    parent_inode_id,
+                    name_key: group.name_key.clone(),
+                },
+                latest.clone(),
+            );
+            if let Some(latest) = latest {
+                latest_binds.push(latest);
+            }
+        }
+        let (Some(first_group), Some(last_group)) = (groups.first(), groups.last()) else {
+            return Ok(());
+        };
+
+        self.counters.list_preload_unbind_range_scans = self
+            .counters
+            .list_preload_unbind_range_scans
+            .saturating_add(1);
+        let unbinds = self
+            .base
+            .direntry_unbinds_for_parent_name_range(
+                parent_inode_id,
+                &first_group.name_key,
+                &last_group.name_key,
+            )
+            .await?;
+        let unbound_identities: HashSet<BindingCacheKey> = unbinds
+            .iter()
+            .filter(|unbind| unbind.unbind_seq <= visible_seq)
+            .map(BindingCacheKey::from)
+            .collect();
+        for direntry in &latest_binds {
+            let cache_key = BindingCacheKey::from(direntry);
+            let unbound = unbound_identities.contains(&cache_key);
+            self.unbind_cache.insert(cache_key, unbound);
+        }
+
+        let mut pending_child_ids: Vec<InodeId> = latest_binds
+            .iter()
+            .map(|direntry| direntry.child_inode_id)
+            .filter(|child_inode_id| {
+                !(self.inode_at_seq_cache.contains_key(child_inode_id)
+                    && self
+                        .latest_parent_binding_cache
+                        .contains_key(child_inode_id)
+                    && self.active_tombstone_cache.contains_key(child_inode_id))
+            })
+            .collect();
+        pending_child_ids.sort_unstable();
+        pending_child_ids.dedup();
+        if pending_child_ids.is_empty() {
+            return Ok(());
+        }
+        self.counters.list_preload_child_lookups = self
+            .counters
+            .list_preload_child_lookups
+            .saturating_add(pending_child_ids.len() as u64);
+
+        let base = &self.base;
+        let lookups = futures::future::try_join_all(pending_child_ids.iter().map(
+            |&child_inode_id| async move {
+                let (inode, bindings, tombstones) = futures::try_join!(
+                    base.inode_at_seq(child_inode_id),
+                    base.direntry_binds_for_child(child_inode_id),
+                    base.tombstones_for_root(child_inode_id),
+                )?;
+                Ok::<_, CoreError>((child_inode_id, inode, bindings, tombstones))
+            },
+        ))
+        .await?;
+
+        for (child_inode_id, inode, bindings, tombstones) in lookups {
+            self.inode_at_seq_cache.insert(child_inode_id, inode);
+            let latest_binding = bindings
+                .into_iter()
+                .filter(|direntry| direntry.bind_seq <= visible_seq)
+                .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+            if let Some(latest_binding) = &latest_binding {
+                // A child bound in this directory within the preloaded name
+                // range gets its unbind fact from the range scan; bindings
+                // elsewhere fall back to the ordinary per-binding scan.
+                if latest_binding.parent_inode_id == parent_inode_id
+                    && latest_binding.name_key.as_str() >= first_group.name_key.as_str()
+                    && latest_binding.name_key.as_str() <= last_group.name_key.as_str()
+                {
+                    let cache_key = BindingCacheKey::from(latest_binding);
+                    let unbound = unbound_identities.contains(&cache_key);
+                    self.unbind_cache.entry(cache_key).or_insert(unbound);
+                }
+            }
+            self.latest_parent_binding_cache
+                .insert(child_inode_id, latest_binding);
+            let active_tombstone = tombstones
+                .into_iter()
+                .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
+                .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index));
+            self.active_tombstone_cache
+                .insert(child_inode_id, active_tombstone);
+        }
+        Ok(())
     }
 
     pub(crate) async fn visible_child(
@@ -910,14 +1131,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
+        if let Some(cached) = self
+            .latest_parent_binding_cache
+            .get(&child_inode_id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
         self.counters.direntry_child_scan_calls =
             self.counters.direntry_child_scan_calls.saturating_add(1);
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let bindings = self.base.direntry_binds_for_child(child_inode_id).await?;
-        Ok(bindings
+        let latest = bindings
             .into_iter()
             .filter(|direntry| direntry.bind_seq <= self.base.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+        self.latest_parent_binding_cache
+            .insert(child_inode_id, latest.clone());
+        Ok(latest)
     }
 
     pub(crate) async fn covering_subtree_tombstone(
@@ -1086,6 +1317,50 @@ impl From<&DirentryBindRecord> for BindingCacheKey {
             bind_delta_index: record.bind_delta_index,
         }
     }
+}
+
+/// An unbind carries the identity of the binding event it revokes, so it
+/// keys the same cache slot as that binding.
+impl From<&DirentryUnbindRecord> for BindingCacheKey {
+    fn from(record: &DirentryUnbindRecord) -> Self {
+        Self {
+            parent_inode_id: record.parent_inode_id,
+            name_key: record.name_key.clone(),
+            child_inode_id: record.child_inode_id,
+            bind_seq: record.bind_seq,
+            bind_delta_index: record.bind_delta_index,
+        }
+    }
+}
+
+/// Cursor state for the merged manifest+tail direntry-bind stream, grouped
+/// by name key across calls.
+struct DirentryBindNameGroupStream {
+    manifest_after_row_key: Option<String>,
+    manifest_exhausted: bool,
+    manifest_candidates: VecDeque<DirentryBindPageCandidate>,
+    tail_candidates: Vec<DirentryBindPageCandidate>,
+    tail_index: usize,
+    pushed_back: Option<DirentryBindPageCandidate>,
+}
+
+impl DirentryBindNameGroupStream {
+    fn new(tail_candidates: Vec<DirentryBindPageCandidate>, manifest_exhausted: bool) -> Self {
+        Self {
+            manifest_after_row_key: None,
+            manifest_exhausted,
+            manifest_candidates: VecDeque::new(),
+            tail_candidates,
+            tail_index: 0,
+            pushed_back: None,
+        }
+    }
+}
+
+/// Every bind row the stream carried for one name key, in row-key order.
+struct DirentryBindNameGroup {
+    name_key: String,
+    rows: Vec<DirentryBindRecord>,
 }
 
 #[derive(Clone)]
