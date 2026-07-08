@@ -256,14 +256,21 @@ pub(super) fn validate_manifest_segment(
         });
     }
 
-    // The builder writes segments in row-key order; verifying once here lets
-    // every scan binary-search this block instead of filtering all rows. An
-    // unsorted segment stays valid — scans fall back to a full filter.
-    let sorted_by_row_key = row_keys.windows(2).all(|pair| pair[0] <= pair[1]);
+    // The format requires segment rows in ascending row-key order (format
+    // spec, "Recovery view"): every scan binary-searches this block, so an
+    // out-of-order segment is malformed, not merely slow.
+    if let Some(pair) = row_keys.windows(2).find(|pair| pair[0] > pair[1]) {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+            object_key: descriptor.object_key.clone(),
+            message: format!(
+                "rows out of row-key order: `{}` follows `{}`",
+                pair[1], pair[0]
+            ),
+        });
+    }
     Ok(DecodedSegmentRowSet {
         rows: collected_rows,
         row_keys,
-        sorted_by_row_key,
     })
 }
 
