@@ -2,25 +2,24 @@
 //! tail, write its tables, and publish it under one checkpoint record.
 
 use super::build::{
-    build_manifest_l0_run_tables, build_manifest_tables, build_manifest_tables_from_rows,
-    debug_assert_manifest_table_segments_do_not_overlap, MetadataTableSegmentation,
+    build_manifest_l0_run_tables, build_manifest_tables,
+    debug_assert_manifest_table_segments_do_not_overlap,
 };
 use super::error::ManifestLoadError;
 use super::load::{
     head_from_manifest, load_namespace_manifest_envelope_if_present,
-    load_verified_manifest_tables_with_cache, validate_direntry_child_bind_index,
-    validate_revision_by_inode_desc_index,
+    load_verified_manifest_tables_with_cache,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::record::{
     deterministic_checkpoint_id, set_checkpoint_record_state, verify_checkpoint_basis,
     write_checkpoint_record, CheckpointRecordWrite,
 };
+#[cfg(test)]
 use super::row::manifest_rows_for_family;
-use super::runs::{
-    flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL,
-    CHECKPOINT_TABLE_FAMILIES,
-};
+use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
+#[cfg(test)]
+use super::runs::{l0_run_count, CHECKPOINT_TABLE_FAMILIES};
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
@@ -65,7 +64,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<CreateCheckpointResponse> {
-    create_checkpoint_with_policy(store, namespace_id, context, MetadataLsmPolicy::default()).await
+    create_checkpoint_with_owner(store, namespace_id, context, None).await
 }
 
 pub(crate) const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
@@ -77,20 +76,10 @@ struct CheckpointBasis {
     manifest_payload_checksum: String,
 }
 
-pub(crate) async fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_checkpoint_with_owner<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
-) -> Result<CreateCheckpointResponse> {
-    create_checkpoint_with_policy_and_owner(store, namespace_id, context, policy, None).await
-}
-
-pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-    policy: MetadataLsmPolicy,
     owner: Option<CheckpointOwner>,
 ) -> Result<CreateCheckpointResponse> {
     // Checkpoint creation pins a manifest version as a first-class record
@@ -147,7 +136,6 @@ pub(crate) async fn create_checkpoint_with_policy_and_owner<S: ObjectStore + ?Si
                             namespace_id,
                             &projection,
                             &context.writer_version,
-                            policy,
                             manifest_id,
                             manifest_object_id,
                         )
@@ -485,51 +473,31 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     namespace_id: &NamespaceId,
     projection: &CheckpointProjection<'_, S>,
     writer_version: &str,
-    policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
     manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope> {
     let head_seq = projection.head.seq;
     let previous_manifest = projection.manifest_tables.manifest();
 
-    let (base_seq, metadata_files) = if is_bootstrap_seed_manifest(&previous_manifest.payload) {
-        let run_tables = build_base_manifest_tables_from_projection(
-            store,
-            namespace_id,
-            head_seq,
-            projection,
-            policy.max_rows_per_segment,
-        )
-        .await?;
-        debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
-        (head_seq, flatten_manifest_tables(run_tables))
-    } else if l0_run_count(&previous_manifest.payload) < policy.max_l0_runs {
-        let mut metadata_files = previous_manifest.payload.metadata_files.clone();
-        if previous_manifest.payload.head_seq < head_seq {
-            metadata_files.extend(flatten_manifest_tables(
-                build_manifest_l0_run_tables(
-                    store,
-                    namespace_id,
-                    head_seq,
-                    previous_manifest.payload.head_seq,
-                    &projection.tail_state,
-                )
-                .await?,
-            ));
-        }
-        (previous_manifest.payload.base_seq, metadata_files)
-    } else {
-        let run_tables = build_base_manifest_tables_from_projection(
-            store,
-            namespace_id,
-            head_seq,
-            projection,
-            policy.max_rows_per_segment,
-        )
-        .await?;
-        debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
-        (head_seq, flatten_manifest_tables(run_tables))
-    };
+    // Checkpoint publication is manifest-only: every prior run is
+    // referenced unchanged and the WAL delta lands as one new L0 run, so
+    // the cost follows the delta, never the namespace. Folding L0 runs
+    // back into the base is reorganization's job (`reorganize.rs`), off
+    // this path.
+    let base_seq = previous_manifest.payload.base_seq;
+    let mut metadata_files = previous_manifest.payload.metadata_files.clone();
+    if previous_manifest.payload.head_seq < head_seq {
+        metadata_files.extend(flatten_manifest_tables(
+            build_manifest_l0_run_tables(
+                store,
+                namespace_id,
+                head_seq,
+                previous_manifest.payload.head_seq,
+                &projection.tail_state,
+            )
+            .await?,
+        ));
+    }
 
     NamespaceManifestEnvelope::from_payload(
         writer_version,
@@ -741,94 +709,19 @@ pub(super) fn drop_rows_below_retention_floor(
             _ => true,
         });
     }
-    Ok(())
-}
 
-async fn build_base_manifest_tables_from_projection<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    run_seq: ChangeSeq,
-    projection: &CheckpointProjection<'_, S>,
-    max_rows_per_segment: usize,
-) -> Result<Vec<super::runs::MetadataTableManifest>> {
-    let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
-    for family in CHECKPOINT_TABLE_FAMILIES {
-        let mut rows = projection
-            .manifest_tables
-            .scan_prefix(family, "")
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-        rows.extend(manifest_rows_for_family(&projection.tail_state, family));
-        if family == MetadataTableFamily::CommitReceipts {
-            // The idempotency horizon is the retention floor: a commit
-            // retried from below it re-bootstraps like any sub-floor cursor,
-            // so its receipt no longer needs to be carried forward.
-            let retention_floor_seq = projection.floor_seq;
-            rows.retain(|row| match row {
-                MetadataRow::CommitReceipt { committed_seq, .. } => {
-                    *committed_seq >= retention_floor_seq
-                }
-                _ => true,
-            });
-        }
-        rows.sort_by_key(|row| row.row_key_for_family(family));
-        rows_by_family.insert(family, rows);
+    // The idempotency horizon is the retention floor: a commit retried from
+    // below it re-bootstraps like any sub-floor cursor, so its receipt no
+    // longer needs to be carried forward.
+    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::CommitReceipts) {
+        rows.retain(|row| match row {
+            MetadataRow::CommitReceipt { committed_seq, .. } => {
+                *committed_seq >= retention_floor_seq
+            }
+            _ => true,
+        });
     }
-
-    // The base rebuild is the one production point that holds every row of
-    // every family, so cross-check the index families against their
-    // canonical tables before compacting them forward (format spec,
-    // "Manifest publication and checkpoint verification").
-    let source_manifest_key = metadata_manifest_object(
-        namespace_id.as_str(),
-        &projection
-            .manifest_tables
-            .manifest()
-            .payload
-            .manifest_object_id,
-    );
-    let index_error =
-        |error| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error));
-    validate_direntry_child_bind_index(
-        &source_manifest_key,
-        rows_by_family
-            .get(&MetadataTableFamily::DirentryBinds)
-            .cloned()
-            .unwrap_or_default(),
-        rows_by_family
-            .get(&MetadataTableFamily::DirentryChildBinds)
-            .cloned()
-            .unwrap_or_default(),
-    )
-    .map_err(index_error)?;
-    validate_revision_by_inode_desc_index(
-        &source_manifest_key,
-        rows_by_family
-            .get(&MetadataTableFamily::Revisions)
-            .cloned()
-            .unwrap_or_default(),
-        rows_by_family
-            .get(&MetadataTableFamily::RevisionsByInodeDesc)
-            .cloned()
-            .unwrap_or_default(),
-    )
-    .map_err(index_error)?;
-
-    drop_rows_below_retention_floor(&mut rows_by_family, projection.floor_seq)?;
-
-    build_manifest_tables_from_rows(
-        store,
-        namespace_id,
-        run_seq,
-        CHECKPOINT_BASE_RUN_LEVEL,
-        |family| rows_by_family.remove(&family).unwrap_or_default(),
-        MetadataTableSegmentation::Base {
-            max_rows_per_segment,
-        },
-    )
-    .await
+    Ok(())
 }
 
 #[cfg(test)]
@@ -847,6 +740,7 @@ pub(super) struct ManifestMetadataSource<'a> {
     skip_all,
     fields(phase = "project_manifest")
 )]
+#[cfg(test)]
 pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -955,6 +849,7 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     })
 }
 
+#[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
     payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0) && payload.fork.is_none()
 }

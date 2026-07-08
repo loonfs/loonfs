@@ -796,6 +796,24 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
+    /// Runs at most one metadata reorganization unit: folds one family
+    /// group's L0 delta rows into new base segments and publishes a manifest
+    /// swapping that group's references. Checkpoints only append L0 runs, so
+    /// calling this from maintenance is what keeps read fan-out bounded.
+    /// Repeat until the report says `NotNeeded`; every call re-reads durable
+    /// state, so interrupted reorganizations resume from the live manifest.
+    pub async fn reorganize_metadata(
+        &self,
+    ) -> CoreResult<crate::checkpoint::MetadataReorganizeReport> {
+        crate::checkpoint::reorganize_metadata_step(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+            crate::checkpoint::MetadataLsmPolicy::default(),
+        )
+        .await
+    }
+
     /// Advances the retention floor when a verified checkpoint makes it safe.
     pub async fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
         crate::checkpoint::advance_retention_floor(

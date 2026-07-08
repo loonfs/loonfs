@@ -85,6 +85,7 @@ pub mod publish {
 #[cfg(any(test, feature = "inspection"))]
 pub mod inspection;
 
+pub use checkpoint::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub use context::MutationContext;
 #[doc(hidden)]
 pub use engine::RuntimeReadContext;

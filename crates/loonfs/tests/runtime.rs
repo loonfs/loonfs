@@ -2440,7 +2440,9 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
+    // Checkpoints only append: the base marker stays the seed's until
+    // reorganization folds the delta runs.
+    assert_eq!(manifest.payload.base_seq, ChangeSeq(0));
     let l0_files = manifest
         .payload
         .metadata_files
@@ -2450,7 +2452,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     assert!(!l0_files.is_empty());
     assert!(l0_files
         .iter()
-        .all(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
+        .any(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
 }
 
 #[test]
