@@ -5,8 +5,8 @@
 use crate::background::BackgroundWork;
 use crate::cache::{CommitEngineCache, RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::commit_window::{
-    combine_content_gates, commit_window_delay, pad_missing_results, CommitWindows, WindowEntry,
-    WindowRole,
+    attribute_window_gate_failure, combine_member_content_gates, commit_window_delay,
+    pad_missing_results, CommitWindows, WindowEntry, WindowRole,
 };
 use crate::config::{validate_config, FsConfig};
 use crate::content_tokens::ContentAdmission;
@@ -1018,9 +1018,9 @@ impl FsCore {
                 commit_window_delay(std::time::Duration::from_millis(window_ms)).await;
                 let entries = guard.take_entries();
                 let mut combined = Vec::new();
-                let mut gates = Vec::new();
+                let mut member_gates = Vec::new();
                 let mut routes = Vec::new();
-                for entry in entries {
+                for (member_index, entry) in entries.into_iter().enumerate() {
                     let WindowEntry {
                         candidates,
                         content_gate,
@@ -1029,19 +1029,22 @@ impl FsCore {
                     routes.push((candidates.len(), result_sender));
                     combined.extend(candidates);
                     if let Some(gate) = content_gate {
-                        gates.push(gate);
+                        member_gates.push((member_index, gate));
                     }
                 }
+                let (combined_gate, gate_failures) =
+                    combine_member_content_gates(member_gates, routes.len());
                 let mut results = self
-                    .publish_namespace_mutations_batch_gated(
-                        namespace_id,
-                        combined,
-                        combine_content_gates(gates),
-                    )
+                    .publish_namespace_mutations_batch_gated(namespace_id, combined, combined_gate)
                     .await
                     .into_iter();
-                for (expected, sender) in routes {
+                let failures = gate_failures.take();
+                for (member_index, (expected, sender)) in routes.into_iter().enumerate() {
                     let slice: Vec<_> = results.by_ref().take(expected).collect();
+                    let slice = attribute_window_gate_failure(
+                        slice,
+                        failures.get(member_index).and_then(Option::as_ref),
+                    );
                     let _ = sender.send(pad_missing_results(slice, expected));
                 }
                 result_receiver
