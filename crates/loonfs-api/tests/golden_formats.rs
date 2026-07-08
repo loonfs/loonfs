@@ -862,3 +862,153 @@ fn wal_delta_wire_tags_match_spec_names() {
         assert_eq!(value["kind"], expected_tag, "in {value}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Metadata SST blocks
+// ---------------------------------------------------------------------------
+
+fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
+    use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+    // A tiny target block size forces several data blocks, so the fixture
+    // pins block splitting, restart points, and the index shape at once.
+    let mut builder = SegmentBlocksBuilder::new(256);
+    let rows = [
+        MetadataRow::CommitReceipt {
+            commit_id: commit_id(),
+            semantic_commit_fingerprint: "fp:golden".to_owned(),
+            committed_seq: ChangeSeq(9),
+            message: None,
+        },
+        MetadataRow::DirentryBind {
+            parent_inode_id: InodeId(1),
+            name_key: name_key("docs"),
+            display_name: "docs".to_owned(),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(3),
+            bind_delta_index: 0,
+        },
+        MetadataRow::DirentryBind {
+            parent_inode_id: InodeId(1),
+            name_key: name_key("docs-archive"),
+            display_name: "docs-archive".to_owned(),
+            child_inode_id: InodeId(5),
+            bind_seq: ChangeSeq(6),
+            bind_delta_index: 0,
+        },
+        MetadataRow::DirentryUnbind {
+            parent_inode_id: InodeId(1),
+            name_key: name_key("docs-archive"),
+            child_inode_id: InodeId(5),
+            bind_seq: ChangeSeq(6),
+            bind_delta_index: 0,
+            unbind_seq: ChangeSeq(8),
+            unbind_delta_index: 0,
+        },
+        MetadataRow::Inode {
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Directory,
+            created_seq: ChangeSeq(1),
+        },
+        MetadataRow::Inode {
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            created_seq: ChangeSeq(3),
+        },
+        MetadataRow::Revision {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(1),
+            committed_seq: ChangeSeq(3),
+            revision_delta_index: 0,
+            content_ref: sample_content_ref(),
+        },
+        MetadataRow::Tombstone {
+            root_inode_id: InodeId(5),
+            tombstone_seq: ChangeSeq(8),
+            tombstone_delta_index: 0,
+        },
+    ];
+    for row in &rows {
+        let key = row.row_key();
+        builder.push(&key, &key, row).expect("push sample row");
+    }
+    builder.finish().expect("finish sample segment")
+}
+
+fn segment_section<'a>(
+    bytes: &'a [u8],
+    handle: &loonfs_api::wire::sst_blocks::BlockHandle,
+) -> &'a [u8] {
+    &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
+}
+
+#[test]
+fn sst_block_data_payload_matches_golden_bytes() {
+    use loonfs_api::wire::sst_blocks::decode_index_block;
+    let built = sample_segment_blocks();
+    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
+        .expect("decode index");
+    assert!(index.len() > 1, "sample should span several blocks");
+    // Compare the decompressed block payload: zstd frames may differ across
+    // zstd versions, the entry encoding (which the format defines) may not.
+    assert_matches_golden(
+        "sst_block_data.v1.bin",
+        &unzstd(segment_section(&built.bytes, &index[0].block)),
+    );
+}
+
+#[test]
+fn sst_block_data_golden_decodes_to_sample_rows() {
+    use loonfs_api::wire::sst_blocks::{decode_data_block, BlockHandle};
+    let payload = read_golden("sst_block_data.v1.bin");
+    let stored = rezstd(&payload);
+    let handle = BlockHandle {
+        offset: 0,
+        stored_len: stored.len() as u32,
+        decoded_len: payload.len() as u32,
+        crc32c: crc32c::crc32c(&stored),
+    };
+    let block = decode_data_block(&stored, &handle).expect("decode golden data block");
+    assert!(!block.rows.is_empty());
+    assert_eq!(block.row_keys[0], block.rows[0].row_key());
+}
+
+#[test]
+fn sst_block_filter_matches_golden_bytes_and_answers() {
+    use loonfs_api::wire::sst_blocks::decode_filter_block;
+    let built = sample_segment_blocks();
+    // The filter section is stored raw, so its bytes are pinned directly.
+    let stored = segment_section(&built.bytes, &built.filter);
+    assert_matches_golden("sst_block_filter.v1.bin", stored);
+    let filter = decode_filter_block(stored, &built.filter).expect("decode filter");
+    assert!(filter.may_contain(
+        &MetadataRow::Inode {
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Directory,
+            created_seq: ChangeSeq(1),
+        }
+        .row_key()
+    ));
+    assert!(!filter.may_contain("inode-99999999999999999999"));
+}
+
+#[test]
+fn sst_block_index_entry_schema_matches_golden_bytes() {
+    use loonfs_api::wire::sst_blocks::{BlockHandle, SegmentIndexEntry};
+    // Fixed handle values: this fixture pins the index entry schema (field
+    // names, order, integer widths) without coupling to zstd output.
+    let entries = vec![SegmentIndexEntry {
+        last_key: "inode-00000000000000000042".to_owned(),
+        block: BlockHandle {
+            offset: 7,
+            stored_len: 512,
+            decoded_len: 4096,
+            crc32c: 0xdead_beef,
+        },
+    }];
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&entries, &mut encoded).expect("encode index entries");
+    assert_matches_golden("sst_block_index_entry.v1.cbor", &encoded);
+    let decoded: Vec<SegmentIndexEntry> =
+        ciborium::de::from_reader(encoded.as_slice()).expect("decode index entries");
+    assert_eq!(decoded, entries);
+}

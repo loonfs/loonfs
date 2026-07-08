@@ -22,6 +22,7 @@ mod manifest;
 mod name_policy;
 mod pagination;
 mod path;
+mod sst_blocks;
 pub mod v0;
 mod wal;
 
@@ -32,6 +33,10 @@ pub mod wire {
 
     pub mod control {
         pub use crate::control::*;
+    }
+
+    pub mod sst_blocks {
+        pub use crate::sst_blocks::*;
     }
 
     pub mod wal {
