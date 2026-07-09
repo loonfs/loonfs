@@ -94,7 +94,6 @@ impl FsCore {
         ));
         let wal_tail_projection_cache =
             Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-                enabled: config.runtime_cache.wal_tail_projection_cache_enabled,
                 max_entries: config.runtime_cache.max_cached_namespaces,
                 max_rows: config.runtime_cache.max_cached_wal_tail_projection_rows,
                 max_decoded_bytes: config

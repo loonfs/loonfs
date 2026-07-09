@@ -9,25 +9,19 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
 /// Default decoded-byte budget for cached metadata table blocks. The byte
-/// budget is the primary limit: one wide directory's segment working set
-/// must fit, or warm listings re-fetch segments superlinearly.
+/// budget is the only limit — one wide directory's segment working set must
+/// fit, or warm listings re-fetch segments superlinearly — and zero
+/// disables the cache.
 pub const DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES: usize = 256 * 1024 * 1024;
-/// Secondary block-count bound behind the byte budget; it only binds under
-/// pathological many-tiny-block shapes.
-pub const DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataTableCacheConfig {
-    pub enabled: bool,
-    pub max_blocks: usize,
     pub max_decoded_bytes: usize,
 }
 
 impl Default for MetadataTableCacheConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            max_blocks: DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
             max_decoded_bytes: DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES,
         }
     }
@@ -252,7 +246,7 @@ impl MetadataTableCache {
     }
 
     pub(super) fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
-        if !self.config.enabled || self.config.max_blocks == 0 {
+        if self.config.max_decoded_bytes == 0 {
             return None;
         }
         let mut inner = self
@@ -269,7 +263,7 @@ impl MetadataTableCache {
     }
 
     pub(super) fn insert(&self, key: MetadataTableCacheKey, block: DecodedMetadataTableBlock) {
-        if !self.config.enabled || self.config.max_blocks == 0 {
+        if self.config.max_decoded_bytes == 0 {
             return;
         }
         let mut inner = self
@@ -286,9 +280,7 @@ impl MetadataTableCache {
             .saturating_add(block.decoded_byte_len());
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
-        while inner.entries.len() > self.config.max_blocks
-            || inner.decoded_byte_len > self.config.max_decoded_bytes
-        {
+        while inner.decoded_byte_len > self.config.max_decoded_bytes {
             let Some(evicted) = inner.order.pop_front() else {
                 break;
             };
@@ -309,23 +301,18 @@ impl MetadataTableCacheInner {
     }
 }
 
+/// Default bounds for WAL-tail projections, shared by the read-side
+/// projection cache and the publish-side tail reuse check.
+pub const DEFAULT_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
+pub const DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 1024 * 1024;
+
+/// Zero entries disables the cache; the row and byte limits bound what one
+/// entry may hold and what the cache may retain in total.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalTailProjectionCacheConfig {
-    pub enabled: bool,
     pub max_entries: usize,
     pub max_rows: usize,
-    pub max_decoded_bytes: Option<usize>,
-}
-
-impl Default for WalTailProjectionCacheConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_entries: 64,
-            max_rows: 1_000_000,
-            max_decoded_bytes: Some(256 * 1024 * 1024),
-        }
-    }
+    pub max_decoded_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -435,7 +422,7 @@ impl WalTailProjectionCache {
     }
 
     pub fn get(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<MetadataState>> {
-        if !self.config.enabled || self.config.max_entries == 0 {
+        if self.config.max_entries == 0 {
             return None;
         }
         let mut inner = self
@@ -452,18 +439,12 @@ impl WalTailProjectionCache {
     }
 
     pub fn insert(&self, key: WalTailProjectionCacheKey, rows: Arc<MetadataState>) {
-        if !self.config.enabled || self.config.max_entries == 0 {
+        if self.config.max_entries == 0 {
             return;
         }
         let cached = CachedWalTailProjection::new(rows);
         let (row_count, decoded_bytes) = cached.weight();
-        if row_count > self.config.max_rows
-            || self
-                .config
-                .max_decoded_bytes
-                .map(|max| decoded_bytes > max)
-                .unwrap_or(false)
-        {
+        if row_count > self.config.max_rows || decoded_bytes > self.config.max_decoded_bytes {
             self.stats.uncacheable_count.fetch_add(1, Ordering::SeqCst);
             self.stats
                 .uncacheable_rows
@@ -490,11 +471,7 @@ impl WalTailProjectionCache {
 
         while inner.entries.len() > self.config.max_entries
             || inner.cached_rows > self.config.max_rows
-            || self
-                .config
-                .max_decoded_bytes
-                .map(|max| inner.cached_decoded_bytes > max)
-                .unwrap_or(false)
+            || inner.cached_decoded_bytes > self.config.max_decoded_bytes
         {
             let Some(evicted) = inner.order.pop_front() else {
                 break;
@@ -574,23 +551,17 @@ mod tests {
     }
 
     #[test]
-    fn default_config_budgets_bytes_as_the_primary_limit() {
+    fn default_config_budgets_bytes() {
         let config = MetadataTableCacheConfig::default();
         assert_eq!(
             config.max_decoded_bytes,
             super::DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES
         );
-        assert_eq!(
-            config.max_blocks,
-            super::DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS
-        );
     }
 
     #[test]
-    fn byte_budget_evicts_before_the_block_bound() {
+    fn byte_budget_evicts_the_oldest_block() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
-            enabled: true,
-            max_blocks: 100,
             max_decoded_bytes: 1000,
         });
         cache.insert(key("a"), block(600));
@@ -606,8 +577,6 @@ mod tests {
     #[test]
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig {
-            enabled: true,
-            max_blocks: 100,
             max_decoded_bytes: 1000,
         });
         cache.insert(key("a"), block(600));
