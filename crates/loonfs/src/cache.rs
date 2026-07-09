@@ -61,6 +61,18 @@ impl CommitEngineCache {
     }
 
     fn invalidate(&mut self, namespace_id: &NamespaceId) {
+        // The engine survives invalidation: its acquired epoch and fencing
+        // are session state ("a fenced session stays fenced"), and only its
+        // tail projection goes stale. A held lock means a publish is in
+        // flight; that publish revalidates against the live head itself.
+        if let Some(engine) = self.entries.get(namespace_id) {
+            if let Ok(mut engine) = engine.try_lock() {
+                engine.invalidate();
+            }
+        }
+    }
+
+    fn remove(&mut self, namespace_id: &NamespaceId) {
         self.remove_entry(namespace_id);
         self.order.retain(|candidate| candidate != namespace_id);
     }
@@ -481,6 +493,53 @@ impl FsCore {
     pub(crate) fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
         self.invalidate_namespace_read_cache(namespace_id);
         self.inner.commit_engines().invalidate(namespace_id);
+    }
+
+    /// Namespace-terminal invalidation: the commit engine is removed rather
+    /// than kept, because the namespace itself is gone.
+    pub(crate) fn invalidate_namespace_cache_for_delete(&self, namespace_id: &NamespaceId) {
+        self.invalidate_namespace_read_cache(namespace_id);
+        self.inner.commit_engines().remove(namespace_id);
+    }
+
+    /// Seeds the read caches with the state one landed publish produced:
+    /// the head anchor and the projected WAL tail. Safe by construction —
+    /// the anchor is etag-revalidated against the store on every read, so a
+    /// wrong seed degrades to today's reload instead of a wrong read.
+    pub(crate) fn seed_namespace_read_cache(
+        &self,
+        namespace_id: &NamespaceId,
+        state: loonfs_core::publish::ResultingReadState,
+    ) {
+        if !self.control_cache_enabled() {
+            return;
+        }
+        let max_cached_namespaces = self.inner.config.runtime_cache.max_cached_namespaces;
+        let head_seq = state.head.seq;
+        self.inner.control_cache().insert_namespace_head(
+            namespace_id,
+            CachedNamespaceAnchor {
+                head: CachedControl {
+                    identity: ControlObjectIdentity {
+                        etag: state.head_etag.clone(),
+                    },
+                    state: state.head,
+                },
+                manifest_id: state.manifest_id,
+                manifest_object_id: state.manifest_object_id,
+            },
+            max_cached_namespaces,
+        );
+        self.inner.wal_tail_projection_cache.insert(
+            loonfs_core::cache::WalTailProjectionCacheKey {
+                namespace_id: namespace_id.clone(),
+                manifest_id: state.manifest_id,
+                manifest_head_seq: state.manifest_head_seq,
+                head_seq,
+                head_etag: state.head_etag,
+            },
+            state.tail_rows,
+        );
     }
 
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {

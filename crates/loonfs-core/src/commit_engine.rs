@@ -3,6 +3,7 @@ use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIden
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, MetadataViewError, Result};
+use crate::metadata::MetadataState;
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PathMutationIntent};
@@ -11,8 +12,8 @@ use crate::protocol::{
 };
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::{CommitId, NamespaceId};
+use loonfs_api::wire::control::{AcquiredWriter, HeadState};
+use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -66,6 +67,21 @@ pub struct NamespaceCommitEnginePublishResult {
     /// WAL tail length observed by this publish, for opportunistic
     /// maintenance scheduling. Zero when no projection was loaded.
     pub wal_tail_segments: u64,
+    /// The read state this publish produced, present when the head CAS
+    /// landed unambiguously: callers can seed read caches with it instead
+    /// of invalidating them and rebuilding from the store.
+    pub resulting_read_state: Option<ResultingReadState>,
+}
+
+/// A read anchor plus the projected WAL tail as of one landed publish.
+#[derive(Debug, Clone)]
+pub struct ResultingReadState {
+    pub head: HeadState,
+    pub head_etag: String,
+    pub manifest_id: ManifestId,
+    pub manifest_object_id: ManifestObjectId,
+    pub manifest_head_seq: ChangeSeq,
+    pub tail_rows: Arc<MetadataState>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +170,7 @@ impl NamespaceCommitEngine {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
                 wal_tail_segments: 0,
+                resulting_read_state: None,
             };
         }
 
@@ -162,6 +179,7 @@ impl NamespaceCommitEngine {
             return NamespaceCommitEnginePublishResult {
                 results: repeated_error(candidate_count, CoreError::WriterFenced(message.clone())),
                 wal_tail_segments: 0,
+                resulting_read_state: None,
             };
         }
         let acquired_writer = match &self.acquired_writer {
@@ -175,6 +193,7 @@ impl NamespaceCommitEngine {
                     return NamespaceCommitEnginePublishResult {
                         results: repeated_error(candidate_count, CoreError::WriterEpoch(error)),
                         wal_tail_segments: 0,
+                        resulting_read_state: None,
                     };
                 }
             },
@@ -194,6 +213,7 @@ impl NamespaceCommitEngine {
                             CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)),
                         ),
                         wal_tail_segments: 0,
+                        resulting_read_state: None,
                     };
                 }
             },
@@ -220,6 +240,7 @@ impl NamespaceCommitEngine {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
                     wal_tail_segments: 0,
+                    resulting_read_state: None,
                 };
             }
         };
@@ -236,6 +257,7 @@ impl NamespaceCommitEngine {
             return NamespaceCommitEnginePublishResult {
                 results: repeated_error(candidate_count, CoreError::from(error)),
                 wal_tail_segments,
+                resulting_read_state: None,
             };
         }
 
@@ -249,11 +271,28 @@ impl NamespaceCommitEngine {
             content_gate,
         )
         .await;
+        let resulting_head = published.resulting_head.clone();
         let wal_tail_segments =
             self.update_publish_tail_projection(projection, &published, tail_options);
+        // Seedable only when the CAS landed unambiguously and the updated
+        // projection survived (it carries the post-publish tail and etag).
+        let resulting_read_state = match (resulting_head, self.publish_tail_projection.as_ref()) {
+            (Some(head), Some(projection)) if projection.head_seq == head.seq => {
+                Some(ResultingReadState {
+                    head,
+                    head_etag: projection.head_etag.clone(),
+                    manifest_id: projection.manifest_id,
+                    manifest_object_id: projection.manifest_object_id.clone(),
+                    manifest_head_seq: projection.manifest_head_seq,
+                    tail_rows: Arc::new(projection.tail_state.clone()),
+                })
+            }
+            _ => None,
+        };
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail_segments,
+            resulting_read_state,
         }
     }
 
