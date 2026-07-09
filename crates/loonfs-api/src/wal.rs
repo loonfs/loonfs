@@ -176,11 +176,13 @@ pub enum WalCodecError {
     StalePayloadChecksum { checksum: String, actual: String },
 }
 
-pub fn wal_payload_checksum(payload: &WalSegmentPayload) -> Result<String, WalCodecError> {
+pub(crate) fn wal_payload_checksum(payload: &WalSegmentPayload) -> Result<String, WalCodecError> {
     Ok(sha256_digest(&encode_wal_payload_cbor(payload)?))
 }
 
-pub fn encode_wal_payload_cbor(payload: &WalSegmentPayload) -> Result<Vec<u8>, WalCodecError> {
+pub(crate) fn encode_wal_payload_cbor(
+    payload: &WalSegmentPayload,
+) -> Result<Vec<u8>, WalCodecError> {
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| WalCodecError::PayloadEncode(err.to_string()))?;

@@ -374,7 +374,7 @@ pub enum NamespaceManifestCodecError {
     StalePayloadChecksum { checksum: String, actual: String },
 }
 
-pub fn namespace_manifest_payload_checksum(
+fn namespace_manifest_payload_checksum(
     payload: &NamespaceManifestPayload,
 ) -> Result<String, NamespaceManifestCodecError> {
     let bytes = serde_json::to_vec(payload)

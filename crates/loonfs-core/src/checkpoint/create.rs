@@ -507,9 +507,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
     })
 }
 
-/// Unnamed checkpoint records are maintenance bookkeeping; a manifest keeps
-/// only the newest few so correctly-operated maintenance cannot pin storage
-/// forever. Named records persist until explicitly removed, and fork sources
 /// Drops rows that no retained sequence can observe (format spec,
 /// "Compaction"). Conservative subset: superseded revisions, superseded or
 /// unbound bindings, and spent unbind markers at or below the retention

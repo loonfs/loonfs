@@ -48,13 +48,6 @@ impl ObjectStore for AwsS3Store {
         self.inner.head(key).await
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head_with_checksum(key).await
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.inner.get_with_metadata(key).await
     }

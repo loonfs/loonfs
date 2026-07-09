@@ -189,7 +189,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     let decoded = match table_cache {
         Some(cache) => {
             let cache_key = MetadataTableCacheKey {
-                table_digest: manifest_key.clone(),
+                identity: manifest_key.clone(),
                 block_kind: MetadataTableBlockKind::Manifest,
                 block_offset: 0,
             };
@@ -633,7 +633,7 @@ fn segment_block_cache_key(
     block_offset: u64,
 ) -> MetadataTableCacheKey {
     MetadataTableCacheKey {
-        table_digest: descriptor.payload_checksum.clone(),
+        identity: descriptor.payload_checksum.clone(),
         block_kind,
         block_offset,
     }
@@ -902,7 +902,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     .await?;
 
     // Everything the winner published (or this call fetched) is resolvable
-    // now; blocks a read-only winner could not publish are fetched alone.
+    // now; blocks that lost a cache race are fetched alone.
     for (position, entry) in entries.iter().enumerate() {
         if blocks[position].is_some() {
             continue;

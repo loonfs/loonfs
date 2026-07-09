@@ -1449,8 +1449,13 @@ mod tests {
     fn explicit_commit_facade_exports_constructor_types() {
         let display_name = DisplayName::parse("Report.txt").expect("valid display name");
         let name_key = NameKey::for_display_name(NamePolicy::default(), &display_name);
-        let precondition =
-            CommitPrecondition::binding_is(InodeId(1), name_key, InodeId(2), ChangeSeq(3), 4);
+        let precondition = CommitPrecondition::BindingIs {
+            parent_inode_id: InodeId(1),
+            name_key,
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(3),
+            bind_delta_index: 4,
+        };
 
         let request = CommitRequest {
             commit_id: CommitId::generate(),
