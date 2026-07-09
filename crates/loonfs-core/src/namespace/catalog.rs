@@ -10,17 +10,26 @@ use thiserror::Error;
 // Both variants share ControlObjectLoadError; conversion stays explicit so
 // `?` cannot pick a variant silently.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(crate) enum NamespaceCatalogLoadError {
+pub enum NamespaceCatalogLoadError {
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
     LoadContentStoreDescriptor(ControlObjectLoadError),
 }
 
+/// The namespace's spec-immutable identity pair: its config and the
+/// content-store binding it was created with. Loaded once and reusable for
+/// the life of a process; neither object can change after creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VerifiedNamespaceCatalogEntry {
+pub struct VerifiedNamespaceCatalogEntry {
     pub(crate) namespace_config: NamespaceConfigState,
     pub(crate) content_store_id: ContentStoreId,
+}
+
+impl VerifiedNamespaceCatalogEntry {
+    pub fn content_store_id(&self) -> &ContentStoreId {
+        &self.content_store_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +65,7 @@ pub(crate) async fn load_namespace_descriptor<S: ObjectStore + ?Sized>(
     Ok(loaded_descriptor.envelope.state)
 }
 
-pub(crate) async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
+pub async fn load_namespace_catalog_entry<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<VerifiedNamespaceCatalogEntry, NamespaceCatalogLoadError> {

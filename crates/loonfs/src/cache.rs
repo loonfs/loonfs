@@ -13,8 +13,9 @@ use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheStats, WalTailProjectionCacheStats,
 };
 use loonfs_core::control::{
-    load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
-    LoadedMetadataRootControl,
+    load_namespace_catalog_entry, load_namespace_read_anchor, ControlObjectIdentity,
+    ControlObjectLoadError, LoadedHeadControl, LoadedMetadataRootControl,
+    VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::publish::NamespaceCommitEngine;
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
@@ -36,14 +37,18 @@ impl CommitEngineCache {
         namespace_id: &NamespaceId,
         max_cached_namespaces: usize,
         table_cache: Arc<MetadataTableCache>,
+        catalog: Option<VerifiedNamespaceCatalogEntry>,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         if let Some(engine) = self.entries.get(namespace_id).cloned() {
             self.touch(namespace_id);
             return engine;
         }
-        let engine = Arc::new(AsyncMutex::new(
-            NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache),
-        ));
+        let mut engine =
+            NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache);
+        if let Some(catalog) = catalog {
+            engine = engine.with_catalog_entry(catalog);
+        }
+        let engine = Arc::new(AsyncMutex::new(engine));
         self.entries.insert(namespace_id.clone(), engine.clone());
         self.touch(namespace_id);
         while self.entries.len() > max_cached_namespaces {
@@ -85,6 +90,9 @@ pub(crate) struct RuntimeControlCache {
 #[derive(Debug, Default)]
 struct NamespaceControlCacheEntry {
     head: Option<CachedNamespaceAnchor>,
+    /// The namespace's spec-immutable catalog pair (config plus content-store
+    /// binding): loaded once, never revalidated.
+    catalog: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,10 +220,32 @@ impl RuntimeControlCache {
             .head = Some(head);
     }
 
+    fn catalog(&mut self, namespace_id: &NamespaceId) -> Option<VerifiedNamespaceCatalogEntry> {
+        let catalog = self.namespaces.get(namespace_id)?.catalog.clone()?;
+        self.touch_namespace(namespace_id);
+        Some(catalog)
+    }
+
+    fn insert_catalog(
+        &mut self,
+        namespace_id: &NamespaceId,
+        catalog: VerifiedNamespaceCatalogEntry,
+        max_cached_namespaces: usize,
+    ) {
+        if max_cached_namespaces == 0 {
+            return;
+        }
+        self.namespace_entry(namespace_id, max_cached_namespaces)
+            .catalog = Some(catalog);
+    }
+
     fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
-        self.namespaces.remove(namespace_id);
-        self.namespace_order
-            .retain(|candidate| candidate != namespace_id);
+        // The head anchor goes stale on every mutation, but the catalog pair
+        // is immutable for the namespace's lifetime (a deleted namespace id
+        // never rebinds), so it survives invalidation.
+        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
+            entry.head = None;
+        }
     }
 
     fn invalidate_namespace_head(&mut self, namespace_id: &NamespaceId) {
@@ -388,29 +418,62 @@ impl FsCore {
         namespace_id: &NamespaceId,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         let cache_config = &self.inner.config.runtime_cache;
+        let catalog = self.inner.control_cache().catalog(namespace_id);
         self.inner.commit_engines().get_or_insert(
             namespace_id,
             cache_config.max_cached_namespaces,
             Arc::clone(&self.inner.metadata_table_cache),
+            catalog,
         )
     }
 
-    pub(crate) fn runtime_read_context(
+    pub(crate) async fn runtime_read_context(
         &self,
+        namespace_id: &NamespaceId,
         anchor: &CachedNamespaceAnchor,
-    ) -> RuntimeReadContext {
+    ) -> Result<RuntimeReadContext> {
         let cache_config = &self.inner.config.runtime_cache;
         let tail_cache = cache_config
             .wal_tail_projection_cache_enabled
             .then(|| Arc::clone(&self.inner.wal_tail_projection_cache));
-        RuntimeReadContext::pinned_head(
+        let catalog = self.load_namespace_catalog_cached(namespace_id).await?;
+        Ok(RuntimeReadContext::pinned_head(
             anchor.head.state.clone(),
             anchor.head.identity.etag.clone(),
             anchor.manifest_id,
             anchor.manifest_object_id.clone(),
             Some(Arc::clone(&self.inner.metadata_table_cache)),
             tail_cache,
-        )
+            catalog,
+        ))
+    }
+
+    /// Returns the namespace's immutable catalog pair through the control
+    /// cache, loading it once per cached namespace. With the control cache
+    /// disabled this returns `None` and view loads read it per operation.
+    pub(crate) async fn load_namespace_catalog_cached(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Option<VerifiedNamespaceCatalogEntry>> {
+        if !self.control_cache_enabled() {
+            return Ok(None);
+        }
+        if let Some(catalog) = self.inner.control_cache().catalog(namespace_id) {
+            return Ok(Some(catalog));
+        }
+        let loaded = load_namespace_catalog_entry(self.store(), namespace_id)
+            .await
+            .map_err(|error| {
+                RuntimeError::Core(CoreError::MetadataProjection(
+                    MetadataProjectionLoadError::from(error),
+                ))
+            })?;
+        self.inner.control_cache().insert_catalog(
+            namespace_id,
+            loaded.clone(),
+            self.inner.config.runtime_cache.max_cached_namespaces,
+        );
+        Ok(Some(loaded))
     }
 
     #[tracing::instrument(

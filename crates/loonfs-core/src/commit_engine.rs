@@ -2,7 +2,8 @@ use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
-use crate::error::{CoreError, ErrorCode, MetadataViewError, Result};
+use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError, MetadataViewError, Result};
+use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::planner::plan_path_mutation_against_publish_view;
 use crate::path::write::{
@@ -111,6 +112,9 @@ pub struct NamespaceCommitEngine {
     /// content-addressed by segment digest, so cached entries can never
     /// serve stale state; freshness stays enforced by the head etag check.
     table_cache: Option<Arc<MetadataTableCache>>,
+    /// The namespace's immutable catalog pair, loaded on this session's
+    /// first publish and reused for its lifetime.
+    catalog_entry: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 impl NamespaceCommitEngine {
@@ -122,6 +126,7 @@ impl NamespaceCommitEngine {
             fenced: None,
             timer: Arc::new(StdMonotonicTimer::default()),
             table_cache: None,
+            catalog_entry: None,
         }
     }
 
@@ -133,6 +138,11 @@ impl NamespaceCommitEngine {
 
     pub fn with_table_cache(mut self, table_cache: Arc<MetadataTableCache>) -> Self {
         self.table_cache = Some(table_cache);
+        self
+    }
+
+    pub fn with_catalog_entry(mut self, catalog_entry: VerifiedNamespaceCatalogEntry) -> Self {
+        self.catalog_entry = Some(catalog_entry);
         self
     }
 
@@ -197,9 +207,29 @@ impl NamespaceCommitEngine {
             },
         };
 
+        let catalog_entry = match &self.catalog_entry {
+            Some(value) => value.clone(),
+            None => match load_namespace_catalog_entry(store, &self.namespace_id).await {
+                Ok(value) => {
+                    self.catalog_entry = Some(value.clone());
+                    value
+                }
+                Err(error) => {
+                    return NamespaceCommitEnginePublishResult {
+                        results: repeated_error(
+                            candidate_count,
+                            CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)),
+                        ),
+                        wal_tail_segments: 0,
+                    };
+                }
+            },
+        };
+
         let (publish_view, projection) = match load_publish_metadata_view(
             store,
             self.table_cache.as_deref(),
+            Some(catalog_entry),
             &self.namespace_id,
             Some(acquired_writer),
             self.publish_tail_projection.as_ref(),
@@ -334,6 +364,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
     ) -> Result<PlannedPathMutation> {
         let (view, _projection) = load_publish_metadata_view(
             self.store,
+            None,
             None,
             namespace_id,
             None,

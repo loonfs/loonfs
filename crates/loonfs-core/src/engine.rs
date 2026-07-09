@@ -2,6 +2,7 @@ use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
@@ -33,6 +34,7 @@ pub struct RuntimeReadContext {
     manifest_object_id: ManifestObjectId,
     table_cache: Option<Arc<MetadataTableCache>>,
     tail_cache: Option<Arc<WalTailProjectionCache>>,
+    catalog: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 impl RuntimeReadContext {
@@ -44,6 +46,7 @@ impl RuntimeReadContext {
         manifest_object_id: ManifestObjectId,
         table_cache: Option<Arc<MetadataTableCache>>,
         tail_cache: Option<Arc<WalTailProjectionCache>>,
+        catalog: Option<VerifiedNamespaceCatalogEntry>,
     ) -> Self {
         Self {
             head,
@@ -52,6 +55,7 @@ impl RuntimeReadContext {
             manifest_object_id,
             table_cache,
             tail_cache,
+            catalog,
         }
     }
 }
@@ -64,6 +68,7 @@ fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_
         &options.manifest_object_id,
         options.table_cache.as_deref(),
         options.tail_cache.as_deref(),
+        options.catalog.as_ref(),
     )
 }
 

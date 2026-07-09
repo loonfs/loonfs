@@ -9,7 +9,7 @@ use crate::checkpoint::{
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
-use crate::namespace::catalog::load_namespace_catalog_entry;
+use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
@@ -106,14 +106,20 @@ impl PublishTailProjection {
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
+    catalog: Option<VerifiedNamespaceCatalogEntry>,
     namespace_id: &NamespaceId,
     acquired_writer: Option<AcquiredWriter>,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
-    let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
-        .await
-        .map_err(|error| CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)))?;
+    let catalog_entry = match catalog {
+        Some(entry) => entry,
+        None => load_namespace_catalog_entry(store, namespace_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::from(error))
+            })?,
+    };
     let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
         .await
         .map_err(|error| {

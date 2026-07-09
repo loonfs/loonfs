@@ -9,7 +9,7 @@ use crate::metadata::{
     DirentryBindRecord, InodeRecord, MetadataState, MetadataView, MetadataViewSession,
     ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
 };
-use crate::namespace::catalog::load_namespace_catalog_entry;
+use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::read_head_and_metadata_root;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
@@ -46,6 +46,9 @@ pub(crate) struct ReadLoadContext<'a> {
     view: ReadViewContext<'a>,
     table_cache: Option<&'a MetadataTableCache>,
     tail_cache: Option<&'a WalTailProjectionCache>,
+    /// The namespace's immutable catalog pair, when the caller has already
+    /// loaded it; a view load without one reads it from the store.
+    catalog: Option<&'a VerifiedNamespaceCatalogEntry>,
 }
 
 impl<'a> ReadLoadContext<'a> {
@@ -54,6 +57,7 @@ impl<'a> ReadLoadContext<'a> {
             view: ReadViewContext::Latest,
             table_cache: None,
             tail_cache: None,
+            catalog: None,
         }
     }
 
@@ -64,6 +68,7 @@ impl<'a> ReadLoadContext<'a> {
         manifest_object_id: &'a ManifestObjectId,
         table_cache: Option<&'a MetadataTableCache>,
         tail_cache: Option<&'a WalTailProjectionCache>,
+        catalog: Option<&'a VerifiedNamespaceCatalogEntry>,
     ) -> Self {
         Self {
             view: ReadViewContext::PinnedHead {
@@ -74,6 +79,7 @@ impl<'a> ReadLoadContext<'a> {
             },
             table_cache,
             tail_cache,
+            catalog,
         }
     }
 }
@@ -146,9 +152,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 namespace_id: namespace_id.clone(),
             });
         }
-        let catalog_entry = load_namespace_catalog_entry(store, namespace_id)
-            .await
-            .map_err(MetadataProjectionLoadError::from)?;
+        let catalog_entry = match load_context.catalog {
+            Some(entry) => entry.clone(),
+            None => load_namespace_catalog_entry(store, namespace_id)
+                .await
+                .map_err(MetadataProjectionLoadError::from)?,
+        };
         let tables = load_verified_manifest_tables_with_cache(
             store,
             load_context.table_cache,
