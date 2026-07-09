@@ -1243,7 +1243,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(inode)
     }
 
-    pub(crate) async fn latest_revision_head(
+    /// The head revision of an inode the caller has already established as
+    /// visible at this session's seq — path resolution and child enumeration
+    /// both do. Skips the per-inode visibility re-derivation the checked
+    /// [`MetadataView::latest_revision_head`] performs: on a wide listing
+    /// that re-check was one full child-binds scan and tombstone probe per
+    /// file entry, and it can never disagree with the enumeration that just
+    /// admitted the entry at the same seq.
+    pub(crate) async fn latest_revision_head_of_visible(
         &mut self,
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>, CoreError> {
@@ -1251,7 +1258,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         if let Some(cached) = self.latest_revision_head_cache.get(&inode_id).cloned() {
             return Ok(cached);
         }
-        let revision = self.base.latest_revision_head(inode_id).await?;
+        let revision = self.base.latest_revision_record(inode_id).await?;
         self.latest_revision_head_cache
             .insert(inode_id, revision.clone());
         Ok(revision)
