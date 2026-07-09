@@ -4,9 +4,7 @@
 use super::cache::{DecodedSegmentRowSet, MetadataTableCache};
 use super::error::ManifestLoadError;
 use super::load::{
-    load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter,
-    metadata_file_object_key, MetadataSstSeqExpectation, MetadataTableLoadContext,
-    SessionBlockMemo,
+    load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SessionBlockMemo,
 };
 use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
@@ -52,10 +50,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         key: &str,
         filter_probe: &str,
-        readahead: bool,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         Ok(self
-            .scan_prefix_rows(family, key, Some(filter_probe), readahead)
+            .scan_prefix_rows(family, key, Some(filter_probe), true)
             .await?
             .into_iter()
             .find(|row| row.row_key_for_family(family) == key))
@@ -101,7 +98,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
     /// [`Self::scan_range_page`] for a point lookup within one filter key's
     /// range; see [`Self::scan_prefix_for_lookup`] for the probe contract.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn scan_range_page_for_lookup(
         &self,
         family: MetadataTableFamily,
@@ -109,7 +105,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         upper_bound: Option<&str>,
         limit: usize,
         filter_probe: &str,
-        readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -120,11 +115,13 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             upper_bound,
             limit,
             Some(filter_probe),
-            readahead,
+            true,
         )
         .await
     }
 
+    /// A prefix scan is a range scan over `[prefix, upper_bound(prefix))`
+    /// with no row limit; rows come back in row-key order.
     async fn scan_prefix_rows(
         &self,
         family: MetadataTableFamily,
@@ -132,25 +129,16 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         filter_probe: Option<&str>,
         readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        let mut rows = Vec::new();
-        for run in runs_in_scan_order(&self.manifest.payload) {
-            self.scan_manifest_tables(
-                family,
-                prefix,
-                MetadataTableLoadContext {
-                    manifest_object_key: &self.manifest_object_key,
-                    segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
-                    row_seq_min: None,
-                    row_seq_max: run.run_seq,
-                },
-                &run.tables,
-                &mut rows,
-                filter_probe,
-                readahead,
-            )
-            .await?;
-        }
-        Ok(rows)
+        let upper_bound = string_prefix_upper_bound(prefix);
+        self.scan_range_page_rows(
+            family,
+            prefix,
+            upper_bound.as_deref(),
+            usize::MAX,
+            filter_probe,
+            readahead,
+        )
+        .await
     }
 
     /// Whether a lookup should touch this segment at all: false only when
@@ -193,37 +181,18 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         filter_probe: Option<&str>,
         readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        let mut matching_descriptors = Vec::new();
-        for run in runs_in_scan_order(&self.manifest.payload) {
-            let context = MetadataTableLoadContext {
-                manifest_object_key: &self.manifest_object_key,
-                segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
-                row_seq_min: None,
-                row_seq_max: run.run_seq,
-            };
-            let table =
-                manifest_table_for_family(context.manifest_object_key, &run.tables, family)?;
-            for descriptor in &table.segments {
-                context.expected_segment_seq(descriptor)?;
-                let expected_key = metadata_file_object_key(descriptor);
-                if descriptor.object_key != expected_key {
-                    return Err(ManifestLoadError::SegmentObjectKeyMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        expected: expected_key,
-                    });
-                }
-                if !descriptor_may_intersect_range(descriptor, lower_bound, upper_bound) {
-                    continue;
-                }
-                if let Some(filter_probe) = filter_probe {
-                    if !self.segment_filter_admits(descriptor, filter_probe).await? {
-                        continue;
-                    }
-                }
-                matching_descriptors.push((context, descriptor.clone()));
-            }
+        let runs = runs_in_scan_order(&self.manifest.payload);
+        let mut candidates = Vec::new();
+        for run in &runs {
+            let table = manifest_table_for_family(&self.manifest_object_key, &run.tables, family)?;
+            candidates.extend(table.segments.iter().filter(|descriptor| {
+                descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)
+            }));
         }
-        matching_descriptors.sort_by(|(_, left), (_, right)| {
+        let mut matching_descriptors = self
+            .filter_admitted_descriptors(candidates, filter_probe)
+            .await?;
+        matching_descriptors.sort_by(|left, right| {
             left.min_key
                 .cmp(&right.min_key)
                 .then(left.max_key.cmp(&right.max_key))
@@ -237,7 +206,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 true
             } else {
                 let boundary_key = &rows[limit - 1].0;
-                matching_descriptors[next_descriptor_index].1.min_key <= *boundary_key
+                matching_descriptors[next_descriptor_index].min_key <= *boundary_key
             };
             if !should_load_next {
                 break;
@@ -248,93 +217,29 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             let loaded_segments = try_join_all(
                 matching_descriptors[next_descriptor_index..chunk_end]
                     .iter()
-                    .map(|(context, descriptor)| {
-                        self.segment_rows(
-                            *context,
-                            family,
-                            descriptor,
-                            lower_bound,
-                            upper_bound,
-                            readahead,
-                        )
+                    .map(|descriptor| {
+                        self.segment_rows(family, descriptor, lower_bound, upper_bound, readahead)
                     }),
             )
             .await?;
             next_descriptor_index = chunk_end;
 
-            rows.extend(loaded_segments.iter().flat_map(|segment_rows| {
-                segment_rows
-                    .rows_in_key_range(lower_bound, upper_bound)
-                    .map(|(row_key, row)| (row_key.to_owned(), row.clone()))
-            }));
+            for segment_rows in loaded_segments {
+                let matched_before = rows.len();
+                rows.extend(
+                    segment_rows
+                        .rows_in_key_range(lower_bound, upper_bound)
+                        .map(|(row_key, row)| (row_key.to_owned(), row.clone())),
+                );
+                if filter_probe.is_some() {
+                    self.record_filter_false_positive_if_empty(rows.len() - matched_before);
+                }
+            }
             rows.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
         }
 
         rows.truncate(limit);
         Ok(rows.into_iter().map(|(_, row)| row).collect())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn scan_manifest_tables(
-        &self,
-        family: MetadataTableFamily,
-        prefix: &str,
-        context: MetadataTableLoadContext<'_>,
-        tables: &[MetadataTableManifest],
-        rows: &mut Vec<MetadataRow>,
-        filter_probe: Option<&str>,
-        readahead: bool,
-    ) -> Result<(), ManifestLoadError> {
-        let table = manifest_table_for_family(context.manifest_object_key, tables, family)?;
-        let mut matching_descriptors = Vec::new();
-        for descriptor in &table.segments {
-            context.expected_segment_seq(descriptor)?;
-            let expected_key = metadata_file_object_key(descriptor);
-            if descriptor.object_key != expected_key {
-                return Err(ManifestLoadError::SegmentObjectKeyMismatch {
-                    object_key: descriptor.object_key.clone(),
-                    expected: expected_key,
-                });
-            }
-            if !descriptor_may_contain_prefix(descriptor, prefix) {
-                continue;
-            }
-            matching_descriptors.push(descriptor);
-        }
-        let matching_descriptors = self
-            .filter_admitted_descriptors(matching_descriptors, filter_probe)
-            .await?;
-
-        let prefix_upper_bound = string_prefix_upper_bound(prefix);
-        let mut loaded_segments = Vec::new();
-        for chunk in matching_descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
-            loaded_segments.extend(
-                try_join_all(chunk.iter().map(|descriptor| {
-                    self.segment_rows(
-                        context,
-                        family,
-                        descriptor,
-                        prefix,
-                        prefix_upper_bound.as_deref(),
-                        readahead,
-                    )
-                }))
-                .await?,
-            );
-        }
-
-        for segment_rows in loaded_segments {
-            let matched = rows.len();
-            rows.extend(
-                segment_rows
-                    .rows_in_key_range(prefix, prefix_upper_bound.as_deref())
-                    .map(|(_, row)| row.clone()),
-            );
-            if filter_probe.is_some() {
-                self.record_filter_false_positive_if_empty(rows.len() - matched);
-            }
-        }
-        Ok(())
     }
 
     /// Drops the descriptors whose bloom filter rules the probe out; with no
@@ -368,7 +273,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
     async fn segment_rows(
         &self,
-        context: MetadataTableLoadContext<'_>,
         family: MetadataTableFamily,
         descriptor: &MetadataFileRef,
         lower_bound: &str,
@@ -379,7 +283,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             self.store,
             self.table_cache,
             &self.block_memo,
-            context,
             family,
             descriptor,
             lower_bound,
@@ -419,31 +322,14 @@ pub(super) fn manifest_table_for_family<'a>(
     tables: &'a [MetadataTableManifest],
     family: MetadataTableFamily,
 ) -> Result<&'a MetadataTableManifest, ManifestLoadError> {
-    ordered_manifest_tables(manifest_object_key, tables)?
-        .into_iter()
-        .find(|table| table.family == family)
-        .ok_or(ManifestLoadError::MissingTableFamily {
+    // Family-set integrity is validated once when the tables are loaded;
+    // scans only need the lookup.
+    tables.iter().find(|table| table.family == family).ok_or(
+        ManifestLoadError::MissingTableFamily {
             object_key: manifest_object_key.to_owned(),
             family,
-        })
-}
-
-pub(super) fn descriptor_may_contain_prefix(descriptor: &MetadataFileRef, prefix: &str) -> bool {
-    if descriptor.row_count == 0 {
-        return false;
-    }
-    if prefix.is_empty() {
-        return true;
-    }
-    if descriptor.max_key.as_str() < prefix {
-        return false;
-    }
-    if let Some(upper_bound) = string_prefix_upper_bound(prefix) {
-        if descriptor.min_key >= upper_bound {
-            return false;
-        }
-    }
-    true
+        },
+    )
 }
 
 pub(super) fn descriptor_may_intersect_range(

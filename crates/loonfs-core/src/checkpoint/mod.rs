@@ -10,9 +10,9 @@
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`publish`] writes manifest objects and advances `current_manifest_id`
 //!   on the head by compare-and-swap.
-//! - [`load`] and [`validate`] provide envelope-only loading, descriptor-only
-//!   table verification, and explicit inspection materialization when callers
-//!   truly need every metadata row.
+//! - [`load`] and [`validate`] provide envelope-only loading and
+//!   descriptor-only table verification (full-row inspection
+//!   materialization is test-only).
 //! - [`scan`] answers verified row scans over loaded manifest tables.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above, and
