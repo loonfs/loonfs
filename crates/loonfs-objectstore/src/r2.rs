@@ -56,13 +56,6 @@ impl ObjectStore for CloudflareR2Store {
         self.inner.head(key).await
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.inner.get_with_metadata(key).await
     }

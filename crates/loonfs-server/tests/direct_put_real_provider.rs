@@ -34,7 +34,7 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
             secret_access_key: config.secret_access_key.into(),
             session_token: config.session_token.map(Into::into),
             key_prefix: Some(config.prefix),
-            force_path_style: Some(false),
+            force_path_style: false,
         },
     })
     .await;

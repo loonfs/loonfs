@@ -15,7 +15,7 @@ use crate::storage::content::{DurableContentValidationError, ImmutableObjectWrit
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind, ManifestId,
+    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
     NamespaceId, NamespaceIdValidationError, UploadId,
 };
 use loonfs_objectstore::ObjectStoreError;
@@ -165,14 +165,6 @@ pub enum MetadataViewError {
         requested_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
-    #[error(
-        "namespace `{namespace_id}` current manifest changed during metadata view load: expected `{expected_manifest_id}`, found `{actual_manifest_id:?}`"
-    )]
-    ManifestChangedDuringViewLoad {
-        namespace_id: NamespaceId,
-        expected_manifest_id: ManifestId,
-        actual_manifest_id: Option<ManifestId>,
-    },
 }
 
 /// Failures while loading a bounded manifest-plus-tail metadata projection.
@@ -193,8 +185,6 @@ pub enum MetadataProjectionLoadError {
     MissingHeadEtag { object_key: String },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` head has no current manifest")]
-    MissingCurrentManifest { namespace_id: NamespaceId },
     #[error(
         "namespace head changed during metadata projection load for `{object_key}`: loaded `{loaded_head_etag}`, current `{current_head_etag}`"
     )]
@@ -332,14 +322,12 @@ fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
         // listing, same as a sub-floor change cursor.
         MetadataViewError::SnapshotUnavailable { .. }
         | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::RebootstrapRequired,
-        MetadataViewError::ManifestChangedDuringViewLoad { .. } => ErrorCode::StaleHead,
     }
 }
 
 fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) -> ErrorCode {
     match error {
         MetadataProjectionLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        MetadataProjectionLoadError::MissingCurrentManifest { .. } => ErrorCode::NamespaceCorrupt,
         MetadataProjectionLoadError::LoadNamespaceDescriptor(error) => {
             classify_control_object_load_error(error)
         }
@@ -571,7 +559,7 @@ mod tests {
     #[test]
     fn metadata_view_errors_map_to_actionable_public_codes() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let manifest_id = ManifestId(1);
+        let _manifest_id = ManifestId(1);
         let head_seq = ChangeSeq(3);
 
         let cases = [
@@ -601,14 +589,6 @@ mod tests {
                     head_seq,
                 },
                 ErrorCode::RebootstrapRequired,
-            ),
-            (
-                MetadataViewError::ManifestChangedDuringViewLoad {
-                    namespace_id,
-                    expected_manifest_id: manifest_id,
-                    actual_manifest_id: Some(ManifestId(2)),
-                },
-                ErrorCode::StaleHead,
             ),
         ];
 

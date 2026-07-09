@@ -10,7 +10,7 @@ use crate::namespace::control::{
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::{
-    keys::{namespace_config, wal_head, wal_segment_id_from_key, wal_segment_prefix},
+    keys::{namespace_config, wal_segment_id_from_key, wal_segment_prefix},
     ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -28,15 +28,6 @@ pub struct NamespaceHeadSummary {
     /// a validated chain length.
     pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
-}
-
-/// Opaque ETag probe for the namespace head object.
-///
-/// This only proves that the durable head object identity still matches a
-/// previously loaded namespace view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceHeadEtagProbe {
-    pub head_etag: String,
 }
 
 pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
@@ -126,43 +117,6 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
         .count();
     u64::try_from(tail_segments)
         .map_err(|_| CoreError::Internal("WAL tail segment count overflow".to_owned()))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "loon.phase",
-    err,
-    skip_all,
-    fields(phase = "probe_namespace_head_etag", key_class = "wal_head")
-)]
-pub async fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<NamespaceHeadEtagProbe> {
-    NamespaceId::parse(expected_namespace_id.as_str())?;
-    let object_key = wal_head(expected_namespace_id.as_str());
-    let metadata = store
-        .head(&object_key)
-        .await
-        .map_err(|err| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                ControlObjectLoadError::Store {
-                    object_key: object_key.clone(),
-                    message: err.message(),
-                },
-            ))
-        })?
-        .ok_or_else(|| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                ControlObjectLoadError::MissingObject {
-                    object_key: object_key.clone(),
-                },
-            ))
-        })?;
-    let head_etag = metadata.etag.ok_or(CoreError::MetadataProjection(
-        MetadataProjectionLoadError::MissingHeadEtag { object_key },
-    ))?;
-    Ok(NamespaceHeadEtagProbe { head_etag })
 }
 
 fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {

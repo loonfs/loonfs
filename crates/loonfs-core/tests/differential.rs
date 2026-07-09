@@ -148,13 +148,10 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
 
     let model_state = model_state
         .apply_committed_wal_deltas(ChangeSeq(1), &create_directory)
-        .expect("model applies create-dir delta")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
-        .expect("model applies create-file deltas")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
-        .expect("model applies replace-file delta")
         .metadata_state;
 
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
@@ -260,7 +257,6 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
             .metadata_state;
         model_state = model_state
             .apply_committed_wal_deltas(seq, deltas)
-            .expect("model apply")
             .metadata_state;
     }
 

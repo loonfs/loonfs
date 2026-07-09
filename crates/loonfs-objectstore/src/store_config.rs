@@ -40,8 +40,8 @@ pub enum StoreConfig {
         session_token: Option<SecretString>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        force_path_style: Option<bool>,
+        #[serde(default)]
+        force_path_style: bool,
     },
     CloudflareR2 {
         bucket: String,
@@ -126,7 +126,7 @@ impl StoreConfig {
                 secret_access_key: secret_access_key.clone(),
                 session_token: session_token.clone(),
                 key_prefix: key_prefix.clone(),
-                force_path_style: force_path_style.unwrap_or(false),
+                force_path_style: *force_path_style,
             }),
             StoreConfig::CloudflareR2 {
                 bucket,

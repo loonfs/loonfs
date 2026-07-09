@@ -8,6 +8,5 @@
 
 mod genesis;
 pub mod metadata;
-pub mod wal;
 
 pub use genesis::bootstrap_metadata_state;
