@@ -10,7 +10,8 @@ use crate::metadata::{
     unbind_matches_binding, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
     InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::manifest::{hex_encode_row_key_component, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::lookup_keys;
+use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
@@ -22,7 +23,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     inode_id: InodeId,
 ) -> Result<Option<InodeRecord>> {
-    let key = format!("inode-{:020}", inode_id.0);
+    let key = lookup_keys::inode_key(inode_id);
     Ok(tables
         .get_for_lookup(MetadataTableFamily::Inodes, &key, &key)
         .await
@@ -34,7 +35,7 @@ pub(super) async fn direntry_binds_for_parent<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     parent_inode_id: InodeId,
 ) -> Result<Vec<DirentryBindRecord>> {
-    let prefix = format!("direntry-{:020}-", parent_inode_id.0);
+    let prefix = lookup_keys::direntry_parent_prefix(parent_inode_id);
     Ok(tables
         .scan_prefix(MetadataTableFamily::DirentryBinds, &prefix)
         .await
@@ -56,12 +57,11 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
     start_after_row_key: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ManifestDirentryBindCandidate>> {
-    let parent_prefix = format!("direntry-{:020}-", parent_inode_id.0);
+    let parent_prefix = lookup_keys::direntry_parent_prefix(parent_inode_id);
     let lower_bound = if let Some(row_key) = start_after_row_key {
         resume_after_row_key(row_key)
     } else if let Some(name_key) = start_after_name_key {
-        let encoded_name_key = hex_encode_row_key_component(name_key);
-        let exact_name_prefix = format!("{parent_prefix}{encoded_name_key}-");
+        let exact_name_prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
         string_prefix_upper_bound(&exact_name_prefix).unwrap_or(exact_name_prefix)
     } else {
         parent_prefix.clone()
@@ -86,9 +86,8 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     name_key: &str,
 ) -> Result<Vec<DirentryBindRecord>> {
-    let encoded_name_key = hex_encode_row_key_component(name_key);
-    let filter_probe = format!("direntry-{:020}-{encoded_name_key}", parent_inode_id.0);
-    let prefix = format!("{filter_probe}-");
+    let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key);
+    let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
     Ok(tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::DirentryBinds,
@@ -107,8 +106,8 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     child_inode_id: InodeId,
 ) -> Result<Vec<DirentryBindRecord>> {
-    let filter_probe = format!("direntry-child-{:020}", child_inode_id.0);
-    let prefix = format!("{filter_probe}-");
+    let filter_probe = lookup_keys::direntry_child_probe(child_inode_id);
+    let prefix = lookup_keys::direntry_child_prefix(child_inode_id);
     Ok(tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::DirentryChildBinds,
@@ -127,14 +126,13 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     direntry: &DirentryBindRecord,
 ) -> Result<Vec<DirentryUnbindRecord>> {
-    let encoded_name_key = hex_encode_row_key_component(&direntry.name_key);
-    let filter_probe = format!(
-        "direntry-unbind-{:020}-{encoded_name_key}",
-        direntry.parent_inode_id.0
-    );
-    let prefix = format!(
-        "{filter_probe}-{:020}-{:010}-",
-        direntry.bind_seq.0, direntry.bind_delta_index
+    let filter_probe =
+        lookup_keys::direntry_unbind_probe(direntry.parent_inode_id, &direntry.name_key);
+    let prefix = lookup_keys::direntry_unbind_binding_prefix(
+        direntry.parent_inode_id,
+        &direntry.name_key,
+        direntry.bind_seq,
+        direntry.bind_delta_index,
     );
     Ok(tables
         .scan_prefix_for_lookup(
@@ -162,11 +160,8 @@ pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Siz
     last_name_key: &str,
 ) -> Result<Vec<DirentryUnbindRecord>> {
     const UNBIND_RANGE_SCAN_LIMIT: usize = 512;
-    let parent_prefix = format!("direntry-unbind-{:020}-", parent_inode_id.0);
-    let first_encoded = hex_encode_row_key_component(first_name_key);
-    let last_encoded = hex_encode_row_key_component(last_name_key);
-    let mut lower_bound = format!("{parent_prefix}{first_encoded}-");
-    let last_name_prefix = format!("{parent_prefix}{last_encoded}-");
+    let mut lower_bound = lookup_keys::direntry_unbind_name_prefix(parent_inode_id, first_name_key);
+    let last_name_prefix = lookup_keys::direntry_unbind_name_prefix(parent_inode_id, last_name_key);
     let upper_bound = string_prefix_upper_bound(&last_name_prefix);
 
     let mut unbinds = Vec::new();
@@ -285,8 +280,8 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     root_inode_id: InodeId,
 ) -> Result<Vec<SubtreeTombstoneRecord>> {
-    let filter_probe = format!("tombstone-{:020}", root_inode_id.0);
-    let prefix = format!("{filter_probe}-");
+    let filter_probe = lookup_keys::tombstone_probe(root_inode_id);
+    let prefix = lookup_keys::tombstone_prefix(root_inode_id);
     Ok(tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::Tombstones,
@@ -305,9 +300,8 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     commit_id: &CommitId,
 ) -> Result<Option<CommitReceiptRecord>> {
-    let encoded_commit_id = hex_encode_row_key_component(commit_id.as_str());
-    let filter_probe = format!("commit-receipt-{encoded_commit_id}");
-    let prefix = format!("{filter_probe}-");
+    let filter_probe = lookup_keys::commit_receipt_probe(commit_id.as_str());
+    let prefix = lookup_keys::commit_receipt_prefix(commit_id.as_str());
     Ok(tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::CommitReceipts,
@@ -338,32 +332,25 @@ fn resume_after_row_key(row_key: &str) -> String {
 }
 
 fn revision_by_inode_desc_inode_prefix(inode_id: InodeId) -> String {
-    format!("revision-by-inode-desc-{:020}-", inode_id.0)
+    lookup_keys::revision_by_inode_desc_prefix(inode_id)
 }
 
-/// The filter key for revision-by-inode lookups; must match
-/// `MetadataRow::filter_key_for_family` for the family byte-for-byte.
 fn revision_by_inode_desc_filter_probe(inode_id: InodeId) -> String {
-    format!("revision-by-inode-desc-{:020}", inode_id.0)
+    lookup_keys::revision_by_inode_desc_probe(inode_id)
 }
 
 fn revision_by_inode_desc_exact_revision_prefix(
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> String {
-    format!(
-        "{}{:020}-",
-        revision_by_inode_desc_inode_prefix(inode_id),
-        u64::MAX - revision_no.0
-    )
+    lookup_keys::revision_by_inode_desc_revision_prefix(inode_id, revision_no)
 }
 
 fn revision_by_inode_desc_row_key(inode_id: InodeId, position: RevisionPagePosition) -> String {
-    format!(
-        "{}{:020}-{:020}-{:010}",
-        revision_by_inode_desc_inode_prefix(inode_id),
-        u64::MAX - position.revision_no.0,
-        u64::MAX - position.committed_seq.0,
-        u32::MAX - position.revision_delta_index
+    lookup_keys::revision_by_inode_desc_row_key(
+        inode_id,
+        position.revision_no,
+        position.committed_seq,
+        position.revision_delta_index,
     )
 }

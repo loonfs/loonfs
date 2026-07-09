@@ -281,6 +281,133 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
     encoded
 }
 
+/// Reader-side lookup grammar: the probes, prefixes, and resume keys that
+/// point lookups and scans build per family. Defined beside
+/// `row_key_for_family` and `filter_key_for_family` because the pairing is
+/// byte-for-byte — a probe must equal the filter key the writer stored, and
+/// a prefix must be a prefix of the row keys it selects. Change a key
+/// format and its lookup grammar together, here.
+pub mod lookup_keys {
+    use super::hex_encode_row_key_component;
+    use crate::{ChangeSeq, InodeId, RevisionNo};
+
+    pub fn inode_key(inode_id: InodeId) -> String {
+        format!("inode-{:020}", inode_id.0)
+    }
+
+    pub fn direntry_parent_prefix(parent_inode_id: InodeId) -> String {
+        format!("direntry-{:020}-", parent_inode_id.0)
+    }
+
+    pub fn direntry_bind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
+        format!(
+            "direntry-{:020}-{}",
+            parent_inode_id.0,
+            hex_encode_row_key_component(name_key)
+        )
+    }
+
+    pub fn direntry_bind_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
+        format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
+    }
+
+    pub fn direntry_child_probe(child_inode_id: InodeId) -> String {
+        format!("direntry-child-{:020}", child_inode_id.0)
+    }
+
+    pub fn direntry_child_prefix(child_inode_id: InodeId) -> String {
+        format!("{}-", direntry_child_probe(child_inode_id))
+    }
+
+    pub fn direntry_unbind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
+        format!(
+            "direntry-unbind-{:020}-{}",
+            parent_inode_id.0,
+            hex_encode_row_key_component(name_key)
+        )
+    }
+
+    /// Rows for one specific binding generation under the unbind probe.
+    pub fn direntry_unbind_binding_prefix(
+        parent_inode_id: InodeId,
+        name_key: &str,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+    ) -> String {
+        format!(
+            "{}-{:020}-{:010}-",
+            direntry_unbind_probe(parent_inode_id, name_key),
+            bind_seq.0,
+            bind_delta_index
+        )
+    }
+
+    pub fn direntry_unbind_parent_prefix(parent_inode_id: InodeId) -> String {
+        format!("direntry-unbind-{:020}-", parent_inode_id.0)
+    }
+
+    pub fn direntry_unbind_name_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
+        format!(
+            "{}{}-",
+            direntry_unbind_parent_prefix(parent_inode_id),
+            hex_encode_row_key_component(name_key)
+        )
+    }
+
+    pub fn tombstone_probe(root_inode_id: InodeId) -> String {
+        format!("tombstone-{:020}", root_inode_id.0)
+    }
+
+    pub fn tombstone_prefix(root_inode_id: InodeId) -> String {
+        format!("{}-", tombstone_probe(root_inode_id))
+    }
+
+    pub fn commit_receipt_probe(commit_id: &str) -> String {
+        format!("commit-receipt-{}", hex_encode_row_key_component(commit_id))
+    }
+
+    pub fn commit_receipt_prefix(commit_id: &str) -> String {
+        format!("{}-", commit_receipt_probe(commit_id))
+    }
+
+    pub fn revision_by_inode_desc_probe(inode_id: InodeId) -> String {
+        format!("revision-by-inode-desc-{:020}", inode_id.0)
+    }
+
+    pub fn revision_by_inode_desc_prefix(inode_id: InodeId) -> String {
+        format!("{}-", revision_by_inode_desc_probe(inode_id))
+    }
+
+    /// Revision numbers are stored inverted so newest sorts first.
+    pub fn revision_by_inode_desc_revision_prefix(
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> String {
+        format!(
+            "{}{:020}-",
+            revision_by_inode_desc_prefix(inode_id),
+            u64::MAX - revision_no.0
+        )
+    }
+
+    /// The full descending-index row key: revision number, commit seq, and
+    /// delta index all inverted so newest sorts first.
+    pub fn revision_by_inode_desc_row_key(
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        committed_seq: ChangeSeq,
+        revision_delta_index: u32,
+    ) -> String {
+        format!(
+            "{}{:020}-{:020}-{:010}",
+            revision_by_inode_desc_prefix(inode_id),
+            u64::MAX - revision_no.0,
+            u64::MAX - committed_seq.0,
+            u32::MAX - revision_delta_index
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
