@@ -16,9 +16,9 @@ use super::record::{
 };
 #[cfg(test)]
 use super::row::manifest_rows_for_family;
-use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
 #[cfg(test)]
-use super::runs::{l0_run_count, CHECKPOINT_TABLE_FAMILIES};
+use super::runs::CHECKPOINT_TABLE_FAMILIES;
+use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
@@ -34,17 +34,15 @@ use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainL
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
-use loonfs_api::wire::manifest::{
-    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
-};
+use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tracing::Instrument;
 
 #[cfg(test)]
-use super::load::{append_rows_to_metadata, load_manifest_materialization_for_inspection};
+use super::load::append_rows_to_metadata;
 #[cfg(test)]
 use crate::metadata::MetadataStateBuilder;
 
@@ -443,13 +441,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
     })
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "loon.phase",
-    err,
-    skip_all,
-    fields(phase = "project_manifest")
-)]
 async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -505,327 +496,4 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             "failed to build namespace manifest envelope: {err}"
         ))
     })
-}
-
-/// Drops rows that no retained sequence can observe (format spec,
-/// "Compaction"). Conservative subset: superseded revisions, superseded or
-/// unbound bindings, and spent unbind markers at or below the retention
-/// floor. Tombstone and inode rows are always retained until
-/// reachability-based dropping is designed.
-pub(super) fn drop_rows_below_retention_floor(
-    rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
-    retention_floor_seq: ChangeSeq,
-) -> Result<()> {
-    // The latest revision at or below the floor is what the floor itself
-    // observes; every older one is superseded at every retained sequence.
-    let mut latest_revision_at_floor = BTreeMap::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::Revisions)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::Revision {
-            inode_id,
-            revision_no,
-            committed_seq,
-            ..
-        } = row
-        {
-            if *committed_seq <= retention_floor_seq {
-                let latest = latest_revision_at_floor
-                    .entry(*inode_id)
-                    .or_insert(*revision_no);
-                if *revision_no > *latest {
-                    *latest = *revision_no;
-                }
-            }
-        }
-    }
-    let retain_revision = |row: &MetadataRow| match row {
-        MetadataRow::Revision {
-            inode_id,
-            revision_no,
-            committed_seq,
-            ..
-        } => {
-            *committed_seq > retention_floor_seq
-                || latest_revision_at_floor.get(inode_id) == Some(revision_no)
-        }
-        _ => true,
-    };
-    for family in [
-        MetadataTableFamily::Revisions,
-        MetadataTableFamily::RevisionsByInodeDesc,
-    ] {
-        if let Some(rows) = rows_by_family.get_mut(&family) {
-            rows.retain(retain_revision);
-        }
-    }
-
-    // At the floor only the latest non-unbound bind per (parent, name) slot
-    // is visible; an unbind marker at or below the floor has finished its
-    // work once every bind it covered is gone.
-    // Unbind identity here omits child_inode_id (the read path also matches
-    // it); the 4-tuple is already unique for writer-produced rows, so the
-    // predicates agree on every legal history.
-    let mut unbound_at_floor = BTreeSet::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryUnbinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryUnbind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            unbind_seq,
-            ..
-        } = row
-        {
-            if *unbind_seq <= retention_floor_seq {
-                unbound_at_floor.insert((
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ));
-            }
-        }
-    }
-    let mut latest_bind_at_floor = BTreeMap::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryBinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq {
-                let candidate = (*bind_seq, *bind_delta_index);
-                let latest = latest_bind_at_floor
-                    .entry((*parent_inode_id, name_key.clone()))
-                    .or_insert(candidate);
-                if candidate > *latest {
-                    *latest = candidate;
-                }
-            }
-        }
-    }
-    // Load-bearing writer invariant: a bind is only ever superseded by an
-    // operation that also unbinds it, so every non-latest bind at or below
-    // the floor must have a matching unbind at or below the floor. The drop
-    // is only visibility-preserving under that rule; refuse to compact state
-    // that violates it.
-    for row in rows_by_family
-        .get(&MetadataTableFamily::DirentryBinds)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } = row
-        {
-            if *bind_seq <= retention_floor_seq
-                && latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    != Some(&(*bind_seq, *bind_delta_index))
-                && !unbound_at_floor.contains(&(
-                    *parent_inode_id,
-                    name_key.clone(),
-                    *bind_seq,
-                    *bind_delta_index,
-                ))
-            {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "bind at seq `{bind_seq}` delta {bind_delta_index} for parent `{parent_inode_id}` is superseded at or below the retention floor without an unbind; refusing to drop rows"
-                )));
-            }
-        }
-    }
-
-    let retain_bind = |row: &MetadataRow| match row {
-        MetadataRow::DirentryBind {
-            parent_inode_id,
-            name_key,
-            bind_seq,
-            bind_delta_index,
-            ..
-        } => {
-            *bind_seq > retention_floor_seq
-                || (latest_bind_at_floor.get(&(*parent_inode_id, name_key.clone()))
-                    == Some(&(*bind_seq, *bind_delta_index))
-                    && !unbound_at_floor.contains(&(
-                        *parent_inode_id,
-                        name_key.clone(),
-                        *bind_seq,
-                        *bind_delta_index,
-                    )))
-        }
-        _ => true,
-    };
-    for family in [
-        MetadataTableFamily::DirentryBinds,
-        MetadataTableFamily::DirentryChildBinds,
-    ] {
-        if let Some(rows) = rows_by_family.get_mut(&family) {
-            rows.retain(retain_bind);
-        }
-    }
-    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::DirentryUnbinds) {
-        rows.retain(|row| match row {
-            MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq > retention_floor_seq,
-            _ => true,
-        });
-    }
-
-    // The idempotency horizon is the retention floor: a commit retried from
-    // below it re-bootstraps like any sub-floor cursor, so its receipt no
-    // longer needs to be carried forward.
-    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::CommitReceipts) {
-        rows.retain(|row| match row {
-            MetadataRow::CommitReceipt { committed_seq, .. } => {
-                *committed_seq >= retention_floor_seq
-            }
-            _ => true,
-        });
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-pub(super) struct ManifestMetadataSource<'a> {
-    pub(super) head: &'a HeadState,
-    pub(super) basis_manifest_id: Option<ManifestId>,
-    pub(super) retention_floor_seq: ChangeSeq,
-    pub(super) metadata_state: &'a MetadataState,
-}
-
-#[cfg(test)]
-#[tracing::instrument(
-    level = "info",
-    name = "loon.phase",
-    err,
-    skip_all,
-    fields(phase = "project_manifest")
-)]
-#[cfg(test)]
-pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    source: ManifestMetadataSource<'_>,
-    writer_version: &str,
-    policy: MetadataLsmPolicy,
-    manifest_id: ManifestId,
-) -> Result<NamespaceManifestEnvelope> {
-    let manifest_object_id = ManifestObjectId::generate(manifest_id);
-    let head = source.head;
-    let metadata_state = source.metadata_state;
-    let head_seq = head.seq;
-    let previous_manifest = match source.basis_manifest_id {
-        Some(previous_id) => Some(
-            load_manifest_materialization_for_inspection(store, namespace_id, previous_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-                })?,
-        ),
-        _ => None,
-    };
-
-    let (base_seq, metadata_files) = match previous_manifest {
-        Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
-            let run_tables = build_manifest_tables(
-                store,
-                namespace_id,
-                head_seq,
-                CHECKPOINT_BASE_RUN_LEVEL,
-                metadata_state,
-                policy.max_rows_per_segment,
-            )
-            .await?;
-            debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
-            (head_seq, flatten_manifest_tables(run_tables))
-        }
-        Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
-            let mut metadata_files = previous.manifest.payload.metadata_files.clone();
-            if previous.manifest.payload.head_seq < head_seq {
-                metadata_files.extend(flatten_manifest_tables(
-                    build_manifest_l0_run_tables(
-                        store,
-                        namespace_id,
-                        head_seq,
-                        previous.manifest.payload.head_seq,
-                        metadata_state,
-                    )
-                    .await?,
-                ));
-            }
-            (previous.manifest.payload.base_seq, metadata_files)
-        }
-        Some(_) => {
-            let run_tables = build_manifest_tables(
-                store,
-                namespace_id,
-                head_seq,
-                CHECKPOINT_BASE_RUN_LEVEL,
-                metadata_state,
-                policy.max_rows_per_segment,
-            )
-            .await?;
-            debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
-            (head_seq, flatten_manifest_tables(run_tables))
-        }
-        _ => {
-            let run_tables = build_manifest_tables(
-                store,
-                namespace_id,
-                head_seq,
-                CHECKPOINT_BASE_RUN_LEVEL,
-                metadata_state,
-                policy.max_rows_per_segment,
-            )
-            .await?;
-            (head_seq, flatten_manifest_tables(run_tables))
-        }
-    };
-
-    NamespaceManifestEnvelope::from_payload(
-        writer_version,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_object_id,
-            head_seq,
-            head_commit_id: head.head_commit_id.clone(),
-            base_seq,
-            writer_epoch: head.writer_epoch,
-            next_inode_id: head.next_inode_id,
-            retention_floor_seq: source.retention_floor_seq,
-            initialized: true,
-            verified: true,
-            fork: None,
-            features: BTreeMap::new(),
-            metadata_files,
-        },
-    )
-    .map_err(|err| {
-        CoreError::Internal(format!(
-            "failed to build namespace manifest envelope: {err}"
-        ))
-    })
-}
-
-#[cfg(test)]
-fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
-    payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0) && payload.fork.is_none()
 }
