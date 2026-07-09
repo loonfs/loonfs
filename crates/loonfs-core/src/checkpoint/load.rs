@@ -146,7 +146,9 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
     manifest_object_id: &ManifestObjectId,
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id.as_str(), manifest_object_id);
-    let manifest = {
+    // Manifests are immutable per object key, so the decoded and validated
+    // envelope is cacheable forever under that key.
+    let fetch = || async {
         let Some(manifest_bytes) = store
             .get(&manifest_key, None)
             .instrument(tracing::info_span!(
@@ -164,22 +166,48 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
                 object_key: manifest_key.clone(),
             });
         };
-        decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
+        let manifest = decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
             ManifestLoadError::ManifestCodec {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
             }
+        })?;
+        validate_namespace_manifest(
+            namespace_id,
+            manifest.payload.manifest_id,
+            manifest_object_id,
+            &manifest_key,
+            &manifest,
+        )?;
+        validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
+        validate_manifest_table_descriptors(&manifest_key, &manifest)?;
+        Ok(DecodedMetadataTableBlock::Manifest {
+            manifest: Arc::new(manifest),
+            decoded_byte_len: manifest_bytes.len(),
         })
-    }?;
-    validate_namespace_manifest(
-        namespace_id,
-        manifest.payload.manifest_id,
-        manifest_object_id,
-        &manifest_key,
-        &manifest,
-    )?;
-    validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
-    validate_manifest_table_descriptors(&manifest_key, &manifest)?;
+    };
+    let decoded = match table_cache {
+        Some(cache) => {
+            let cache_key = MetadataTableCacheKey {
+                table_digest: manifest_key.clone(),
+                block_kind: MetadataTableBlockKind::Manifest,
+                block_offset: 0,
+            };
+            cache.get_or_fetch(&cache_key, fetch).await?
+        }
+        None => fetch().await?,
+    };
+    let manifest = match decoded {
+        DecodedMetadataTableBlock::Manifest { manifest, .. } => manifest,
+        DecodedMetadataTableBlock::Index { .. }
+        | DecodedMetadataTableBlock::Filter { .. }
+        | DecodedMetadataTableBlock::Data { .. } => {
+            return Err(segment_codec_error(
+                &manifest_key,
+                "cache returned a non-manifest entry for a manifest key",
+            ));
+        }
+    };
     let tables = VerifiedMetadataTables {
         store,
         table_cache,
@@ -747,12 +775,12 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
     memo.record(&cache_key, &block);
     match block {
         DecodedMetadataTableBlock::Index { entries, .. } => Ok(entries),
-        DecodedMetadataTableBlock::Filter { .. } | DecodedMetadataTableBlock::Data { .. } => {
-            Err(segment_codec_error(
-                &descriptor.object_key,
-                "cache returned a non-index block for an index key",
-            ))
-        }
+        DecodedMetadataTableBlock::Filter { .. }
+        | DecodedMetadataTableBlock::Data { .. }
+        | DecodedMetadataTableBlock::Manifest { .. } => Err(segment_codec_error(
+            &descriptor.object_key,
+            "cache returned a non-index block for an index key",
+        )),
     }
 }
 
@@ -792,9 +820,12 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
     memo.record(&cache_key, &block);
     match block {
         DecodedMetadataTableBlock::Filter { filter, .. } => Ok(filter),
-        DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Data { .. } => Err(
-            segment_codec_error(&descriptor.object_key, "cache returned a non-filter block"),
-        ),
+        DecodedMetadataTableBlock::Index { .. }
+        | DecodedMetadataTableBlock::Data { .. }
+        | DecodedMetadataTableBlock::Manifest { .. } => Err(segment_codec_error(
+            &descriptor.object_key,
+            "cache returned a non-filter block",
+        )),
     }
 }
 
@@ -833,12 +864,12 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     memo.record(&cache_key, &block);
     match block {
         DecodedMetadataTableBlock::Data { block, .. } => Ok(block),
-        DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Filter { .. } => {
-            Err(segment_codec_error(
-                &descriptor.object_key,
-                "cache returned a non-data block for a data key",
-            ))
-        }
+        DecodedMetadataTableBlock::Index { .. }
+        | DecodedMetadataTableBlock::Filter { .. }
+        | DecodedMetadataTableBlock::Manifest { .. } => Err(segment_codec_error(
+            &descriptor.object_key,
+            "cache returned a non-data block for a data key",
+        )),
     }
 }
 
