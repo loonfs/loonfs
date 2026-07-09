@@ -24,7 +24,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
 ) -> Result<Option<InodeRecord>> {
     let key = format!("inode-{:020}", inode_id.0);
     Ok(tables
-        .get_for_lookup(MetadataTableFamily::Inodes, &key, &key, true)
+        .get_for_lookup(MetadataTableFamily::Inodes, &key, &key)
         .await
         .map_err(manifest_error_to_core)?
         .and_then(inode_from_manifest_row))
@@ -244,7 +244,6 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
             string_prefix_upper_bound(&exact_prefix).as_deref(),
             1,
             &filter_probe,
-            true,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -274,7 +273,6 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
             string_prefix_upper_bound(&inode_prefix).as_deref(),
             limit,
             &filter_probe,
-            true,
         )
         .await
         .map_err(manifest_error_to_core)?

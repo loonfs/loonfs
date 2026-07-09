@@ -1,12 +1,12 @@
 //! Read-side manifest loading.
 //!
-//! There are three intentionally separate levels here:
+//! There are two intentionally separate levels:
 //!
 //! 1. `load_namespace_manifest_envelope` validates only the manifest envelope.
 //! 2. `load_verified_manifest_tables` validates the manifest and table
 //!    descriptors without fetching SST row payloads.
-//! 3. `load_manifest_materialization_for_inspection` is the expensive
-//!    inspection/debug path that loads every referenced row into `MetadataState`.
+//!
+//! Full-row inspection materialization exists only for tests.
 
 use super::cache::{
     DecodedMetadataTableBlock, DecodedSegmentRowSet, MetadataTableBlockKind, MetadataTableCache,
@@ -45,7 +45,7 @@ use loonfs_api::wire::sst_blocks::{
 };
 #[cfg(test)]
 use loonfs_api::ManifestId;
-use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
+use loonfs_api::{ManifestObjectId, NamespaceId};
 #[cfg(test)]
 use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
@@ -328,12 +328,7 @@ pub(super) async fn load_manifest_metadata_state_for_inspection_from_manifest<
         append_manifest_tables_to_metadata(
             store,
             namespace_id,
-            MetadataTableLoadContext {
-                manifest_object_key,
-                segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
-                row_seq_min: None,
-                row_seq_max: run.run_seq,
-            },
+            manifest_object_key,
             &run.tables,
             &mut metadata_state,
         )
@@ -353,16 +348,8 @@ fn validate_manifest_table_descriptors(
         let mut direntry_child_bind_rows = 0u64;
         let mut revision_rows = 0u64;
         let mut revision_by_inode_desc_rows = 0u64;
-        let context = MetadataTableLoadContext {
-            manifest_object_key,
-            segment_seq_expectation: MetadataSstSeqExpectation::Descriptor,
-            row_seq_min: None,
-            row_seq_max: run.run_seq,
-        };
-
         for table in ordered_tables {
             for descriptor in &table.segments {
-                context.expected_segment_seq(descriptor)?;
                 let expected_key = metadata_file_object_key(descriptor);
                 if descriptor.object_key != expected_key {
                     return Err(ManifestLoadError::SegmentObjectKeyMismatch {
@@ -414,45 +401,6 @@ fn validate_manifest_table_descriptors(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct MetadataTableLoadContext<'a> {
-    pub(super) manifest_object_key: &'a str,
-    pub(super) segment_seq_expectation: MetadataSstSeqExpectation,
-    pub(super) row_seq_min: Option<ChangeSeq>,
-    pub(super) row_seq_max: ChangeSeq,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum MetadataSstSeqExpectation {
-    Descriptor,
-}
-
-impl MetadataTableLoadContext<'_> {
-    pub(super) fn expected_segment_seq(
-        &self,
-        descriptor: &MetadataFileRef,
-    ) -> Result<ChangeSeq, ManifestLoadError> {
-        match self.segment_seq_expectation {
-            MetadataSstSeqExpectation::Descriptor => {
-                if descriptor.run_seq > self.row_seq_max {
-                    return Err(ManifestLoadError::SegmentSeqMismatch {
-                        object_key: descriptor.object_key.clone(),
-                        expected: self.row_seq_max,
-                        actual: descriptor.run_seq,
-                    });
-                }
-                Ok(descriptor.run_seq)
-            }
-        }
-    }
-
-    pub(super) fn row_seq_max(&self, descriptor: &MetadataFileRef) -> ChangeSeq {
-        match self.segment_seq_expectation {
-            MetadataSstSeqExpectation::Descriptor => descriptor.run_seq,
-        }
-    }
-}
-
 pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
     metadata_table(
         descriptor.owner_namespace_id.as_str(),
@@ -464,14 +412,14 @@ pub(super) fn metadata_file_object_key(descriptor: &MetadataFileRef) -> String {
 pub(super) async fn append_manifest_tables_to_metadata<S>(
     store: &S,
     _namespace_id: &NamespaceId,
-    context: MetadataTableLoadContext<'_>,
+    manifest_object_key: &str,
     tables: &[MetadataTableManifest],
     metadata_state: &mut MetadataStateBuilder,
 ) -> Result<(), ManifestLoadError>
 where
     S: ObjectStore + ?Sized,
 {
-    let ordered_tables = ordered_manifest_tables(context.manifest_object_key, tables)?;
+    let ordered_tables = ordered_manifest_tables(manifest_object_key, tables)?;
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     let mut revision_rows = Vec::new();
@@ -479,7 +427,6 @@ where
     for table in ordered_tables {
         let mut descriptors = Vec::with_capacity(table.segments.len());
         for descriptor in &table.segments {
-            context.expected_segment_seq(descriptor)?;
             let expected_key = metadata_file_object_key(descriptor);
             if descriptor.object_key != expected_key {
                 return Err(ManifestLoadError::SegmentObjectKeyMismatch {
@@ -493,9 +440,11 @@ where
         let mut loaded_segments = Vec::with_capacity(descriptors.len());
         for chunk in descriptors.chunks(MAX_MAINTENANCE_TABLE_IO) {
             loaded_segments.extend(
-                try_join_all(chunk.iter().map(|descriptor| {
-                    load_manifest_segment_rows(store, context, table.family, descriptor)
-                }))
+                try_join_all(
+                    chunk.iter().map(|descriptor| {
+                        load_manifest_segment_rows(store, table.family, descriptor)
+                    }),
+                )
                 .await?,
             );
         }
@@ -526,12 +475,12 @@ where
     }
 
     validate_direntry_child_bind_index(
-        context.manifest_object_key,
+        manifest_object_key,
         direntry_bind_rows,
         direntry_child_bind_rows,
     )?;
     validate_revision_by_inode_desc_index(
-        context.manifest_object_key,
+        manifest_object_key,
         revision_rows,
         revision_by_inode_desc_rows,
     )
@@ -540,11 +489,10 @@ where
 #[cfg(test)]
 pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
-    context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
-    load_manifest_segment_rows_with_cache(store, None, context, family, descriptor).await
+    load_manifest_segment_rows_with_cache(store, None, family, descriptor).await
 }
 
 /// Per-view memo of decoded blocks, so one operation never re-fetches or
@@ -592,7 +540,6 @@ const MAX_BULK_FETCH_BYTES: u64 = 4 * 1024 * 1024;
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
-    context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
@@ -600,7 +547,6 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         store,
         table_cache,
         &SessionBlockMemo::default(),
-        context,
         family,
         descriptor,
         "",
@@ -638,14 +584,12 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
-    context: MetadataTableLoadContext<'_>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
     lower_bound: &str,
     upper_bound: Option<&str>,
     readahead: bool,
 ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
-    context.expected_segment_seq(descriptor)?;
     let index = load_segment_index(store, table_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
@@ -679,12 +623,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
         row_keys.extend(block.row_keys.iter().cloned());
         rows.extend(block.rows.iter().cloned());
     }
-    validate_manifest_row_seq_range(
-        &descriptor.object_key,
-        &rows,
-        context.row_seq_min,
-        context.row_seq_max(descriptor),
-    )?;
+    validate_manifest_row_seq_range(&descriptor.object_key, &rows, descriptor.run_seq)?;
     Ok(Arc::new(DecodedSegmentRowSet { rows, row_keys }))
 }
 
