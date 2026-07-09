@@ -132,12 +132,31 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use crate::namespace::delete::delete_namespace;
     use crate::options::DeleteNamespaceOptions;
-    use crate::protocol::commit_operations;
+
+    async fn commit_operations<S: loonfs_objectstore::ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        request: ApiCommitRequest,
+        context: &crate::context::MutationContext,
+    ) -> crate::error::Result<loonfs_api::v0::CommitResponse> {
+        let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+        engine
+            .publish_batch(
+                store,
+                vec![NamespaceMutationCandidate::Commit(request)],
+                context,
+            )
+            .await
+            .results
+            .pop()
+            .expect("one commit result")
+    }
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::BoxStream;

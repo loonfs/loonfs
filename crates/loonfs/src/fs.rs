@@ -1150,15 +1150,19 @@ impl FsCore {
                 // Boxing erases the engine's deeply nested publish future;
                 // without it, callers awaiting a put or commit (CLI, server,
                 // embedding crates) exceed rustc's type-recursion depth.
+                let tail_options = loonfs_core::publish::PublishTailOptions {
+                    max_tail_rows: cache_config.max_cached_wal_tail_projection_rows,
+                    max_tail_decoded_bytes: cache_config
+                        .max_cached_wal_tail_projection_decoded_bytes,
+                };
                 Box::pin(async {
                     let mut engine = engine.lock().await;
                     engine
-                        .publish_batch_with_tail_cache_limits(
+                        .publish_batch_with_tail_options(
                             &store,
                             candidates,
                             &context,
-                            cache_config.max_cached_wal_tail_projection_rows,
-                            cache_config.max_cached_wal_tail_projection_decoded_bytes,
+                            &tail_options,
                             content_gate,
                         )
                         .await

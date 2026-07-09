@@ -73,9 +73,20 @@ impl PublishPlanningSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
+    use crate::commit_engine::{
+        publish_namespace_mutations_batch_gated, NamespaceMutationCandidate,
+    };
+
+    async fn publish_namespace_mutations_batch<S: loonfs_objectstore::ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &loonfs_api::NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+    ) -> Vec<crate::error::Result<loonfs_api::v0::CommitResponse>> {
+        publish_namespace_mutations_batch_gated(store, namespace_id, candidates, context, None)
+            .await
+    }
     use crate::context::MutationContext;
-    use crate::engine::NamespaceEngine;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
@@ -120,19 +131,6 @@ mod tests {
             content_ref,
             behavior: PutBehavior::NoReplace,
         })
-    }
-
-    fn test_engine<'a>(
-        store: &'a LocalFsStore,
-        namespace_id: &NamespaceId,
-        context: &MutationContext,
-    ) -> NamespaceEngine<&'a LocalFsStore> {
-        NamespaceEngine::builder(store)
-            .namespace_id(namespace_id.clone())
-            .writer_id(context.writer_id.clone())
-            .writer_version(context.writer_version.clone())
-            .build()
-            .expect("test engine")
     }
 
     /// Two plans through one session share the durable-layer memo: the
@@ -231,12 +229,17 @@ mod tests {
         let second = results[1].as_ref().expect("second create succeeds");
         assert!(second.committed_seq > first.committed_seq);
 
-        let engine = test_engine(&store, &namespace_id, &context);
         for path in ["/wide/a.txt", "/wide/b.txt"] {
-            engine
-                .resolve_path(path)
-                .await
-                .expect("published file is visible");
+            crate::path::read::load_metadata_view(
+                &store,
+                &namespace_id,
+                crate::path::read::ReadLoadContext::latest(),
+            )
+            .await
+            .expect("load view")
+            .resolve_path(path)
+            .await
+            .expect("published file is visible");
         }
     }
 
@@ -295,9 +298,15 @@ mod tests {
             .as_ref()
             .expect("delete sees the create from the same batch");
 
-        test_engine(&store, &namespace_id, &context)
-            .resolve_path("/docs/doomed.txt")
-            .await
-            .expect_err("deleted file is no longer visible");
+        crate::path::read::load_metadata_view(
+            &store,
+            &namespace_id,
+            crate::path::read::ReadLoadContext::latest(),
+        )
+        .await
+        .expect("load view")
+        .resolve_path("/docs/doomed.txt")
+        .await
+        .expect_err("deleted file is no longer visible");
     }
 }

@@ -24,7 +24,6 @@ tracing.workspace = true
 
 [features]
 default = []
-inspection = []
 
 [dev-dependencies]
 loonfs-model = { path = "../loonfs-model" }

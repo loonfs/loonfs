@@ -8,8 +8,11 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::v0::BeginUploadRequest;
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
+use loonfs_core::content::store_bytes_as_content;
+use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::gc::{gc_namespace, GcConfig};
-use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
+use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::{
@@ -17,6 +20,54 @@ use loonfs_objectstore::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
+
+async fn put_file<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    bytes: &[u8],
+    context: &MutationContext,
+) {
+    let content = store_bytes_as_content(store, namespace_id, bytes)
+        .await
+        .expect("stage content");
+    NamespaceCommitEngine::new(namespace_id.clone())
+        .publish_batch(
+            store,
+            vec![NamespaceMutationCandidate::Path(
+                PathMutationIntent::PutFile {
+                    commit_id: loonfs_api::CommitId::generate(),
+                    absolute_path: absolute_path.to_owned(),
+                    content_ref: content.content_ref,
+                    behavior: loonfs_api::PutBehavior::NoReplace,
+                },
+            )],
+            context,
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("put file");
+}
+
+async fn read_context<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> RuntimeReadContext {
+    let (head, root) = load_namespace_read_anchor(store, namespace_id)
+        .await
+        .expect("load read anchor");
+    RuntimeReadContext::pinned_head(
+        head.state,
+        head.identity.etag,
+        root.state.manifest_id,
+        root.state.manifest_object_id,
+        None,
+        None,
+        None,
+    )
+}
 
 fn page_limit() -> EffectiveLimit {
     EffectiveLimit::new(std::num::NonZeroU32::new(1024).expect("nonzero limit"))
@@ -144,14 +195,35 @@ async fn reads_commits_and_change_feed_never_list() {
         )
         .await
         .expect("complete upload");
-    engine
-        .put_file("/docs/hello.txt", b"hello\n", Default::default())
-        .await
-        .expect("put file");
+    put_file(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+    )
+    .await;
 
-    engine.resolve_path("/docs/hello.txt").await.expect("stat");
-    engine.list_path("/docs").await.expect("list directory");
-    let bytes = engine.read_file("/docs/hello.txt").await.expect("read");
+    let ctx = read_context(&store, &namespace_id).await;
+    engine
+        .resolve_path_with_runtime_context("/docs/hello.txt", &ctx)
+        .await
+        .expect("stat");
+    engine
+        .list_path_page_with_runtime_context(
+            "/docs",
+            loonfs_api::PageRequest {
+                limit: page_limit(),
+                cursor: None,
+            },
+            &ctx,
+        )
+        .await
+        .expect("list directory");
+    let bytes = engine
+        .read_file_with_runtime_context("/docs/hello.txt", &ctx)
+        .await
+        .expect("read");
     assert_eq!(bytes.bytes, b"hello\n");
     let changes = engine
         .list_changes_after(ChangeSeq(0), page_limit())
@@ -180,10 +252,14 @@ async fn maintenance_never_touches_the_wal_head() {
         .bootstrap_namespace(BootstrapOptions::default())
         .await
         .expect("bootstrap");
-    engine
-        .put_file("/docs/hello.txt", b"hello\n", Default::default())
-        .await
-        .expect("put file");
+    put_file(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+    )
+    .await;
 
     let head_key = wal_head(namespace_id.as_str());
     let before = store

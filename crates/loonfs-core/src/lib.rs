@@ -10,23 +10,45 @@
 //!
 //! # Example
 //!
+//! Mutations are published as candidate batches through
+//! [`publish::NamespaceCommitEngine`]; day-to-day reads and writes should go
+//! through the `loonfs` crate's `FsReader`/`FsWriter` handles, which wrap
+//! this crate with caching and batching.
+//!
 //! ```no_run
-//! use loonfs_api::NamespaceId;
-//! use loonfs_core::{BootstrapOptions, NamespaceEngine, WriteOptions};
+//! use loonfs_api::{CommitId, NamespaceId};
+//! use loonfs_core::publish::{
+//!     NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent,
+//! };
+//! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //!
 //! let store = LocalFsStore::new(std::env::temp_dir()).expect("store");
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
 //! let engine = NamespaceEngine::builder(store)
-//!     .namespace_id(namespace)
+//!     .namespace_id(namespace.clone())
 //!     .writer_id("example-writer")
 //!     .build()
 //!     .expect("engine");
-//!
 //! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
-//! let _ = engine.put_file("/plan.md", b"hello", WriteOptions::default());
-//! let _ = engine.read_file("/plan.md");
+//!
+//! let publish_store = LocalFsStore::new(std::env::temp_dir()).expect("store");
+//! let context = MutationContext {
+//!     writer_id: "example-writer".to_owned(),
+//!     writer_session_id: "example-session".to_owned(),
+//!     writer_version: "example/0.1".to_owned(),
+//!     now_ms: 0,
+//! };
+//! let mut publisher = NamespaceCommitEngine::new(namespace);
+//! let _ = publisher.publish_batch(
+//!     &publish_store,
+//!     vec![NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
+//!         commit_id: CommitId::generate(),
+//!         absolute_path: "/plans".to_owned(),
+//!     })],
+//!     &context,
+//! );
 //! ```
 
 mod checkpoint;
@@ -78,15 +100,11 @@ pub mod control {
 pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use crate::commit_engine::{
-        DirectObjectStorePublisher, FlushPolicy, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, NamespaceMutationCandidate, PublishOptions,
+        NamespaceCommitEngine, NamespaceCommitEnginePublishResult, NamespaceMutationCandidate,
     };
     pub use crate::path::write::PathMutationIntent;
-    pub use crate::protocol::ContentDurabilityGate;
+    pub use crate::protocol::{ContentDurabilityGate, PublishTailOptions};
 }
-
-#[cfg(any(test, feature = "inspection"))]
-pub mod inspection;
 
 pub use checkpoint::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub use context::MutationContext;
