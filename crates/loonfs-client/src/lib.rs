@@ -168,6 +168,32 @@ impl ClientConfig {
     }
 }
 
+/// Options shared by every client mutation, mirroring the runtime's
+/// per-operation options structs.
+#[derive(Debug, Clone, Default)]
+pub struct MutationOptions {
+    /// Idempotency key for the commit; retrying with the same id replays
+    /// the committed mutation instead of double-committing. A fresh id is
+    /// generated when absent.
+    pub commit_id: Option<String>,
+}
+
+impl MutationOptions {
+    /// Retry with a caller-chosen idempotency key.
+    pub fn with_commit_id(commit_id: impl Into<String>) -> Self {
+        Self {
+            commit_id: Some(commit_id.into()),
+        }
+    }
+
+    fn resolve_commit_id(&self) -> Result<CommitId, ClientError> {
+        match &self.commit_id {
+            Some(value) => parse_commit_id(value),
+            None => parse_commit_id(&generated_commit_id()),
+        }
+    }
+}
+
 impl Client {
     /// Creates a client from validated config.
     pub fn new(config: ClientConfig) -> Self {
@@ -633,18 +659,9 @@ impl Client {
         spec: &NamespacePath,
         bytes: &[u8],
         force: bool,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
-        self.put_file_bytes_with_commit_id(spec, bytes, force, &generated_commit_id())
-    }
-
-    pub fn put_file_bytes_with_commit_id(
-        &self,
-        spec: &NamespacePath,
-        bytes: &[u8],
-        force: bool,
-        commit_id: &str,
-    ) -> Result<MutationResult, ClientError> {
-        let commit_id = parse_commit_id(commit_id)?;
+        let commit_id = options.resolve_commit_id()?;
         let staged = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
@@ -669,29 +686,17 @@ impl Client {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
-        self.write_file_bytes_with_commit_id(spec, bytes, &generated_commit_id())
+        self.put_file_bytes(spec, bytes, true, options)
     }
 
-    pub fn write_file_bytes_with_commit_id(
+    pub fn create_directory(
         &self,
         spec: &NamespacePath,
-        bytes: &[u8],
-        commit_id: &str,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
-        self.put_file_bytes_with_commit_id(spec, bytes, true, commit_id)
-    }
-
-    pub fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
-        self.create_directory_with_commit_id(spec, &generated_commit_id())
-    }
-
-    pub fn create_directory_with_commit_id(
-        &self,
-        spec: &NamespacePath,
-        commit_id: &str,
-    ) -> Result<MutationResult, ClientError> {
-        let commit_id = parse_commit_id(commit_id)?;
+        let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
@@ -705,48 +710,29 @@ impl Client {
         Ok(response.into())
     }
 
-    pub fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
-        self.delete_path_with_commit_id(spec, &generated_commit_id())
+    pub fn delete_path(
+        &self,
+        spec: &NamespacePath,
+        options: &MutationOptions,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::NonRecursive, options)
     }
 
     pub fn delete_path_recursive(
         &self,
         spec: &NamespacePath,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
-        self.delete_path_recursive_with_commit_id(spec, &generated_commit_id())
+        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::Recursive, options)
     }
 
-    pub fn delete_path_with_commit_id(
-        &self,
-        spec: &NamespacePath,
-        commit_id: &str,
-    ) -> Result<MutationResult, ClientError> {
-        self.delete_path_with_behavior_and_commit_id(
-            spec,
-            DeleteDirectoryBehavior::NonRecursive,
-            commit_id,
-        )
-    }
-
-    pub fn delete_path_recursive_with_commit_id(
-        &self,
-        spec: &NamespacePath,
-        commit_id: &str,
-    ) -> Result<MutationResult, ClientError> {
-        self.delete_path_with_behavior_and_commit_id(
-            spec,
-            DeleteDirectoryBehavior::Recursive,
-            commit_id,
-        )
-    }
-
-    pub fn delete_path_with_behavior_and_commit_id(
+    fn delete_path_with_behavior(
         &self,
         spec: &NamespacePath,
         behavior: DeleteDirectoryBehavior,
-        commit_id: &str,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
-        let commit_id = parse_commit_id(commit_id)?;
+        let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
@@ -765,15 +751,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-    ) -> Result<MutationResult, ClientError> {
-        self.move_path_with_commit_id(from, to, &generated_commit_id())
-    }
-
-    pub fn move_path_with_commit_id(
-        &self,
-        from: &NamespacePath,
-        to: &NamespacePath,
-        commit_id: &str,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -781,7 +759,7 @@ impl Client {
                 from.namespace, to.namespace
             )));
         }
-        let commit_id = parse_commit_id(commit_id)?;
+        let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &from.namespace,
             &FilesystemOperationRequest {
@@ -801,15 +779,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-    ) -> Result<MutationResult, ClientError> {
-        self.copy_path_with_commit_id(from, to, &generated_commit_id())
-    }
-
-    pub fn copy_path_with_commit_id(
-        &self,
-        from: &NamespacePath,
-        to: &NamespacePath,
-        commit_id: &str,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -817,7 +787,7 @@ impl Client {
                 from.namespace, to.namespace
             )));
         }
-        let commit_id = parse_commit_id(commit_id)?;
+        let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &from.namespace,
             &FilesystemOperationRequest {
@@ -836,17 +806,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
+        options: &MutationOptions,
     ) -> Result<MutationResult, ClientError> {
-        self.restore_file_revision_with_commit_id(spec, source_revision_no, &generated_commit_id())
-    }
-
-    pub fn restore_file_revision_with_commit_id(
-        &self,
-        spec: &NamespacePath,
-        source_revision_no: RevisionNo,
-        commit_id: &str,
-    ) -> Result<MutationResult, ClientError> {
-        let commit_id = parse_commit_id(commit_id)?;
+        let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
