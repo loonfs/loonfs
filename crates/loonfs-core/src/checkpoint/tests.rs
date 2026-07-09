@@ -45,7 +45,7 @@ use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
-    MetadataSegmentKey, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
+    MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
@@ -787,7 +787,6 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         created_at_ms: context.now_ms,
         expires_at_ms: None,
-        owner: None,
         name: None,
         state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active,
     };
@@ -1962,7 +1961,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             namespace_id: namespace_id.clone(),
             manifest_id: manifest_id(materialization.head.seq),
             manifest_object_id: manifest_object_id(manifest_id(materialization.head.seq)),
-            prev_manifest_id: Some(materialization.root.manifest_id),
             head_seq: materialization.head.seq,
             head_commit_id: materialization.head.head_commit_id.clone(),
             base_seq: first,
@@ -2204,12 +2202,6 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         .find(|table| table.family == ApiMetadataTableFamily::Revisions)
         .expect("revision table");
     assert!(revisions.segments.len() >= 3);
-    assert!(revisions.segments.iter().all(|descriptor| {
-        matches!(
-            descriptor.segment_key,
-            MetadataSegmentKey::RowKeyRange { .. }
-        )
-    }));
 
     let direntries = base
         .tables
@@ -2220,12 +2212,6 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
         direntries.segments.len() >= 3,
         "hot directory direntry rows should be range-split"
     );
-    assert!(direntries.segments.iter().all(|descriptor| {
-        matches!(
-            descriptor.segment_key,
-            MetadataSegmentKey::RowKeyRange { .. }
-        )
-    }));
 
     for table in &base.tables {
         let mut previous_max_key: Option<&str> = None;
@@ -3066,7 +3052,6 @@ async fn rewrite_manifest_segment(
     descriptor.row_count = built.row_count;
     descriptor.min_key = built.min_key;
     descriptor.max_key = built.max_key;
-    descriptor.object_len = built.bytes.len() as u64;
     descriptor.index_block = built.index;
     descriptor.filter_block = built.filter;
     descriptor.payload_checksum = loonfs_api::sha256_digest(&built.bytes);
@@ -4150,7 +4135,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
             namespace_id: namespace_id.clone(),
             manifest_id: ManifestId(materialization_before.head.seq.0),
             manifest_object_id: manifest_object_id(ManifestId(materialization_before.head.seq.0)),
-            prev_manifest_id: Some(materialization_before.root.manifest_id),
             head_seq: materialization_before.head.seq,
             head_commit_id: materialization_before.head.head_commit_id.clone(),
             base_seq: materialization_before.head.seq,
@@ -4631,11 +4615,6 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         }
         other => panic!("expected published compacted root, got {other:?}"),
     }
-    assert_eq!(
-        compacted.payload.prev_manifest_id,
-        Some(checkpoint.manifest_id)
-    );
-
     // Reads keep working against the replaced root.
     let after = load_current_projection(&store, &namespace_id)
         .await

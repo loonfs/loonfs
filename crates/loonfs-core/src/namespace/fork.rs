@@ -1,6 +1,6 @@
 use super::bootstrap::BootstrapNamespaceError;
 use crate::checkpoint::{
-    create_checkpoint_with_owner, load_verified_manifest_tables, read_checkpoint_record,
+    create_checkpoint, load_verified_manifest_tables, read_checkpoint_record,
     write_namespace_manifest,
 };
 use crate::context::MutationContext;
@@ -13,9 +13,9 @@ use crate::namespace::catalog::{
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
-    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
+    decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
+    ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
+    NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
     NamespaceGcPinStateEnvelope, NamespaceState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
     WriterBlock,
 };
@@ -62,16 +62,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 
     // Fork routes through a fork-owned source checkpoint: the pin will
     // reference the checkpoint only, and reachability resolves through it.
-    let checkpoint = create_checkpoint_with_owner(
-        store,
-        source_namespace_id,
-        context,
-        Some(CheckpointOwner {
-            kind: "fork".to_owned(),
-            id: Some(new_namespace_id.as_str().to_owned()),
-        }),
-    )
-    .await?;
+    let checkpoint = create_checkpoint(store, source_namespace_id, context).await?;
     let source_record =
         read_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id)
             .await?
@@ -266,7 +257,6 @@ fn fork_target_manifest_payload(
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
         manifest_object_id: target_manifest_object_id,
-        prev_manifest_id: None,
         head_seq: fork_seq,
         head_commit_id: source_record.head_commit_id.clone(),
         base_seq: source_manifest.payload.base_seq,
@@ -563,7 +553,6 @@ mod tests {
             head_commit_id: CommitId::parse(head_commit_id).expect("commit id"),
             created_at_ms: 1_000,
             expires_at_ms: None,
-            owner: None,
             name: None,
             state: CheckpointRecordLifecycle::Active,
         }
@@ -582,7 +571,6 @@ mod tests {
                 namespace_id,
                 manifest_id,
                 manifest_object_id: manifest_object_id(manifest_id),
-                prev_manifest_id: None,
                 head_seq,
                 head_commit_id: commit_id.clone(),
                 base_seq: head_seq,

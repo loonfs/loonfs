@@ -19,16 +19,16 @@
 //!   re-encoding.
 
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlCodecError,
-    ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState,
-    NamespaceGcPinState, NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState,
-    WalSegmentPointer, WriterBlock,
+    decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
+    CompletedUpload, ContentStoreDescriptorState, ControlCodecError, ControlObjectEnvelope,
+    ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState, NamespaceGcPinState,
+    NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState, WalSegmentPointer,
+    WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
-    MetadataSegmentKey, MetadataTableFamily, NamespaceManifestCodecError,
-    NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
+    MetadataTableFamily, NamespaceManifestCodecError, NamespaceManifestEnvelope,
+    NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCodecError,
@@ -221,7 +221,6 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             namespace_id: namespace_id(),
             manifest_id: ManifestId(2),
             manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
-            prev_manifest_id: Some(ManifestId(1)),
             head_seq: ChangeSeq(2),
             head_commit_id: commit_id(),
             base_seq: ChangeSeq(2),
@@ -252,11 +251,9 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 level: 0,
                 family: MetadataTableFamily::Inodes,
                 segment_index: 0,
-                segment_key: MetadataSegmentKey::Full,
                 row_count: 6,
                 min_key: "commit-receipt".to_owned(),
                 max_key: "tombstone".to_owned(),
-                object_len: 4_242,
                 index_block: loonfs_api::wire::sst_blocks::BlockHandle {
                     offset: 4_000,
                     stored_len: 200,
@@ -443,10 +440,6 @@ fn control_objects_match_golden_bytes() {
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             expires_at_ms: None,
-            owner: Some(CheckpointOwner {
-                kind: "fork".to_owned(),
-                id: Some("clone".to_owned()),
-            }),
             name: None,
             state: CheckpointRecordLifecycle::Active,
         },
@@ -478,6 +471,71 @@ fn control_objects_match_golden_bytes() {
             }),
             created_at_ms: 1_000,
         },
+    );
+    // The dead lifecycle and the direct-put session shape are durable
+    // encodings of their own: `state` and `mode` change the document.
+    check_control_golden(
+        "control_checkpoint_record_dead.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        CheckpointRecordState {
+            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
+            namespace_id: namespace_id(),
+            manifest_id: ManifestId(3),
+            manifest_object_id: manifest_object_id(3, "0123456789abcdef"),
+            manifest_head_seq: ChangeSeq(3),
+            manifest_payload_checksum:
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            head_commit_id: commit_id(),
+            created_at_ms: 3_000,
+            expires_at_ms: Some(9_000),
+            name: Some("nightly".to_owned()),
+            state: CheckpointRecordLifecycle::Dead,
+        },
+    );
+    check_control_golden(
+        "control_upload_session_direct_put.v1.json",
+        ControlObjectKind::UploadSession,
+        UploadSessionState {
+            namespace_id: namespace_id(),
+            upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
+                .expect("valid upload id"),
+            mode: UploadMode::DirectPut,
+            direct_put_content_ref: Some(sample_content_ref()),
+            staged_content_ref: None,
+            completed: None,
+            created_at_ms: 1_000,
+        },
+    );
+}
+
+#[test]
+fn metadata_table_family_wire_tags_are_pinned() {
+    let tags: Vec<String> = [
+        MetadataTableFamily::Inodes,
+        MetadataTableFamily::DirentryBinds,
+        MetadataTableFamily::DirentryChildBinds,
+        MetadataTableFamily::DirentryUnbinds,
+        MetadataTableFamily::Revisions,
+        MetadataTableFamily::RevisionsByInodeDesc,
+        MetadataTableFamily::Tombstones,
+        MetadataTableFamily::CommitReceipts,
+    ]
+    .iter()
+    .map(|family| serde_json::to_string(family).expect("family tag"))
+    .collect();
+    assert_eq!(
+        tags,
+        [
+            "\"inodes\"",
+            "\"direntry_binds\"",
+            "\"direntry_child_binds\"",
+            "\"direntry_unbinds\"",
+            "\"revisions\"",
+            "\"revisions_by_inode_desc\"",
+            "\"tombstones\"",
+            "\"commit_receipts\"",
+        ],
+        "family tags are durable bytes in every manifest descriptor"
     );
 }
 

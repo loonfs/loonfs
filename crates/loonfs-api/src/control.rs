@@ -147,13 +147,6 @@ pub enum CheckpointRecordLifecycle {
     Dead,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointOwner {
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-}
-
 /// Durable stable-view pin to a metadata manifest.
 ///
 /// First-class file under `checkpoints/`; never part of a manifest and never
@@ -173,8 +166,6 @@ pub struct CheckpointRecordState {
     pub created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<CheckpointOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub state: CheckpointRecordLifecycle,

@@ -33,9 +33,7 @@ use crate::namespace::control::{read_head_and_metadata_root, read_wal_floor_seq_
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::wire::control::{
-    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-};
+use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
@@ -59,14 +57,6 @@ pub(super) const MANIFEST_ALLOCATION_RETRY_LIMIT: usize = 8;
 // newest current manifest.
 pub(super) const CHECKPOINT_PUBLICATION_RETRY_LIMIT: usize = 8;
 
-pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> Result<CreateCheckpointResponse> {
-    create_checkpoint_with_owner(store, namespace_id, context, None).await
-}
-
 pub(crate) const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
 
 struct CheckpointBasis {
@@ -76,11 +66,10 @@ struct CheckpointBasis {
     manifest_payload_checksum: String,
 }
 
-pub(crate) async fn create_checkpoint_with_owner<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    owner: Option<CheckpointOwner>,
 ) -> Result<CreateCheckpointResponse> {
     // Checkpoint creation pins a manifest version as a first-class record
     // under `checkpoints/`, write-then-verify (format spec, "Checkpoints"):
@@ -211,7 +200,6 @@ pub(crate) async fn create_checkpoint_with_owner<S: ObjectStore + ?Sized>(
             head_commit_id: projection.head.head_commit_id.clone(),
             created_at_ms: context.now_ms,
             expires_at_ms: None,
-            owner: owner.clone(),
             name: None,
             state: CheckpointRecordLifecycle::Active,
         };
@@ -438,7 +426,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             manifest_id,
             manifest_object_id,
-            prev_manifest_id: None,
             head_seq: initial_head.seq,
             head_commit_id: initial_head.head_commit_id.clone(),
             base_seq: initial_head.seq,
@@ -505,7 +492,6 @@ async fn build_namespace_manifest_for_checkpoint_projection<S: ObjectStore + ?Si
             namespace_id: namespace_id.clone(),
             manifest_id,
             manifest_object_id,
-            prev_manifest_id: Some(projection.root.manifest_id),
             head_seq,
             head_commit_id: projection.head.head_commit_id.clone(),
             base_seq,
@@ -763,7 +749,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         ),
         _ => None,
     };
-    let prev_manifest_id = source.basis_manifest_id;
 
     let (base_seq, metadata_files) = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
@@ -828,7 +813,6 @@ pub(super) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             namespace_id: namespace_id.clone(),
             manifest_id,
             manifest_object_id,
-            prev_manifest_id,
             head_seq,
             head_commit_id: head.head_commit_id.clone(),
             base_seq,
