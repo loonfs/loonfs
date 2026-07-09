@@ -25,7 +25,7 @@ use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_tables, runs_from_metadata_files, MetadataLsmPolicy, MetadataRunManifest,
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
-    DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
+    DEFAULT_MAX_CHECKPOINT_L0_RUNS,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
@@ -2024,18 +2024,6 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
 }
 
 #[tokio::test]
-async fn metadata_lsm_policy_default_matches_l0_run_cap() {
-    assert_eq!(
-        MetadataLsmPolicy::default().max_l0_runs,
-        MAX_CHECKPOINT_L0_RUNS
-    );
-    assert_eq!(
-        MetadataLsmPolicy::default().max_rows_per_segment,
-        DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT
-    );
-}
-
-#[tokio::test]
 async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2697,8 +2685,6 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
         .expect("checkpoint");
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
     let cache = MetadataTableCache::new(MetadataTableCacheConfig {
-        enabled: true,
-        max_blocks: 256,
         max_decoded_bytes: 1,
     });
     let tables = super::load_verified_manifest_tables_with_cache(
@@ -3555,7 +3541,7 @@ async fn checkpoints_chain_l0_runs_past_the_default_cap() {
     )
     .await
     .expect("load appended manifest");
-    assert!(l0_runs(&appended.manifest).len() > MAX_CHECKPOINT_L0_RUNS);
+    assert!(l0_runs(&appended.manifest).len() > DEFAULT_MAX_CHECKPOINT_L0_RUNS);
     assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 }
 

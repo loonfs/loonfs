@@ -37,11 +37,12 @@ mod validate;
 pub use self::cache::{
     MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats, WalTailProjectionCache,
     WalTailProjectionCacheConfig, WalTailProjectionCacheKey, WalTailProjectionCacheStats,
-    DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_METADATA_TABLE_CACHE_MAX_BLOCKS,
+    DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
-pub use self::runs::MetadataLsmPolicy;
+pub(crate) use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{
     build_initial_namespace_manifest, create_checkpoint, create_checkpoint_with_owner,

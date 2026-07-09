@@ -13,8 +13,6 @@ pub(super) const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 pub(super) const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 65_536;
 
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
-#[cfg(test)]
-pub(super) const MAX_CHECKPOINT_L0_RUNS: usize = DEFAULT_MAX_CHECKPOINT_L0_RUNS;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
 pub(super) const CHECKPOINT_BASE_RUN_LEVEL: u32 = 1;
 pub(super) const CHECKPOINT_TABLE_FAMILIES: [MetadataTableFamily; 8] = [
@@ -42,7 +40,7 @@ pub(super) struct MetadataRunManifest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataLsmPolicy {
+pub(crate) struct MetadataLsmPolicy {
     pub max_l0_runs: usize,
     pub max_rows_per_segment: usize,
 }
