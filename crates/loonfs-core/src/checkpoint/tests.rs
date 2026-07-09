@@ -8,11 +8,7 @@ use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
-use super::create::{
-    build_namespace_manifest_from_metadata_state, create_checkpoint,
-    drop_rows_below_retention_floor, load_checkpoint_projection_metadata_state,
-    ManifestMetadataSource,
-};
+use super::create::{create_checkpoint, load_checkpoint_projection_metadata_state};
 use super::error::ManifestLoadError;
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
@@ -988,7 +984,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         vec![unbind(1, 0, 2)],
     );
 
-    drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
+    super::reorganize::drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
 
     assert_eq!(rows[&ApiMetadataTableFamily::DirentryBinds].len(), 2);
     assert_eq!(rows[&ApiMetadataTableFamily::DirentryChildBinds].len(), 2);
@@ -1026,7 +1022,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     );
     rows.insert(ApiMetadataTableFamily::DirentryUnbinds, vec![unbind]);
 
-    drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
+    super::reorganize::drop_rows_below_retention_floor(&mut rows, ChangeSeq(1)).expect("drop");
 
     // Only the delta-2 rebind (the slot's latest) survives; the superseded
     // delta-0 bind and its spent unbind marker are gone from both families.
@@ -1064,7 +1060,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
         vec![bind(0), bind(1)],
     );
 
-    let error = drop_rows_below_retention_floor(&mut rows, ChangeSeq(1))
+    let error = super::reorganize::drop_rows_below_retention_floor(&mut rows, ChangeSeq(1))
         .expect_err("superseded live bind must refuse the drop");
     assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
 }
@@ -5193,4 +5189,131 @@ impl ObjectStore for ConflictOnManifestCreateStore {
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         self.inner.list_prefix_stream(prefix)
     }
+}
+
+use super::build::{
+    build_manifest_l0_run_tables, debug_assert_manifest_table_segments_do_not_overlap,
+};
+use super::runs::l0_run_count;
+
+// Test support: a manifest built directly from a MetadataState, used to
+// author arbitrary layouts without driving the full checkpoint pipeline.
+#[cfg(test)]
+pub(crate) struct ManifestMetadataSource<'a> {
+    pub(super) head: &'a HeadState,
+    pub(super) basis_manifest_id: Option<ManifestId>,
+    pub(super) retention_floor_seq: ChangeSeq,
+    pub(super) metadata_state: &'a MetadataState,
+}
+
+#[cfg(test)]
+pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    source: ManifestMetadataSource<'_>,
+    writer_version: &str,
+    policy: MetadataLsmPolicy,
+    manifest_id: ManifestId,
+) -> crate::error::Result<NamespaceManifestEnvelope> {
+    let manifest_object_id = ManifestObjectId::generate(manifest_id);
+    let head = source.head;
+    let metadata_state = source.metadata_state;
+    let head_seq = head.seq;
+    let previous_manifest = match source.basis_manifest_id {
+        Some(previous_id) => Some(
+            load_manifest_materialization_for_inspection(store, namespace_id, previous_id)
+                .await
+                .map_err(|error| {
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+                })?,
+        ),
+        _ => None,
+    };
+
+    let (base_seq, metadata_files) = match previous_manifest {
+        Some(previous) if is_bootstrap_seed_manifest(&previous.manifest.payload) => {
+            let run_tables = build_manifest_tables(
+                store,
+                namespace_id,
+                head_seq,
+                CHECKPOINT_BASE_RUN_LEVEL,
+                metadata_state,
+                policy.max_rows_per_segment,
+            )
+            .await?;
+            debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
+            (head_seq, flatten_manifest_tables(run_tables))
+        }
+        Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
+            let mut metadata_files = previous.manifest.payload.metadata_files.clone();
+            if previous.manifest.payload.head_seq < head_seq {
+                metadata_files.extend(flatten_manifest_tables(
+                    build_manifest_l0_run_tables(
+                        store,
+                        namespace_id,
+                        head_seq,
+                        previous.manifest.payload.head_seq,
+                        metadata_state,
+                    )
+                    .await?,
+                ));
+            }
+            (previous.manifest.payload.base_seq, metadata_files)
+        }
+        Some(_) => {
+            let run_tables = build_manifest_tables(
+                store,
+                namespace_id,
+                head_seq,
+                CHECKPOINT_BASE_RUN_LEVEL,
+                metadata_state,
+                policy.max_rows_per_segment,
+            )
+            .await?;
+            debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
+            (head_seq, flatten_manifest_tables(run_tables))
+        }
+        _ => {
+            let run_tables = build_manifest_tables(
+                store,
+                namespace_id,
+                head_seq,
+                CHECKPOINT_BASE_RUN_LEVEL,
+                metadata_state,
+                policy.max_rows_per_segment,
+            )
+            .await?;
+            (head_seq, flatten_manifest_tables(run_tables))
+        }
+    };
+
+    NamespaceManifestEnvelope::from_payload(
+        writer_version,
+        NamespaceManifestPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            manifest_object_id,
+            head_seq,
+            head_commit_id: head.head_commit_id.clone(),
+            base_seq,
+            writer_epoch: head.writer_epoch,
+            next_inode_id: head.next_inode_id,
+            retention_floor_seq: source.retention_floor_seq,
+            initialized: true,
+            verified: true,
+            fork: None,
+            features: BTreeMap::new(),
+            metadata_files,
+        },
+    )
+    .map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to build namespace manifest envelope: {err}"
+        ))
+    })
+}
+
+#[cfg(test)]
+fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
+    payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0) && payload.fork.is_none()
 }
