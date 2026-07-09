@@ -338,7 +338,6 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
                 namespace_id: namespace_id.clone(),
                 manifest_id,
                 manifest_object_id,
-                prev_manifest_id: Some(previous.payload.manifest_id),
                 head_seq: previous.payload.head_seq,
                 head_commit_id: previous.payload.head_commit_id.clone(),
                 base_seq,

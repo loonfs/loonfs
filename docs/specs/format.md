@@ -603,7 +603,7 @@ observes at least the root's seq; this race is not corruption.
 A checkpoint is a durable pin to a namespace manifest version, stored as a
 first-class record under `checkpoints/` — never inside a manifest, and never
 an input to latest visibility. A record carries its basis facts (manifest id,
-seq, payload checksum, head commit id), an optional owner/name/expiry, and a
+seq, payload checksum, head commit id), an optional name and expiry, and a
 lifecycle `state` of `active` or `dead`. Only active, non-expired records are
 long-term GC roots; dead records are collectable tombstones. Creation is
 write-then-verify: write the record active, then verify — under the
@@ -1156,7 +1156,7 @@ independently readable sections — prefix-compressed data blocks holding rows
 in ascending row-key order, one bloom filter block over per-family lookup
 prefixes, then one index block naming each data block's last key and byte
 range. There is no footer and no self-describing header; the referencing
-manifest's segment descriptor carries the object length and the index and
+manifest's segment descriptor carries the index and
 filter block handles, and is the only entry point into the object. Each
 section's CRC32C is computed over its stored (compressed) bytes and lives in
 the handle that names it — index entries for data blocks, the manifest

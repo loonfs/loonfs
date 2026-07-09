@@ -42,13 +42,6 @@ pub enum MetadataTableFamily {
     CommitReceipts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MetadataSegmentKey {
-    Full,
-    RowKeyRange { shard: u32 },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataFileRef {
     pub owner_namespace_id: NamespaceId,
@@ -58,12 +51,9 @@ pub struct MetadataFileRef {
     pub level: u32,
     pub family: MetadataTableFamily,
     pub segment_index: u32,
-    pub segment_key: MetadataSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
-    /// Total length of the segment object, in bytes.
-    pub object_len: u64,
     /// Where the segment's index block lives and how to verify it. The
     /// descriptor is the only entry point into a segment object — there is
     /// no footer — so a reader starts here.
@@ -71,8 +61,8 @@ pub struct MetadataFileRef {
     /// Where the segment's bloom filter block lives and how to verify it.
     pub filter_block: BlockHandle,
     /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
-    /// Not consulted by the ranged read path (block CRCs cover reads);
-    /// publication conflict checks and offline verification compare it.
+    /// The ranged read path verifies per-block CRCs instead; this digest is
+    /// the segment's identity in the decoded-block cache.
     pub payload_checksum: String,
 }
 
@@ -296,12 +286,6 @@ pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
     pub manifest_id: ManifestId,
     pub manifest_object_id: ManifestObjectId,
-    /// Same-namespace manifest this one was derived from; null for the
-    /// bootstrap or fork-initial manifest. Provenance and a discovery aid,
-    /// never authority — superseded-table sets are derived by predecessor
-    /// diff, not encoded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prev_manifest_id: Option<ManifestId>,
     pub head_seq: ChangeSeq,
     pub head_commit_id: CommitId,
     pub base_seq: ChangeSeq,
@@ -473,8 +457,8 @@ pub fn decode_namespace_manifest_json(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataFileRef, MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope,
-        NamespaceManifestFork, NamespaceManifestPayload,
+        MetadataFileRef, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
+        NamespaceManifestPayload,
     };
     use crate::{
         ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId,
@@ -487,7 +471,6 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
             NamespaceManifestPayload {
-                prev_manifest_id: None,
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(10),
                 manifest_object_id: ManifestObjectId::parse(
@@ -530,7 +513,6 @@ mod tests {
         let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
             NamespaceManifestPayload {
-                prev_manifest_id: None,
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(12),
                 manifest_object_id: ManifestObjectId::parse(
@@ -676,11 +658,9 @@ mod tests {
             level,
             family: MetadataTableFamily::Inodes,
             segment_index: 0,
-            segment_key: MetadataSegmentKey::Full,
             row_count: 0,
             min_key: String::new(),
             max_key: String::new(),
-            object_len: 0,
             index_block: BlockHandle {
                 offset: 0,
                 stored_len: 0,

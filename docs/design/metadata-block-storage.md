@@ -31,8 +31,8 @@ Every block is compressed and checksummed on its own, so a reader can
 fetch and verify exactly the byte ranges it needs.
 
 There is no footer or header. The manifest's segment descriptor records
-the object's length and the location of the index and filter blocks,
-and is the only way into the object:
+where the index and filter blocks live, and is the only way into the
+object:
 
 ```
 manifest ──> descriptor ──> index block ──> data blocks
