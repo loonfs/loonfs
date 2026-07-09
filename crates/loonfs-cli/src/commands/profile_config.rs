@@ -387,11 +387,7 @@ fn build_embedded_profile(
             )?,
             session_token: spec.session_token.map(SecretString::from),
             key_prefix: spec.key_prefix,
-            force_path_style: if spec.force_path_style {
-                Some(true)
-            } else {
-                None
-            },
+            force_path_style: spec.force_path_style,
         },
         ConfiguredObjectStoreKind::CloudflareR2 => StoreConfig::CloudflareR2 {
             bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,

@@ -1,31 +1,6 @@
-use crate::layout::{self, ObjectLayout};
+use crate::layout::ObjectLayout;
 use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetadataTableFamily {
-    Inodes,
-    DirentryBinds,
-    DirentryChildBinds,
-    DirentryUnbinds,
-    Revisions,
-    Tombstones,
-    CommitReceipts,
-}
-
-impl MetadataTableFamily {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Inodes => "inodes",
-            Self::DirentryBinds => "direntry-binds",
-            Self::DirentryChildBinds => "direntry-child-binds",
-            Self::DirentryUnbinds => "direntry-unbinds",
-            Self::Revisions => "revisions",
-            Self::Tombstones => "tombstones",
-            Self::CommitReceipts => "commit-receipts",
-        }
-    }
-}
 
 pub fn namespace_config(namespace: &str) -> String {
     ObjectLayout::new()
@@ -39,16 +14,6 @@ pub fn wal_head(namespace: &str) -> String {
 
 pub fn wal_floor(namespace: &str) -> String {
     ObjectLayout::new().wal_floor(namespace).into_string()
-}
-
-pub fn wal_index(namespace: &str) -> String {
-    ObjectLayout::new().wal_index(namespace).into_string()
-}
-
-pub fn wal_index_run(namespace: &str, index_id: &str) -> String {
-    ObjectLayout::new()
-        .wal_index_run(namespace, index_id)
-        .into_string()
 }
 
 pub fn wal_segment(namespace: &str, segment_id: &str) -> String {
@@ -109,14 +74,14 @@ pub fn pin_prefix(source_namespace: &str) -> String {
     ObjectLayout::new().pin_prefix(source_namespace)
 }
 
+pub fn upload_session_prefix(namespace: &str) -> String {
+    ObjectLayout::new().upload_session_prefix(namespace)
+}
+
 pub fn upload_session(namespace: &str, upload_id: &str) -> String {
     ObjectLayout::new()
         .upload_session(namespace, upload_id)
         .into_string()
-}
-
-pub fn upload_session_prefix(namespace: &str) -> String {
-    ObjectLayout::new().upload_session_prefix(namespace)
 }
 
 pub fn content_store_descriptor(content_store: &str) -> String {
@@ -131,17 +96,12 @@ pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectS
         .map(|key| key.into_string())
 }
 
-pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
-    layout::sha256_hex_from_digest(digest)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         checkpoint_record, content_blob, content_store_descriptor, metadata_manifest_object,
-        metadata_root, metadata_table, namespace_config, pin, sha256_hex_from_digest,
-        upload_session, upload_session_prefix, wal_floor, wal_head, wal_segment,
-        wal_segment_id_from_key, wal_segment_prefix,
+        metadata_root, metadata_table, namespace_config, pin, upload_session, wal_floor, wal_head,
+        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::ManifestObjectId;
 
@@ -309,14 +269,14 @@ mod tests {
             upload_session("ns-1", "upl_00000000000000000000000000000001"),
             "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
         );
-        assert_eq!(upload_session_prefix("ns-1"), "namespaces/ns-1/uploads/");
     }
 
     #[test]
     fn content_blob_rejects_invalid_sha256_digest() {
-        assert!(sha256_hex_from_digest("sha1:abcdef").is_err());
-        assert!(sha256_hex_from_digest("sha256:abcd").is_err());
-        assert!(sha256_hex_from_digest(
+        assert!(content_blob("ns-1", "sha1:abcdef").is_err());
+        assert!(content_blob("ns-1", "sha256:abcd").is_err());
+        assert!(content_blob(
+            "ns-1",
             "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         )
         .is_err());

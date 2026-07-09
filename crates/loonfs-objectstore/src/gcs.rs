@@ -95,13 +95,6 @@ impl ObjectStore for GcpGcsStore {
             .map(Self::generation_as_compare_token))
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.head(key).await
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         Ok(self
             .inner

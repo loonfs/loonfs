@@ -52,15 +52,16 @@ pub(super) enum MetadataTableBlockKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MetadataTableCacheKey {
-    pub(super) table_digest: String,
+    /// The cached object's identity: a segment's payload checksum for block
+    /// entries, or the manifest object key for manifest entries — both
+    /// immutable, so entries can never go stale.
+    pub(super) identity: String,
     pub(super) block_kind: MetadataTableBlockKind,
     pub(super) block_offset: u64,
 }
 
-/// One segment's decoded rows with their stored row keys, shared behind one
-/// `Arc`: cache hits, single-flight waiters, and per-scan session caches all
-/// hold the same allocation, so concurrent wide scans cannot multiply
-/// resident copies.
+/// One segment's decoded rows with their stored row keys, assembled per
+/// call from the decoded blocks a range read touched.
 #[derive(Debug)]
 pub(super) struct DecodedSegmentRowSet {
     pub(super) rows: Vec<MetadataRow>,
@@ -174,12 +175,12 @@ impl MetadataTableCache {
         }
     }
 
-    /// Resolves one segment access through the single-flight cell: the
-    /// winner consults the cache, fetches on a miss, and populates when
-    /// `populate` is set; concurrent waiters share the winner's block
-    /// instead of issuing duplicate lookups, fetches, or inserts, so hit and
-    /// miss counts measure deduplicated accesses. A failed or cancelled
-    /// fetch leaves the cell empty, so the next caller retries.
+    /// Resolves one block access through the single-flight cell: the
+    /// winner consults the cache, fetches on a miss, and always populates;
+    /// concurrent waiters share the winner's block instead of issuing
+    /// duplicate lookups, fetches, or inserts, so hit and miss counts
+    /// measure deduplicated accesses. A failed or cancelled fetch leaves
+    /// the cell empty, so the next caller retries.
     pub(super) async fn get_or_fetch<E, F, Fut>(
         &self,
         cache_key: &MetadataTableCacheKey,
@@ -544,7 +545,7 @@ mod tests {
 
     fn key(digest: &str) -> MetadataTableCacheKey {
         MetadataTableCacheKey {
-            table_digest: digest.to_owned(),
+            identity: digest.to_owned(),
             block_kind: MetadataTableBlockKind::Data,
             block_offset: 0,
         }

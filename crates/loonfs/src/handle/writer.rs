@@ -313,8 +313,9 @@ impl FsWriter {
     /// Publishes already-classified namespace mutation candidates as one
     /// batch.
     ///
-    /// Server code uses this to push path intents and explicit commits
-    /// through one namespace publisher; results match candidates in order.
+    /// Publishes already-classified candidates as one batch; results match
+    /// candidates in order. (The server routes through its own publisher
+    /// registry, not this method.)
     pub async fn publish_namespace_mutations_batch(
         &self,
         namespace_id: &NamespaceId,

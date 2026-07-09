@@ -149,8 +149,7 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
         rows_by_family.insert(*family, rows);
     }
     // The paired groups exist to preserve index parity; verify it on the
-    // merged rows before writing anything, exactly as the old full rebuild
-    // did at publication.
+    // merged rows before writing anything.
     if group.contains(&MetadataTableFamily::DirentryBinds) {
         validate_direntry_child_bind_index(
             root.manifest_object_id.as_ref(),
