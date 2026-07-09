@@ -6,10 +6,11 @@ use crate::checkpoint::{
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, MetadataViewError};
 use crate::metadata::{
-    DirentryBindRecord, InodeRecord, MetadataState, MetadataView, MetadataViewSession,
-    ResolvedVisiblePath, RevisionRecord, VisibleChildEntry,
+    MetadataState, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
+    VisibleChildEntry,
 };
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
+#[cfg(test)]
 use crate::namespace::control::read_head_and_metadata_root;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
@@ -28,6 +29,9 @@ use tracing::Instrument;
 
 #[derive(Clone, Copy)]
 pub(crate) enum ReadViewContext<'a> {
+    /// Fresh head+root read with no caches: the shape embedded unit tests
+    /// exercise; production reads always pin an anchor.
+    #[cfg(test)]
     Latest,
     PinnedHead {
         head: &'a HeadState,
@@ -52,6 +56,7 @@ pub(crate) struct ReadLoadContext<'a> {
 }
 
 impl<'a> ReadLoadContext<'a> {
+    #[cfg(test)]
     pub(crate) fn latest() -> Self {
         Self {
             view: ReadViewContext::Latest,
@@ -90,6 +95,7 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
     context: ReadLoadContext<'a>,
 ) -> Result<LoadedMetadataView<'a, S>, CoreError> {
     match context.view {
+        #[cfg(test)]
         ReadViewContext::Latest => {
             let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
                 .await
@@ -170,6 +176,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })?;
         let manifest_head = head_from_manifest(&head, tables.manifest());
         let cache_key = match load_context.view {
+            #[cfg(test)]
             ReadViewContext::Latest => None,
             ReadViewContext::PinnedHead { head_etag, .. } => {
                 head_etag.map(|etag| WalTailProjectionCacheKey {
@@ -249,52 +256,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let resolved = self.resolve_visible_path(&absolute_path).await?;
         self.build_authoritative_path_entry(&resolved).await
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loon.phase",
-        err,
-        skip_all,
-        fields(phase = "walk_path")
-    )]
-    pub(crate) async fn list_path(
-        &self,
-        absolute_path: &str,
-    ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-        let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-        let resolved = self.resolve_visible_path(&absolute_path).await?;
-        if resolved.inode_kind == InodeKind::File {
-            return Ok(vec![self.build_authoritative_path_entry(&resolved).await?]);
-        }
-        if resolved.inode_kind != InodeKind::Directory {
-            return Err(CoreError::ExpectedDirectory {
-                path: resolved.absolute_path,
-                kind: resolved.inode_kind,
-            });
-        }
-
-        let mut entries = Vec::new();
-        for direntry in self.visible_children(resolved.inode_id).await? {
-            let child = self
-                .visible_inode(direntry.child_inode_id)
-                .await?
-                .expect("visible child listing should resolve inode");
-            let child_path = AbsolutePath::parse(&resolved.absolute_path)
-                .map_err(map_path_error_to_core)?
-                .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
-            entries.push(
-                self.build_authoritative_path_entry(&ResolvedVisiblePath {
-                    absolute_path: child_path.as_str().to_owned(),
-                    inode_id: direntry.child_inode_id,
-                    inode_kind: child.inode_kind,
-                    parent_inode_id: Some(direntry.parent_inode_id),
-                    display_name: direntry.display_name,
-                })
-                .await?,
-            );
-        }
-        Ok(entries)
     }
 
     pub(crate) async fn read_file_bytes(
@@ -721,17 +682,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             },
         )
         .await
-    }
-
-    async fn visible_children(
-        &self,
-        parent_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        self.metadata_view().visible_children(parent_inode_id).await
-    }
-
-    async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, CoreError> {
-        self.metadata_view().visible_inode(inode_id).await
     }
 
     async fn revision_for_inode(

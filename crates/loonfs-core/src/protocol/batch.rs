@@ -5,7 +5,7 @@
 use super::candidates::{
     prepare_candidate_request, validate_commit_content_references, BatchDedup, CandidateAdmission,
 };
-use super::publish_view::{load_publish_metadata_view, PublishMetadataView, PublishTailOptions};
+use super::publish_view::PublishMetadataView;
 use crate::commit::{
     build_commit_plan_for_publish, materialize_commit, prepare_commit_head_publish,
     publish_commit_head, resolve_restore_content_refs_for_publish,
@@ -14,15 +14,14 @@ use crate::commit::{
 };
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
-use crate::error::{CoreError, MetadataViewError, Result};
-use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::error::{CoreError, Result};
 use crate::path::write::PublishPlanningSession;
 use crate::storage::content::ContentValidationTracker;
 use crate::timing::MonotonicTimer;
 use crate::wal::{prepare_wal_segment, PreparedWalSegment};
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
+use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
@@ -80,119 +79,6 @@ impl PublishBatchAgainstViewResult {
             can_reuse_loaded_projection: false,
         }
     }
-}
-
-pub(crate) async fn commit_operations<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    request: ApiCommitRequest,
-    context: &MutationContext,
-) -> Result<ApiCommitResponse> {
-    publish_namespace_mutations_batch(
-        store,
-        namespace_id,
-        vec![NamespaceMutationCandidate::Commit(request)],
-        context,
-    )
-    .await
-    .pop()
-    .unwrap_or_else(|| Err(CoreError::Internal("empty commit batch".to_owned())))
-}
-
-pub(crate) async fn commit_operations_batch<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    requests: Vec<ApiCommitRequest>,
-    context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse>> {
-    publish_namespace_mutations_batch(
-        store,
-        namespace_id,
-        requests
-            .into_iter()
-            .map(NamespaceMutationCandidate::Commit)
-            .collect(),
-        context,
-    )
-    .await
-}
-
-pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    candidates: Vec<NamespaceMutationCandidate>,
-    context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse>> {
-    commit_namespace_mutations_batch(store, namespace_id, candidates, context, None).await
-}
-
-async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    candidates: Vec<NamespaceMutationCandidate>,
-    context: &MutationContext,
-    content_gate: Option<ContentDurabilityGate>,
-) -> Vec<Result<ApiCommitResponse>> {
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    let acquired_writer = match acquire_writer_epoch(store, namespace_id, context).await {
-        Ok(value) => value,
-        Err(error) => {
-            return (0..candidates.len())
-                .map(|_| Err(CoreError::WriterEpoch(error.clone())))
-                .collect();
-        }
-    };
-    let publish_tail_options = PublishTailOptions::default();
-    let (publish_view, projection) = match load_publish_metadata_view(
-        store,
-        None,
-        None,
-        namespace_id,
-        Some(acquired_writer),
-        None,
-        &publish_tail_options,
-    )
-    .instrument(tracing::info_span!(
-        "loon.phase",
-        phase = "load_publish_view"
-    ))
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => return (0..candidates.len()).map(|_| Err(error.clone())).collect(),
-    };
-    if projection.wal_tail_segments > crate::commit_engine::WAL_TAIL_BACKPRESSURE_SEGMENTS {
-        // Same backpressure contract as the caching engine: the commit
-        // surface must not outrun maintenance either (format spec,
-        // "Maintenance operations").
-        let error = MetadataViewError::MaintenanceRequired {
-            namespace_id: namespace_id.clone(),
-            reason: format!(
-                "wal tail has {} segments; publishes resume once maintenance brings it back to {} or fewer",
-                projection.wal_tail_segments,
-                crate::commit_engine::WAL_TAIL_BACKPRESSURE_SEGMENTS
-            ),
-        };
-        return (0..candidates.len())
-            .map(|_| Err(CoreError::from(error.clone())))
-            .collect();
-    }
-    // One-shot path: each call is its own writer-session decision, so a
-    // fresh budget timer per call is correct.
-    let timer = crate::timing::StdMonotonicTimer::default();
-    publish_namespace_mutations_batch_against_publish_view(
-        store,
-        namespace_id,
-        &candidates,
-        context,
-        &publish_view,
-        &timer,
-        content_gate,
-    )
-    .await
-    .results
 }
 
 /// Awaited between the batch's WAL write and its head compare-and-swap:
