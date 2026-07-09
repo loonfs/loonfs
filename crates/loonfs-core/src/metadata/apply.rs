@@ -7,7 +7,7 @@ use super::{
 };
 use crate::invariants::InvariantId;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
+use loonfs_api::{ChangeSeq, CommitId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -18,15 +18,7 @@ pub struct AppliedMetadataState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum MetadataApplyError {
-    #[error(
-        "revision counter overflow for inode `{inode_id}` at base revision `{base_revision_no}`"
-    )]
-    RevisionOverflow {
-        inode_id: InodeId,
-        base_revision_no: RevisionNo,
-    },
-}
+pub enum MetadataApplyError {}
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
@@ -148,19 +140,6 @@ impl MetadataState {
                 InvariantId::TombstoneSubtreeWritesTombstoneRow
             }
         }
-    }
-
-    pub fn apply_committed_wal_record(
-        &self,
-        record: &WalCommitPayload,
-    ) -> Result<AppliedMetadataState, MetadataApplyError> {
-        let mut metadata_state = self.clone();
-        let checked_invariants = metadata_state.apply_committed_wal_record_mut(record)?;
-
-        Ok(AppliedMetadataState {
-            metadata_state,
-            checked_invariants,
-        })
     }
 
     pub fn apply_committed_wal_record_mut(

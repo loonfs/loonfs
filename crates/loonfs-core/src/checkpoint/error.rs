@@ -76,30 +76,6 @@ pub enum ManifestLoadError {
     ReadSegment { object_key: String, message: String },
     #[error("metadata SST codec error for `{object_key}`: {message}")]
     SegmentCodec { object_key: String, message: String },
-    #[error(
-        "metadata SST namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    SegmentNamespaceMismatch {
-        object_key: String,
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
-    #[error(
-        "metadata SST family mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
-    )]
-    SegmentFamilyMismatch {
-        object_key: String,
-        expected: MetadataTableFamily,
-        actual: MetadataTableFamily,
-    },
-    #[error(
-        "metadata SST index mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    SegmentIndexMismatch {
-        object_key: String,
-        expected: u32,
-        actual: u32,
-    },
     #[error("metadata SST key mismatch for `{object_key}`: expected `{expected}`")]
     SegmentObjectKeyMismatch {
         object_key: String,
@@ -107,22 +83,6 @@ pub enum ManifestLoadError {
     },
     #[error("metadata SST descriptor mismatch for `{object_key}`: {message}")]
     SegmentDescriptorMismatch { object_key: String, message: String },
-    #[error("manifest page shape mismatch for `{object_key}` page {page_index}: {message}")]
-    PageShapeMismatch {
-        object_key: String,
-        page_index: u32,
-        message: String,
-    },
-    #[error(
-        "metadata row key mismatch for `{object_key}` page {page_index} row {row_index}: expected `{expected}`, actual `{actual}`"
-    )]
-    RowKeyMismatch {
-        object_key: String,
-        page_index: u32,
-        row_index: usize,
-        expected: String,
-        actual: String,
-    },
     #[error(
         "metadata row kind mismatch for `{object_key}` family `{family:?}`: found `{row_kind}`"
     )]
@@ -141,8 +101,6 @@ pub enum ManifestLoadError {
     },
     #[error("namespace manifest `{object_key}` revision index does not match canonical revisions")]
     RevisionIndexMismatch { object_key: String },
-    #[error("metadata rows do not reproduce authoritative metadata")]
-    MetadataMismatch,
 }
 
 impl ManifestLoadError {

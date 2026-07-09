@@ -4,8 +4,7 @@
 //! them. Path-oriented convenience operations live in [`super::operations`].
 
 use crate::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamePolicy,
-    NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -215,59 +214,6 @@ pub struct ChangesResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_after_seq: Option<ChangeSeq>,
     pub changes: Vec<CommittedChange>,
-}
-
-impl CommitPrecondition {
-    pub fn child_name_absent(parent_inode_id: InodeId, name_key: NameKey) -> Self {
-        Self::ChildNameAbsent {
-            parent_inode_id,
-            name_key,
-        }
-    }
-
-    pub fn child_display_name_absent(
-        parent_inode_id: InodeId,
-        name_policy: NamePolicy,
-        display_name: &DisplayName,
-    ) -> Self {
-        Self::child_name_absent(
-            parent_inode_id,
-            NameKey::for_display_name(name_policy, display_name),
-        )
-    }
-
-    pub fn binding_is(
-        parent_inode_id: InodeId,
-        name_key: NameKey,
-        child_inode_id: InodeId,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
-    ) -> Self {
-        Self::BindingIs {
-            parent_inode_id,
-            name_key,
-            child_inode_id,
-            bind_seq,
-            bind_delta_index,
-        }
-    }
-
-    pub fn display_name_binding_is(
-        parent_inode_id: InodeId,
-        name_policy: NamePolicy,
-        display_name: &DisplayName,
-        child_inode_id: InodeId,
-        bind_seq: ChangeSeq,
-        bind_delta_index: u32,
-    ) -> Self {
-        Self::binding_is(
-            parent_inode_id,
-            NameKey::for_display_name(name_policy, display_name),
-            child_inode_id,
-            bind_seq,
-            bind_delta_index,
-        )
-    }
 }
 
 #[cfg(test)]
