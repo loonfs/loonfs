@@ -629,13 +629,18 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
+    /// `resolved` must come from visible resolution or enumeration at this
+    /// session's seq (both callers do), so the revision lookup does not
+    /// re-derive the inode's visibility.
     async fn build_authoritative_path_entry_with_session(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
     ) -> Result<AuthoritativePathEntry, CoreError> {
         let revision = if resolved.inode_kind == InodeKind::File {
-            session.latest_revision_head(resolved.inode_id).await?
+            session
+                .latest_revision_head_of_visible(resolved.inode_id)
+                .await?
         } else {
             None
         };

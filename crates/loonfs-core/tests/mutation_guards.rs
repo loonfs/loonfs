@@ -5838,3 +5838,79 @@ async fn head_cas_advances_seq(
         })?;
     Ok(candidate.state.seq > existing.state.seq)
 }
+
+/// Listings decide visibility during child enumeration and then look up
+/// revision heads without re-deriving it, so this pins both halves of that
+/// contract: a recursively deleted subtree stays out of listings and
+/// resolution entirely, while entries the enumeration does admit still
+/// surface their real revision data (revision_no, size, content ref).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+
+    create_directory_path(&store, &namespace_id(), "/live", &context, None)
+        .expect("create live dir");
+    create_directory_path(&store, &namespace_id(), "/dead", &context, None)
+        .expect("create dead dir");
+    put_file_bytes(
+        &store,
+        &namespace_id(),
+        "/live/kept.txt",
+        b"alive",
+        PutBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .expect("put live file");
+    put_file_bytes(
+        &store,
+        &namespace_id(),
+        "/dead/gone.txt",
+        b"doomed",
+        PutBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .expect("put doomed file");
+    delete_path(&store, &namespace_id(), "/dead", &context, None).expect("delete dead subtree");
+
+    let root_entries = list_path(&store, &namespace_id(), "/").expect("list root");
+    let root_names: Vec<&str> = root_entries
+        .iter()
+        .map(|entry| entry.absolute_path.as_str())
+        .collect();
+    assert!(
+        root_names.contains(&"/live"),
+        "live directory must list, got {root_names:?}"
+    );
+    assert!(
+        !root_names.iter().any(|path| path.starts_with("/dead")),
+        "tombstoned directory must not list, got {root_names:?}"
+    );
+
+    let live_entries = list_path(&store, &namespace_id(), "/live").expect("list live dir");
+    assert_eq!(live_entries.len(), 1, "one live child");
+    let kept = &live_entries[0];
+    assert_eq!(kept.absolute_path, "/live/kept.txt");
+    assert_eq!(
+        kept.size_bytes,
+        Some(b"alive".len() as u64),
+        "listed entry carries its revision's size"
+    );
+    assert!(
+        kept.revision_no.is_some(),
+        "listed entry carries its revision number"
+    );
+    assert!(
+        kept.content_ref.is_some(),
+        "listed entry carries its content ref"
+    );
+
+    resolve_path(&store, &namespace_id(), "/dead/gone.txt")
+        .expect_err("file under tombstoned subtree must not resolve");
+    resolve_path(&store, &namespace_id(), "/dead")
+        .expect_err("tombstoned directory must not resolve");
+}
