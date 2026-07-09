@@ -9,7 +9,9 @@ use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ManifestId, ManifestObjectId};
-use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
+use loonfs_core::cache::{
+    MetadataTableCache, MetadataTableCacheStats, WalTailProjectionCacheStats,
+};
 use loonfs_core::control::{
     load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
     LoadedMetadataRootControl,
@@ -33,14 +35,15 @@ impl CommitEngineCache {
         &mut self,
         namespace_id: &NamespaceId,
         max_cached_namespaces: usize,
+        table_cache: Arc<MetadataTableCache>,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         if let Some(engine) = self.entries.get(namespace_id).cloned() {
             self.touch(namespace_id);
             return engine;
         }
-        let engine = Arc::new(AsyncMutex::new(NamespaceCommitEngine::new(
-            namespace_id.clone(),
-        )));
+        let engine = Arc::new(AsyncMutex::new(
+            NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache),
+        ));
         self.entries.insert(namespace_id.clone(), engine.clone());
         self.touch(namespace_id);
         while self.entries.len() > max_cached_namespaces {
@@ -385,9 +388,11 @@ impl FsCore {
         namespace_id: &NamespaceId,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         let cache_config = &self.inner.config.runtime_cache;
-        self.inner
-            .commit_engines()
-            .get_or_insert(namespace_id, cache_config.max_cached_namespaces)
+        self.inner.commit_engines().get_or_insert(
+            namespace_id,
+            cache_config.max_cached_namespaces,
+            Arc::clone(&self.inner.metadata_table_cache),
+        )
     }
 
     pub(crate) fn runtime_read_context(

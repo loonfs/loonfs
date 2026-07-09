@@ -322,4 +322,20 @@ async fn warm_phase_request_accounting() {
         .await
         .expect("warm write");
     report("warm write", &log.take(), &tables);
+
+    // A second write on the same handle separates per-handle warmup cost
+    // from per-write cost.
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/hot/file-05002.txt",
+            b"replaced again",
+            PutFileOptions {
+                behavior: loonfs::PutBehavior::Replace,
+                commit_id: None,
+            },
+        )
+        .await
+        .expect("second warm write");
+    report("warm write (same handle, second)", &log.take(), &tables);
 }

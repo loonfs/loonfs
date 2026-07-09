@@ -161,6 +161,7 @@ mod tests {
 
         let (view, _projection) = load_publish_metadata_view(
             &store,
+            None,
             &namespace_id,
             None,
             None,
