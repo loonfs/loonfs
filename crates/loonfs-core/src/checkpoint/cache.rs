@@ -150,9 +150,23 @@ pub struct MetadataTableCache {
 
 #[derive(Debug, Default)]
 struct MetadataTableCacheInner {
-    entries: HashMap<MetadataTableCacheKey, DecodedMetadataTableBlock>,
-    order: VecDeque<MetadataTableCacheKey>,
+    entries: HashMap<MetadataTableCacheKey, CacheSlot>,
+    /// Recency queue with lazy deletion: a hit appends its key with a fresh
+    /// stamp in constant time and leaves its old position behind as a
+    /// ghost; eviction skips ghosts (stale stamps) as it pops. Nothing is
+    /// scheduled — the queue is compacted inline when ghosts outnumber live
+    /// entries, amortized constant like a vector reallocation.
+    order: VecDeque<(MetadataTableCacheKey, u64)>,
     decoded_byte_len: usize,
+    touch_counter: u64,
+}
+
+#[derive(Debug)]
+struct CacheSlot {
+    block: DecodedMetadataTableBlock,
+    /// Stamp of this entry's newest queue position; older positions for the
+    /// same key are ghosts.
+    last_touch: u64,
 }
 
 #[derive(Debug, Default)]
@@ -254,7 +268,7 @@ impl MetadataTableCache {
             .inner
             .lock()
             .expect("metadata table cache lock poisoned");
-        let Some(block) = inner.entries.get(key).cloned() else {
+        let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
             self.stats.misses.fetch_add(1, Ordering::SeqCst);
             return None;
         };
@@ -271,24 +285,36 @@ impl MetadataTableCache {
             .inner
             .lock()
             .expect("metadata table cache lock poisoned");
-        if let Some(previous) = inner.entries.insert(key.clone(), block.clone()) {
+        let decoded_byte_len = block.decoded_byte_len();
+        if let Some(previous) = inner.entries.insert(
+            key.clone(),
+            CacheSlot {
+                block,
+                last_touch: 0,
+            },
+        ) {
             inner.decoded_byte_len = inner
                 .decoded_byte_len
-                .saturating_sub(previous.decoded_byte_len());
+                .saturating_sub(previous.block.decoded_byte_len());
         }
-        inner.decoded_byte_len = inner
-            .decoded_byte_len
-            .saturating_add(block.decoded_byte_len());
+        inner.decoded_byte_len = inner.decoded_byte_len.saturating_add(decoded_byte_len);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
         while inner.decoded_byte_len > self.config.max_decoded_bytes {
-            let Some(evicted) = inner.order.pop_front() else {
+            let Some((candidate, stamp)) = inner.order.pop_front() else {
                 break;
             };
-            if let Some(block) = inner.entries.remove(&evicted) {
+            let live = inner
+                .entries
+                .get(&candidate)
+                .is_some_and(|slot| slot.last_touch == stamp);
+            if !live {
+                continue;
+            }
+            if let Some(slot) = inner.entries.remove(&candidate) {
                 inner.decoded_byte_len = inner
                     .decoded_byte_len
-                    .saturating_sub(block.decoded_byte_len());
+                    .saturating_sub(slot.block.decoded_byte_len());
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -297,8 +323,26 @@ impl MetadataTableCache {
 
 impl MetadataTableCacheInner {
     fn touch(&mut self, key: &MetadataTableCacheKey) {
-        self.order.retain(|candidate| candidate != key);
-        self.order.push_back(key.clone());
+        self.touch_counter += 1;
+        let stamp = self.touch_counter;
+        if let Some(slot) = self.entries.get_mut(key) {
+            slot.last_touch = stamp;
+        }
+        self.order.push_back((key.clone(), stamp));
+        if self.order.len() > (self.entries.len() * 2).max(16) {
+            self.compact_order();
+        }
+    }
+
+    /// Drops ghost queue positions. Runs inline when ghosts outnumber live
+    /// entries, so its cost is amortized over the touches that created them.
+    fn compact_order(&mut self) {
+        let entries = &self.entries;
+        self.order.retain(|(key, stamp)| {
+            entries
+                .get(key)
+                .is_some_and(|slot| slot.last_touch == *stamp)
+        });
     }
 }
 
@@ -587,6 +631,27 @@ mod tests {
         assert!(cache.get(&key("a")).is_some());
         assert!(cache.get(&key("b")).is_some());
         assert_eq!(cache.stats().evictions, 0);
+    }
+
+    #[test]
+    fn recency_queue_stays_bounded_under_repeated_hits() {
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+            max_decoded_bytes: 10_000,
+        });
+        for index in 0..8 {
+            cache.insert(key(&format!("k{index}")), block(10));
+        }
+        for _ in 0..10_000 {
+            cache.get(&key("k0"));
+            cache.get(&key("k3"));
+        }
+        let inner = cache.inner.lock().expect("cache lock");
+        assert_eq!(inner.entries.len(), 8);
+        assert!(
+            inner.order.len() <= (inner.entries.len() * 2).max(16),
+            "hits must not grow the recency queue unboundedly, queue = {}",
+            inner.order.len()
+        );
     }
 
     #[test]
