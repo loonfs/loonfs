@@ -1,3 +1,4 @@
+use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
@@ -106,6 +107,10 @@ pub struct NamespaceCommitEngine {
     fenced: Option<String>,
     /// Local monotonic source for the self-enforced publish budget.
     timer: Arc<dyn MonotonicTimer>,
+    /// Shared decoded-block cache for publish-view table reads. Blocks are
+    /// content-addressed by segment digest, so cached entries can never
+    /// serve stale state; freshness stays enforced by the head etag check.
+    table_cache: Option<Arc<MetadataTableCache>>,
 }
 
 impl NamespaceCommitEngine {
@@ -116,12 +121,18 @@ impl NamespaceCommitEngine {
             acquired_writer: None,
             fenced: None,
             timer: Arc::new(StdMonotonicTimer::default()),
+            table_cache: None,
         }
     }
 
     #[doc(hidden)]
     pub fn with_monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
         self.timer = timer;
+        self
+    }
+
+    pub fn with_table_cache(mut self, table_cache: Arc<MetadataTableCache>) -> Self {
+        self.table_cache = Some(table_cache);
         self
     }
 
@@ -188,6 +199,7 @@ impl NamespaceCommitEngine {
 
         let (publish_view, projection) = match load_publish_metadata_view(
             store,
+            self.table_cache.as_deref(),
             &self.namespace_id,
             Some(acquired_writer),
             self.publish_tail_projection.as_ref(),
@@ -322,6 +334,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
     ) -> Result<PlannedPathMutation> {
         let (view, _projection) = load_publish_metadata_view(
             self.store,
+            None,
             namespace_id,
             None,
             None,
@@ -603,5 +616,81 @@ mod tests {
             .state;
         assert_eq!(head_final.seq, ChangeSeq(1));
         assert_eq!(head_final.writer_epoch, WriterEpoch(0));
+    }
+
+    #[tokio::test]
+    async fn publish_views_reuse_cached_table_blocks_across_publishes() {
+        use crate::cache::MetadataTableCacheConfig;
+        use crate::checkpoint::tests::MetadataSstGetCountingStore;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let store =
+            MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = context("writer-a", "session-a");
+        bootstrap_namespace(&store, &namespace_id, &writer, false)
+            .await
+            .expect("bootstrap");
+        let mut seed = NamespaceCommitEngine::new(namespace_id.clone());
+        seed.publish_batch(&store, vec![create_dir("seed-commit", "docs")], &writer)
+            .await
+            .results
+            .remove(0)
+            .expect("seed publish");
+        crate::checkpoint::create_checkpoint(&store, &namespace_id, &writer)
+            .await
+            .expect("checkpoint");
+
+        // Without a cache, every publish view re-fetches the table blocks
+        // its validation walks need.
+        let mut uncached = NamespaceCommitEngine::new(namespace_id.clone());
+        store.reset_metadata_sst_gets();
+        uncached
+            .publish_batch(&store, vec![create_dir("uncached-a", "alpha")], &writer)
+            .await
+            .results
+            .remove(0)
+            .expect("uncached publish a");
+        assert!(
+            store.metadata_sst_gets() > 0,
+            "publish validation should read table blocks"
+        );
+        store.reset_metadata_sst_gets();
+        uncached
+            .publish_batch(&store, vec![create_dir("uncached-b", "beta")], &writer)
+            .await
+            .results
+            .remove(0)
+            .expect("uncached publish b");
+        assert!(
+            store.metadata_sst_gets() > 0,
+            "without a cache the next publish re-fetches the same blocks"
+        );
+
+        let cache = Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default()));
+        let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(cache);
+        store.reset_metadata_sst_gets();
+        cached
+            .publish_batch(&store, vec![create_dir("cached-a", "gamma")], &writer)
+            .await
+            .results
+            .remove(0)
+            .expect("cached publish a");
+        assert!(
+            store.metadata_sst_gets() > 0,
+            "the first cached publish fills the cache"
+        );
+        store.reset_metadata_sst_gets();
+        cached
+            .publish_batch(&store, vec![create_dir("cached-b", "delta")], &writer)
+            .await
+            .results
+            .remove(0)
+            .expect("cached publish b");
+        assert_eq!(
+            store.metadata_sst_gets(),
+            0,
+            "a warm cache serves every publish-view table read"
+        );
     }
 }

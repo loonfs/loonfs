@@ -5038,27 +5038,27 @@ impl ObjectStore for RootCasTransportAfterCompetingRootStore {
 }
 
 #[derive(Debug)]
-struct MetadataSstGetCountingStore {
+pub(crate) struct MetadataSstGetCountingStore {
     inner: LocalFsStore,
     metadata_sst_gets: Mutex<usize>,
 }
 
 impl MetadataSstGetCountingStore {
-    fn new(inner: LocalFsStore) -> Self {
+    pub(crate) fn new(inner: LocalFsStore) -> Self {
         Self {
             inner,
             metadata_sst_gets: Mutex::new(0),
         }
     }
 
-    fn metadata_sst_gets(&self) -> usize {
+    pub(crate) fn metadata_sst_gets(&self) -> usize {
         *self
             .metadata_sst_gets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn reset_metadata_sst_gets(&self) {
+    pub(crate) fn reset_metadata_sst_gets(&self) {
         *self
             .metadata_sst_gets
             .lock()

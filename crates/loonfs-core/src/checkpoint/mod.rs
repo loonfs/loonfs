@@ -31,7 +31,7 @@ mod row;
 mod runs;
 mod scan;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod validate;
 
 pub use self::cache::{

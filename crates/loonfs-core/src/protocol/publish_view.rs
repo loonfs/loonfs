@@ -3,7 +3,8 @@
 //! publishers.
 
 use crate::checkpoint::{
-    head_from_manifest, load_verified_manifest_tables_with_cache, VerifiedMetadataTables,
+    head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
+    VerifiedMetadataTables,
 };
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
@@ -104,6 +105,7 @@ impl PublishTailProjection {
 
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
+    table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
     acquired_writer: Option<AcquiredWriter>,
     cached_projection: Option<&PublishTailProjection>,
@@ -136,7 +138,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     }
     let manifest_tables = load_verified_manifest_tables_with_cache(
         store,
-        None,
+        table_cache,
         namespace_id,
         &root.manifest_object_id,
     )
