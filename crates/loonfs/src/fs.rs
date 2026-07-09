@@ -187,7 +187,7 @@ impl FsCore {
                 .await
                 .map_err(RuntimeError::from)
         };
-        self.invalidate_namespace_cache(namespace_id);
+        self.invalidate_namespace_cache_for_delete(namespace_id);
         result
     }
 
@@ -1143,7 +1143,7 @@ impl FsCore {
             // as the publish view's own, properly shaped error instead.
             self.load_namespace_catalog_cached(namespace_id).await.ok();
             let engine = self.commit_engine(namespace_id);
-            let publish = {
+            let mut publish = {
                 let context = self.mutation_context();
                 let cache_config = &self.inner.config.runtime_cache;
                 // Boxing erases the engine's deeply nested publish future;
@@ -1177,12 +1177,19 @@ impl FsCore {
                     batch_size
                 )
                 .entered();
-                let runtime_results = publish
-                    .results
-                    .iter()
-                    .map(|result| result.clone().map_err(RuntimeError::Core))
-                    .collect::<Vec<_>>();
-                self.invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
+                match publish.resulting_read_state.take() {
+                    // A landed publish hands the caches exactly the state a
+                    // rebuild would recompute; use it instead of dropping.
+                    Some(state) => self.seed_namespace_read_cache(namespace_id, state),
+                    None => {
+                        let runtime_results = publish
+                            .results
+                            .iter()
+                            .map(|result| result.clone().map_err(RuntimeError::Core))
+                            .collect::<Vec<_>>();
+                        self.invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
+                    }
+                }
             }
             let wal_tail_segments = publish.wal_tail_segments;
             let results = publish

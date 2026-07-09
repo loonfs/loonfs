@@ -13,7 +13,9 @@ use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceC
 use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
-use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, ManifestId, NamePolicy, NamespaceId};
+use loonfs_api::{
+    ChangeSeq, CommitId, ContentStoreId, ManifestId, ManifestObjectId, NamePolicy, NamespaceId,
+};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
 
@@ -73,6 +75,7 @@ pub(crate) struct PublishTailProjection {
     pub(crate) head_etag: String,
     pub(crate) head_seq: ChangeSeq,
     pub(crate) manifest_id: ManifestId,
+    pub(crate) manifest_object_id: ManifestObjectId,
     pub(crate) manifest_head_seq: ChangeSeq,
     pub(crate) manifest_payload_checksum: String,
     pub(crate) wal_tail_segments: u64,
@@ -182,6 +185,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             &head,
             &head_etag,
             manifest_id,
+            root.manifest_object_id.clone(),
             &manifest_head,
             manifest_payload_checksum,
         )
@@ -230,6 +234,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     head: &HeadState,
     head_etag: &str,
     manifest_id: ManifestId,
+    manifest_object_id: ManifestObjectId,
     manifest_head: &HeadState,
     manifest_payload_checksum: String,
 ) -> Result<PublishTailProjection> {
@@ -264,6 +269,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         head_etag: head_etag.to_owned(),
         head_seq: head.seq,
         manifest_id,
+        manifest_object_id,
         manifest_head_seq: manifest_head.seq,
         manifest_payload_checksum,
         wal_tail_segments,

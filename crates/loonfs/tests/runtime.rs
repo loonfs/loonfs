@@ -740,18 +740,21 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 
     raw_store.reset_wal_get_count();
     fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
-        .expect("first read should project WAL tail");
-    assert!(raw_store.wal_get_count() > 0);
+        .expect("first read is served from the projection the put seeded");
+    assert_eq!(raw_store.wal_get_count(), 0);
     let after_first = fs.runtime_cache_stats();
-    assert_eq!(after_first.wal_tail_projection_cache_misses, 1);
-    assert_eq!(after_first.wal_tail_projection_cache_inserts, 1);
+    assert_eq!(after_first.wal_tail_projection_cache_misses, 0);
+    assert!(after_first.wal_tail_projection_cache_inserts >= 1);
+    assert!(after_first.wal_tail_projection_cache_hits >= 1);
 
     raw_store.reset_wal_get_count();
     fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
     assert_eq!(raw_store.wal_get_count(), 0);
     let after_second = fs.runtime_cache_stats();
-    assert_eq!(after_second.wal_tail_projection_cache_hits, 1);
+    assert!(
+        after_second.wal_tail_projection_cache_hits > after_first.wal_tail_projection_cache_hits
+    );
 
     fs.put_file_bytes_blocking(
         &namespace_id,
@@ -762,13 +765,11 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     .expect("put other");
     raw_store.reset_wal_get_count();
     fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
-        .expect("read after local mutation should rebuild WAL-tail projection");
-    assert!(raw_store.wal_get_count() > 0);
-    let after_write = fs.runtime_cache_stats();
-    assert!(after_write.wal_tail_projection_cache_evictions > 0);
-    assert!(
-        after_write.wal_tail_projection_cache_misses
-            > after_second.wal_tail_projection_cache_misses
+        .expect("read after local mutation reuses the newly seeded projection");
+    assert_eq!(
+        raw_store.wal_get_count(),
+        0,
+        "the put seeds the projection for its own resulting head"
     );
 }
 
@@ -1027,7 +1028,7 @@ fn runtime_read_allows_multi_segment_wal_tail() {
 }
 
 #[test]
-fn stale_head_write_error_invalidates_runtime_cache() {
+fn stale_head_write_error_recovers_and_reseeds_caches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -1051,22 +1052,21 @@ fn stale_head_write_error_invalidates_runtime_cache() {
     );
 
     raw_store.allow_head_cas();
-    raw_store.reset_wal_get_count();
     fs.create_directory_blocking(
         &namespace_id,
         "/after-stale",
         CreateDirectoryOptions::default(),
     )
-    .expect("write after stale head should reload publish tail");
-    assert!(
-        raw_store.wal_get_count() > 0,
-        "failed publish attempt should invalidate cached publish tail"
-    );
+    .expect("write after stale head succeeds (the engine revalidates its projection by etag)");
 
     raw_store.reset_wal_get_count();
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("read after stale head should reload materialization");
-    assert!(raw_store.wal_get_count() > 0);
+    fs.stat_path_blocking(&namespace_id, "/after-stale")
+        .expect("read after the recovered write");
+    assert_eq!(
+        raw_store.wal_get_count(),
+        0,
+        "the recovered write seeds the read caches like any landed publish"
+    );
 }
 
 #[test]

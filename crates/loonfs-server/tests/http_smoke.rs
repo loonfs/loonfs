@@ -1702,13 +1702,25 @@ async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store");
     let harness = start_server(test_config(
-        temp_dir.path().join("store"),
+        store_root.clone(),
         "loonfs-server-admin-corrupt",
         "http-admin-corrupt",
     ))
     .await;
+    // A second server on the same store reads cold: it must consume the
+    // manifest and notice the corruption. The first server's reads are
+    // pinned to the head-plus-manifest pair its own publish seeded, which
+    // stays valid without touching the corrupted object.
+    let cold = start_server(test_config(
+        store_root,
+        "loonfs-server-cold-reader",
+        "http-admin-corrupt",
+    ))
+    .await;
     let client = harness.client.clone();
+    let cold_client = cold.client.clone();
     let server_url = harness.server_url.clone();
     let store_root = harness.store_root.clone();
     let store_key_prefix = harness.store_key_prefix.clone();
@@ -1738,15 +1750,21 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         ))
         .expect("corrupt manifest");
 
-        match client.stat_path(&target) {
+        match cold_client.stat_path(&target) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
             other => panic!("expected namespace_corrupt, got {other:?}"),
         }
+        // The warm server keeps serving its pinned pair; the corruption is
+        // surfaced by whoever actually consumes the manifest.
+        client
+            .stat_path(&target)
+            .expect("warm server reads from its pinned head-plus-manifest pair");
     })
     .await
     .expect("join blocking task");
 
     harness.server.abort();
+    cold.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
