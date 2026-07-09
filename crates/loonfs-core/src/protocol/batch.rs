@@ -148,6 +148,7 @@ async fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     let (publish_view, projection) = match load_publish_metadata_view(
         store,
         None,
+        None,
         namespace_id,
         Some(acquired_writer),
         None,

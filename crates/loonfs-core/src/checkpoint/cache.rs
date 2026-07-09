@@ -1,5 +1,5 @@
 use crate::metadata::MetadataState;
-use loonfs_api::wire::manifest::MetadataRow;
+use loonfs_api::wire::manifest::{MetadataRow, NamespaceManifestEnvelope};
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ pub(super) enum MetadataTableBlockKind {
     Index,
     Filter,
     Data,
+    Manifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -99,9 +100,10 @@ impl DecodedSegmentRowSet {
     }
 }
 
-/// One decoded, CRC-verified section of a segment object. Index and data
-/// sections share the cache and its byte budget; the key's `block_kind`
-/// and `block_offset` make collisions between them impossible.
+/// One decoded, verified object the cache holds: a CRC-checked segment
+/// section (index, filter, or data) or a validated namespace manifest.
+/// Everything shares the cache and its byte budget; the key's `block_kind`
+/// and `block_offset` make collisions between kinds impossible.
 #[derive(Debug, Clone)]
 pub(super) enum DecodedMetadataTableBlock {
     Index {
@@ -116,6 +118,10 @@ pub(super) enum DecodedMetadataTableBlock {
         block: Arc<DecodedDataBlock>,
         decoded_byte_len: usize,
     },
+    Manifest {
+        manifest: Arc<NamespaceManifestEnvelope>,
+        decoded_byte_len: usize,
+    },
 }
 
 impl DecodedMetadataTableBlock {
@@ -128,6 +134,9 @@ impl DecodedMetadataTableBlock {
                 decoded_byte_len, ..
             }
             | Self::Data {
+                decoded_byte_len, ..
+            }
+            | Self::Manifest {
                 decoded_byte_len, ..
             } => *decoded_byte_len,
         }
@@ -616,7 +625,9 @@ mod tests {
         let inserted = block(64);
         let rows = match &inserted {
             DecodedMetadataTableBlock::Data { block: rows, .. } => Arc::clone(rows),
-            DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Filter { .. } => {
+            DecodedMetadataTableBlock::Index { .. }
+            | DecodedMetadataTableBlock::Filter { .. }
+            | DecodedMetadataTableBlock::Manifest { .. } => {
                 unreachable!("fixture builds a data block")
             }
         };
@@ -626,9 +637,9 @@ mod tests {
             DecodedMetadataTableBlock::Data {
                 block: hit_rows, ..
             } => Arc::ptr_eq(hit_rows, &rows),
-            DecodedMetadataTableBlock::Index { .. } | DecodedMetadataTableBlock::Filter { .. } => {
-                false
-            }
+            DecodedMetadataTableBlock::Index { .. }
+            | DecodedMetadataTableBlock::Filter { .. }
+            | DecodedMetadataTableBlock::Manifest { .. } => false,
         };
         assert!(
             shares_allocation,

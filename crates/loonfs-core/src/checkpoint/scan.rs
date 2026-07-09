@@ -36,7 +36,7 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
     pub(super) table_cache: Option<&'a MetadataTableCache>,
     pub(super) manifest_object_key: String,
-    pub(super) manifest: NamespaceManifestEnvelope,
+    pub(super) manifest: Arc<NamespaceManifestEnvelope>,
     /// Per-view memo of decoded blocks: one operation never re-fetches a
     /// block it already saw, with or without a shared cache attached.
     pub(super) block_memo: SessionBlockMemo,
@@ -44,7 +44,7 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
-        &self.manifest
+        self.manifest.as_ref()
     }
 
     pub(crate) async fn get_for_lookup(
