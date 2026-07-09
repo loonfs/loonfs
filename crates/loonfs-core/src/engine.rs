@@ -24,39 +24,19 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+/// The pinned inputs the runtime resolves once per read: the head anchored
+/// to its manifest, the shared caches, and (when the runtime has it) the
+/// namespace's immutable catalog pair.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
-    head: HeadState,
-    head_etag: String,
-    manifest_id: ManifestId,
-    manifest_object_id: ManifestObjectId,
-    table_cache: Option<Arc<MetadataTableCache>>,
-    tail_cache: Option<Arc<WalTailProjectionCache>>,
-    catalog: Option<VerifiedNamespaceCatalogEntry>,
-}
-
-impl RuntimeReadContext {
-    #[doc(hidden)]
-    pub fn pinned_head(
-        head: HeadState,
-        head_etag: String,
-        manifest_id: ManifestId,
-        manifest_object_id: ManifestObjectId,
-        table_cache: Option<Arc<MetadataTableCache>>,
-        tail_cache: Option<Arc<WalTailProjectionCache>>,
-        catalog: Option<VerifiedNamespaceCatalogEntry>,
-    ) -> Self {
-        Self {
-            head,
-            head_etag,
-            manifest_id,
-            manifest_object_id,
-            table_cache,
-            tail_cache,
-            catalog,
-        }
-    }
+    pub head: HeadState,
+    pub head_etag: String,
+    pub manifest_id: ManifestId,
+    pub manifest_object_id: ManifestObjectId,
+    pub table_cache: Arc<MetadataTableCache>,
+    pub tail_cache: Arc<WalTailProjectionCache>,
+    pub catalog: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_> {
@@ -65,8 +45,8 @@ fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_
         Some(options.head_etag.as_str()),
         options.manifest_id,
         &options.manifest_object_id,
-        options.table_cache.as_deref(),
-        options.tail_cache.as_deref(),
+        Some(&options.table_cache),
+        Some(&options.tail_cache),
         options.catalog.as_ref(),
     )
 }

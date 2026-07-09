@@ -3,7 +3,7 @@
 //! cache-aware delegation to `loonfs-core`.
 
 use crate::background::BackgroundWork;
-use crate::cache::{CommitEngineCache, RuntimeCacheStatsInner, RuntimeControlCache};
+use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::commit_window::{
     attribute_window_gate_failure, combine_member_content_gates, commit_window_delay,
     pad_missing_results, CommitWindows, WindowEntry, WindowRole,
@@ -54,7 +54,6 @@ pub(crate) struct FsInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: FsConfig,
     pub(crate) writer_session_id: String,
-    pub(crate) commit_engines: Mutex<CommitEngineCache>,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
@@ -69,12 +68,6 @@ pub(crate) struct FsInner {
 /// panicked mid-update, and serving from it could violate the consistency the
 /// caches promise.
 impl FsInner {
-    pub(crate) fn commit_engines(&self) -> MutexGuard<'_, CommitEngineCache> {
-        self.commit_engines
-            .lock()
-            .expect("commit engine cache lock poisoned")
-    }
-
     pub(crate) fn control_cache(&self) -> MutexGuard<'_, RuntimeControlCache> {
         self.control_cache
             .lock()
@@ -105,7 +98,6 @@ impl FsCore {
                 store,
                 config,
                 writer_session_id: generated_id("wrs"),
-                commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
                 wal_tail_projection_cache,
@@ -396,9 +388,7 @@ impl FsCore {
     ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let engine = self.namespace_engine(namespace_id);
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
         let entry = engine
             .resolve_path_with_runtime_context(absolute_path, &read_context)
             .await?;
@@ -488,10 +478,8 @@ impl FsCore {
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let engine = self.namespace_engine(namespace_id);
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let page = engine
             .list_path_page_with_runtime_context(listed_path.as_str(), request, &read_context)
             .await?;
@@ -501,7 +489,7 @@ impl FsCore {
             .first()
             .map(|entry| entry.head_seq)
             .or(request_head_seq)
-            .unwrap_or(head.head.state.seq);
+            .unwrap_or(read_context.head.seq);
         let next_cursor = page.next_cursor;
         let response = ListPathEntriesResponse {
             namespace_id: namespace_id.clone(),
@@ -519,10 +507,8 @@ impl FsCore {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let read = self
-            .namespace_engine(namespace_id)
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let read = engine
             .read_file_with_runtime_context(absolute_path, &read_context)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
@@ -535,10 +521,8 @@ impl FsCore {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<ListFileRevisionsResponse> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let revisions = self
-            .namespace_engine(namespace_id)
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let revisions = engine
             .list_file_revisions_with_runtime_context(absolute_path, &read_context)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
@@ -552,17 +536,15 @@ impl FsCore {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let page = self
-            .namespace_engine(namespace_id)
+        let page = engine
             .list_file_revisions_page_with_runtime_context(absolute_path, request, &read_context)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
-            head.head.state.seq,
+            read_context.head.seq,
             page,
             fallback_inode_id,
         )?)
@@ -575,10 +557,8 @@ impl FsCore {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<ListFileRevisionsResponse> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let revisions = self
-            .namespace_engine(namespace_id)
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let revisions = engine
             .list_file_revisions_for_inode_with_runtime_context(inode_id, &read_context)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
@@ -592,10 +572,8 @@ impl FsCore {
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let page = self
-            .namespace_engine(namespace_id)
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let page = engine
             .list_file_revisions_for_inode_page_with_runtime_context(
                 inode_id,
                 request,
@@ -605,7 +583,7 @@ impl FsCore {
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
-            head.head.state.seq,
+            read_context.head.seq,
             page,
             Some(inode_id),
         )?)
@@ -618,10 +596,8 @@ impl FsCore {
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let read = self
-            .namespace_engine(namespace_id)
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let read = engine
             .read_file_revision_with_runtime_context(absolute_path, revision_no, &read_context)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
@@ -635,10 +611,8 @@ impl FsCore {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
-        let read = self
-            .namespace_engine(namespace_id)
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let read = engine
             .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &read_context)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
