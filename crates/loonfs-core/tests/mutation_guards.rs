@@ -27,6 +27,11 @@ use loonfs_api::{
     DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
     NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, UploadId, WriterEpoch,
 };
+use loonfs_core::cache::{
+    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
+    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+};
 use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitOpResult, CommitRequest,
     CommitValidationContext, CommitValidationError, PreparedCommit,
@@ -51,7 +56,7 @@ use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 #[derive(Debug, Clone)]
@@ -234,15 +239,19 @@ fn read_context<S: ObjectStore + ?Sized>(
 ) -> RuntimeReadContext {
     let (head, root) =
         block_on(load_namespace_read_anchor(store, namespace_id)).expect("load read anchor");
-    RuntimeReadContext::pinned_head(
-        head.state,
-        head.identity.etag,
-        root.state.manifest_id,
-        root.state.manifest_object_id,
-        None,
-        None,
-        None,
-    )
+    RuntimeReadContext {
+        head: head.state,
+        head_etag: head.identity.etag,
+        manifest_id: root.state.manifest_id,
+        manifest_object_id: root.state.manifest_object_id,
+        table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
+        tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
+            max_entries: 4,
+            max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+            max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+        })),
+        catalog: None,
+    }
 }
 
 /// Publishes one path intent through the commit engine — the single publish

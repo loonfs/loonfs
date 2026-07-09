@@ -26,73 +26,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Default)]
-pub(crate) struct CommitEngineCache {
-    entries: HashMap<NamespaceId, Arc<AsyncMutex<NamespaceCommitEngine>>>,
-    order: VecDeque<NamespaceId>,
-}
-
-impl CommitEngineCache {
-    fn get_or_insert(
-        &mut self,
-        namespace_id: &NamespaceId,
-        max_cached_namespaces: usize,
-        table_cache: Arc<MetadataTableCache>,
-        catalog: Option<VerifiedNamespaceCatalogEntry>,
-    ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
-        if let Some(engine) = self.entries.get(namespace_id).cloned() {
-            self.touch(namespace_id);
-            return engine;
-        }
-        let mut engine =
-            NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache);
-        if let Some(catalog) = catalog {
-            engine = engine.with_catalog_entry(catalog);
-        }
-        let engine = Arc::new(AsyncMutex::new(engine));
-        self.entries.insert(namespace_id.clone(), engine.clone());
-        self.touch(namespace_id);
-        while self.entries.len() > max_cached_namespaces {
-            let Some(evicted) = self.order.pop_front() else {
-                break;
-            };
-            self.remove_entry(&evicted);
-        }
-        engine
-    }
-
-    fn invalidate(&mut self, namespace_id: &NamespaceId) {
-        // The engine survives invalidation: its acquired epoch and fencing
-        // are session state ("a fenced session stays fenced"), and only its
-        // tail projection goes stale. A held lock means a publish is in
-        // flight; that publish revalidates against the live head itself.
-        if let Some(engine) = self.entries.get(namespace_id) {
-            if let Ok(mut engine) = engine.try_lock() {
-                engine.invalidate();
-            }
-        }
-    }
-
-    fn remove(&mut self, namespace_id: &NamespaceId) {
-        self.remove_entry(namespace_id);
-        self.order.retain(|candidate| candidate != namespace_id);
-    }
-
-    fn remove_entry(&mut self, namespace_id: &NamespaceId) {
-        let Some(engine) = self.entries.remove(namespace_id) else {
-            return;
-        };
-        if let Ok(mut engine) = engine.try_lock() {
-            engine.invalidate();
-        };
-    }
-
-    fn touch(&mut self, namespace_id: &NamespaceId) {
-        self.order.retain(|candidate| candidate != namespace_id);
-        self.order.push_back(namespace_id.clone());
-    }
-}
-
-#[derive(Debug, Default)]
 
 pub(crate) struct RuntimeControlCache {
     namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
@@ -105,6 +38,11 @@ struct NamespaceControlCacheEntry {
     /// The namespace's spec-immutable catalog pair (config plus content-store
     /// binding): loaded once, never revalidated.
     catalog: Option<VerifiedNamespaceCatalogEntry>,
+    /// This process's commit engine for the namespace: writer-session state
+    /// (acquired epoch, fencing, tail projection). Survives invalidation —
+    /// only its tail projection is dropped; removal happens on namespace
+    /// deletion or LRU eviction.
+    engine: Option<Arc<AsyncMutex<NamespaceCommitEngine>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -252,18 +190,56 @@ impl RuntimeControlCache {
     }
 
     fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
-        // The head anchor goes stale on every mutation, but the catalog pair
-        // is immutable for the namespace's lifetime (a deleted namespace id
-        // never rebinds), so it survives invalidation.
+        // The head anchor goes stale on every mutation; the catalog pair is
+        // immutable for the namespace's lifetime (a deleted namespace id
+        // never rebinds), and the engine keeps its session state ("a fenced
+        // session stays fenced") — only its tail projection goes stale. A
+        // held engine lock means a publish is in flight; that publish
+        // revalidates against the live head itself.
         if let Some(entry) = self.namespaces.get_mut(namespace_id) {
             entry.head = None;
+            if let Some(engine) = &entry.engine {
+                if let Ok(mut engine) = engine.try_lock() {
+                    engine.invalidate();
+                }
+            }
         }
     }
 
-    fn invalidate_namespace_head(&mut self, namespace_id: &NamespaceId) {
-        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
-            entry.head = None;
+    /// Namespace-terminal removal: the whole entry goes, engine included.
+    fn remove_namespace(&mut self, namespace_id: &NamespaceId) {
+        if let Some(entry) = self.namespaces.remove(namespace_id) {
+            invalidate_dropped_engine(&entry);
         }
+        self.namespace_order
+            .retain(|candidate| candidate != namespace_id);
+    }
+
+    fn engine(
+        &mut self,
+        namespace_id: &NamespaceId,
+        max_cached_namespaces: usize,
+        table_cache: Arc<MetadataTableCache>,
+    ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
+        if max_cached_namespaces == 0 {
+            // Diagnostic mode: nothing is cached, every publish gets a
+            // throwaway engine.
+            return Arc::new(AsyncMutex::new(
+                NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache),
+            ));
+        }
+        let entry = self.namespace_entry(namespace_id, max_cached_namespaces);
+        if let Some(engine) = &entry.engine {
+            return Arc::clone(engine);
+        }
+        let mut engine =
+            NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache);
+        if let Some(catalog) = &entry.catalog {
+            engine = engine.with_catalog_entry(catalog.clone());
+        }
+        let engine = Arc::new(AsyncMutex::new(engine));
+        entry.engine = Some(Arc::clone(&engine));
+        engine
     }
 
     fn namespace_entry(
@@ -277,7 +253,9 @@ impl RuntimeControlCache {
             let Some(evicted) = self.namespace_order.pop_front() else {
                 break;
             };
-            self.namespaces.remove(&evicted);
+            if let Some(entry) = self.namespaces.remove(&evicted) {
+                invalidate_dropped_engine(&entry);
+            }
         }
         self.namespaces
             .get_mut(namespace_id)
@@ -316,11 +294,11 @@ impl FsCore {
                 Ok(false) => self
                     .inner
                     .control_cache()
-                    .invalidate_namespace_head(namespace_id),
+                    .invalidate_namespace(namespace_id),
                 Err(error) => {
                     self.inner
                         .control_cache()
-                        .invalidate_namespace_head(namespace_id);
+                        .invalidate_namespace(namespace_id);
                     return Err(error);
                 }
             }
@@ -331,7 +309,7 @@ impl FsCore {
             Err(error) => {
                 self.inner
                     .control_cache()
-                    .invalidate_namespace_head(namespace_id);
+                    .invalidate_namespace(namespace_id);
                 return Err(error);
             }
         };
@@ -429,12 +407,10 @@ impl FsCore {
         namespace_id: &NamespaceId,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         let cache_config = &self.inner.config.runtime_cache;
-        let catalog = self.inner.control_cache().catalog(namespace_id);
-        self.inner.commit_engines().get_or_insert(
+        self.inner.control_cache().engine(
             namespace_id,
             cache_config.max_cached_namespaces,
             Arc::clone(&self.inner.metadata_table_cache),
-            catalog,
         )
     }
 
@@ -443,17 +419,31 @@ impl FsCore {
         namespace_id: &NamespaceId,
         anchor: &CachedNamespaceAnchor,
     ) -> Result<RuntimeReadContext> {
-        let tail_cache = Some(Arc::clone(&self.inner.wal_tail_projection_cache));
         let catalog = self.load_namespace_catalog_cached(namespace_id).await?;
-        Ok(RuntimeReadContext::pinned_head(
-            anchor.head.state.clone(),
-            anchor.head.identity.etag.clone(),
-            anchor.manifest_id,
-            anchor.manifest_object_id.clone(),
-            Some(Arc::clone(&self.inner.metadata_table_cache)),
-            tail_cache,
+        Ok(RuntimeReadContext {
+            head: anchor.head.state.clone(),
+            head_etag: anchor.head.identity.etag.clone(),
+            manifest_id: anchor.manifest_id,
+            manifest_object_id: anchor.manifest_object_id.clone(),
+            table_cache: Arc::clone(&self.inner.metadata_table_cache),
+            tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
             catalog,
-        ))
+        })
+    }
+
+    /// The shared preamble of every pinned read: revalidate or load the head
+    /// anchor, pin the read context to it, and hand back the engine. The
+    /// context's `head` is the anchor the read is pinned to.
+    pub(crate) async fn pinned_read(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(
+        loonfs_core::NamespaceEngine<crate::SharedObjectStore>,
+        RuntimeReadContext,
+    )> {
+        let head = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
+        Ok((self.namespace_engine(namespace_id), read_context))
     }
 
     /// Returns the namespace's immutable catalog pair through the control
@@ -492,14 +482,15 @@ impl FsCore {
     )]
     pub(crate) fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
         self.invalidate_namespace_read_cache(namespace_id);
-        self.inner.commit_engines().invalidate(namespace_id);
     }
 
-    /// Namespace-terminal invalidation: the commit engine is removed rather
-    /// than kept, because the namespace itself is gone.
+    /// Namespace-terminal invalidation: the whole entry is removed, engine
+    /// included, because the namespace itself is gone.
     pub(crate) fn invalidate_namespace_cache_for_delete(&self, namespace_id: &NamespaceId) {
-        self.invalidate_namespace_read_cache(namespace_id);
-        self.inner.commit_engines().remove(namespace_id);
+        self.inner.control_cache().remove_namespace(namespace_id);
+        self.inner
+            .wal_tail_projection_cache
+            .invalidate_namespace(namespace_id);
     }
 
     /// Seeds the read caches with the state one landed publish produced:
@@ -569,6 +560,14 @@ impl FsCore {
     ) {
         if results.iter().any(should_invalidate_after_result) {
             self.invalidate_namespace_read_cache(namespace_id);
+        }
+    }
+}
+
+fn invalidate_dropped_engine(entry: &NamespaceControlCacheEntry) {
+    if let Some(engine) = &entry.engine {
+        if let Ok(mut engine) = engine.try_lock() {
+            engine.invalidate();
         }
     }
 }
