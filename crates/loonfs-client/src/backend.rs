@@ -16,7 +16,7 @@
 //! running each wire call on the runtime's blocking pool instead of stalling
 //! an async worker.
 
-use crate::{Client, ClientError, NamespacePath};
+use crate::{Client, ClientError, MutationOptions, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
@@ -350,19 +350,22 @@ impl Backend for RemoteBackend {
     ) -> Result<MutationResult, BackendError> {
         let spec = spec.clone();
         let bytes = bytes.to_vec();
-        self.wire(move |client| client.put_file_bytes(&spec, &bytes, force))
-            .await
+        self.wire(move |client| {
+            client.put_file_bytes(&spec, &bytes, force, &MutationOptions::default())
+        })
+        .await
     }
 
     async fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
         let spec = spec.clone();
-        self.wire(move |client| client.create_directory(&spec))
+        self.wire(move |client| client.create_directory(&spec, &MutationOptions::default()))
             .await
     }
 
     async fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
         let spec = spec.clone();
-        self.wire(move |client| client.delete_path(&spec)).await
+        self.wire(move |client| client.delete_path(&spec, &MutationOptions::default()))
+            .await
     }
 
     async fn move_path(
@@ -372,7 +375,8 @@ impl Backend for RemoteBackend {
     ) -> Result<MutationResult, BackendError> {
         let from = from.clone();
         let to = to.clone();
-        self.wire(move |client| client.move_path(&from, &to)).await
+        self.wire(move |client| client.move_path(&from, &to, &MutationOptions::default()))
+            .await
     }
 
     async fn copy_path(
@@ -382,7 +386,8 @@ impl Backend for RemoteBackend {
     ) -> Result<MutationResult, BackendError> {
         let from = from.clone();
         let to = to.clone();
-        self.wire(move |client| client.copy_path(&from, &to)).await
+        self.wire(move |client| client.copy_path(&from, &to, &MutationOptions::default()))
+            .await
     }
 
     async fn restore_file_revision(
@@ -391,8 +396,10 @@ impl Backend for RemoteBackend {
         source_revision_no: RevisionNo,
     ) -> Result<MutationResult, BackendError> {
         let spec = spec.clone();
-        self.wire(move |client| client.restore_file_revision(&spec, source_revision_no))
-            .await
+        self.wire(move |client| {
+            client.restore_file_revision(&spec, source_revision_no, &MutationOptions::default())
+        })
+        .await
     }
 
     async fn create_checkpoint(
