@@ -235,6 +235,16 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    store_bytes_as_content_with_store_id(store, content_store_id, bytes).await
+}
+
+/// Stages bytes when the caller already knows the namespace's content-store
+/// binding (it is immutable, so a handle can resolve it once).
+pub async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: ContentStoreId,
+    bytes: &[u8],
+) -> Result<StoredContent, CoreError> {
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Internal(format!("failed to derive content blob key: {err}")))?;

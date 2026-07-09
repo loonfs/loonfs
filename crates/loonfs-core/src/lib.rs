@@ -62,6 +62,9 @@ pub mod cache {
 }
 
 pub mod control {
+    pub use crate::namespace::catalog::{
+        load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
+    };
     pub use crate::namespace::control::{
         load_content_store_descriptor_control, load_namespace_checkpoint_record_control,
         load_namespace_descriptor_control, load_namespace_head_control,

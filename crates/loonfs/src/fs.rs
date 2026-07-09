@@ -399,7 +399,7 @@ impl FsCore {
         self.record_trace_context(&span);
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let entry = engine
             .resolve_path_with_runtime_context(absolute_path, &read_context)
             .await?;
@@ -492,7 +492,7 @@ impl FsCore {
         let head = self.head_for_metadata_read(namespace_id).await?;
         let engine = self.namespace_engine(namespace_id);
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let page = engine
             .list_path_page_with_runtime_context(listed_path.as_str(), request, &read_context)
             .await?;
@@ -521,7 +521,7 @@ impl FsCore {
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
         let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let read = self
             .namespace_engine(namespace_id)
             .read_file_with_runtime_context(absolute_path, &read_context)
@@ -537,7 +537,7 @@ impl FsCore {
         absolute_path: &str,
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let revisions = self
             .namespace_engine(namespace_id)
             .list_file_revisions_with_runtime_context(absolute_path, &read_context)
@@ -555,7 +555,7 @@ impl FsCore {
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let page = self
             .namespace_engine(namespace_id)
             .list_file_revisions_page_with_runtime_context(absolute_path, request, &read_context)
@@ -577,7 +577,7 @@ impl FsCore {
         inode_id: InodeId,
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let revisions = self
             .namespace_engine(namespace_id)
             .list_file_revisions_for_inode_with_runtime_context(inode_id, &read_context)
@@ -594,7 +594,7 @@ impl FsCore {
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
         let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let page = self
             .namespace_engine(namespace_id)
             .list_file_revisions_for_inode_page_with_runtime_context(
@@ -620,7 +620,7 @@ impl FsCore {
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
         let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let read = self
             .namespace_engine(namespace_id)
             .read_file_revision_with_runtime_context(absolute_path, revision_no, &read_context)
@@ -637,7 +637,7 @@ impl FsCore {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
         let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(&head);
+        let read_context = self.runtime_read_context(namespace_id, &head).await?;
         let read = self
             .namespace_engine(namespace_id)
             .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &read_context)
@@ -693,13 +693,29 @@ impl FsCore {
         let (content_result_sender, content_result_receiver) = futures::channel::oneshot::channel();
         let content_store = self.inner.store.clone();
         let content_namespace_id = namespace_id.clone();
+        let cached_content_store_id = self
+            .load_namespace_catalog_cached(namespace_id)
+            .await?
+            .map(|catalog| catalog.content_store_id().clone());
         let content_write = async move {
-            let result = loonfs_core::content::store_bytes_as_content(
-                &content_store,
-                &content_namespace_id,
-                bytes,
-            )
-            .await
+            let result = match cached_content_store_id {
+                Some(content_store_id) => {
+                    loonfs_core::content::store_bytes_as_content_with_store_id(
+                        &content_store,
+                        content_store_id,
+                        bytes,
+                    )
+                    .await
+                }
+                None => {
+                    loonfs_core::content::store_bytes_as_content(
+                        &content_store,
+                        &content_namespace_id,
+                        bytes,
+                    )
+                    .await
+                }
+            }
             .map(|_| ());
             // A receiver dropped before the gate point means the publish
             // failed earlier; the content object is then a GC-covered orphan.
@@ -1123,6 +1139,10 @@ impl FsCore {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
         let store = self.store();
         if self.commit_engine_cache_enabled() {
+            // Warm the immutable catalog through the control cache so a
+            // recreated engine starts seeded; a load failure here surfaces
+            // as the publish view's own, properly shaped error instead.
+            self.load_namespace_catalog_cached(namespace_id).await.ok();
             let engine = self.commit_engine(namespace_id);
             let publish = {
                 let context = self.mutation_context();
