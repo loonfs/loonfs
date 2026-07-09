@@ -72,7 +72,7 @@ use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
-use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -264,7 +264,7 @@ async fn http_created_state_is_readable_through_runtime() {
         let target = NamespacePath::parse("demo:/notes/from-http.txt").expect("target");
         harness
             .client
-            .write_file_bytes(&target, b"hello from http")
+            .write_file_bytes(&target, b"hello from http", &MutationOptions::default())
             .expect("write file through http");
     })
     .await
@@ -292,20 +292,26 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     tokio::task::spawn_blocking(move || {
         let target = NamespacePath::parse("missing:/notes/hello.txt").expect("target");
         assert_api_error(
-            harness.client.write_file_bytes(&target, b"hello"),
+            harness
+                .client
+                .write_file_bytes(&target, b"hello", &MutationOptions::default()),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
         );
         assert_api_error(
-            harness.client.delete_path(&target),
+            harness
+                .client
+                .delete_path(&target, &MutationOptions::default()),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
         );
         let destination = NamespacePath::parse("missing:/notes/renamed.txt").expect("target");
         assert_api_error(
-            harness.client.move_path(&target, &destination),
+            harness
+                .client
+                .move_path(&target, &destination, &MutationOptions::default()),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
@@ -348,7 +354,9 @@ async fn http_delete_missing_path_returns_path_not_found() {
     tokio::task::spawn_blocking(move || {
         let target = NamespacePath::parse("demo:/missing.txt").expect("target");
         assert_api_error(
-            harness.client.delete_path(&target),
+            harness
+                .client
+                .delete_path(&target, &MutationOptions::default()),
             404,
             "path_not_found",
             None,
@@ -394,7 +402,11 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
     tokio::task::spawn_blocking(move || {
         let dir_target = NamespacePath::parse("demo:/docs").expect("dir target");
         assert_api_error(
-            harness.client.write_file_bytes(&dir_target, b"not a file"),
+            harness.client.write_file_bytes(
+                &dir_target,
+                b"not a file",
+                &MutationOptions::default(),
+            ),
             409,
             "path_conflict",
             None,
@@ -403,7 +415,9 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
         let from = NamespacePath::parse("demo:/tmp/a.txt").expect("from");
         let to = NamespacePath::parse("demo:/docs/a.txt").expect("to");
         assert_api_error(
-            harness.client.move_path(&from, &to),
+            harness
+                .client
+                .move_path(&from, &to, &MutationOptions::default()),
             409,
             "path_conflict",
             None,
@@ -445,7 +459,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         let put_target = NamespacePath::parse("demo:/docs/new.txt").expect("put target");
         harness
             .client
-            .write_file_bytes(&put_target, b"new")
+            .write_file_bytes(&put_target, b"new", &MutationOptions::default())
             .expect("put recreates the subtree");
         let old_child = NamespacePath::parse("demo:/docs/old.txt").expect("old child");
         assert_api_error(
@@ -459,7 +473,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         let to = NamespacePath::parse("demo:/docs/source.txt").expect("to");
         harness
             .client
-            .move_path(&from, &to)
+            .move_path(&from, &to, &MutationOptions::default())
             .expect("move lands in the recreated subtree");
     })
     .await
@@ -479,7 +493,7 @@ async fn http_path_mutation_retries_transient_stale_head_cas() {
         let target = NamespacePath::parse("demo:/notes/race.txt").expect("target");
         let result = harness
             .client
-            .write_file_bytes(&target, b"race")
+            .write_file_bytes(&target, b"race", &MutationOptions::default())
             .expect("path write retries stale head");
         assert_eq!(result.committed_seq, ChangeSeq(1));
     })
@@ -503,7 +517,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         let target = NamespacePath::parse("demo:/notes/taken-over.txt").expect("target");
         let result = harness
             .client
-            .write_file_bytes(&target, b"taken over")
+            .write_file_bytes(&target, b"taken over", &MutationOptions::default())
             .expect("first write takes over the namespace");
         assert_eq!(result.committed_seq, ChangeSeq(1));
     })

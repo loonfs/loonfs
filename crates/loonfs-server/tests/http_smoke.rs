@@ -13,7 +13,7 @@ use loonfs_api::{
     NamespaceId, PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
     LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
-use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
@@ -48,7 +48,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         let target = NamespacePath::parse("doomed:/note.txt").expect("parse path");
         harness
             .client
-            .write_file_bytes(&target, b"last words")
+            .write_file_bytes(&target, b"last words", &MutationOptions::default())
             .expect("write file");
 
         // A stale precondition refuses the delete and deletes nothing.
@@ -178,17 +178,17 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         let other = NamespacePath::parse("demo:/other").expect("other path");
         harness
             .client
-            .create_directory(&docs)
+            .create_directory(&docs, &MutationOptions::default())
             .expect("create docs dir");
         harness
             .client
-            .create_directory(&other)
+            .create_directory(&other, &MutationOptions::default())
             .expect("create other dir");
         for name in ["a.txt", "b.txt", "c.txt"] {
             let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
             harness
                 .client
-                .write_file_bytes(&path, name.as_bytes())
+                .write_file_bytes(&path, name.as_bytes(), &MutationOptions::default())
                 .expect("write file");
         }
 
@@ -274,13 +274,13 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
         let docs = NamespacePath::parse("demo:/docs").expect("docs path");
         harness
             .client
-            .create_directory(&docs)
+            .create_directory(&docs, &MutationOptions::default())
             .expect("create docs dir");
         for name in ["B.txt", "a.txt", "c.txt"] {
             let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
             harness
                 .client
-                .write_file_bytes(&path, name.as_bytes())
+                .write_file_bytes(&path, name.as_bytes(), &MutationOptions::default())
                 .expect("write file");
         }
 
@@ -311,7 +311,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         let directory = NamespacePath::parse("demo:/notes").expect("parse directory path");
         harness
             .client
-            .create_directory(&directory)
+            .create_directory(&directory, &MutationOptions::default())
             .expect("create directory");
         let directory_entry = harness
             .client
@@ -322,7 +322,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         let target = NamespacePath::parse("demo:/notes/hello.txt").expect("parse namespace path");
         harness
             .client
-            .write_file_bytes(&target, b"hello over http\n")
+            .write_file_bytes(&target, b"hello over http\n", &MutationOptions::default())
             .expect("write bytes");
 
         let entry = harness.client.stat_path(&target).expect("stat path");
@@ -476,23 +476,38 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         let source = NamespacePath::parse("demo:/docs/hello.txt").expect("source");
         harness
             .client
-            .put_file_bytes(&source, b"hello over http\n", false)
+            .put_file_bytes(
+                &source,
+                b"hello over http\n",
+                false,
+                &MutationOptions::default(),
+            )
             .expect("initial create");
 
-        match harness.client.put_file_bytes(&source, b"conflict\n", false) {
+        match harness.client.put_file_bytes(
+            &source,
+            b"conflict\n",
+            false,
+            &MutationOptions::default(),
+        ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
             other => panic!("expected path_conflict, got {other:?}"),
         }
 
         harness
             .client
-            .put_file_bytes(&source, b"forced overwrite\n", true)
+            .put_file_bytes(
+                &source,
+                b"forced overwrite\n",
+                true,
+                &MutationOptions::default(),
+            )
             .expect("forced overwrite");
 
         let destination = NamespacePath::parse("demo:/docs/copy.txt").expect("destination");
         harness
             .client
-            .copy_path(&source, &destination)
+            .copy_path(&source, &destination, &MutationOptions::default())
             .expect("copy path");
 
         let source_entry = harness.client.stat_path(&source).expect("source stat");
@@ -530,7 +545,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         let clone_path = NamespacePath::parse("clone:/docs/shared.txt").expect("clone path");
         harness
             .client
-            .write_file_bytes(&source_path, b"base\n")
+            .write_file_bytes(&source_path, b"base\n", &MutationOptions::default())
             .expect("write source");
 
         let forked = harness
@@ -552,7 +567,11 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         harness
             .client
-            .write_file_bytes(&source_path, b"source-after-fork\n")
+            .write_file_bytes(
+                &source_path,
+                b"source-after-fork\n",
+                &MutationOptions::default(),
+            )
             .expect("replace source");
         assert_eq!(
             harness
@@ -564,7 +583,11 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         let clone_write = harness
             .client
-            .write_file_bytes(&clone_path, b"clone-after-fork\n")
+            .write_file_bytes(
+                &clone_path,
+                b"clone-after-fork\n",
+                &MutationOptions::default(),
+            )
             .expect("replace clone");
         assert_eq!(clone_write.committed_seq, ChangeSeq(2));
         assert_eq!(
@@ -977,11 +1000,11 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let target = NamespacePath::parse("demo:/docs/rev.txt").expect("target");
         harness
             .client
-            .put_file_bytes(&target, b"one", false)
+            .put_file_bytes(&target, b"one", false, &MutationOptions::default())
             .expect("create file");
         harness
             .client
-            .put_file_bytes(&target, b"two", true)
+            .put_file_bytes(&target, b"two", true, &MutationOptions::default())
             .expect("replace file");
 
         let entry = harness.client.stat_path(&target).expect("stat file");
@@ -1002,7 +1025,7 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
         harness
             .client
-            .move_path(&target, &moved)
+            .move_path(&target, &moved, &MutationOptions::default())
             .expect("move path");
         assert!(matches!(
             harness.client.list_file_revisions(&target),
@@ -1023,7 +1046,7 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
 
         harness
             .client
-            .restore_file_revision(&moved, RevisionNo(1))
+            .restore_file_revision(&moved, RevisionNo(1), &MutationOptions::default())
             .expect("path restore");
         assert_eq!(
             harness
@@ -1285,13 +1308,23 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
         let first = harness
             .client
-            .put_file_bytes_with_commit_id(&target, b"stable bytes\n", false, commit_id)
+            .put_file_bytes(
+                &target,
+                b"stable bytes\n",
+                false,
+                &MutationOptions::with_commit_id(commit_id),
+            )
             .expect("first put");
         assert!(first.committed_seq.0 >= 1);
 
         let repeated = harness
             .client
-            .put_file_bytes_with_commit_id(&target, b"stable bytes\n", false, commit_id)
+            .put_file_bytes(
+                &target,
+                b"stable bytes\n",
+                false,
+                &MutationOptions::with_commit_id(commit_id),
+            )
             .expect("repeat put");
         assert_eq!(repeated, first);
 
@@ -1300,11 +1333,11 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         let bytes = harness.client.read_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"stable bytes\n");
 
-        match harness.client.put_file_bytes_with_commit_id(
+        match harness.client.put_file_bytes(
             &target,
             b"different bytes\n",
             false,
-            commit_id,
+            &MutationOptions::with_commit_id(commit_id),
         ) {
             Err(ClientError::Api { code, .. }) => {
                 assert_eq!(code, "commit_id_reuse_conflict")
@@ -1336,17 +1369,25 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
         harness
             .client
-            .write_file_bytes(&source, b"source bytes\n")
+            .write_file_bytes(&source, b"source bytes\n", &MutationOptions::default())
             .expect("seed source");
 
         let copied = NamespacePath::parse("demo:/docs/copied.txt").expect("copied");
         let copy_first = harness
             .client
-            .copy_path_with_commit_id(&source, &copied, "req-v1-copy")
+            .copy_path(
+                &source,
+                &copied,
+                &MutationOptions::with_commit_id("req-v1-copy"),
+            )
             .expect("copy first");
         let copy_repeated = harness
             .client
-            .copy_path_with_commit_id(&source, &copied, "req-v1-copy")
+            .copy_path(
+                &source,
+                &copied,
+                &MutationOptions::with_commit_id("req-v1-copy"),
+            )
             .expect("copy repeat");
         assert_eq!(copy_repeated, copy_first);
         let source_entry = harness.client.stat_path(&source).expect("source stat");
@@ -1357,11 +1398,19 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
         let move_first = harness
             .client
-            .move_path_with_commit_id(&copied, &moved, "req-v1-move")
+            .move_path(
+                &copied,
+                &moved,
+                &MutationOptions::with_commit_id("req-v1-move"),
+            )
             .expect("move first");
         let move_repeated = harness
             .client
-            .move_path_with_commit_id(&copied, &moved, "req-v1-move")
+            .move_path(
+                &copied,
+                &moved,
+                &MutationOptions::with_commit_id("req-v1-move"),
+            )
             .expect("move repeat");
         assert_eq!(move_repeated, move_first);
         match harness.client.stat_path(&copied) {
@@ -1373,11 +1422,11 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 
         let delete_first = harness
             .client
-            .delete_path_with_commit_id(&moved, "req-v1-delete")
+            .delete_path(&moved, &MutationOptions::with_commit_id("req-v1-delete"))
             .expect("delete first");
         let delete_repeated = harness
             .client
-            .delete_path_with_commit_id(&moved, "req-v1-delete")
+            .delete_path(&moved, &MutationOptions::with_commit_id("req-v1-delete"))
             .expect("delete repeat");
         assert_eq!(delete_repeated, delete_first);
         match harness.client.stat_path(&moved) {
@@ -1409,13 +1458,13 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         let child = NamespacePath::parse("demo:/docs/child.txt").expect("child path");
         harness
             .client
-            .write_file_bytes(&child, b"child")
+            .write_file_bytes(&child, b"child", &MutationOptions::default())
             .expect("write child");
 
         let dir = NamespacePath::parse("demo:/docs").expect("dir path");
         let non_recursive = harness
             .client
-            .delete_path(&dir)
+            .delete_path(&dir, &MutationOptions::default())
             .expect_err("non-recursive delete rejects non-empty dir");
         match non_recursive {
             ClientError::Api { status, code, .. } => {
@@ -1427,7 +1476,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
 
         harness
             .client
-            .delete_path_recursive(&dir)
+            .delete_path_recursive(&dir, &MutationOptions::default())
             .expect("recursive delete succeeds");
         match harness.client.stat_path(&child) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
@@ -1458,7 +1507,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
         harness
             .client
-            .write_file_bytes(&source, b"source")
+            .write_file_bytes(&source, b"source", &MutationOptions::default())
             .expect("seed source");
 
         // Unknown behaviors are not wire variants; they fail request
@@ -1534,7 +1583,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .create_namespace(namespace)
             .expect("create namespace");
         client
-            .write_file_bytes(&target, b"hello admin\n")
+            .write_file_bytes(&target, b"hello admin\n", &MutationOptions::default())
             .expect("write file");
 
         let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
@@ -1591,7 +1640,7 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
             .expect("create namespace");
         let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
         client
-            .write_file_bytes(&target, b"hello gc\n")
+            .write_file_bytes(&target, b"hello gc\n", &MutationOptions::default())
             .expect("write file");
         post_checkpoint(&server_url, namespace).expect("checkpoint");
 
@@ -1632,7 +1681,7 @@ async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
             .expect("create namespace");
         let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
         client
-            .write_file_bytes(&target, b"hello tick\n")
+            .write_file_bytes(&target, b"hello tick\n", &MutationOptions::default())
             .expect("write file");
 
         // One WAL segment sits far below the default threshold.
@@ -1732,7 +1781,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
             .create_namespace(namespace)
             .expect("create namespace");
         client
-            .write_file_bytes(&target, b"hello\n")
+            .write_file_bytes(&target, b"hello\n", &MutationOptions::default())
             .expect("write file");
         post_checkpoint(&server_url, namespace).expect("checkpoint");
 
@@ -1790,14 +1839,14 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         client_a.create_namespace("demo").expect("create namespace");
         let host_a_target = NamespacePath::parse("demo:/docs/host-a.txt").expect("host a target");
         client_a
-            .write_file_bytes(&host_a_target, b"host a\n")
+            .write_file_bytes(&host_a_target, b"host a\n", &MutationOptions::default())
             .expect("host a write");
 
         // Server B's first semantic write acquires the epoch immediately:
         // there is no lease to wait out, only last-writer-wins fencing.
         let host_b_target = NamespacePath::parse("demo:/docs/host-b.txt").expect("host b target");
         let moved = client_b
-            .move_path(&host_a_target, &host_b_target)
+            .move_path(&host_a_target, &host_b_target, &MutationOptions::default())
             .expect("host b takes over on first write");
         assert!(
             moved.committed_seq.0 >= 2,
@@ -1809,7 +1858,11 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         // `writer_fenced` and keep failing, with no silent reacquisition.
         let host_c_target = NamespacePath::parse("demo:/docs/host-c.txt").expect("host c target");
         for attempt in 0..2 {
-            match client_a.write_file_bytes(&host_c_target, b"host a again\n") {
+            match client_a.write_file_bytes(
+                &host_c_target,
+                b"host a again\n",
+                &MutationOptions::default(),
+            ) {
                 Err(ClientError::Api { code, .. }) => {
                     assert_eq!(code, "writer_fenced", "attempt {attempt}")
                 }
