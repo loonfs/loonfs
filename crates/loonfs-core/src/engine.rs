@@ -4,21 +4,20 @@ use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
-use crate::options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
+use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_api::generated_id;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DirectoryPageCursor,
-    FileRevision, FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId,
-    ManifestObjectId, MutationResult, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo,
-    UploadId,
+    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
+    FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId, ManifestObjectId,
+    NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -135,11 +134,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self.writer_version
     }
 
-    /// Consumes the engine and returns the underlying object store.
-    pub fn into_store(self) -> S {
-        self.store
-    }
-
     /// Creates the namespace if it does not already exist.
     ///
     /// Use this before normal reads and writes for a new namespace.
@@ -185,12 +179,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Resolves one absolute path to the authoritative entry at the current head.
-    pub async fn resolve_path(&self, path: impl AsRef<str>) -> CoreResult<AuthoritativePathEntry> {
-        self.resolve_path_with_context(path.as_ref(), ReadLoadContext::latest())
-            .await
-    }
-
     #[doc(hidden)]
     pub async fn resolve_path_with_runtime_context(
         &self,
@@ -198,35 +186,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         options: &RuntimeReadContext,
     ) -> CoreResult<AuthoritativePathEntry> {
         self.resolve_path_with_context(path.as_ref(), runtime_read_load_context(options))
-            .await
-    }
-
-    /// Lists the children of a directory path.
-    pub async fn list_path(
-        &self,
-        path: impl AsRef<str>,
-    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
-        self.list_path_with_context(path.as_ref(), ReadLoadContext::latest())
-            .await
-    }
-
-    #[doc(hidden)]
-    pub async fn list_path_with_runtime_context(
-        &self,
-        path: impl AsRef<str>,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
-        self.list_path_with_context(path.as_ref(), runtime_read_load_context(options))
-            .await
-    }
-
-    /// Lists one page of children for a directory path.
-    pub async fn list_path_page(
-        &self,
-        path: impl AsRef<str>,
-        request: PageRequest<DirectoryPageCursor>,
-    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        self.list_path_page_with_context(path.as_ref(), request, ReadLoadContext::latest())
             .await
     }
 
@@ -241,15 +200,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    /// Reads the current bytes for a file path.
-    ///
-    /// Content bytes are validated against the file's `content_ref` before they
-    /// are returned.
-    pub async fn read_file(&self, path: impl AsRef<str>) -> CoreResult<AuthoritativeFileBytes> {
-        self.read_file_with_context(path.as_ref(), ReadLoadContext::latest())
-            .await
-    }
-
     #[doc(hidden)]
     pub async fn read_file_with_runtime_context(
         &self,
@@ -257,15 +207,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         options: &RuntimeReadContext,
     ) -> CoreResult<AuthoritativeFileBytes> {
         self.read_file_with_context(path.as_ref(), runtime_read_load_context(options))
-            .await
-    }
-
-    /// Lists retained revisions for the file currently visible at `path`.
-    pub async fn list_file_revisions(
-        &self,
-        path: impl AsRef<str>,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        self.list_file_revisions_with_context(path.as_ref(), ReadLoadContext::latest())
             .await
     }
 
@@ -277,20 +218,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<ListFileRevisionsResponse> {
         self.list_file_revisions_with_context(path.as_ref(), runtime_read_load_context(options))
             .await
-    }
-
-    /// Lists one page of retained revisions for the file currently visible at `path`.
-    pub async fn list_file_revisions_page(
-        &self,
-        path: impl AsRef<str>,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
-        self.list_file_revisions_page_with_context(
-            path.as_ref(),
-            request,
-            ReadLoadContext::latest(),
-        )
-        .await
     }
 
     #[doc(hidden)]
@@ -308,15 +235,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Lists retained revisions for a file inode, independent of its current path.
-    pub async fn list_file_revisions_for_inode(
-        &self,
-        inode_id: InodeId,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        self.list_file_revisions_for_inode_with_context(inode_id, ReadLoadContext::latest())
-            .await
-    }
-
     #[doc(hidden)]
     pub async fn list_file_revisions_for_inode_with_runtime_context(
         &self,
@@ -326,20 +244,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         self.list_file_revisions_for_inode_with_context(
             inode_id,
             runtime_read_load_context(options),
-        )
-        .await
-    }
-
-    /// Lists one page of retained revisions for a file inode.
-    pub async fn list_file_revisions_for_inode_page(
-        &self,
-        inode_id: InodeId,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
-        self.list_file_revisions_for_inode_page_with_context(
-            inode_id,
-            request,
-            ReadLoadContext::latest(),
         )
         .await
     }
@@ -359,16 +263,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Reads a retained revision for the file currently visible at `path`.
-    pub async fn read_file_revision(
-        &self,
-        path: impl AsRef<str>,
-        revision_no: RevisionNo,
-    ) -> CoreResult<AuthoritativeFileBytes> {
-        self.read_file_revision_with_context(path.as_ref(), revision_no, ReadLoadContext::latest())
-            .await
-    }
-
     #[doc(hidden)]
     pub async fn read_file_revision_with_runtime_context(
         &self,
@@ -380,20 +274,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             path.as_ref(),
             revision_no,
             runtime_read_load_context(options),
-        )
-        .await
-    }
-
-    /// Reads a retained revision by stable inode id.
-    pub async fn read_file_revision_for_inode(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> CoreResult<Vec<u8>> {
-        self.read_file_revision_for_inode_with_context(
-            inode_id,
-            revision_no,
-            ReadLoadContext::latest(),
         )
         .await
     }
@@ -427,15 +307,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<AuthoritativePathEntry> {
         let view = self.load_read_view(context).await?;
         view.resolve_path(path).await
-    }
-
-    async fn list_path_with_context(
-        &self,
-        path: &str,
-        context: ReadLoadContext<'_>,
-    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
-        let view = self.load_read_view(context).await?;
-        view.list_path(path).await
     }
 
     async fn list_path_page_with_context(
@@ -515,187 +386,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<Vec<u8>> {
         let view = self.load_read_view(context).await?;
         view.read_file_revision_bytes_for_inode(&self.store, inode_id, revision_no)
-            .await
-    }
-
-    /// Writes file bytes to a path.
-    ///
-    /// The bytes become durable content first. Metadata is published only after
-    /// that content is safe to reference.
-    pub async fn put_file(
-        &self,
-        path: impl AsRef<str>,
-        bytes: impl AsRef<[u8]>,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::put_file_bytes(
-            &self.store,
-            &self.namespace_id,
-            path.as_ref(),
-            bytes.as_ref(),
-            options.put_behavior,
-            &self.mutation_context(),
-            options.commit_id.as_ref(),
-        )
-        .await
-    }
-
-    /// Publishes a file revision that points at an already-durable content ref.
-    ///
-    /// Use this when the caller staged content separately.
-    pub async fn put_file_content_ref(
-        &self,
-        path: impl AsRef<str>,
-        content_ref: ContentRef,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::put_file_content_ref(
-            &self.store,
-            &self.namespace_id,
-            path.as_ref(),
-            content_ref,
-            options.put_behavior,
-            &self.mutation_context(),
-            options.commit_id.as_ref(),
-        )
-        .await
-    }
-
-    /// Creates a directory at an absolute path.
-    pub async fn create_directory(
-        &self,
-        path: impl AsRef<str>,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::create_directory_path(
-            &self.store,
-            &self.namespace_id,
-            path.as_ref(),
-            &self.mutation_context(),
-            options.commit_id.as_ref(),
-        )
-        .await
-    }
-
-    /// Deletes a file or directory path.
-    pub async fn delete_path(
-        &self,
-        path: impl AsRef<str>,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        let commit_id = options.commit_id.as_ref();
-        if options.delete_behavior == DeleteDirectoryBehavior::Recursive {
-            crate::path::write::ops::delete_path(
-                &self.store,
-                &self.namespace_id,
-                path.as_ref(),
-                &self.mutation_context(),
-                commit_id,
-            )
-            .await
-        } else {
-            crate::path::write::ops::delete_path_non_recursive(
-                &self.store,
-                &self.namespace_id,
-                path.as_ref(),
-                &self.mutation_context(),
-                commit_id,
-            )
-            .await
-        }
-    }
-
-    /// Moves a path within the same namespace.
-    pub async fn move_path(
-        &self,
-        source: impl AsRef<str>,
-        dest: impl AsRef<str>,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::move_path(
-            &self.store,
-            &self.namespace_id,
-            source.as_ref(),
-            dest.as_ref(),
-            &self.mutation_context(),
-            options.commit_id.as_ref(),
-        )
-        .await
-    }
-
-    /// Copies a file path within the same namespace.
-    pub async fn copy_path(
-        &self,
-        source: impl AsRef<str>,
-        dest: impl AsRef<str>,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::copy_file_path(
-            &self.store,
-            &self.namespace_id,
-            source.as_ref(),
-            dest.as_ref(),
-            &self.mutation_context(),
-            options.commit_id.as_ref(),
-        )
-        .await
-    }
-
-    /// Restores a prior file revision by appending a new current revision.
-    pub async fn restore_file_revision(
-        &self,
-        path: impl AsRef<str>,
-        source_revision_no: RevisionNo,
-        options: WriteOptions,
-    ) -> CoreResult<MutationResult> {
-        crate::path::write::ops::restore_file_revision(
-            &self.store,
-            &self.namespace_id,
-            path.as_ref(),
-            source_revision_no,
-            &self.mutation_context(),
-            options.commit_id.as_ref(),
-        )
-        .await
-    }
-
-    /// Submits one explicit semantic commit request.
-    ///
-    /// This is the lower-level surface used by clients that need their own
-    /// commit ids, preconditions, and operation lists.
-    pub async fn commit_operations(&self, request: CommitRequest) -> CoreResult<CommitResponse> {
-        crate::protocol::commit_operations(
-            &self.store,
-            &self.namespace_id,
-            request,
-            &self.mutation_context(),
-        )
-        .await
-    }
-
-    /// Submits explicit semantic commit requests as one publication attempt.
-    pub async fn commit_operations_batch(
-        &self,
-        requests: Vec<CommitRequest>,
-    ) -> Vec<CoreResult<CommitResponse>> {
-        crate::protocol::commit_operations_batch(
-            &self.store,
-            &self.namespace_id,
-            requests,
-            &self.mutation_context(),
-        )
-        .await
-    }
-
-    /// Publishes already-classified namespace mutation candidates.
-    ///
-    /// Server code uses this to batch path intents and explicit commits through
-    /// one namespace publisher.
-    pub async fn publish_namespace_mutations_batch(
-        &self,
-        candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<CoreResult<CommitResponse>> {
-        self.publish_namespace_mutations_batch_gated(candidates, None)
             .await
     }
 

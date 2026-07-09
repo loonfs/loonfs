@@ -28,6 +28,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
+    #[cfg(test)]
     pub(crate) fn head(&self) -> &HeadState {
         &self.head
     }
@@ -49,10 +50,12 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     }
 }
 
+/// Size bounds on the publish-time WAL-tail projection a view load will
+/// accept for reuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PublishTailOptions {
-    pub(crate) max_tail_rows: usize,
-    pub(crate) max_tail_decoded_bytes: Option<usize>,
+pub struct PublishTailOptions {
+    pub max_tail_rows: usize,
+    pub max_tail_decoded_bytes: Option<usize>,
 }
 
 impl Default for PublishTailOptions {

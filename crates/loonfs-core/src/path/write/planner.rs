@@ -20,7 +20,7 @@ use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedPathMutation {
+pub(crate) struct PlannedPathMutation {
     pub commit_id: CommitId,
     pub path_intent_fingerprint: PathIntentFingerprint,
     pub commit_request: ApiCommitRequest,

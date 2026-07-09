@@ -2,25 +2,19 @@ use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
-use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError, MetadataViewError, Result};
+use crate::error::{CoreError, MetadataProjectionLoadError, MetadataViewError, Result};
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::write::planner::plan_path_mutation_against_publish_view;
-use crate::path::write::{
-    path_intent_fingerprint_for_path_intent, PathMutationIntent, PlannedPathMutation,
-    PublishPlanningSession,
-};
+use crate::path::write::{path_intent_fingerprint_for_path_intent, PathMutationIntent};
 use crate::protocol::{
     load_publish_metadata_view, ContentDurabilityGate, PublishTailOptions, PublishTailProjection,
 };
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::{CommitId, MutationResult, NamespaceId};
+use loonfs_api::{CommitId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
-
-const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceMutationCandidate {
@@ -56,27 +50,6 @@ impl NamespaceMutationCandidate {
                 path_intent_fingerprint_for_path_intent(namespace_id, intent)
                     .map(SemanticMutationIdentity::PathIntent)
             }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlushPolicy {
-    Immediate,
-    Coalesce { max_delay_ms: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PublishOptions {
-    pub flush: FlushPolicy,
-    pub stale_head_retry_limit: usize,
-}
-
-impl Default for PublishOptions {
-    fn default() -> Self {
-        Self {
-            flush: FlushPolicy::Immediate,
-            stale_head_retry_limit: DEFAULT_STALE_HEAD_RETRY_LIMIT,
         }
     }
 }
@@ -130,8 +103,8 @@ impl NamespaceCommitEngine {
         }
     }
 
-    #[doc(hidden)]
-    pub fn with_monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
         self.timer = timer;
         self
     }
@@ -169,7 +142,7 @@ impl NamespaceCommitEngine {
         .await
     }
 
-    pub(crate) async fn publish_batch_with_tail_options<S: ObjectStore + ?Sized>(
+    pub async fn publish_batch_with_tail_options<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -284,23 +257,6 @@ impl NamespaceCommitEngine {
         }
     }
 
-    pub async fn publish_batch_with_tail_cache_limits<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        candidates: Vec<NamespaceMutationCandidate>,
-        context: &MutationContext,
-        max_tail_rows: usize,
-        max_tail_decoded_bytes: Option<usize>,
-        content_gate: Option<ContentDurabilityGate>,
-    ) -> NamespaceCommitEnginePublishResult {
-        let options = PublishTailOptions {
-            max_tail_rows,
-            max_tail_decoded_bytes,
-        };
-        self.publish_batch_with_tail_options(store, candidates, context, &options, content_gate)
-            .await
-    }
-
     fn update_publish_tail_projection(
         &mut self,
         mut projection: PublishTailProjection,
@@ -348,110 +304,6 @@ fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitRespons
     (0..count).map(|_| Err(error.clone())).collect()
 }
 
-pub struct DirectObjectStorePublisher<'a, S: ObjectStore + ?Sized> {
-    store: &'a S,
-}
-
-impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
-    pub fn new(store: &'a S) -> Self {
-        Self { store }
-    }
-
-    pub async fn plan_path_intent(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-    ) -> Result<PlannedPathMutation> {
-        let (view, _projection) = load_publish_metadata_view(
-            self.store,
-            None,
-            None,
-            namespace_id,
-            None,
-            None,
-            &PublishTailOptions::default(),
-        )
-        .await?;
-        let session = PublishPlanningSession::new(view.head());
-        let base_view = view.metadata_view();
-        let metadata_view = base_view.with_overlay(session.accepted_rows(), session.head().seq);
-        plan_path_mutation_against_publish_view(
-            namespace_id,
-            intent,
-            session.head(),
-            &metadata_view,
-        )
-        .await
-    }
-
-    pub async fn submit_path_intent(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
-        context: &MutationContext,
-        options: PublishOptions,
-    ) -> Result<MutationResult> {
-        let attempts = options.stale_head_retry_limit.max(1);
-        let mut last_error = None;
-
-        for attempt in 0..attempts {
-            let mut results = publish_namespace_mutations_batch(
-                self.store,
-                namespace_id,
-                vec![NamespaceMutationCandidate::Path(intent.clone())],
-                context,
-            )
-            .await;
-            let result = results.pop().unwrap_or_else(|| {
-                Err(CoreError::Internal("empty path mutation batch".to_owned()))
-            });
-            match result {
-                Ok(response) => {
-                    return Ok(MutationResult {
-                        namespace_id: response.namespace_id,
-                        committed_seq: response.committed_seq,
-                    });
-                }
-                Err(error) if error.code() == ErrorCode::StaleHead && attempt + 1 < attempts => {
-                    last_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            CoreError::Internal("path mutation stale-head retry exhausted".to_owned())
-        }))
-    }
-
-    pub async fn submit_commit_request(
-        &self,
-        namespace_id: &NamespaceId,
-        request: ApiCommitRequest,
-        context: &MutationContext,
-    ) -> Result<ApiCommitResponse> {
-        crate::protocol::commit_operations(self.store, namespace_id, request, context).await
-    }
-
-    pub async fn submit_commit_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        requests: Vec<ApiCommitRequest>,
-        context: &MutationContext,
-    ) -> Vec<Result<ApiCommitResponse>> {
-        crate::protocol::commit_operations_batch(self.store, namespace_id, requests, context).await
-    }
-}
-
-pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    candidates: Vec<NamespaceMutationCandidate>,
-    context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse>> {
-    publish_namespace_mutations_batch_gated(store, namespace_id, candidates, context, None).await
-}
-
 /// [`publish_namespace_mutations_batch`] with a content durability gate: the
 /// gate is a future, so it rides an explicit parameter instead of an options
 /// struct, and it is awaited between the WAL write and the head CAS.
@@ -478,6 +330,7 @@ pub(crate) async fn publish_namespace_mutations_batch_gated<S: ObjectStore + ?Si
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use futures::StreamExt;

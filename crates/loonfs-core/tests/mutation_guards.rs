@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{
     sha256_digest,
     v0::{
@@ -31,15 +32,12 @@ use loonfs_core::commit::{
     CommitValidationContext, CommitValidationError, PreparedCommit,
 };
 use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
-use loonfs_core::control::load_namespace_head_control;
+use loonfs_core::control::{load_namespace_head_control, load_namespace_read_anchor};
 use loonfs_core::metadata::MetadataState;
-use loonfs_core::publish::{
-    DirectObjectStorePublisher, NamespaceCommitEngine, NamespaceMutationCandidate,
-    PathMutationIntent, PublishOptions,
-};
+use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    MutationContext, NamespaceEngine, WriteOptions,
+    MutationContext, NamespaceEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, metadata_manifest_object, namespace_config,
@@ -222,12 +220,62 @@ fn create_checkpoint<S: ObjectStore + ?Sized>(
     block_on(namespace_engine(store, namespace_id, context).create_checkpoint())
 }
 
-fn write_options(commit_id: Option<&str>, behavior: PutBehavior) -> WriteOptions {
-    WriteOptions {
-        commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-        put_behavior: behavior,
-        ..WriteOptions::default()
-    }
+fn test_commit_id(commit_id: Option<&str>) -> CommitId {
+    commit_id
+        .map(|value| CommitId::parse(value).expect("valid test commit id"))
+        .unwrap_or_else(CommitId::generate)
+}
+
+/// Pins the current head and manifest the way the runtime does before a
+/// read; the deleted convenience readers used to do this internally.
+fn read_context<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> RuntimeReadContext {
+    let (head, root) =
+        block_on(load_namespace_read_anchor(store, namespace_id)).expect("load read anchor");
+    RuntimeReadContext::pinned_head(
+        head.state,
+        head.identity.etag,
+        root.state.manifest_id,
+        root.state.manifest_object_id,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Publishes one path intent through the commit engine — the single publish
+/// pipeline — and maps the response like the old convenience writers did.
+async fn submit_intent_async<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    intent: PathMutationIntent,
+    context: &MutationContext,
+) -> Result<loonfs_api::MutationResult, CoreError> {
+    let response = NamespaceCommitEngine::new(namespace_id.clone())
+        .publish_batch(
+            store,
+            vec![NamespaceMutationCandidate::Path(intent)],
+            context,
+        )
+        .await
+        .results
+        .pop()
+        .expect("one publish result")?;
+    Ok(loonfs_api::MutationResult {
+        namespace_id: response.namespace_id,
+        committed_seq: response.committed_seq,
+    })
+}
+
+fn submit_intent<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    intent: PathMutationIntent,
+    context: &MutationContext,
+) -> Result<loonfs_api::MutationResult, CoreError> {
+    block_on(submit_intent_async(store, namespace_id, intent, context))
 }
 
 fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -239,11 +287,18 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).put_file(
-        absolute_path,
-        bytes,
-        write_options(commit_id, behavior),
-    ))
+    let content = block_on(store_bytes_as_content(store, namespace_id, bytes))?;
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: test_commit_id(commit_id),
+            absolute_path: absolute_path.to_owned(),
+            content_ref: content.content_ref,
+            behavior,
+        },
+        context,
+    )
 }
 
 fn write_file_bytes<S: ObjectStore + ?Sized>(
@@ -272,15 +327,14 @@ fn create_directory_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, context).create_directory(
-            absolute_path,
-            WriteOptions {
-                commit_id: commit_id
-                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                ..WriteOptions::default()
-            },
-        ),
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::CreateDir {
+            commit_id: test_commit_id(commit_id),
+            absolute_path: absolute_path.to_owned(),
+        },
+        context,
     )
 }
 
@@ -291,14 +345,16 @@ fn delete_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).delete_path(
-        absolute_path,
-        WriteOptions {
-            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            delete_behavior: DeleteDirectoryBehavior::Recursive,
-            ..WriteOptions::default()
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::DeletePath {
+            commit_id: test_commit_id(commit_id),
+            absolute_path: absolute_path.to_owned(),
+            behavior: DeleteDirectoryBehavior::Recursive,
         },
-    ))
+        context,
+    )
 }
 
 fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
@@ -308,14 +364,16 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).delete_path(
-        absolute_path,
-        WriteOptions {
-            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            delete_behavior: DeleteDirectoryBehavior::NonRecursive,
-            ..WriteOptions::default()
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::DeletePath {
+            commit_id: test_commit_id(commit_id),
+            absolute_path: absolute_path.to_owned(),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
         },
-    ))
+        context,
+    )
 }
 
 fn move_path<S: ObjectStore + ?Sized>(
@@ -326,14 +384,17 @@ fn move_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).move_path(
-        from_path,
-        to_path,
-        WriteOptions {
-            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            ..WriteOptions::default()
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::MovePath {
+            commit_id: test_commit_id(commit_id),
+            from_path: from_path.to_owned(),
+            to_path: to_path.to_owned(),
+            behavior: MoveBehavior::NoReplace,
         },
-    ))
+        context,
+    )
 }
 
 fn copy_file_path<S: ObjectStore + ?Sized>(
@@ -344,14 +405,16 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).copy_path(
-        from_path,
-        to_path,
-        WriteOptions {
-            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
-            ..WriteOptions::default()
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::CopyFilePath {
+            commit_id: test_commit_id(commit_id),
+            from_path: from_path.to_owned(),
+            to_path: to_path.to_owned(),
         },
-    ))
+        context,
+    )
 }
 
 fn restore_file_revision<S: ObjectStore + ?Sized>(
@@ -362,16 +425,15 @@ fn restore_file_revision<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::MutationResult, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, context).restore_file_revision(
-            absolute_path,
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::RestoreRevision {
+            commit_id: test_commit_id(commit_id),
+            absolute_path: absolute_path.to_owned(),
             source_revision_no,
-            WriteOptions {
-                commit_id: commit_id
-                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
-                ..WriteOptions::default()
-            },
-        ),
+        },
+        context,
     )
 }
 
@@ -380,7 +442,11 @@ fn resolve_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    block_on(namespace_engine(store, namespace_id, &mutation_context()).resolve_path(absolute_path))
+    let context = read_context(store, namespace_id);
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .resolve_path_with_runtime_context(absolute_path, &context),
+    )
 }
 
 fn list_path<S: ObjectStore + ?Sized>(
@@ -388,7 +454,25 @@ fn list_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    block_on(namespace_engine(store, namespace_id, &mutation_context()).list_path(absolute_path))
+    let context = read_context(store, namespace_id);
+    let engine = namespace_engine(store, namespace_id, &mutation_context());
+    let mut entries = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = block_on(engine.list_path_page_with_runtime_context(
+            absolute_path,
+            PageRequest {
+                limit: page_limit(1_000),
+                cursor,
+            },
+            &context,
+        ))?;
+        entries.extend(page.items);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(entries),
+        }
+    }
 }
 
 fn page_limit(value: u32) -> EffectiveLimit {
@@ -402,14 +486,17 @@ fn list_path_page<S: ObjectStore + ?Sized>(
     limit: u32,
     cursor: Option<DirectoryPageCursor>,
 ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
+    let context = read_context(store, namespace_id);
     block_on(
-        namespace_engine(store, namespace_id, &mutation_context()).list_path_page(
-            absolute_path,
-            PageRequest {
-                limit: page_limit(limit),
-                cursor,
-            },
-        ),
+        namespace_engine(store, namespace_id, &mutation_context())
+            .list_path_page_with_runtime_context(
+                absolute_path,
+                PageRequest {
+                    limit: page_limit(limit),
+                    cursor,
+                },
+                &context,
+            ),
     )
 }
 
@@ -418,7 +505,11 @@ fn read_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
-    block_on(namespace_engine(store, namespace_id, &mutation_context()).read_file(absolute_path))
+    let context = read_context(store, namespace_id);
+    block_on(
+        namespace_engine(store, namespace_id, &mutation_context())
+            .read_file_with_runtime_context(absolute_path, &context),
+    )
 }
 
 fn list_file_revisions<S: ObjectStore + ?Sized>(
@@ -426,9 +517,10 @@ fn list_file_revisions<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
+    let context = read_context(store, namespace_id);
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .list_file_revisions(absolute_path),
+            .list_file_revisions_with_runtime_context(absolute_path, &context),
     )
 }
 
@@ -437,9 +529,10 @@ fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     inode_id: InodeId,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
+    let context = read_context(store, namespace_id);
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .list_file_revisions_for_inode(inode_id),
+            .list_file_revisions_for_inode_with_runtime_context(inode_id, &context),
     )
 }
 
@@ -449,9 +542,10 @@ fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     revision_no: RevisionNo,
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
+    let context = read_context(store, namespace_id);
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_revision(absolute_path, revision_no),
+            .read_file_revision_with_runtime_context(absolute_path, revision_no, &context),
     )
 }
 
@@ -461,9 +555,10 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
+    let context = read_context(store, namespace_id);
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_revision_for_inode(inode_id, revision_no),
+            .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &context),
     )
 }
 
@@ -506,8 +601,7 @@ fn resolve_path_latest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    let engine = namespace_engine(store, namespace_id, &mutation_context());
-    block_on(engine.resolve_path(absolute_path))
+    resolve_path(store, namespace_id, absolute_path)
 }
 
 fn list_path_latest<S: ObjectStore + ?Sized>(
@@ -515,8 +609,7 @@ fn list_path_latest<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    let engine = namespace_engine(store, namespace_id, &mutation_context());
-    block_on(engine.list_path(absolute_path))
+    list_path(store, namespace_id, absolute_path)
 }
 
 fn wal_create_directory(
@@ -1471,39 +1564,6 @@ async fn path_put_file_uses_checksum_metadata_for_content_validation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_planning_does_not_validate_content() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = ContentBlobGetCountingStore::new(temp_dir.path());
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"planned")
-        .await
-        .expect("stage content");
-
-    store.reset_content_blob_get_count();
-    let planned = DirectObjectStorePublisher::new(&store)
-        .plan_path_intent(
-            &namespace_id,
-            &PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("plan-put-content").expect("valid commit id"),
-                absolute_path: "/docs/planned.txt".to_owned(),
-                content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
-            },
-        )
-        .await
-        .expect("plan path intent");
-
-    assert_eq!(
-        planned.commit_id,
-        CommitId::parse("plan-put-content").expect("valid commit id")
-    );
-    assert_eq!(store.content_blob_get_count(), 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
@@ -1893,19 +1953,22 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
     ))
     .expect("stage recreated content");
     let results = block_on(
-        namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch(vec![
-            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
-                absolute_path: "/docs/cycled.txt".to_owned(),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-            }),
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
-                absolute_path: "/docs/cycled.txt".to_owned(),
-                content_ref: staged.content_ref,
-                behavior: PutBehavior::NoReplace,
-            }),
-        ]),
+        namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch_gated(
+            vec![
+                NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                    commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
+                    absolute_path: "/docs/cycled.txt".to_owned(),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                }),
+                NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
+                    absolute_path: "/docs/cycled.txt".to_owned(),
+                    content_ref: staged.content_ref,
+                    behavior: PutBehavior::NoReplace,
+                }),
+            ],
+            None,
+        ),
     );
     results[0]
         .as_ref()
@@ -2619,21 +2682,19 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
     let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
         .await
         .expect("stage content");
-    let publisher = DirectObjectStorePublisher::new(&store);
-    publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("before-delete").expect("valid commit id"),
-                absolute_path: "/keep.txt".to_owned(),
-                content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("commit before delete");
+    submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("before-delete").expect("valid commit id"),
+            absolute_path: "/keep.txt".to_owned(),
+            content_ref: content.content_ref.clone(),
+            behavior: PutBehavior::NoReplace,
+        },
+        &context,
+    )
+    .await
+    .expect("commit before delete");
 
     // A stale precondition deletes nothing.
     let engine = namespace_engine(&store, &namespace_id, &context);
@@ -2655,20 +2716,19 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
     // all observe the deleted head.
     let read = resolve_path(&store, &namespace_id, "/").expect_err("read after delete");
     assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
-    let commit = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("after-delete").expect("valid commit id"),
-                absolute_path: "/late.txt".to_owned(),
-                content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect_err("commit after delete");
+    let commit = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("after-delete").expect("valid commit id"),
+            absolute_path: "/late.txt".to_owned(),
+            content_ref: content.content_ref.clone(),
+            behavior: PutBehavior::NoReplace,
+        },
+        &context,
+    )
+    .await
+    .expect_err("commit after delete");
     assert_eq!(commit.code(), ErrorCode::NamespaceDeleted);
     let again = engine
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
@@ -2699,21 +2759,19 @@ async fn fork_clone_survives_source_delete() {
     let content = store_bytes_as_content(&store, &source, b"shared bytes")
         .await
         .expect("stage content");
-    let publisher = DirectObjectStorePublisher::new(&store);
-    publisher
-        .submit_path_intent(
-            &source,
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
-                absolute_path: "/shared.txt".to_owned(),
-                content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("seed source");
+    submit_intent_async(
+        &store,
+        &source,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
+            absolute_path: "/shared.txt".to_owned(),
+            content_ref: content.content_ref,
+            behavior: PutBehavior::NoReplace,
+        },
+        &context,
+    )
+    .await
+    .expect("seed source");
     fork_namespace(&store, &source, &clone, &context).expect("fork");
 
     namespace_engine(&store, &source, &context)
@@ -2739,7 +2797,6 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
     let content = store_bytes_as_content(&store, &namespace_id, b"ack lost")
         .await
         .expect("stage content");
-    let publisher = DirectObjectStorePublisher::new(&store);
     let intent = || PathMutationIntent::PutFile {
         commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
         absolute_path: "/ack.txt".to_owned(),
@@ -2749,8 +2806,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
 
     // The CAS landed but its acknowledgment was lost: this must surface as
     // an unknown outcome, never as definite failure.
-    let error = publisher
-        .submit_path_intent(&namespace_id, intent(), &context, PublishOptions::default())
+    let error = submit_intent_async(&store, &namespace_id, intent(), &context)
         .await
         .expect_err("ack-lost head CAS is not definite failure");
     assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
@@ -2758,8 +2814,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
 
     // The documented remedy: retry with the same commit id. The commit is
     // already visible, so the retry replays it instead of double-committing.
-    let result = publisher
-        .submit_path_intent(&namespace_id, intent(), &context, PublishOptions::default())
+    let result = submit_intent_async(&store, &namespace_id, intent(), &context)
         .await
         .expect("same-commit-id retry replays the committed mutation");
     assert_eq!(result.committed_seq, ChangeSeq(1));
@@ -2769,7 +2824,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
+async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -2778,24 +2833,24 @@ async fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     let content = store_bytes_as_content(&store, &namespace_id, b"retry")
         .await
         .expect("stage content");
-    let publisher = DirectObjectStorePublisher::new(&store);
-
-    let result = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
-                absolute_path: "/retry.txt".to_owned(),
-                content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
+    let intent = PathMutationIntent::PutFile {
+        commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
+        absolute_path: "/retry.txt".to_owned(),
+        content_ref: content.content_ref,
+        behavior: PutBehavior::NoReplace,
+    };
+    let error = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
         .await
-        .expect("path intent retries stale head");
-    assert_eq!(result.committed_seq, ChangeSeq(1));
+        .expect_err("injected stale head surfaces to the caller");
+    assert_eq!(error.code(), ErrorCode::StaleHead);
     assert!(store.injected_stale_head());
+
+    // The orphaned segment from the failed attempt must not block a retry
+    // with the same commit id.
+    let result = submit_intent_async(&store, &namespace_id, intent, &context)
+        .await
+        .expect("retry after the orphaned segment");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
 
     let wal_keys = store
         .list_prefix("namespaces/demo/wal/segments/")
@@ -3022,7 +3077,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load() {
+async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
@@ -3065,6 +3120,18 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
     );
 
     store.inject_stale_head_get_after(1);
+    let error = create_directory_path(
+        &store,
+        &namespace_id,
+        "/parent/child",
+        &context,
+        Some("mkdir-child"),
+    )
+    .expect_err("injected stale head read surfaces to the caller");
+    assert_eq!(error.code(), ErrorCode::StaleHead);
+    assert!(store.injected_stale_head_get());
+
+    // The failed attempt must not block a retry with the same commit id.
     let result = create_directory_path(
         &store,
         &namespace_id,
@@ -3072,10 +3139,8 @@ async fn direct_publisher_retries_after_stale_head_get_during_publish_view_load(
         &context,
         Some("mkdir-child"),
     )
-    .expect("path intent retries stale head get");
-
+    .expect("retry after the stale head read");
     assert_eq!(result.committed_seq, ChangeSeq(4));
-    assert!(store.injected_stale_head_get());
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/file.txt")
             .expect("read after stale get")
@@ -3301,77 +3366,72 @@ async fn explicit_commit_rejects_invalid_display_names() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_publisher_path_intents_cover_basic_mutations() {
+async fn path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let publisher = DirectObjectStorePublisher::new(&store);
 
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("stage content");
-    let put = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-path").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
-                content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("put path");
+    let put = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("put-path").expect("valid commit id"),
+            absolute_path: "/docs/a.txt".to_owned(),
+            content_ref: content.content_ref.clone(),
+            behavior: PutBehavior::NoReplace,
+        },
+        &context,
+    )
+    .await
+    .expect("put path");
     assert_eq!(put.committed_seq, ChangeSeq(1));
 
-    let moved = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::MovePath {
-                commit_id: CommitId::parse("move-path").expect("valid commit id"),
-                from_path: "/docs/a.txt".to_owned(),
-                to_path: "/docs/b.txt".to_owned(),
-                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("move path");
+    let moved = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::MovePath {
+            commit_id: CommitId::parse("move-path").expect("valid commit id"),
+            from_path: "/docs/a.txt".to_owned(),
+            to_path: "/docs/b.txt".to_owned(),
+            behavior: loonfs_api::v0::MoveBehavior::NoReplace,
+        },
+        &context,
+    )
+    .await
+    .expect("move path");
     assert_eq!(moved.committed_seq, ChangeSeq(2));
 
-    let copied = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::CopyFilePath {
-                commit_id: CommitId::parse("copy-path").expect("valid commit id"),
-                from_path: "/docs/b.txt".to_owned(),
-                to_path: "/docs/c.txt".to_owned(),
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("copy path");
+    let copied = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::CopyFilePath {
+            commit_id: CommitId::parse("copy-path").expect("valid commit id"),
+            from_path: "/docs/b.txt".to_owned(),
+            to_path: "/docs/c.txt".to_owned(),
+        },
+        &context,
+    )
+    .await
+    .expect("copy path");
     assert_eq!(copied.committed_seq, ChangeSeq(3));
 
-    let deleted = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("delete-path").expect("valid commit id"),
-                absolute_path: "/docs/b.txt".to_owned(),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("delete path");
+    let deleted = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::DeletePath {
+            commit_id: CommitId::parse("delete-path").expect("valid commit id"),
+            absolute_path: "/docs/b.txt".to_owned(),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+        },
+        &context,
+    )
+    .await
+    .expect("delete path");
     assert_eq!(deleted.committed_seq, ChangeSeq(4));
 
     let copied_bytes =
@@ -3380,13 +3440,12 @@ async fn direct_publisher_path_intents_cover_basic_mutations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_publisher_uses_durable_path_commit_receipt_index() {
+async fn path_publishes_use_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let publisher = DirectObjectStorePublisher::new(&store);
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("stage content");
@@ -3397,44 +3456,36 @@ async fn direct_publisher_uses_durable_path_commit_receipt_index() {
         content_ref: content.content_ref.clone(),
         behavior: PutBehavior::NoReplace,
     };
-    let first = publisher
-        .submit_path_intent(
-            &namespace_id,
-            intent.clone(),
-            &context,
-            PublishOptions::default(),
-        )
+    let first = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
         .await
         .expect("first publish");
-    let retry = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-                absolute_path: "/same/path.txt".to_owned(),
-                content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect("idempotent retry");
+    let retry = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
+            absolute_path: "/same/path.txt".to_owned(),
+            content_ref: content.content_ref.clone(),
+            behavior: PutBehavior::NoReplace,
+        },
+        &context,
+    )
+    .await
+    .expect("idempotent retry");
     assert_eq!(retry.committed_seq, first.committed_seq);
 
-    let conflict = publisher
-        .submit_path_intent(
-            &namespace_id,
-            PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-                absolute_path: "/same/path.txt".to_owned(),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-            },
-            &context,
-            PublishOptions::default(),
-        )
-        .await
-        .expect_err("conflicting retry");
+    let conflict = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::DeletePath {
+            commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
+            absolute_path: "/same/path.txt".to_owned(),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+        },
+        &context,
+    )
+    .await
+    .expect_err("conflicting retry");
     assert!(matches!(
         conflict,
         CoreError::CommitIdReuseConflict(commit_id) if commit_id == "same-path-request"
