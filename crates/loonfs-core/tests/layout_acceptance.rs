@@ -8,6 +8,11 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::v0::BeginUploadRequest;
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
+use loonfs_core::cache::{
+    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
+    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+};
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::gc::{gc_namespace, GcConfig};
@@ -19,6 +24,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn put_file<S: ObjectStore + ?Sized>(
@@ -58,15 +64,19 @@ async fn read_context<S: ObjectStore + ?Sized>(
     let (head, root) = load_namespace_read_anchor(store, namespace_id)
         .await
         .expect("load read anchor");
-    RuntimeReadContext::pinned_head(
-        head.state,
-        head.identity.etag,
-        root.state.manifest_id,
-        root.state.manifest_object_id,
-        None,
-        None,
-        None,
-    )
+    RuntimeReadContext {
+        head: head.state,
+        head_etag: head.identity.etag,
+        manifest_id: root.state.manifest_id,
+        manifest_object_id: root.state.manifest_object_id,
+        table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
+        tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
+            max_entries: 4,
+            max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+            max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
+        })),
+        catalog: None,
+    }
 }
 
 fn page_limit() -> EffectiveLimit {
