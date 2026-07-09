@@ -10,9 +10,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use crate::storage::content::write_immutable_object;
 use futures::future::try_join_all;
-use loonfs_api::wire::manifest::{
-    MetadataFileRef, MetadataRow, MetadataSegmentKey, MetadataTableFamily,
-};
+use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_table;
@@ -83,7 +81,6 @@ pub(super) enum MetadataTableSegmentation {
 }
 
 pub(super) struct MetadataSstRows {
-    segment_key: MetadataSegmentKey,
     rows: Vec<MetadataRow>,
 }
 
@@ -131,7 +128,6 @@ where
                 level,
                 family,
                 segment_index,
-                segment_key: segment_rows.segment_key,
                 rows: segment_rows.rows,
                 object_key,
             });
@@ -171,7 +167,6 @@ pub(super) struct MetadataSstWriteRequest<'a> {
     level: u32,
     family: MetadataTableFamily,
     segment_index: u32,
-    segment_key: MetadataSegmentKey,
     rows: Vec<MetadataRow>,
     object_key: String,
 }
@@ -206,11 +201,9 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         level: request.level,
         family: request.family,
         segment_index: request.segment_index,
-        segment_key: request.segment_key,
         row_count: built.row_count,
         min_key: built.min_key,
         max_key: built.max_key,
-        object_len: built.bytes.len() as u64,
         index_block: built.index,
         filter_block: built.filter,
         payload_checksum: sha256_digest(&built.bytes),
@@ -222,10 +215,7 @@ pub(super) fn segment_manifest_rows(
     segmentation: MetadataTableSegmentation,
 ) -> Vec<MetadataSstRows> {
     match segmentation {
-        MetadataTableSegmentation::Full => vec![MetadataSstRows {
-            segment_key: MetadataSegmentKey::Full,
-            rows,
-        }],
+        MetadataTableSegmentation::Full => vec![MetadataSstRows { rows }],
         MetadataTableSegmentation::Base {
             max_rows_per_segment,
         } => segment_rows_by_row_key_range(rows, max_rows_per_segment.max(1)),
@@ -237,11 +227,7 @@ pub(super) fn segment_rows_by_row_key_range(
     max_rows_per_segment: usize,
 ) -> Vec<MetadataSstRows> {
     rows.chunks(max_rows_per_segment)
-        .enumerate()
-        .map(|(shard, rows)| MetadataSstRows {
-            segment_key: MetadataSegmentKey::RowKeyRange {
-                shard: u32::try_from(shard).unwrap_or(u32::MAX),
-            },
+        .map(|rows| MetadataSstRows {
             rows: rows.to_vec(),
         })
         .collect()

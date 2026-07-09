@@ -44,9 +44,7 @@ pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 
-pub(crate) use self::create::{
-    build_initial_namespace_manifest, create_checkpoint, create_checkpoint_with_owner,
-};
+pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,
     load_verified_manifest_tables_with_cache,
