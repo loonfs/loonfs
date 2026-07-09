@@ -27,7 +27,6 @@ use super::runs::{
     CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
     DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
 };
-use super::scan::SMALL_SCAN_CACHE_SEGMENT_LIMIT;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
@@ -2328,56 +2327,6 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
 }
 
 #[tokio::test]
-async fn count_bounded_cache_keeps_large_table_scans_read_only() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    for index in 0..8 {
-        let path = format!("/docs/file-{index}.txt");
-        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
-            .await
-            .expect("write file");
-    }
-    let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 1,
-        ..MetadataLsmPolicy::default()
-    };
-    checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
-    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    // Without a byte budget only entry count bounds the cache, so one wide
-    // scan admitting all its segments could flush every resident block; wide
-    // scans stay read-only under that configuration.
-    let cache = super::MetadataTableCache::new(MetadataTableCacheConfig {
-        enabled: true,
-        max_blocks: 256,
-        max_decoded_bytes: None,
-    });
-    let tables = super::load_verified_manifest_tables_with_cache(
-        &store,
-        Some(&cache),
-        &namespace_id,
-        &manifest_object_id,
-    )
-    .await
-    .expect("load tables");
-
-    let before = cache.stats();
-    let revisions = tables
-        .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
-        .await
-        .expect("scan revisions");
-    let after = cache.stats();
-
-    assert!(revisions.len() >= 8);
-    assert_eq!(after.inserts, before.inserts);
-    assert!(after.misses > before.misses);
-}
-
-#[tokio::test]
 async fn concurrent_scans_share_one_fetch_per_segment() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
@@ -2399,27 +2348,20 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     };
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
     let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
-    // A count-bounded cache keeps wide scans read-only, so nothing is ever
-    // admitted and single-flight deduplication is the only fetch sharing —
-    // exactly the property this test pins.
-    let cache = super::MetadataTableCache::new(MetadataTableCacheConfig {
-        enabled: true,
-        max_blocks: 256,
-        max_decoded_bytes: None,
-    });
-    let load_tables = || {
-        super::load_verified_manifest_tables_with_cache(
-            &store,
-            Some(&cache),
-            &namespace_id,
-            &manifest_object_id,
-        )
-    };
-
-    // The scan touches more segments than the small-scan populate limit, so
-    // every fresh view re-fetches each segment: a solo pass measures the
-    // true per-scan fetch count.
-    let solo_tables = load_tables().await.expect("load solo tables");
+    // Concurrent scans over one shared cache must not multiply fetches:
+    // single-flight covers blocks racing before the first insert lands, and
+    // population covers everything after.
+    let cache = super::MetadataTableCache::new(MetadataTableCacheConfig::default());
+    // A solo pass over its own cold cache measures the true per-scan
+    // fetch count.
+    let solo_tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load solo tables");
     store.reset_metadata_sst_gets();
     let solo = solo_tables
         .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
@@ -2429,10 +2371,25 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     assert!(solo.len() >= 8);
     assert!(solo_fetches >= 8, "solo scan should fetch every segment");
 
-    // Concurrent requests each load their own tables view; only the shared
-    // cache's single-flight can deduplicate their segment fetches.
-    let first_tables = load_tables().await.expect("load first tables");
-    let second_tables = load_tables().await.expect("load second tables");
+    // Concurrent requests race over a second cold cache, each with its own
+    // tables view; single-flight is what keeps the pair at the solo count.
+    let paired_cache = super::MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let first_tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&paired_cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load first tables");
+    let second_tables = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&paired_cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load second tables");
     store.reset_metadata_sst_gets();
     let (first, second) = tokio::join!(
         first_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
@@ -2553,8 +2510,8 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
     let after_first = cache.stats();
     assert_eq!(page.len(), 8);
     assert!(
-        after_first.inserts > SMALL_SCAN_CACHE_SEGMENT_LIMIT,
-        "a wide range scan against a byte-budgeted cache should admit its segments"
+        after_first.inserts > 4,
+        "a wide range scan should admit its segments to the cache"
     );
 
     let fresh_tables = super::load_verified_manifest_tables_with_cache(
@@ -2742,7 +2699,7 @@ async fn metadata_cache_budget_counts_decoded_blocks() {
     let cache = MetadataTableCache::new(MetadataTableCacheConfig {
         enabled: true,
         max_blocks: 256,
-        max_decoded_bytes: Some(1),
+        max_decoded_bytes: 1,
     });
     let tables = super::load_verified_manifest_tables_with_cache(
         &store,
