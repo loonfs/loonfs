@@ -11,9 +11,11 @@ pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
 /// Default maximum namespaces retained in runtime caches.
 pub const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
 /// Default maximum metadata rows retained across cached WAL-tail projections.
-pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize = 1_000_000;
+pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize =
+    loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_ROWS;
 /// Default decoded-byte budget for cached WAL-tail projections.
-pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
+    loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES;
 /// Default commit window, in milliseconds: how long a direct publish holds
 /// its namespace's window open so concurrent publishes can join the same
 /// flush — one WAL segment, one head CAS. Zero disables coalescing.
@@ -37,38 +39,33 @@ pub(crate) struct FsConfig {
     pub trace_store_kind: TraceStoreKind,
 }
 
-/// Cache configuration for the embedded runtime.
+/// Cache configuration for the embedded runtime. Every cache disables the
+/// same way: a zero budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
-    /// Enables WAL-tail projection caching.
-    pub wal_tail_projection_cache_enabled: bool,
-    /// Enables namespace control-object caching.
-    pub control_cache_enabled: bool,
-    /// Maximum namespaces retained in runtime caches.
-    /// Setting this to zero disables the commit-engine cache — a diagnostic
-    /// mode that also disables post-publish auto-maintenance, leaving only
-    /// the hard publish backpressure. Not for production use.
+    /// Maximum namespaces retained in runtime caches (control anchors,
+    /// catalogs, commit engines, and WAL-tail projection entries).
+    /// Setting this to zero disables those caches — a diagnostic mode that
+    /// also disables post-publish auto-maintenance, leaving only the hard
+    /// publish backpressure. Not for production use.
     pub max_cached_namespaces: usize,
-    /// Maximum metadata rows retained across cached WAL-tail projections.
+    /// Maximum metadata rows retained across cached WAL-tail projections;
+    /// zero disables the projection cache.
     pub max_cached_wal_tail_projection_rows: usize,
     /// Approximate decoded-byte budget for cached WAL-tail projections.
-    pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
+    pub max_cached_wal_tail_projection_decoded_bytes: usize,
     /// Cache settings for decoded metadata tables.
     pub metadata_table_cache: MetadataTableCacheConfig,
 }
 
 impl RuntimeCacheConfig {
-    /// Disables runtime caches.
+    /// Disables runtime caches by zeroing every budget.
     pub fn disabled() -> Self {
         Self {
-            wal_tail_projection_cache_enabled: false,
-            control_cache_enabled: false,
             max_cached_namespaces: 0,
             max_cached_wal_tail_projection_rows: 0,
-            max_cached_wal_tail_projection_decoded_bytes: Some(0),
+            max_cached_wal_tail_projection_decoded_bytes: 0,
             metadata_table_cache: MetadataTableCacheConfig {
-                enabled: false,
-                max_blocks: 0,
                 max_decoded_bytes: 0,
             },
         }
@@ -78,13 +75,10 @@ impl RuntimeCacheConfig {
 impl Default for RuntimeCacheConfig {
     fn default() -> Self {
         Self {
-            wal_tail_projection_cache_enabled: true,
-            control_cache_enabled: true,
             max_cached_namespaces: DEFAULT_MAX_CACHED_NAMESPACES,
             max_cached_wal_tail_projection_rows: DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS,
-            max_cached_wal_tail_projection_decoded_bytes: Some(
+            max_cached_wal_tail_projection_decoded_bytes:
                 DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
-            ),
             metadata_table_cache: MetadataTableCacheConfig::default(),
         }
     }

@@ -55,14 +55,14 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishTailOptions {
     pub max_tail_rows: usize,
-    pub max_tail_decoded_bytes: Option<usize>,
+    pub max_tail_decoded_bytes: usize,
 }
 
 impl Default for PublishTailOptions {
     fn default() -> Self {
         Self {
-            max_tail_rows: 1_000_000,
-            max_tail_decoded_bytes: Some(256 * 1024 * 1024),
+            max_tail_rows: crate::checkpoint::DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+            max_tail_decoded_bytes: crate::checkpoint::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         }
     }
 }
@@ -99,10 +99,7 @@ impl PublishTailProjection {
 
     pub(crate) fn within_limits(&self, options: &PublishTailOptions) -> bool {
         self.tail_state.row_count() <= options.max_tail_rows
-            && options
-                .max_tail_decoded_bytes
-                .map(|max| self.tail_state.decoded_bytes() <= max)
-                .unwrap_or(true)
+            && self.tail_state.decoded_bytes() <= options.max_tail_decoded_bytes
     }
 }
 

@@ -405,8 +405,7 @@ impl FsCore {
     }
 
     pub(crate) fn control_cache_enabled(&self) -> bool {
-        let cache_config = &self.inner.config.runtime_cache;
-        cache_config.control_cache_enabled && cache_config.max_cached_namespaces > 0
+        self.inner.config.runtime_cache.max_cached_namespaces > 0
     }
 
     pub(crate) fn commit_engine_cache_enabled(&self) -> bool {
@@ -432,10 +431,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         anchor: &CachedNamespaceAnchor,
     ) -> Result<RuntimeReadContext> {
-        let cache_config = &self.inner.config.runtime_cache;
-        let tail_cache = cache_config
-            .wal_tail_projection_cache_enabled
-            .then(|| Arc::clone(&self.inner.wal_tail_projection_cache));
+        let tail_cache = Some(Arc::clone(&self.inner.wal_tail_projection_cache));
         let catalog = self.load_namespace_catalog_cached(namespace_id).await?;
         Ok(RuntimeReadContext::pinned_head(
             anchor.head.state.clone(),
