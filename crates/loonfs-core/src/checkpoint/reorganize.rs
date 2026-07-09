@@ -143,12 +143,9 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     // output represents the same head the manifest already describes.
     let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
     for family in group {
-        let mut rows = tables.scan_prefix(*family, "").await.map_err(|error| {
+        let rows = tables.scan_prefix(*family, "").await.map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
-        // The scan yields rows in run order (base, then L0 newest-first);
-        // the merged base must be in row-key order.
-        rows.sort_by_cached_key(|row| row.row_key_for_family(*family));
         rows_by_family.insert(*family, rows);
     }
     // The paired groups exist to preserve index parity; verify it on the

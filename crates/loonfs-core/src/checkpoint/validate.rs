@@ -138,21 +138,10 @@ pub(super) fn validate_manifest_materialization_ranges(
 pub(super) fn validate_manifest_row_seq_range(
     object_key: &str,
     rows: &[MetadataRow],
-    min_seq: Option<ChangeSeq>,
     max_seq: ChangeSeq,
 ) -> Result<(), ManifestLoadError> {
     for (row_index, row) in rows.iter().enumerate() {
         let row_seq = manifest_row_commit_seq(row);
-        if let Some(min_seq) = min_seq {
-            if row_seq < min_seq {
-                return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                    object_key: object_key.to_owned(),
-                    message: format!(
-                        "row {row_index} seq `{row_seq}` is before expected min `{min_seq}`"
-                    ),
-                });
-            }
-        }
         if row_seq > max_seq {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: object_key.to_owned(),

@@ -7,8 +7,7 @@ use super::build::{
 };
 use super::error::ManifestLoadError;
 use super::load::{
-    head_from_manifest, load_namespace_manifest_envelope_if_present,
-    load_verified_manifest_tables_with_cache,
+    head_from_manifest, load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::record::{
@@ -290,16 +289,12 @@ async fn load_checkpoint_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let manifest_tables = load_verified_manifest_tables_with_cache(
-        store,
-        None,
-        namespace_id,
-        &root.manifest_object_id,
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
+    let manifest_tables =
+        load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
     if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
         return Err(CoreError::NamespaceCorrupt(format!(
             "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",

@@ -1,7 +1,7 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
 use loonfs_api::wire::manifest::MetadataTableFamily;
-use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -83,14 +83,6 @@ pub enum ManifestLoadError {
         object_key: String,
         expected: NamespaceId,
         actual: NamespaceId,
-    },
-    #[error(
-        "metadata SST seq mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    SegmentSeqMismatch {
-        object_key: String,
-        expected: ChangeSeq,
-        actual: ChangeSeq,
     },
     #[error(
         "metadata SST family mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
