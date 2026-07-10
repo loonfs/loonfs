@@ -4164,6 +4164,78 @@ async fn corrupt_inline_filter_fails_the_lookup() {
 }
 
 #[tokio::test]
+async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    let payload = tables.manifest().payload.clone();
+
+    // The read path assumes the filter block directly precedes the index
+    // block and that an inline copy matches its handle's length; loading a
+    // manifest that breaks either must fail instead of degrading.
+    type Perturbation = fn(&mut MetadataFileRef);
+    fn misalign_filter(descriptor: &mut MetadataFileRef) {
+        descriptor.filter_block.offset -= 1;
+    }
+    fn truncate_inline(descriptor: &mut MetadataFileRef) {
+        let inline = descriptor.filter_inline.as_mut().expect("inline filter");
+        inline.truncate(inline.len() - 2);
+    }
+    let perturbations: [(&str, Perturbation); 2] = [
+        ("filter not adjacent to index", misalign_filter),
+        ("inline length disagrees with handle", truncate_inline),
+    ];
+    for (index, (label, perturb)) in perturbations.iter().enumerate() {
+        let mut perturbed = payload.clone();
+        perturbed.manifest_id = ManifestId(perturbed.manifest_id.0 + 1 + index as u64);
+        perturbed.manifest_object_id = ManifestObjectId::generate(perturbed.manifest_id);
+        let descriptor = perturbed
+            .metadata_files
+            .iter_mut()
+            .find(|descriptor| descriptor.filter_inline.is_some())
+            .expect("an inline-filtered descriptor");
+        perturb(descriptor);
+        let perturbed_object_id = perturbed.manifest_object_id.clone();
+        let envelope = NamespaceManifestEnvelope::from_payload("test-writer", perturbed)
+            .expect("perturbed manifest envelope");
+        write_namespace_manifest(&store, &envelope)
+            .await
+            .expect("write perturbed manifest");
+        let error = match load_verified_manifest_tables(&store, &namespace_id, &perturbed_object_id)
+            .await
+        {
+            Ok(_) => panic!("{label}: perturbed manifest must not load"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, ManifestLoadError::SegmentDescriptorMismatch { .. }),
+            "{label}: unexpected error {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
     let temp_dir = tempdir().expect("tempdir");
     let store =

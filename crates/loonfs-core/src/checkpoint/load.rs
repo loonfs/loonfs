@@ -357,6 +357,36 @@ fn validate_manifest_table_descriptors(
                         expected: expected_key,
                     });
                 }
+                // The one segment layout: the filter block sits immediately
+                // before the index block at the object tail. The read path
+                // assumes it (a filter fetch extends through the index; the
+                // index ends the object), so a descriptor that disagrees is
+                // rejected here rather than tolerated with slower fetches.
+                let filter_end =
+                    descriptor.filter_block.offset + u64::from(descriptor.filter_block.stored_len);
+                if filter_end != descriptor.index_block.offset {
+                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                        object_key: descriptor.object_key.clone(),
+                        message: format!(
+                            "filter block ends at {filter_end} but the index block starts at {}; \
+                             the filter must directly precede the index",
+                            descriptor.index_block.offset
+                        ),
+                    });
+                }
+                if let Some(inline) = &descriptor.filter_inline {
+                    let expected_hex_len = 2 * descriptor.filter_block.stored_len as usize;
+                    if inline.len() != expected_hex_len {
+                        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                            object_key: descriptor.object_key.clone(),
+                            message: format!(
+                                "inline filter is {} hex chars but the filter block stores {} bytes",
+                                inline.len(),
+                                descriptor.filter_block.stored_len
+                            ),
+                        });
+                    }
+                }
                 match table.family {
                     MetadataTableFamily::DirentryBinds => {
                         direntry_bind_rows =
@@ -694,20 +724,13 @@ fn segment_object_len(descriptor: &MetadataFileRef) -> u64 {
     descriptor.index_block.offset + u64::from(descriptor.index_block.stored_len)
 }
 
-/// Whether the filter and index blocks sit back-to-back at the object tail
-/// (the frozen layout). Guarded so a descriptor that violates it degrades to
-/// per-section fetches instead of a misdecoded span.
-fn filter_index_tail_adjacent(descriptor: &MetadataFileRef) -> bool {
-    descriptor.filter_block.offset + u64::from(descriptor.filter_block.stored_len)
-        == descriptor.index_block.offset
-}
-
 /// Fetches the byte span that answers one filter or index load with a single
 /// GET, decoding and publishing every section the span covers: the whole
-/// object when it is small (index, filter, and all data blocks), the
-/// filter+index tail when a filter load would otherwise be followed by an
-/// index fetch one round-trip later, and just the requested section
-/// otherwise. Returns the requested block.
+/// object when it is small (index, filter, and all data blocks), otherwise
+/// everything from the requested section to the end of the object — for a
+/// filter that is the filter plus the index that directly follows it
+/// (manifest loading rejects any other layout), and for an index exactly the
+/// index, which ends the object. Returns the requested block.
 async fn fetch_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -718,34 +741,23 @@ async fn fetch_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let filter_handle = descriptor.filter_block;
     let index_handle = descriptor.index_block;
     let object_len = segment_object_len(descriptor);
-    let wanted_handle = match want {
-        MetadataTableBlockKind::Filter => filter_handle,
-        MetadataTableBlockKind::Index => index_handle,
+    let fetch_whole_object = object_len <= WHOLE_SEGMENT_FETCH_MAX_BYTES;
+    let fetch_offset = match want {
         MetadataTableBlockKind::Data | MetadataTableBlockKind::Manifest => {
             return Err(segment_codec_error(
                 &descriptor.object_key,
                 "segment section fetch supports only filter and index blocks",
             ));
         }
-    };
-    let fetch_whole_object = object_len <= WHOLE_SEGMENT_FETCH_MAX_BYTES;
-    let fetch_offset = if fetch_whole_object {
-        0
-    } else if want == MetadataTableBlockKind::Filter && filter_index_tail_adjacent(descriptor) {
-        filter_handle.offset
-    } else {
-        wanted_handle.offset
-    };
-    let fetch_end = if fetch_whole_object || want == MetadataTableBlockKind::Filter {
-        object_len.max(wanted_handle.offset + u64::from(wanted_handle.stored_len))
-    } else {
-        wanted_handle.offset + u64::from(wanted_handle.stored_len)
+        _ if fetch_whole_object => 0,
+        MetadataTableBlockKind::Filter => filter_handle.offset,
+        MetadataTableBlockKind::Index => index_handle.offset,
     };
     let bytes = fetch_section_bytes(
         store,
         &descriptor.object_key,
         fetch_offset,
-        fetch_end - fetch_offset,
+        object_len - fetch_offset,
     )
     .await?;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
