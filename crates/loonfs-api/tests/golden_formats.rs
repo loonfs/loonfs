@@ -266,6 +266,9 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                     decoded_len: 100,
                     crc32c: 0x9abc_def0,
                 },
+                // Absent in the golden fixture: the field is skipped when
+                // `None`, so pre-inline manifests decode unchanged.
+                filter_inline: None,
                 payload_checksum: sha256_digest(b"sst payload"),
             }],
         },

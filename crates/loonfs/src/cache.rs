@@ -414,13 +414,12 @@ impl FsCore {
         )
     }
 
-    pub(crate) async fn runtime_read_context(
+    pub(crate) fn runtime_read_context(
         &self,
-        namespace_id: &NamespaceId,
         anchor: &CachedNamespaceAnchor,
-    ) -> Result<RuntimeReadContext> {
-        let catalog = self.load_namespace_catalog_cached(namespace_id).await?;
-        Ok(RuntimeReadContext {
+        catalog: Option<VerifiedNamespaceCatalogEntry>,
+    ) -> RuntimeReadContext {
+        RuntimeReadContext {
             head: anchor.head.state.clone(),
             head_etag: anchor.head.identity.etag.clone(),
             manifest_id: anchor.manifest_id,
@@ -428,12 +427,16 @@ impl FsCore {
             table_cache: Arc::clone(&self.inner.metadata_table_cache),
             tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
             catalog,
-        })
+        }
     }
 
     /// The shared preamble of every pinned read: revalidate or load the head
     /// anchor, pin the read context to it, and hand back the engine. The
-    /// context's `head` is the anchor the read is pinned to.
+    /// context's `head` is the anchor the read is pinned to. The anchor and
+    /// the namespace's immutable catalog pair are independent objects, so a
+    /// cold read overlaps the two loads instead of paying the catalog's
+    /// descriptor chain as extra round-trips; the head's result is inspected
+    /// first so error reporting matches the serial order.
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
@@ -441,8 +444,12 @@ impl FsCore {
         loonfs_core::NamespaceEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let head = self.head_for_metadata_read(namespace_id).await?;
-        let read_context = self.runtime_read_context(namespace_id, &head).await?;
+        let (head, catalog) = futures::join!(
+            self.head_for_metadata_read(namespace_id),
+            self.load_namespace_catalog_cached(namespace_id)
+        );
+        let head = head?;
+        let read_context = self.runtime_read_context(&head, catalog?);
         Ok((self.namespace_engine(namespace_id), read_context))
     }
 
