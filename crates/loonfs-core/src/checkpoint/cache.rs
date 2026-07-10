@@ -1,3 +1,4 @@
+use super::runs::MetadataRunManifest;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::manifest::{MetadataRow, NamespaceManifestEnvelope};
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
@@ -115,6 +116,10 @@ pub(super) enum DecodedMetadataTableBlock {
     },
     Manifest {
         manifest: Arc<NamespaceManifestEnvelope>,
+        /// The manifest's `metadata_files` regrouped into scan-order runs,
+        /// derived once when the envelope is validated. Scans walk this list
+        /// on every page; regrouping it per scan dominated warm-read CPU.
+        scan_runs: Arc<Vec<MetadataRunManifest>>,
         decoded_byte_len: usize,
     },
 }
