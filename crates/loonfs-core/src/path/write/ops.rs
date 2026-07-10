@@ -19,12 +19,11 @@ async fn submit_path_intent<S: ObjectStore + ?Sized>(
     intent: PathMutationIntent,
     context: &MutationContext,
 ) -> Result<MutationResult, CoreError> {
-    let mut results = crate::commit_engine::publish_namespace_mutations_batch_gated(
+    let mut results = crate::commit_engine::publish_namespace_mutations_batch(
         store,
         namespace_id,
         vec![NamespaceMutationCandidate::Path(intent)],
         context,
-        None,
     )
     .await;
     let response = results

@@ -1708,14 +1708,14 @@ fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands
             },
         )
         .expect_err("put should surface the failed content write");
-    // A solo put reports its own write's error, not window plumbing.
+    // A put reports its own write's error, not publish plumbing.
     assert!(
         error.to_string().contains("injected content write failure"),
         "unexpected error: {error}"
     );
 
-    // The content result gates the head CAS, so the failed write aborted the
-    // publish with the head unmoved and nothing visible.
+    // Content is staged before the publish is submitted, so the failed write
+    // stopped the put with the head unmoved and nothing visible.
     let error = fs
         .stat_path_blocking(&namespace_id, "/docs/report.txt")
         .expect_err("failed put should leave the path unbound");
@@ -1752,31 +1752,61 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
+
+        // Stage every file's content first: a put publishes only after its
+        // bytes are durable, so racing already-staged publishes is what
+        // reaches the commit window together deterministically.
+        let mut content_refs = Vec::new();
+        for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
+            let begin = fs
+                .writer
+                .begin_upload(&namespace_id, BeginUploadRequest::default())
+                .await
+                .expect("begin upload");
+            let staged = fs
+                .writer
+                .upload_content(&namespace_id, &begin.upload_id, bytes)
+                .await
+                .expect("upload content");
+            let completed = fs
+                .writer
+                .complete_upload(
+                    &namespace_id,
+                    &begin.upload_id,
+                    &CompleteUploadRequest {
+                        content_ref: staged.content_ref,
+                    },
+                )
+                .await
+                .expect("complete upload");
+            content_refs.push(completed.content_ref);
+        }
+        let [ref_a, ref_b, ref_c, ref_d] = content_refs.try_into().expect("four staged refs");
         let segments_before = wal_segment_count(&object_store, &namespace_id).await;
 
         let puts = tokio::join!(
-            fs.put_file_bytes(
+            fs.put_file_content_ref(
                 &namespace_id,
                 "/docs/a.txt",
-                b"alpha",
+                ref_a,
                 PutFileOptions::default()
             ),
-            fs.put_file_bytes(
+            fs.put_file_content_ref(
                 &namespace_id,
                 "/docs/b.txt",
-                b"beta",
+                ref_b,
                 PutFileOptions::default()
             ),
-            fs.put_file_bytes(
+            fs.put_file_content_ref(
                 &namespace_id,
                 "/docs/c.txt",
-                b"gamma",
+                ref_c,
                 PutFileOptions::default()
             ),
-            fs.put_file_bytes(
+            fs.put_file_content_ref(
                 &namespace_id,
                 "/docs/d.txt",
-                b"delta",
+                ref_d,
                 PutFileOptions::default()
             ),
         );
@@ -1853,7 +1883,7 @@ fn commit_window_zero_publishes_each_submission_immediately() {
 }
 
 #[test]
-fn commit_window_flush_aborts_every_member_when_one_content_write_fails() {
+fn concurrent_put_content_write_failure_leaves_the_other_put_committed() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
@@ -1864,9 +1894,9 @@ fn commit_window_flush_aborts_every_member_when_one_content_write_fails() {
             .await
             .expect("create namespace");
 
-        // Exactly one of the two concurrent content writes fails; the
-        // combined durability gate cannot prove the flush, so the whole
-        // window aborts before the head CAS.
+        // Exactly one of the two concurrent content writes fails. Content is
+        // staged before a submission enters the commit window, so only the
+        // put whose own upload failed errors; the other publishes normally.
         raw_store.fail_next_content_blob_puts(1);
         let (a, b) = tokio::join!(
             fs.put_file_bytes(
@@ -1882,54 +1912,60 @@ fn commit_window_flush_aborts_every_member_when_one_content_write_fails() {
                 PutFileOptions::default()
             ),
         );
-        let first = a.expect_err("window abort should fail the first member");
-        let second = b.expect_err("window abort should fail the second member");
-        // Each member's error says what happened to it: whichever upload the
-        // store failed reports the injected write error, and the member whose
-        // upload succeeded is told a batched peer failed and a retry is safe.
-        let messages = [first.to_string(), second.to_string()];
-        let own_failures = messages
-            .iter()
-            .filter(|message| message.contains("injected content write failure"))
-            .count();
-        let peer_failures = messages
-            .iter()
-            .filter(|message| message.contains("batched with this one"))
-            .count();
-        assert_eq!(
-            (own_failures, peer_failures),
-            (1, 1),
-            "unexpected member errors: {messages:?}"
-        );
-        for path in ["/docs/a.txt", "/docs/b.txt"] {
-            let error = fs
-                .reader
-                .stat_path(&namespace_id, path)
-                .await
-                .expect_err("aborted put should leave the path unbound");
-            assert!(matches!(
-                error,
-                RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
-            ));
-        }
 
-        // Both members retry cleanly once the store recovers.
-        let (a, b) = tokio::join!(
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/a.txt",
-                b"alpha",
-                PutFileOptions::default()
-            ),
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/b.txt",
-                b"beta",
-                PutFileOptions::default()
-            ),
-        );
-        a.expect("retried put a");
-        b.expect("retried put b");
+        let mut failed = Vec::new();
+        for (path, bytes, result) in [
+            ("/docs/a.txt", b"alpha" as &[u8], a),
+            ("/docs/b.txt", b"beta" as &[u8], b),
+        ] {
+            match result {
+                Ok(_) => {
+                    let read = fs
+                        .reader
+                        .read_file_bytes(&namespace_id, path)
+                        .await
+                        .expect("read the committed peer");
+                    assert_eq!(read.bytes, bytes);
+                }
+                Err(error) => {
+                    // The failing member reports its own write's error, and
+                    // its path stays unbound behind an unmoved head.
+                    assert!(
+                        error.to_string().contains("injected content write failure"),
+                        "unexpected error: {error}"
+                    );
+                    let error = fs
+                        .reader
+                        .stat_path(&namespace_id, path)
+                        .await
+                        .expect_err("failed put should leave the path unbound");
+                    assert!(matches!(
+                        error,
+                        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
+                    ));
+                    failed.push((path, bytes));
+                }
+            }
+        }
+        let [(failed_path, failed_bytes)] = failed[..] else {
+            panic!("exactly one put should fail its own content write");
+        };
+
+        // The failed member retries cleanly; its peer never needed one.
+        fs.put_file_bytes(
+            &namespace_id,
+            failed_path,
+            failed_bytes,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("retried put");
+        let read = fs
+            .reader
+            .read_file_bytes(&namespace_id, failed_path)
+            .await
+            .expect("read retried file");
+        assert_eq!(read.bytes, failed_bytes);
     });
 }
 

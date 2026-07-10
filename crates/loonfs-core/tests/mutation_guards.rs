@@ -1962,22 +1962,19 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
     ))
     .expect("stage recreated content");
     let results = block_on(
-        namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch_gated(
-            vec![
-                NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
-                    commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
-                    absolute_path: "/docs/cycled.txt".to_owned(),
-                    behavior: DeleteDirectoryBehavior::NonRecursive,
-                }),
-                NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
-                    absolute_path: "/docs/cycled.txt".to_owned(),
-                    content_ref: staged.content_ref,
-                    behavior: PutBehavior::NoReplace,
-                }),
-            ],
-            None,
-        ),
+        namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch(vec![
+            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
+                absolute_path: "/docs/cycled.txt".to_owned(),
+                behavior: DeleteDirectoryBehavior::NonRecursive,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
+                absolute_path: "/docs/cycled.txt".to_owned(),
+                content_ref: staged.content_ref,
+                behavior: PutBehavior::NoReplace,
+            }),
+        ]),
     );
     results[0]
         .as_ref()
