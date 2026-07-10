@@ -218,7 +218,11 @@ async fn build_handles_with_metrics_jsonl_path(
     let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .writer_version(config.writer_version.clone())
-        .background_work(FsBackgroundWork::Enabled)
+        .background_work(if config.background_maintenance {
+            FsBackgroundWork::Enabled
+        } else {
+            FsBackgroundWork::ManualOnly
+        })
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);

@@ -26,6 +26,7 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
         writer_id: "direct-put-aws-s3".to_owned(),
         writer_version: "direct-put-aws-s3/0.1.0".to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        background_maintenance: true,
         store: StoreConfig::AwsS3 {
             bucket: config.bucket,
             region: config.region,
@@ -52,6 +53,7 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
         writer_id: "direct-put-r2".to_owned(),
         writer_version: "direct-put-r2/0.1.0".to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        background_maintenance: true,
         store: StoreConfig::CloudflareR2 {
             bucket: config.bucket,
             account_id: config.account_id,

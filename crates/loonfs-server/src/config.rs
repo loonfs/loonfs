@@ -36,7 +36,17 @@ pub struct ServerConfig {
     pub writer_version: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
+    /// Whether the server writer schedules maintenance (checkpoints and
+    /// reorganization folds) after writes that cross the WAL-tail
+    /// threshold. On by default; set `false` on write-serving nodes when a
+    /// dedicated maintenance process owns ticks for these namespaces.
+    #[serde(default = "default_background_maintenance")]
+    pub background_maintenance: bool,
     pub store: StoreConfig,
+}
+
+fn default_background_maintenance() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -197,6 +207,46 @@ mod tests {
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+
+    #[test]
+    fn background_maintenance_defaults_on_and_accepts_false() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("valid config");
+        assert!(
+            config.background_maintenance,
+            "background maintenance defaults on"
+        );
+
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+background_maintenance = false
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("valid config");
+        assert!(
+            !config.background_maintenance,
+            "write-serving nodes can hand maintenance to a dedicated process"
+        );
+    }
 
     #[test]
     fn load_rejects_invalid_bind() {

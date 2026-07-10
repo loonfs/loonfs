@@ -10,6 +10,11 @@ use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter, MaintenanceTickOptions,
     ManifestId, NamespaceId, PutFileOptions, RuntimeError, StoreConfig,
 };
+use loonfs_api::wire::manifest::decode_namespace_manifest_json;
+use loonfs_core::control::load_namespace_metadata_root_control;
+use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStore;
 use std::future::Future;
 use std::path::Path;
 use tempfile::tempdir;
@@ -324,5 +329,65 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("advance retention");
         assert_eq!(retention.namespace_id, namespace_id);
+    });
+}
+
+/// Eight threshold crossings with background work enabled must both bound
+/// the WAL tail and drain the reorganization backlog: the eighth crossing's
+/// checkpoint reaches the fold trigger (eight L0 runs), and the writer's own
+/// background tick then folds every family group — no admin involvement.
+/// Before the drain, background ticks folded at most one unit per crossing,
+/// so fold debt outlived the burst that created it.
+#[test]
+fn enabled_writer_drains_reorganization_backlog_without_admin() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    block_on(async {
+        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        for round in 0..8u32 {
+            for file in 0..33u32 {
+                writer
+                    .put_file_bytes(
+                        &namespace_id,
+                        &format!("/docs/round-{round}/file-{file}.txt"),
+                        b"body",
+                        PutFileOptions::default(),
+                    )
+                    .await
+                    .expect("put file");
+            }
+            writer
+                .wait_for_background_work()
+                .await
+                .expect("background ticks finish");
+        }
+
+        let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
+        let root = load_namespace_metadata_root_control(&store, &namespace_id)
+            .await
+            .expect("load metadata root");
+        let manifest_key =
+            metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+        let bytes = store
+            .get(&manifest_key, None)
+            .await
+            .expect("read manifest")
+            .expect("manifest exists");
+        let manifest = decode_namespace_manifest_json(&bytes).expect("decode manifest");
+        let l0_files = manifest
+            .payload
+            .metadata_files
+            .iter()
+            .filter(|descriptor| descriptor.level == 0)
+            .count();
+        assert_eq!(
+            l0_files, 0,
+            "background ticks drain the fold backlog to zero L0 runs; \
+             a leftover run means the drain stopped early"
+        );
     });
 }

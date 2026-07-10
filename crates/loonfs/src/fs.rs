@@ -308,9 +308,13 @@ impl FsCore {
 
     /// One bounded reorganization unit per tick: folds one family group of
     /// L0 delta rows into the base when enough L0 runs have piled up (see
-    /// `loonfs-core`'s `reorganize_metadata`). Outcomes are observability,
-    /// not tick results: a superseded unit retries on a later tick.
-    async fn run_tick_reorganization(&self, namespace_id: &NamespaceId) -> Result<()> {
+    /// `loonfs-core`'s `reorganize_metadata`). Explicit ticks stay bounded at
+    /// one unit per call; the returned outcome lets writer-scheduled
+    /// background work keep folding until nothing is left.
+    async fn run_tick_reorganization(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<loonfs_core::MetadataReorganizeOutcome> {
         let report = self
             .namespace_engine(namespace_id)
             .reorganize_metadata()
@@ -332,6 +336,26 @@ impl FsCore {
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
                 tracing::info!("metadata reorganization unit superseded; will retry");
+            }
+        }
+        Ok(report.outcome)
+    }
+
+    /// Folds reorganization units until the trigger reports nothing left to
+    /// do. Only writer-scheduled background ticks drain like this — an
+    /// explicit maintenance tick keeps its one-unit-per-call cost bound —
+    /// so fold debt created by a burst of writes is settled by the burst's
+    /// own background tick instead of waiting for future threshold
+    /// crossings that may never come.
+    async fn drain_reorganization_backlog(&self, namespace_id: &NamespaceId) -> Result<()> {
+        // Four family groups exist today; the bound is a livelock guard,
+        // not a scheduling policy.
+        const MAX_UNITS_PER_DRAIN: usize = 16;
+        for _ in 0..MAX_UNITS_PER_DRAIN {
+            match self.run_tick_reorganization(namespace_id).await? {
+                loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {}
+                loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. }
+                | loonfs_core::MetadataReorganizeOutcome::Superseded => break,
             }
         }
         Ok(())
@@ -1218,11 +1242,20 @@ impl FsCore {
             namespace_id: namespace_id.clone(),
         };
         self.inner.background.spawn(async move {
-            if let Err(error) = claim
+            let tick = claim
                 .fs
                 .maintenance_tick_namespace(&claim.namespace_id, options)
-                .await
-            {
+                .await;
+            let drained = match tick {
+                Ok(_) => {
+                    claim
+                        .fs
+                        .drain_reorganization_backlog(&claim.namespace_id)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = drained {
                 tracing::info!(
                     phase = "auto_maintenance_tick",
                     result = "error",
