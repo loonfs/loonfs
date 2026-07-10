@@ -10,7 +10,9 @@ use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use crate::storage::content::write_immutable_object;
 use futures::future::try_join_all;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{
+    hex_encode_bytes, MetadataFileRef, MetadataRow, MetadataTableFamily,
+};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_table;
@@ -171,6 +173,14 @@ pub(super) struct MetadataSstWriteRequest<'a> {
     object_key: String,
 }
 
+/// Largest filter block inlined into the segment's manifest descriptor, in
+/// stored bytes (hex doubles it in the manifest JSON). Sized for delta-run
+/// segments — the small, key-range-overlapping tables a point lookup must
+/// otherwise fetch one filter block per run to rule out — while keeping big
+/// base-segment filters (which range pruning already narrows to one
+/// candidate) out of the manifest.
+const INLINE_SEGMENT_FILTER_MAX_BYTES: u32 = 1024;
+
 pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
     store: &S,
     request: MetadataSstWriteRequest<'_>,
@@ -193,6 +203,10 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         ))
     })?;
     write_immutable_object(store, &request.object_key, &built.bytes).await?;
+    let filter_inline = (built.filter.stored_len <= INLINE_SEGMENT_FILTER_MAX_BYTES).then(|| {
+        let start = built.filter.offset as usize;
+        hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
+    });
     Ok(MetadataFileRef {
         owner_namespace_id: request.namespace_id.clone(),
         table_id: request.table_id,
@@ -206,6 +220,7 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
         max_key: built.max_key,
         index_block: built.index,
         filter_block: built.filter,
+        filter_inline,
         payload_checksum: sha256_digest(&built.bytes),
     })
 }

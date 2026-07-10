@@ -60,6 +60,13 @@ pub struct MetadataFileRef {
     pub index_block: BlockHandle,
     /// Where the segment's bloom filter block lives and how to verify it.
     pub filter_block: BlockHandle,
+    /// The filter block's stored bytes inlined as hex, present when the
+    /// filter is small (small delta runs). Point lookups consult it to skip
+    /// the segment without any object fetch; `filter_block` still names and
+    /// verifies the same bytes, so the inline copy must decode byte-for-byte
+    /// identical (same length and CRC32C) or the manifest is corrupt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_inline: Option<String>,
     /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
     /// The ranged read path verifies per-block CRCs instead; this digest is
     /// the segment's identity in the decoded-block cache.
@@ -272,13 +279,38 @@ impl MetadataRow {
 }
 
 pub fn hex_encode_row_key_component(value: &str) -> String {
+    hex_encode_bytes(value.as_bytes())
+}
+
+pub fn hex_encode_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         encoded.push(char::from(HEX[(byte >> 4) as usize]));
         encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
     }
     encoded
+}
+
+/// Decodes the lowercase hex this module's encoders produce. Errors carry no
+/// input bytes; callers name the field they were decoding.
+pub fn hex_decode_bytes(encoded: &str) -> Result<Vec<u8>, String> {
+    fn nibble(byte: u8) -> Result<u8, String> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            _ => Err(format!("invalid hex byte {byte:#04x}")),
+        }
+    }
+    let bytes = encoded.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return Err(format!("odd hex length {}", bytes.len()));
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        decoded.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
+    }
+    Ok(decoded)
 }
 
 /// Reader-side lookup grammar: the probes, prefixes, and resume keys that
@@ -800,6 +832,7 @@ mod tests {
                 decoded_len: 0,
                 crc32c: 0,
             },
+            filter_inline: None,
             payload_checksum: "sha256:unused".to_owned(),
         }
     }

@@ -42,7 +42,7 @@ pub struct MetadataTableCacheStats {
     pub filter_false_positives: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum MetadataTableBlockKind {
     Index,
     Filter,

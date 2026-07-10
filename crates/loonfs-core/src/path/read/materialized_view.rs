@@ -254,8 +254,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry, CoreError> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-        let resolved = self.resolve_visible_path(&absolute_path).await?;
-        self.build_authoritative_path_entry(&resolved).await
+        // One session serves the resolution and the entry build: the walk's
+        // preloaded probes (including the leaf's head revision) are exactly
+        // what the entry build reads back as cache hits.
+        let mut session = self.metadata_view().session();
+        let resolved = session.resolve_visible_path(&absolute_path, true).await?;
+        self.build_authoritative_path_entry_with_session(&mut session, &resolved)
+            .await
     }
 
     pub(crate) async fn read_file_bytes(
@@ -470,7 +475,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let mut session = self.metadata_view().session();
-        let resolved = self.resolve_visible_path(&absolute_path).await?;
+        let resolved = session.resolve_visible_path(&absolute_path, false).await?;
         if let Some(cursor) = request.cursor.as_ref() {
             validate_directory_cursor(cursor, &resolved)?;
         }
@@ -609,24 +614,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             items: entries,
             next_cursor,
         })
-    }
-
-    async fn resolve_visible_path(
-        &self,
-        absolute_path: &AbsolutePath,
-    ) -> Result<ResolvedVisiblePath, CoreError> {
-        self.metadata_view()
-            .resolve_visible_path(absolute_path)
-            .await
-    }
-
-    async fn build_authoritative_path_entry(
-        &self,
-        resolved: &ResolvedVisiblePath,
-    ) -> Result<AuthoritativePathEntry, CoreError> {
-        let mut session = self.metadata_view().session();
-        self.build_authoritative_path_entry_with_session(&mut session, resolved)
-            .await
     }
 
     /// `resolved` must come from visible resolution or enumeration at this

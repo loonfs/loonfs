@@ -1164,10 +1164,20 @@ descriptor for the index and filter — so a reader verifies every ranged read
 before decoding it, and the manifest transitively binds the object's exact
 bytes. The descriptor also records a whole-object `sha256` digest for
 publication conflict checks and offline verification; the read path never
-consults it. Readers reject out-of-order rows, out-of-order index entries,
-and checksum failures as malformed. The segment format is versioned by the
-manifest that references it (`namespace_manifest` `format_version`), since a
-segment is unreachable except through a manifest.
+consults it. When the filter block is small (delta-run segments), the
+descriptor additionally inlines the filter's stored bytes as lowercase hex
+(`filter_inline`), so a point lookup can rule the segment out without any
+object fetch. The inline copy is bound by the same filter handle — it must
+decode against the handle's stored length and CRC32C exactly like a fetched
+block, and a mismatch is corruption. When the field is absent (large
+filters are not inlined), readers fetch the filter block by its handle. The
+filter block sits directly before the index block at the end of the object;
+manifest loading rejects a descriptor whose handles disagree with that
+layout, or whose inline copy's length disagrees with its handle, so the
+read path assumes both. Readers reject out-of-order rows,
+out-of-order index entries, and checksum failures as malformed. The segment
+format is versioned by the manifest that references it (`namespace_manifest`
+`format_version`), since a segment is unreachable except through a manifest.
 
 ### 4.3 Evolution rules
 

@@ -11,7 +11,9 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NamePolicy, RevisionNo};
+use loonfs_api::{
+    AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo,
+};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -1204,6 +1206,212 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index));
             self.active_tombstone_cache
                 .insert(child_inode_id, active_tombstone);
+        }
+        Ok(())
+    }
+
+    /// Resolves `absolute_path` with the canonical visibility rules, after a
+    /// pipelined preload of the walk's storage lookups. The preload issues
+    /// each path node's independent probes (inode, tombstone, child-keyed
+    /// binding, previous binding's unbind fact) as one concurrent wave
+    /// alongside the next component's bound-child scan — the only lookup the
+    /// walk truly serializes on — and seeds the session's primitive caches
+    /// with exactly what those primitives would have fetched. The canonical
+    /// rules then decide over cache hits, so a cold resolution costs one
+    /// round-trip wave per path component instead of a strictly sequential
+    /// chain of five-plus lookups each.
+    pub(crate) async fn resolve_visible_path(
+        &mut self,
+        absolute_path: &AbsolutePath,
+        prefetch_leaf_revision: bool,
+    ) -> Result<ResolvedVisiblePath, CoreError> {
+        self.preload_path_walk(absolute_path, prefetch_leaf_revision)
+            .await?;
+        visibility::resolve_visible_path(self, absolute_path, self.base.name_policy()).await
+    }
+
+    /// The preload behind [`Self::resolve_visible_path`]: batches storage
+    /// probes and seeds primitive caches, decides nothing. Seeded values are
+    /// byte-identical to what the corresponding cache-miss paths compute, so
+    /// visibility decisions are unchanged; anything the preload skips (a
+    /// renamed child's foreign binding, an unbound name) falls back to the
+    /// ordinary per-key scans. Stops probing once a component has no bound
+    /// child or its binding is revoked — the canonical walk reports those.
+    async fn preload_path_walk(
+        &mut self,
+        absolute_path: &AbsolutePath,
+        prefetch_leaf_revision: bool,
+    ) -> Result<(), CoreError> {
+        let visible_seq = self.base.visible_seq();
+        let name_policy = self.base.name_policy();
+        let component_name_keys: Vec<String> = absolute_path
+            .components()
+            .iter()
+            .map(|component| {
+                NameKey::for_display_name(name_policy, &component.to_display_name())
+                    .as_str()
+                    .to_owned()
+            })
+            .collect();
+
+        let mut current_inode_id = InodeId(1);
+        let mut pending_binding: Option<DirentryBindRecord> = None;
+        for wave in 0..=component_name_keys.len() {
+            let lookup_name_key = component_name_keys.get(wave);
+            let is_leaf_wave = wave == component_name_keys.len();
+
+            let want_inode = !self.inode_at_seq_cache.contains_key(&current_inode_id);
+            let want_tombstone = !self.active_tombstone_cache.contains_key(&current_inode_id);
+            let want_parent_binding = !self
+                .latest_parent_binding_cache
+                .contains_key(&current_inode_id);
+            let arrived_by_binding = pending_binding.take();
+            let unbind_lookup = arrived_by_binding
+                .as_ref()
+                .filter(|binding| {
+                    !self
+                        .unbind_cache
+                        .contains_key(&BindingCacheKey::from(*binding))
+                })
+                .cloned();
+            let bound_child_lookup = lookup_name_key
+                .filter(|name_key| {
+                    !self.bound_child_cache.contains_key(&ParentNameCacheKey {
+                        parent_inode_id: current_inode_id,
+                        name_key: (*name_key).clone(),
+                    })
+                })
+                .cloned();
+            let want_revision = is_leaf_wave
+                && prefetch_leaf_revision
+                && !self
+                    .latest_revision_head_cache
+                    .contains_key(&current_inode_id);
+
+            let base = &self.base;
+            let (inode, tombstones, child_bindings, unbinds, bound_rows, revision) = futures::try_join!(
+                async {
+                    match want_inode {
+                        true => base.inode_at_seq(current_inode_id).await.map(Some),
+                        false => Ok(None),
+                    }
+                },
+                async {
+                    match want_tombstone {
+                        true => base.tombstones_for_root(current_inode_id).await.map(Some),
+                        false => Ok(None),
+                    }
+                },
+                async {
+                    match want_parent_binding {
+                        true => base
+                            .direntry_binds_for_child(current_inode_id)
+                            .await
+                            .map(Some),
+                        false => Ok(None),
+                    }
+                },
+                async {
+                    match &unbind_lookup {
+                        Some(binding) => base.direntry_unbinds_for_binding(binding).await.map(Some),
+                        None => Ok(None),
+                    }
+                },
+                async {
+                    match &bound_child_lookup {
+                        Some(name_key) => base
+                            .direntry_binds_for_parent_name(current_inode_id, name_key)
+                            .await
+                            .map(Some),
+                        None => Ok(None),
+                    }
+                },
+                async {
+                    match want_revision {
+                        true => base
+                            .latest_revision_record(current_inode_id)
+                            .await
+                            .map(Some),
+                        false => Ok(None),
+                    }
+                },
+            )?;
+
+            if let Some(inode) = inode {
+                self.inode_at_seq_cache.insert(current_inode_id, inode);
+            }
+            if let Some(tombstones) = tombstones {
+                let active = tombstones
+                    .into_iter()
+                    .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
+                    .max_by_key(|tombstone| {
+                        (tombstone.tombstone_seq, tombstone.tombstone_delta_index)
+                    });
+                self.active_tombstone_cache.insert(current_inode_id, active);
+            }
+            if let Some(bindings) = child_bindings {
+                let latest = bindings
+                    .into_iter()
+                    .filter(|direntry| direntry.bind_seq <= visible_seq)
+                    .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+                self.latest_parent_binding_cache
+                    .insert(current_inode_id, latest);
+            }
+            if let Some(revision) = revision {
+                self.latest_revision_head_cache
+                    .insert(current_inode_id, revision);
+            }
+            if let Some(binding) = &arrived_by_binding {
+                let cache_key = BindingCacheKey::from(binding);
+                let unbound = match unbinds {
+                    Some(rows) => {
+                        let unbound = rows
+                            .into_iter()
+                            .any(|unbind| unbind.unbind_seq <= visible_seq);
+                        self.unbind_cache.insert(cache_key, unbound);
+                        unbound
+                    }
+                    None => self.unbind_cache.get(&cache_key).copied().unwrap_or(false),
+                };
+                if unbound {
+                    // The walk dead-ends at the previous component; probing
+                    // deeper would warm caches for nothing.
+                    break;
+                }
+            }
+
+            let Some(name_key) = lookup_name_key else {
+                break;
+            };
+            let bound = match bound_rows {
+                Some(rows) => {
+                    let latest = rows
+                        .into_iter()
+                        .filter(|direntry| direntry.bind_seq <= visible_seq)
+                        .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+                    self.bound_child_cache.insert(
+                        ParentNameCacheKey {
+                            parent_inode_id: current_inode_id,
+                            name_key: name_key.clone(),
+                        },
+                        latest.clone(),
+                    );
+                    latest
+                }
+                None => self
+                    .bound_child_cache
+                    .get(&ParentNameCacheKey {
+                        parent_inode_id: current_inode_id,
+                        name_key: name_key.clone(),
+                    })
+                    .cloned()
+                    .flatten(),
+            };
+            let Some(binding) = bound else {
+                break;
+            };
+            current_inode_id = binding.child_inode_id;
+            pending_binding = Some(binding);
         }
         Ok(())
     }

@@ -266,6 +266,9 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                     decoded_len: 100,
                     crc32c: 0x9abc_def0,
                 },
+                // Only small filters are inlined; this descriptor's filter
+                // is read through its handle, so the field is omitted.
+                filter_inline: None,
                 payload_checksum: sha256_digest(b"sst payload"),
             }],
         },

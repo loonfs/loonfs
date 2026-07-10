@@ -40,8 +40,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
-    MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataFileRef,
+    MetadataRow, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
@@ -3985,6 +3985,254 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         first_lookup_gets,
         "later lookups through the same view should reuse decoded blocks"
     );
+}
+
+#[tokio::test]
+async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store =
+        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    // Three checkpoints append three L0 runs whose direntry key ranges
+    // straddle one another (each run binds names from both ends of the
+    // alphabet), so range pruning alone cannot narrow a name lookup below
+    // several candidate segments — the shape a bulk-loaded directory's
+    // unfolded backlog takes.
+    for names in [["a.txt", "z.txt"], ["b.txt", "y.txt"], ["c.txt", "x.txt"]] {
+        for name in names {
+            write_file_bytes(
+                &store,
+                &namespace_id,
+                &format!("/docs/{name}"),
+                b"content\n",
+                &context,
+                None,
+            )
+            .await
+            .expect("write file");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+    }
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    let direntry_descriptors: Vec<_> = tables
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|descriptor| descriptor.family == ApiMetadataTableFamily::DirentryBinds)
+        .collect();
+    assert!(direntry_descriptors.len() >= 3);
+    assert!(
+        direntry_descriptors
+            .iter()
+            .all(|descriptor| descriptor.filter_inline.is_some()),
+        "small delta-run segments should inline their filters in the manifest"
+    );
+
+    let materialized = load_manifest_materialization_for_inspection(
+        &store,
+        &namespace_id,
+        tables.manifest().payload.manifest_id,
+    )
+    .await
+    .expect("materialize manifest");
+    let binding = materialized
+        .metadata_state
+        .direntry_binds()
+        .iter()
+        .find(|binding| binding.name_key == "x.txt")
+        .expect("binding for x.txt")
+        .clone();
+    let prefix = lookup_keys::direntry_bind_prefix(binding.parent_inode_id, &binding.name_key);
+    let probe = lookup_keys::direntry_bind_probe(binding.parent_inode_id, &binding.name_key);
+
+    store.reset_metadata_sst_gets();
+    let rows = tables
+        .scan_prefix_for_lookup(ApiMetadataTableFamily::DirentryBinds, &prefix, &probe, true)
+        .await
+        .expect("point lookup");
+    assert_eq!(rows.len(), 1, "exactly one bind row for the probed name");
+    assert_eq!(
+        store.metadata_sst_gets(),
+        1,
+        "inline filters reject the other runs without fetches, and the one \
+         admitted small segment loads whole with a single ranged GET"
+    );
+
+    // The same lookup against the same manifest with the inline copies
+    // stripped must return the same rows through fetched filter blocks —
+    // the inline copy is an accelerator, never an answer of its own.
+    let mut stripped_payload = tables.manifest().payload.clone();
+    stripped_payload.manifest_id = ManifestId(stripped_payload.manifest_id.0 + 1);
+    stripped_payload.manifest_object_id = ManifestObjectId::generate(stripped_payload.manifest_id);
+    for descriptor in &mut stripped_payload.metadata_files {
+        descriptor.filter_inline = None;
+    }
+    let stripped_object_id = stripped_payload.manifest_object_id.clone();
+    let stripped = NamespaceManifestEnvelope::from_payload("test-writer", stripped_payload)
+        .expect("stripped manifest envelope");
+    write_namespace_manifest(&store, &stripped)
+        .await
+        .expect("write stripped manifest");
+    let stripped_tables = load_verified_manifest_tables(&store, &namespace_id, &stripped_object_id)
+        .await
+        .expect("load stripped tables");
+    store.reset_metadata_sst_gets();
+    let stripped_rows = stripped_tables
+        .scan_prefix_for_lookup(ApiMetadataTableFamily::DirentryBinds, &prefix, &probe, true)
+        .await
+        .expect("point lookup without inline filters");
+    assert_eq!(stripped_rows, rows);
+    assert!(
+        store.metadata_sst_gets() > 1,
+        "without inline copies the ruled-out runs pay filter fetches"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_inline_filter_fails_the_lookup() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    let descriptor = tables
+        .manifest()
+        .payload
+        .metadata_files
+        .iter()
+        .find(|descriptor| {
+            descriptor.family == ApiMetadataTableFamily::DirentryBinds
+                && descriptor.filter_inline.is_some()
+        })
+        .expect("inline-filtered direntry segment")
+        .clone();
+
+    // Flip one nibble of the inline copy: the handle's CRC no longer
+    // matches, so the read must fail instead of consulting corrupt bits.
+    let mut tampered = descriptor.clone();
+    let mut inline = tampered.filter_inline.take().expect("inline filter");
+    let flipped = if inline.ends_with('0') { '1' } else { '0' };
+    inline.pop();
+    inline.push(flipped);
+    tampered.filter_inline = Some(inline);
+
+    let memo = super::load::SessionBlockMemo::default();
+    super::load::load_segment_filter(&store, None, &memo, &descriptor)
+        .await
+        .expect("intact inline filter decodes");
+    let error = super::load::load_segment_filter(
+        &store,
+        None,
+        &super::load::SessionBlockMemo::default(),
+        &tampered,
+    )
+    .await
+    .expect_err("tampered inline filter must fail");
+    assert!(
+        matches!(error, ManifestLoadError::SegmentCodec { .. }),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
+        .await
+        .expect("load tables");
+    let payload = tables.manifest().payload.clone();
+
+    // The read path assumes the filter block directly precedes the index
+    // block and that an inline copy matches its handle's length; loading a
+    // manifest that breaks either must fail instead of degrading.
+    type Perturbation = fn(&mut MetadataFileRef);
+    fn misalign_filter(descriptor: &mut MetadataFileRef) {
+        descriptor.filter_block.offset -= 1;
+    }
+    fn truncate_inline(descriptor: &mut MetadataFileRef) {
+        let inline = descriptor.filter_inline.as_mut().expect("inline filter");
+        inline.truncate(inline.len() - 2);
+    }
+    let perturbations: [(&str, Perturbation); 2] = [
+        ("filter not adjacent to index", misalign_filter),
+        ("inline length disagrees with handle", truncate_inline),
+    ];
+    for (index, (label, perturb)) in perturbations.iter().enumerate() {
+        let mut perturbed = payload.clone();
+        perturbed.manifest_id = ManifestId(perturbed.manifest_id.0 + 1 + index as u64);
+        perturbed.manifest_object_id = ManifestObjectId::generate(perturbed.manifest_id);
+        let descriptor = perturbed
+            .metadata_files
+            .iter_mut()
+            .find(|descriptor| descriptor.filter_inline.is_some())
+            .expect("an inline-filtered descriptor");
+        perturb(descriptor);
+        let perturbed_object_id = perturbed.manifest_object_id.clone();
+        let envelope = NamespaceManifestEnvelope::from_payload("test-writer", perturbed)
+            .expect("perturbed manifest envelope");
+        write_namespace_manifest(&store, &envelope)
+            .await
+            .expect("write perturbed manifest");
+        let error = match load_verified_manifest_tables(&store, &namespace_id, &perturbed_object_id)
+            .await
+        {
+            Ok(_) => panic!("{label}: perturbed manifest must not load"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, ManifestLoadError::SegmentDescriptorMismatch { .. }),
+            "{label}: unexpected error {error:?}"
+        );
+    }
 }
 
 #[tokio::test]
