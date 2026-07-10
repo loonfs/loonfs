@@ -52,6 +52,11 @@ A lookup touches a segment in this order, stopping as early as it can:
 1. Key range in the descriptor — free, already in the manifest.
 2. Filter block — a bloom filter over each row's lookup key. It answers
    "definitely not here" (skip the whole segment) or "maybe" (continue).
+   Small delta-run segments inline the filter's bytes in their manifest
+   descriptor, making this step free for exactly the segments an
+   unfolded delta backlog multiplies: delta-run key ranges overlap on
+   parent-keyed families, so without the inline copy every run would
+   cost one filter fetch just to be ruled out.
 3. Index block — one binary search names the data blocks that can hold
    the key.
 4. Data blocks — one ranged GET per contiguous stretch of needed
@@ -61,7 +66,10 @@ Index, filter, and data blocks are cached decoded, under a byte budget.
 Scans and clustered lookups read some blocks ahead of what they
 strictly need: on an object store a request costs more than a few dozen
 extra kilobytes, so trading bytes for fewer round trips is the right
-side of the exchange.
+side of the exchange. Cold lookups make the same trade across sections:
+a filter fetch pulls the adjacent index block in the same ranged GET,
+and a segment whose whole object costs less to transfer than a second
+round trip is fetched once and decoded section by section.
 
 ## Checkpoints and reorganization
 
