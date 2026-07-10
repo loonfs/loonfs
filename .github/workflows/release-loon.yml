@@ -101,8 +101,9 @@ jobs:
 
   publish:
     name: Publish release assets
+    # Default needs-gating: publish only when every build leg succeeded, so a
+    # failed target can never ship a release with missing artifacts.
     needs: [prepare, build]
-    if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
