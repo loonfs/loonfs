@@ -13,6 +13,10 @@ pub enum ErrorKind {
     InvalidRequest,
     /// The request was not authorized. Fix credentials before retrying.
     Unauthorized,
+    /// The request body exceeds the deployment's size limit for this
+    /// operation. Send a smaller payload (for uploads, prefer `direct_put`);
+    /// retrying unchanged will not succeed.
+    ContentTooLarge,
     /// The caller may not perform this operation. Request access; retrying
     /// unchanged will not succeed.
     PermissionDenied,
@@ -110,6 +114,7 @@ macro_rules! error_codes {
 error_codes! {
     InvalidRequest => "invalid_request",
     Unauthorized => "unauthorized",
+    ContentTooLarge => "content_too_large",
     NotSupported => "not_supported",
     NamespaceNotFound => "namespace_not_found",
     NamespaceDeleted => "namespace_deleted",
@@ -146,6 +151,7 @@ impl ErrorCode {
         match self {
             ErrorCode::InvalidRequest => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
+            ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
             | ErrorCode::PathNotFound

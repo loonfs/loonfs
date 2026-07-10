@@ -39,8 +39,9 @@ use self::handlers_namespace::{
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::async_trait;
+use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post, put};
@@ -117,6 +118,10 @@ async fn app_with_store_and_transfer_issuer(
 }
 
 fn router(state: AppState) -> Router {
+    // The upload-content route carries raw file bytes and gets the
+    // configured budget; every other route keeps axum's conservative
+    // default JSON body limit.
+    let max_upload_bytes = usize::try_from(state.config.max_upload_bytes).unwrap_or(usize::MAX);
     Router::new()
         .route("/health", get(health))
         // Module-qualified because handler modules also export a bare
@@ -160,7 +165,7 @@ fn router(state: AppState) -> Router {
         .route("/v0/namespaces/:namespace/uploads", post(begin_upload))
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/content",
-            put(upload_content),
+            put(upload_content).layer(DefaultBodyLimit::max(max_upload_bytes)),
         )
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/complete",
@@ -372,7 +377,8 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if actual == format!("Bearer {}", expected.expose()) {
+    let expected = format!("Bearer {}", expected.expose());
+    if constant_time_eq(actual.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
         Err(ApiResponseError::new(
@@ -381,6 +387,16 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
             "missing or invalid bearer token",
         ))
     }
+}
+
+/// Compares token bytes without short-circuiting on the first mismatch, so
+/// response timing does not narrow down the token byte by byte. Length is
+/// still observable; token values are not.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
@@ -442,6 +458,9 @@ where
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(AppJson(value)),
+            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                Err(body_too_large_error())
+            }
             Err(rejection) => Err(ApiResponseError::new(
                 StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidRequest,
@@ -449,6 +468,44 @@ where
             )),
         }
     }
+}
+
+/// A raw-bytes extractor whose rejections stay inside the error contract: a
+/// body over the route's limit answers 413 with a `content_too_large`
+/// `ApiError` body, and other unreadable bodies answer 400, instead of the
+/// raw framework rejection.
+struct AppBytes(Bytes);
+
+#[async_trait]
+impl<S> FromRequest<S> for AppBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Bytes::from_request(req, state).await {
+            Ok(bytes) => Ok(AppBytes(bytes)),
+            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                Err(body_too_large_error())
+            }
+            Err(rejection) => Err(ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &rejection.body_text(),
+            )),
+        }
+    }
+}
+
+fn body_too_large_error() -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::ContentTooLarge,
+        "request body exceeds this deployment's limit; check the \
+         `upload.max_content_bytes` capability limit, and prefer `direct_put` \
+         uploads for large content",
+    )
 }
 
 /// Like [`AppJson`], but an absent (empty) body is `None` rather than an

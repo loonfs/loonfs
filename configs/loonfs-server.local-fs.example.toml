@@ -2,20 +2,28 @@ bind = "127.0.0.1:9400"
 # auth_token and content_token_secret may instead come from the
 # LOONFS_AUTH_TOKEN and LOONFS_CONTENT_TOKEN_SECRET environment variables;
 # a non-blank value in this file takes precedence over the environment.
+# A non-loopback bind refuses to load without auth_token unless
+# allow_unauthenticated_remote = true is set explicitly.
 auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
 writer_version = "loonfs-server/0.1.0"
 
+# Whether this server schedules background maintenance (checkpoints and
+# reorganization folds) after writes; on by default. Set false on
+# write-serving nodes when a dedicated maintenance process owns ticks.
+#background_maintenance = true
+
+# Largest request body accepted for service-proxied upload content, in
+# bytes; the server buffers each upload in memory. Advertised to clients as
+# the `upload.max_content_bytes` capability limit. Defaults to 256 MiB.
+#max_upload_bytes = 268435456
+
 # Optional runtime cache overrides; omitted fields keep the runtime defaults.
 #[runtime_cache]
-#wal_tail_projection_cache_enabled = true
-#control_cache_enabled = true
 #max_cached_namespaces = 64
 #max_cached_wal_tail_projection_rows = 1000000
 #max_cached_wal_tail_projection_decoded_bytes = 268435456
-#metadata_table_cache_enabled = true
-#metadata_table_cache_max_blocks = 256
 # Decoded-byte budget for the metadata table cache; unlimited by default.
 #metadata_table_cache_max_decoded_bytes = 268435456
 

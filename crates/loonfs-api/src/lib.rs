@@ -47,7 +47,7 @@ pub mod wire {
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;

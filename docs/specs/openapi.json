@@ -1993,6 +1993,16 @@
                 }
               }
             }
+          },
+          "413": {
+            "description": "Body exceeds the advertised `upload.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }

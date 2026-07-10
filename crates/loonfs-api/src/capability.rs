@@ -19,6 +19,10 @@ pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 
+/// Advisory limit: the largest request body accepted for service-proxied
+/// upload content requests.
+pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";
+
 /// A deployment's self-description (API spec, "Capability discovery").
 ///
 /// A remote client fetches this from `GET /v0/config` and caches it; an

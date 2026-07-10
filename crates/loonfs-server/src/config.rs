@@ -42,11 +42,28 @@ pub struct ServerConfig {
     /// dedicated maintenance process owns ticks for these namespaces.
     #[serde(default = "default_background_maintenance")]
     pub background_maintenance: bool,
+    /// Largest request body accepted for service-proxied upload content
+    /// requests (`PUT .../uploads/{upload_id}/content`). The server buffers
+    /// each upload body in memory, so this bounds per-request memory;
+    /// larger transfers should use `direct_put` uploads. Advertised to
+    /// clients as the `upload.max_content_bytes` capability limit.
+    #[serde(default = "default_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    /// Allows serving on a non-loopback address with `auth_token` unset.
+    /// Off by default: exposing every endpoint unauthenticated is almost
+    /// always a misconfiguration, so validation rejects it unless this is
+    /// explicitly set.
+    #[serde(default)]
+    pub allow_unauthenticated_remote: bool,
     pub store: StoreConfig,
 }
 
 fn default_background_maintenance() -> bool {
     true
+}
+
+fn default_max_upload_bytes() -> u64 {
+    256 * 1024 * 1024
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -125,7 +142,7 @@ impl ServerConfig {
     }
 
     fn validate(&self) -> Result<(), ServerConfigError> {
-        validate_socket_addr("bind", &self.bind)?;
+        let bind = validate_socket_addr("bind", &self.bind)?;
         require_non_empty("writer_id", &self.writer_id)?;
         require_non_empty("writer_version", &self.writer_version)?;
 
@@ -136,6 +153,22 @@ impl ServerConfig {
                     reason: "must not be empty".to_owned(),
                 });
             }
+        } else if bind_serves_beyond_localhost(&bind) && !self.allow_unauthenticated_remote {
+            return Err(ServerConfigError::InvalidField {
+                field: "auth_token",
+                reason: format!(
+                    "bind `{bind}` serves every endpoint to the network without \
+                     authentication; set `auth_token` (or `LOONFS_AUTH_TOKEN`), \
+                     or set `allow_unauthenticated_remote = true` to serve open \
+                     on purpose"
+                ),
+            });
+        }
+        if self.max_upload_bytes == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_upload_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
         }
         require_non_empty("content_token_secret", self.content_token_secret.expose())?;
         self.store.validate().map_err(ServerConfigError::from)?;
@@ -182,18 +215,24 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfi
     }
 }
 
-fn validate_socket_addr(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
+fn validate_socket_addr(field: &'static str, value: &str) -> Result<SocketAddr, ServerConfigError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ServerConfigError::MissingField { field });
     }
     trimmed
         .parse::<SocketAddr>()
-        .map(|_| ())
         .map_err(|err| ServerConfigError::InvalidField {
             field,
             reason: err.to_string(),
         })
+}
+
+/// Whether a bind address accepts connections from other hosts: any
+/// non-loopback ip, including the unspecified addresses (`0.0.0.0`, `[::]`)
+/// that bind every interface.
+fn bind_serves_beyond_localhost(addr: &SocketAddr) -> bool {
+    !addr.ip().is_loopback()
 }
 
 #[cfg(test)]
@@ -479,6 +518,102 @@ root = "/tmp/loonfs-server"
         let error = load_server_config(&path).expect_err("blank auth token");
 
         assert_invalid_field(error, "auth_token");
+    }
+
+    #[test]
+    fn load_rejects_non_loopback_bind_without_auth_token() {
+        // LOONFS_AUTH_TOKEN in the environment would legitimately fill the
+        // token and make this config valid; only assert when it is unset.
+        if std::env::var("LOONFS_AUTH_TOKEN").is_ok() {
+            return;
+        }
+        for bind in ["0.0.0.0:9400", "[::]:9400", "10.1.2.3:9400"] {
+            let path = write_config(&format!(
+                r#"
+bind = "{bind}"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+
+            let error = load_server_config(&path).expect_err("open network bind");
+
+            assert_invalid_field(error, "auth_token");
+        }
+    }
+
+    #[test]
+    fn allow_unauthenticated_remote_permits_an_open_bind() {
+        let path = write_config(
+            r#"
+bind = "0.0.0.0:9400"
+allow_unauthenticated_remote = true
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        load_server_config(&path).expect("explicitly-open config loads");
+    }
+
+    #[test]
+    fn loopback_bind_without_auth_token_is_allowed() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        load_server_config(&path).expect("loopback-only config loads");
+    }
+
+    #[test]
+    fn max_upload_bytes_defaults_and_rejects_zero() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("valid config");
+        assert_eq!(config.max_upload_bytes, 256 * 1024 * 1024);
+        assert!(!config.allow_unauthenticated_remote);
+
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+max_upload_bytes = 0
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let error = load_server_config(&path).expect_err("zero upload limit");
+        assert_invalid_field(error, "max_upload_bytes");
     }
 
     #[test]

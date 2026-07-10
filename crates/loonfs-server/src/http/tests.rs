@@ -191,6 +191,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     let client = Client::new(ClientConfig {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
+        request_timeout_ms: None,
     });
     tokio::task::spawn_blocking(move || {
         client
@@ -544,6 +545,103 @@ struct TestHarness {
     server: tokio::task::JoinHandle<()>,
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let config = test_config(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    tokio::task::spawn_blocking(move || {
+        for auth_token in [None, Some("wrong-token".to_owned())] {
+            let client = Client::new(ClientConfig {
+                server_url: format!("http://{addr}"),
+                auth_token,
+                request_timeout_ms: None,
+            });
+            assert_api_error(
+                client.namespace_status("demo"),
+                401,
+                "unauthorized",
+                Some("missing or invalid bearer token"),
+            );
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_upload_body_over_the_limit_answers_content_too_large() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_upload_bytes = 1024;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
+        });
+        let target = NamespacePath::parse("demo:/big.bin").expect("target");
+        assert_api_error(
+            client.write_file_bytes(&target, &[0u8; 4096], &MutationOptions::default()),
+            413,
+            "content_too_large",
+            None,
+        );
+        // A body inside the limit still goes through on the same route.
+        client
+            .write_file_bytes(&target, &[0u8; 512], &MutationOptions::default())
+            .expect("small upload fits under the limit");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capability_document_advertises_the_upload_limit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+    tokio::task::spawn_blocking(move || {
+        let capabilities = harness
+            .client
+            .capabilities()
+            .expect("fetch capability document");
+        assert_eq!(
+            capabilities.limits.get("upload.max_content_bytes").copied(),
+            Some(256 * 1024 * 1024)
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
 async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestHarness {
     let config = test_config(root, writer_id);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -559,6 +657,7 @@ async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestH
         client: Client::new(ClientConfig {
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
         }),
         server,
     }
@@ -584,6 +683,8 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         background_maintenance: true,
+        max_upload_bytes: 256 * 1024 * 1024,
+        allow_unauthenticated_remote: false,
         store: StoreConfig::LocalFs {
             root: root.display().to_string(),
             key_prefix: Some("http-tests".to_owned()),

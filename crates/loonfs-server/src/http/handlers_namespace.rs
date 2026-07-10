@@ -12,7 +12,7 @@ use loonfs_api::ApiError;
 use loonfs_api::{
     AdvanceRetentionResponse, CreateCheckpointResponse, CreateNamespaceRequest,
     ForkNamespaceRequest, GcRequest, GcResponse, MaintenanceTickRequest, MaintenanceTickResponse,
-    FEATURE_UPLOADS_DIRECT_PUT,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -45,6 +45,10 @@ pub(super) async fn config(
     capabilities.features.insert(
         FEATURE_UPLOADS_DIRECT_PUT.to_owned(),
         state.transfer_issuer.is_some(),
+    );
+    capabilities.limits.insert(
+        LIMIT_UPLOAD_MAX_CONTENT_BYTES.to_owned(),
+        state.config.max_upload_bytes,
     );
     Ok(Json(capabilities))
 }
