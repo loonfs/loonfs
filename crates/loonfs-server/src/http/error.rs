@@ -108,6 +108,7 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
     match kind {
         ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorKind::ContentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
         ErrorKind::Gone => StatusCode::GONE,

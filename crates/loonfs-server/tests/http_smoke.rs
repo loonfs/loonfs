@@ -1913,6 +1913,7 @@ async fn start_server(config: ServerConfig) -> TestServer {
         client: Client::new(ClientConfig {
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
         }),
         server_url: format!("http://{}", addr),
         store_root,
@@ -1930,6 +1931,8 @@ fn test_config(store_root: std::path::PathBuf, writer_id: &str, key_prefix: &str
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         background_maintenance: true,
+        max_upload_bytes: 256 * 1024 * 1024,
+        allow_unauthenticated_remote: false,
         store: StoreConfig::LocalFs {
             root: store_root.display().to_string(),
             key_prefix: Some(key_prefix.to_owned()),

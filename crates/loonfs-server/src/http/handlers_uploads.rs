@@ -2,9 +2,8 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{authorize, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
+use super::{authorize, AppBytes, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
 use crate::config::ServerConfig;
-use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -207,7 +206,8 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload content conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Body exceeds the advertised `upload.max_content_bytes` limit", body = ApiError)
         )
     )
 )]
@@ -216,7 +216,7 @@ pub(super) async fn upload_content(
     namespace: NamespaceIdPath,
     AxumPath(UploadPathParams { upload_id }): AxumPath<UploadPathParams>,
     headers: HeaderMap,
-    body: Bytes,
+    AppBytes(body): AppBytes,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;

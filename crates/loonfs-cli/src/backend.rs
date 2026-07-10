@@ -527,6 +527,7 @@ impl RemoteTarget {
         let client = Client::new(ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(ToOwned::to_owned),
+            request_timeout_ms: None,
         });
         Ok(Self {
             backend: RemoteBackend::new(client),

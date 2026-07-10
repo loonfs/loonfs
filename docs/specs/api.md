@@ -107,6 +107,7 @@ Registered limit keys:
 | --- | --- |
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
+| `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Larger content should use `direct_put` uploads. |
 
 ### 2.2 Feature registry
 
@@ -169,6 +170,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, or configuration value fails validation. The message names the offending field. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
+| `content_too_large` | 413 | The request body exceeds the deployment's `upload.max_content_bytes` limit. Send a smaller payload or use a `direct_put` upload. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
 | `namespace_deleted` | 410 | The namespace existed and was deleted. The id is permanently retired. |
 | `path_not_found` | 404 | No visible entry at the path. |

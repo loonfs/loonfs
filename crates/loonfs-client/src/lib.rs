@@ -39,7 +39,18 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Optional bearer token.
     pub auth_token: Option<String>,
+    /// Optional overall per-request deadline in milliseconds. Unset means no
+    /// whole-request deadline: requests are bounded only by the built-in
+    /// 60-second socket inactivity timeouts, so slow-but-progressing large
+    /// transfers are not cut off while a stalled connection still fails.
+    #[serde(default)]
+    pub request_timeout_ms: Option<u64>,
 }
+
+/// Socket read/write inactivity timeout applied to every request. A
+/// connection that makes no progress for this long fails instead of hanging
+/// the caller forever.
+const IO_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Synchronous HTTP client for LoonFS.
 #[derive(Debug, Clone)]
@@ -164,6 +175,12 @@ impl ClientConfig {
                 });
             }
         }
+        if self.request_timeout_ms == Some(0) {
+            return Err(ClientError::ConfigValidation {
+                field: "request_timeout_ms",
+                reason: "must be greater than zero; omit it for no deadline".to_owned(),
+            });
+        }
         Ok(())
     }
 }
@@ -197,10 +214,16 @@ impl MutationOptions {
 impl Client {
     /// Creates a client from validated config.
     pub fn new(config: ClientConfig) -> Self {
+        let mut agent = ureq::AgentBuilder::new()
+            .timeout_read(IO_INACTIVITY_TIMEOUT)
+            .timeout_write(IO_INACTIVITY_TIMEOUT);
+        if let Some(timeout_ms) = config.request_timeout_ms {
+            agent = agent.timeout(std::time::Duration::from_millis(timeout_ms));
+        }
         Self {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
-            agent: ureq::AgentBuilder::new().build(),
+            agent: agent.build(),
             capabilities: Arc::new(OnceLock::new()),
         }
     }
@@ -1127,6 +1150,7 @@ auth_token = "   "
         let client = Client::new(ClientConfig {
             server_url: "http://127.0.0.1:9".to_owned(),
             auth_token: None,
+            request_timeout_ms: None,
         });
 
         for result in [
