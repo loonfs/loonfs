@@ -15,7 +15,7 @@ use super::cache::{
 use super::error::ManifestLoadError;
 #[cfg(test)]
 use super::row::manifest_row_kind;
-use super::runs::runs_in_materialization_order;
+use super::runs::{runs_in_materialization_order, runs_in_scan_order};
 #[cfg(test)]
 use super::runs::{MetadataTableManifest, MAX_MAINTENANCE_TABLE_IO};
 #[cfg(test)]
@@ -181,9 +181,13 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         )?;
         validate_manifest_materialization_ranges(&manifest_key, &manifest.payload)?;
         validate_manifest_table_descriptors(&manifest_key, &manifest)?;
+        let scan_runs = Arc::new(runs_in_scan_order(&manifest.payload));
         Ok(DecodedMetadataTableBlock::Manifest {
             manifest: Arc::new(manifest),
-            decoded_byte_len: manifest_bytes.len(),
+            scan_runs,
+            // The entry retains the envelope plus its regrouped descriptor
+            // list, which clones every metadata file ref once.
+            decoded_byte_len: manifest_bytes.len().saturating_mul(2),
         })
     };
     let decoded = match table_cache {
@@ -197,8 +201,12 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         }
         None => fetch().await?,
     };
-    let manifest = match decoded {
-        DecodedMetadataTableBlock::Manifest { manifest, .. } => manifest,
+    let (manifest, scan_runs) = match decoded {
+        DecodedMetadataTableBlock::Manifest {
+            manifest,
+            scan_runs,
+            ..
+        } => (manifest, scan_runs),
         DecodedMetadataTableBlock::Index { .. }
         | DecodedMetadataTableBlock::Filter { .. }
         | DecodedMetadataTableBlock::Data { .. } => {
@@ -213,6 +221,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         table_cache,
         manifest_object_key: manifest_key,
         manifest,
+        scan_runs,
         block_memo: SessionBlockMemo::default(),
     };
     Ok(tables)

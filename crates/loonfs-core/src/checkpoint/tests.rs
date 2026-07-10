@@ -19,9 +19,9 @@ use super::record::read_checkpoint_record;
 use super::retention::advance_retention_floor;
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
-    flatten_manifest_tables, runs_from_metadata_files, MetadataLsmPolicy, MetadataRunManifest,
-    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
-    DEFAULT_MAX_CHECKPOINT_L0_RUNS,
+    flatten_manifest_tables, runs_from_metadata_files, runs_in_scan_order, MetadataLsmPolicy,
+    MetadataRunManifest, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
+    CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_L0_RUNS,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
@@ -58,7 +58,7 @@ use loonfs_objectstore::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 #[derive(Debug)]
@@ -2370,6 +2370,72 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     assert_eq!(
         paired_fetches, solo_fetches,
         "concurrent scans over one shared cache should share one fetch per segment"
+    );
+}
+
+#[tokio::test]
+async fn cached_manifest_carries_its_scan_order_runs() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..4 {
+        let path = format!("/docs/file-{index}.txt");
+        write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create first checkpoint");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/tail.txt",
+        b"tail\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write tail file");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create second checkpoint");
+    let manifest_object_id = current_manifest_object_id(&store, &namespace_id).await;
+
+    let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let first = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load first tables");
+    let second = super::load_verified_manifest_tables_with_cache(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        &manifest_object_id,
+    )
+    .await
+    .expect("load second tables");
+
+    assert!(
+        first.scan_runs.len() >= 2,
+        "two checkpoints should leave more than one run to order"
+    );
+    assert_eq!(
+        *first.scan_runs,
+        runs_in_scan_order(&first.manifest().payload),
+        "the cached run list must equal the manifest's scan-order grouping"
+    );
+    assert!(
+        Arc::ptr_eq(&first.scan_runs, &second.scan_runs),
+        "views over one cached manifest should share one derived run list"
     );
 }
 

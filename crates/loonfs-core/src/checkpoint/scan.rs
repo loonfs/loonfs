@@ -6,7 +6,7 @@ use super::error::ManifestLoadError;
 use super::load::{
     load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SessionBlockMemo,
 };
-use super::runs::{runs_in_scan_order, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
+use super::runs::{MetadataRunManifest, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use futures::future::try_join_all;
@@ -35,6 +35,10 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) table_cache: Option<&'a MetadataTableCache>,
     pub(super) manifest_object_key: String,
     pub(super) manifest: Arc<NamespaceManifestEnvelope>,
+    /// The manifest's runs in scan order, derived once at load validation
+    /// and shared through the manifest cache entry. A run list is immutable
+    /// per manifest object; scans must not regroup it per page.
+    pub(super) scan_runs: Arc<Vec<MetadataRunManifest>>,
     /// Per-view memo of decoded blocks: one operation never re-fetches a
     /// block it already saw, with or without a shared cache attached.
     pub(super) block_memo: SessionBlockMemo,
@@ -181,9 +185,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         filter_probe: Option<&str>,
         readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        let runs = runs_in_scan_order(&self.manifest.payload);
         let mut candidates = Vec::new();
-        for run in &runs {
+        for run in self.scan_runs.iter() {
             let table = manifest_table_for_family(&self.manifest_object_key, &run.tables, family)?;
             candidates.extend(table.segments.iter().filter(|descriptor| {
                 descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)
