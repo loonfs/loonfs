@@ -583,6 +583,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        background_maintenance: true,
         store: StoreConfig::LocalFs {
             root: root.display().to_string(),
             key_prefix: Some("http-tests".to_owned()),
