@@ -102,7 +102,7 @@ pub mod publish {
         ResultingReadState,
     };
     pub use crate::path::write::PathMutationIntent;
-    pub use crate::protocol::{ContentDurabilityGate, PublishTailOptions};
+    pub use crate::protocol::PublishTailOptions;
 }
 
 pub use checkpoint::{MetadataReorganizeOutcome, MetadataReorganizeReport};

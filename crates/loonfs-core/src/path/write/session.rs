@@ -73,19 +73,7 @@ impl PublishPlanningSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit_engine::{
-        publish_namespace_mutations_batch_gated, NamespaceMutationCandidate,
-    };
-
-    async fn publish_namespace_mutations_batch<S: loonfs_objectstore::ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &loonfs_api::NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
-        context: &MutationContext,
-    ) -> Vec<crate::error::Result<loonfs_api::v0::CommitResponse>> {
-        publish_namespace_mutations_batch_gated(store, namespace_id, candidates, context, None)
-            .await
-    }
+    use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
