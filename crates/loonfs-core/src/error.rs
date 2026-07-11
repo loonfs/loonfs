@@ -88,6 +88,10 @@ pub enum CoreError {
     CommitIdReuseConflict(String),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
+    /// The serving front-end closed admission for shutdown. New work is
+    /// refused; work admitted earlier still settles.
+    #[error("shutting down; new work is not admitted")]
+    ShuttingDown,
     #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
     #[error("upload session `{upload_id}` was not found")]
@@ -290,6 +294,7 @@ impl CoreError {
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
+            CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,

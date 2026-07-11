@@ -27,6 +27,12 @@
 //! publication, and publications for one namespace are paced at least 1s
 //! apart (`MIN_NAMESPACE_CAS_INTERVAL`) so hot namespaces amortize work
 //! into larger batches instead of thrashing head compare-and-swaps.
+//!
+//! The registry owns every publish task its publishers spawn. At shutdown,
+//! [`PublisherRegistry::close_admission`] refuses new submissions with
+//! `shutting_down` and [`PublisherRegistry::drain`] settles everything
+//! already admitted. The reference server does this after its HTTP listener
+//! drains; an embedded host should do the same.
 
 use crate::content_tokens::ContentAdmission;
 use crate::fs::FsCore;
@@ -36,8 +42,10 @@ use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCom
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{oneshot, Notify};
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tracing::Instrument;
 
@@ -61,10 +69,52 @@ async fn coalescing_delay() {
 /// Cloning is cheap; clones share the same per-namespace publishers, so
 /// every writer in the process should submit through clones of one
 /// registry.
+///
+/// The registry owns the publish tasks its publishers spawn. Shut it down
+/// in two steps once the host stops accepting work:
+/// [`Self::close_admission`], then [`Self::drain`].
 #[derive(Clone)]
 pub struct PublisherRegistry {
-    inner: Arc<Mutex<HashMap<NamespaceId, NamespacePublisher>>>,
+    shared: Arc<RegistryShared>,
     fs: FsCore,
+}
+
+/// Registry state every publisher reaches back into: admission gating, the
+/// publisher map, and the task registry a shutdown drains.
+struct RegistryShared {
+    state: Mutex<RegistryState>,
+}
+
+struct RegistryState {
+    closed: bool,
+    publishers: HashMap<NamespaceId, NamespacePublisher>,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl RegistryShared {
+    // Recover a poisoned lock instead of `expect`: every critical section
+    // over this state is a plain field update, and the publish abort guard
+    // registers respawns from a drop that may run during a panic unwind,
+    // where a second panic would abort the process.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Spawns a publish task and registers it for shutdown. Callers hold
+    /// their publisher's state lock, so admitting work and registering the
+    /// task that owns it is atomic: a shutdown drain either observes the
+    /// task or the admission never happened.
+    fn register_task(&self, future: impl Future<Output = ()> + Send + 'static) {
+        let mut state = self.lock_state();
+        state.tasks.retain(|task| !task.is_finished());
+        state.tasks.push(tokio::spawn(future));
+    }
+
+    fn evict(&self, namespace_id: &NamespaceId) {
+        self.lock_state().publishers.remove(namespace_id);
+    }
 }
 
 impl PublisherRegistry {
@@ -76,7 +126,13 @@ impl PublisherRegistry {
     /// post-publish maintenance.
     pub fn new(writer: crate::FsWriter) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            shared: Arc::new(RegistryShared {
+                state: Mutex::new(RegistryState {
+                    closed: false,
+                    publishers: HashMap::new(),
+                    tasks: Vec::new(),
+                }),
+            }),
             fs: writer.core().clone(),
         }
     }
@@ -126,16 +182,7 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         options: DeleteNamespaceOptions,
     ) -> DeleteResult {
-        let publisher = {
-            let mut publishers = self
-                .inner
-                .lock()
-                .expect("publisher registry mutex poisoned");
-            publishers
-                .entry(namespace_id.clone())
-                .or_insert_with(|| NamespacePublisher::new(namespace_id.clone(), self.fs.clone()))
-                .clone()
-        };
+        let publisher = self.publisher_for(&namespace_id)?;
         publisher.submit_delete(options).await
     }
 
@@ -144,17 +191,74 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         candidate: NamespaceMutationCandidate,
     ) -> CommitResult {
-        let publisher = {
-            let mut publishers = self
-                .inner
-                .lock()
-                .expect("publisher registry mutex poisoned");
-            publishers
-                .entry(namespace_id.clone())
-                .or_insert_with(|| NamespacePublisher::new(namespace_id.clone(), self.fs.clone()))
-                .clone()
-        };
+        let publisher = self.publisher_for(&namespace_id)?;
         publisher.submit(candidate).await
+    }
+
+    /// Looks up or creates the namespace's publisher, refusing once
+    /// admission is closed.
+    fn publisher_for(&self, namespace_id: &NamespaceId) -> Result<NamespacePublisher, CoreError> {
+        let mut state = self.shared.lock_state();
+        if state.closed {
+            return Err(CoreError::ShuttingDown);
+        }
+        Ok(state
+            .publishers
+            .entry(namespace_id.clone())
+            .or_insert_with(|| {
+                NamespacePublisher::new(
+                    namespace_id.clone(),
+                    self.fs.clone(),
+                    Arc::downgrade(&self.shared),
+                )
+            })
+            .clone())
+    }
+
+    /// Closes the front door: every later submission fails with
+    /// `shutting_down`, while already-admitted work keeps publishing.
+    /// Idempotent.
+    pub fn close_admission(&self) {
+        let publishers: Vec<NamespacePublisher> = {
+            let mut state = self.shared.lock_state();
+            state.closed = true;
+            state.publishers.values().cloned().collect()
+        };
+        // Swept outside the registry lock: locks nest publisher-then-
+        // registry on the spawn path, never the other way around.
+        for publisher in publishers {
+            publisher.close_admission();
+        }
+    }
+
+    /// Waits for every admitted publication to settle, surfacing panics.
+    /// Loops because admitted work may respawn its publish task (panic
+    /// recovery) while the drain waits.
+    ///
+    /// Call [`Self::close_admission`] first for a terminal drain; without
+    /// it this settles only the work registered so far, and new submissions
+    /// keep scheduling more.
+    pub async fn drain(&self) -> Result<(), RuntimeError> {
+        let mut panicked = 0usize;
+        loop {
+            let drained = std::mem::take(&mut self.shared.lock_state().tasks);
+            if drained.is_empty() {
+                break;
+            }
+            for task in drained {
+                if let Err(error) = task.await {
+                    if error.is_panic() {
+                        panicked += 1;
+                    }
+                }
+            }
+        }
+        if panicked > 0 {
+            return Err(RuntimeError::RuntimeTask(format!(
+                "{panicked} publisher task(s) panicked"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -163,6 +267,10 @@ struct NamespacePublisher {
     namespace_id: NamespaceId,
     fs: FsCore,
     state: Arc<Mutex<NamespacePublisherState>>,
+    /// Weak: the registry map owns its publishers, and a strong reference
+    /// back would cycle the whole structure into a leak. A publisher whose
+    /// registry is gone keeps serving, with unowned tasks.
+    shared: Weak<RegistryShared>,
 }
 
 struct NamespacePublisherState {
@@ -175,6 +283,9 @@ struct NamespacePublisherState {
     /// Terminal: set once a delete succeeds. Admissions fail fast from then
     /// on without touching the store.
     deleted: bool,
+    /// Set by the registry's admission close. Later admissions fail with
+    /// `shutting_down`; everything already batched keeps publishing.
+    closed: bool,
     in_flight: HashMap<CommitId, InFlightRequest>,
     publishing: bool,
     next_allowed_cas_at: Instant,
@@ -210,7 +321,7 @@ struct InFlightRequest {
 }
 
 impl NamespacePublisher {
-    fn new(namespace_id: NamespaceId, fs: FsCore) -> Self {
+    fn new(namespace_id: NamespaceId, fs: FsCore, shared: Weak<RegistryShared>) -> Self {
         Self {
             namespace_id,
             fs,
@@ -218,11 +329,20 @@ impl NamespacePublisher {
                 batch: None,
                 pending_delete: None,
                 deleted: false,
+                closed: false,
                 in_flight: HashMap::new(),
                 publishing: false,
                 next_allowed_cas_at: Instant::now(),
             })),
+            shared,
         }
+    }
+
+    fn close_admission(&self) {
+        self.state
+            .lock()
+            .expect("namespace publisher mutex poisoned")
+            .closed = true;
     }
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
@@ -257,7 +377,6 @@ impl NamespacePublisher {
         operation_class: &'static str,
         enqueued_at: Instant,
     ) -> Result<(), CoreError> {
-        let mut should_spawn = false;
         let mut notify_full = None;
         {
             let mut state = self
@@ -269,6 +388,9 @@ impl NamespacePublisher {
                     namespace_id: self.namespace_id.clone(),
                 });
             }
+            if state.closed {
+                return Err(CoreError::ShuttingDown);
+            }
             if let Some(existing) = state.in_flight.get_mut(&commit_id) {
                 if existing.semantic_identity != semantic_identity {
                     return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
@@ -279,11 +401,18 @@ impl NamespacePublisher {
             }
 
             if state.batch.is_none() {
-                should_spawn = !state.publishing;
+                let should_spawn = !state.publishing;
                 state.batch = Some(OpenBatch {
                     candidates: Vec::new(),
                     notify: Arc::new(Notify::new()),
                 });
+                if should_spawn {
+                    // Registered while this lock is held, so a shutdown
+                    // drain that finds no tasks cannot miss the work this
+                    // admission is about to queue; the task blocks on this
+                    // same lock until the batch below is populated.
+                    self.spawn_publish_task();
+                }
             }
 
             let (batch_len, batch_notify) = {
@@ -313,9 +442,6 @@ impl NamespacePublisher {
             }
         }
 
-        if should_spawn {
-            self.spawn_publish_task();
-        }
         if let Some(notify) = notify_full {
             notify.notify_one();
         }
@@ -329,7 +455,7 @@ impl NamespacePublisher {
     /// normally — nothing is rejected for a delete that did not happen.
     async fn submit_delete(&self, options: DeleteNamespaceOptions) -> DeleteResult {
         let (sender, receiver) = oneshot::channel();
-        let should_spawn = {
+        {
             let mut state = self
                 .state
                 .lock()
@@ -339,9 +465,11 @@ impl NamespacePublisher {
                     namespace_id: self.namespace_id.clone(),
                 });
             }
+            if state.closed {
+                return Err(CoreError::ShuttingDown);
+            }
             if let Some(pending) = state.pending_delete.as_mut() {
                 pending.waiters.push(sender);
-                false
             } else {
                 let sealed_batch = state.batch.take();
                 if let Some(batch) = &sealed_batch {
@@ -353,11 +481,12 @@ impl NamespacePublisher {
                     options,
                     waiters: vec![sender],
                 });
-                !state.publishing
+                if !state.publishing {
+                    // Registered under the lock for the same shutdown-drain
+                    // atomicity as `admit`.
+                    self.spawn_publish_task();
+                }
             }
-        };
-        if should_spawn {
-            self.spawn_publish_task();
         }
         receiver.await.unwrap_or_else(|_| {
             Err(CoreError::HeadPublish(
@@ -368,11 +497,21 @@ impl NamespacePublisher {
         })
     }
 
+    /// Spawns this namespace's publish loop, registered with the owning
+    /// registry so a shutdown drain joins it. Callers hold the publisher
+    /// state lock across this call. Without a registry (it was dropped, or
+    /// the publisher was built standalone in tests) the task runs unowned.
     fn spawn_publish_task(&self) {
         let publisher = self.clone();
-        tokio::spawn(async move {
+        let future = async move {
             publisher.publish_open_batch().await;
-        });
+        };
+        match self.shared.upgrade() {
+            Some(shared) => shared.register_task(future),
+            None => {
+                tokio::spawn(future);
+            }
+        }
     }
 
     async fn publish_open_batch(self) {
@@ -583,6 +722,14 @@ impl NamespacePublisher {
                     }
                     failed
                 };
+                // The publisher is terminal; drop it from the registry map
+                // so the map stays bounded by live namespaces. Clones still
+                // in flight fail fast on `deleted`, and a later submission
+                // gets a fresh publisher whose publish fails on the durable
+                // tombstone.
+                if let Some(shared) = self.shared.upgrade() {
+                    shared.evict(&self.namespace_id);
+                }
                 for waiter in pending.waiters {
                     let _ = waiter.send(Ok(response.clone()));
                 }
@@ -759,7 +906,7 @@ impl Drop for PublishAbortGuard {
             return;
         }
         let mut orphaned_waiters = Vec::new();
-        let should_spawn_next = {
+        {
             // Recover a poisoned lock instead of `expect`: panicking in this
             // drop during an unwind would abort the process, and every
             // critical section over this state is a plain field update.
@@ -774,20 +921,22 @@ impl Drop for PublishAbortGuard {
                     orphaned_waiters.extend(in_flight.waiters);
                 }
             }
-            state.pending_delete.is_some()
+            let should_spawn_next = state.pending_delete.is_some()
                 || state
                     .batch
                     .as_ref()
-                    .is_some_and(|batch| !batch.candidates.is_empty())
-        };
+                    .is_some_and(|batch| !batch.candidates.is_empty());
+            if should_spawn_next {
+                // Registered under the lock so a shutdown drain joins the
+                // respawn instead of concluding while queued work remains.
+                self.publisher.spawn_publish_task();
+            }
+        }
 
         for waiter in orphaned_waiters {
             let _ = waiter.send(Err(CoreError::HeadPublish(
                 CommitHeadPublishError::OutcomeUnknown("publish task aborted mid-batch".to_owned()),
             )));
-        }
-        if should_spawn_next {
-            self.publisher.spawn_publish_task();
         }
     }
 }
@@ -1255,6 +1404,12 @@ mod tests {
             .expect("bootstrap");
     }
 
+    /// A publisher with no owning registry, exercising the unowned-task
+    /// fallback the production paths reserve for a dropped registry.
+    fn standalone_publisher(namespace_id: &NamespaceId, fs: FsCore) -> NamespacePublisher {
+        NamespacePublisher::new(namespace_id.clone(), fs, Weak::new())
+    }
+
     fn create_directory_request(
         commit_id: impl Into<String>,
         display_name: impl Into<String>,
@@ -1340,7 +1495,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -1393,7 +1548,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -1433,7 +1588,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -1499,7 +1654,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         store.arm_next_head_cas();
         let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
@@ -1537,7 +1692,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared);
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         // The commit lands but the CAS acknowledgement is lost. The publisher
         // retries with the same commit id and replays the durable receipt
@@ -1563,7 +1718,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         store.arm_blocking_panic();
         let doomed = admit_commit(
@@ -1614,7 +1769,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
+        let publisher = standalone_publisher(&namespace_id, fs);
 
         // A publishes and blocks at its head CAS; B queues behind it.
         store.arm_next_head_cas();
@@ -1798,5 +1953,213 @@ mod tests {
             .expect("wal exists");
         let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
         assert_eq!(segment.payload.records.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let writer = test_writer(shared.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = PublisherRegistry::new(writer);
+
+        // An admitted publication blocks at its head CAS...
+        store.arm_next_head_cas();
+        let active = {
+            let registry = registry.clone();
+            let namespace_id = namespace_id.clone();
+            tokio::spawn(async move {
+                registry
+                    .submit_commit(namespace_id, create_directory_request("active", "active"))
+                    .await
+            })
+        };
+        store.wait_for_blocked_head_cas().await;
+
+        // ...then admission closes. New work is refused at the front door.
+        registry.close_admission();
+        let refused = registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("refused", "refused"),
+            )
+            .await
+            .expect_err("submission after close_admission");
+        assert_eq!(refused.code(), ErrorCode::ShuttingDown);
+
+        // A publisher clone that predates the sweep also refuses directly.
+        let publisher = registry
+            .shared
+            .lock_state()
+            .publishers
+            .get(&namespace_id)
+            .expect("active publisher exists")
+            .clone();
+        let direct = try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("direct", "direct"),
+        );
+        assert!(matches!(direct, Err(CoreError::ShuttingDown)));
+
+        // The admitted publication still settles, and drain joins its task.
+        store.release_head_cas();
+        let response = active
+            .await
+            .expect("submit task")
+            .expect("admitted commit publishes");
+        assert_eq!(response.committed_seq, ChangeSeq(1));
+        registry.drain().await.expect("drain settles publish tasks");
+        assert!(registry.shared.lock_state().tasks.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_drain_surfaces_panics_and_settles_respawned_work() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let writer = test_writer(shared.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = PublisherRegistry::new(writer);
+
+        store.arm_blocking_panic();
+        let doomed = {
+            let registry = registry.clone();
+            let namespace_id = namespace_id.clone();
+            tokio::spawn(async move {
+                registry
+                    .submit_commit(namespace_id, create_directory_request("doomed", "doomed"))
+                    .await
+            })
+        };
+        store.wait_for_blocked_head_cas().await;
+
+        // Queued behind the blocked batch: only the abort guard's respawn
+        // publishes this one, and the drain must join that respawn.
+        let queued = {
+            let registry = registry.clone();
+            let namespace_id = namespace_id.clone();
+            tokio::spawn(async move {
+                registry
+                    .submit_commit(namespace_id, create_directory_request("queued", "queued"))
+                    .await
+            })
+        };
+        let publisher = registry
+            .shared
+            .lock_state()
+            .publishers
+            .get(&namespace_id)
+            .expect("publisher exists while blocked")
+            .clone();
+        loop {
+            let queued_admitted = {
+                let state = publisher
+                    .state
+                    .lock()
+                    .expect("namespace publisher mutex poisoned");
+                state
+                    .batch
+                    .as_ref()
+                    .is_some_and(|batch| !batch.candidates.is_empty())
+            };
+            if queued_admitted {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        store.release_into_panic();
+        registry.close_admission();
+
+        let doomed_error = doomed
+            .await
+            .expect("doomed submit task")
+            .expect_err("doomed commit did not complete");
+        assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
+        let queued_response = queued
+            .await
+            .expect("queued submit task")
+            .expect("respawned task publishes queued work");
+        assert_eq!(queued_response.committed_seq, ChangeSeq(1));
+
+        let drain_error = registry
+            .drain()
+            .await
+            .expect_err("drain surfaces the panicked task");
+        assert!(
+            drain_error.to_string().contains("panicked"),
+            "drain reports panicked publisher tasks: {drain_error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_delete_evicts_the_namespace_publisher() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = test_writer(store.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = PublisherRegistry::new(writer);
+
+        registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("before", "before"),
+            )
+            .await
+            .expect("commit before delete");
+        assert_eq!(registry.shared.lock_state().publishers.len(), 1);
+
+        registry
+            .submit_delete(namespace_id.clone(), DeleteNamespaceOptions::default())
+            .await
+            .expect("delete namespace");
+        assert!(
+            registry.shared.lock_state().publishers.is_empty(),
+            "a terminal publisher must not stay in the map"
+        );
+
+        // A later submission builds a fresh publisher and still fails, now
+        // on the durable tombstone instead of the fast in-memory flag.
+        let late = registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("late", "late"),
+            )
+            .await
+            .expect_err("submission after delete");
+        assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
+        registry.close_admission();
+        registry.drain().await.expect("drain after delete");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_admission_refuses_without_creating_publishers() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = test_writer(store.clone()).await;
+        let registry = PublisherRegistry::new(writer);
+
+        registry.close_admission();
+        let refused = registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("nope", "nope"),
+            )
+            .await
+            .expect_err("closed registry refuses commits");
+        assert_eq!(refused.code(), ErrorCode::ShuttingDown);
+        let refused_delete = registry
+            .submit_delete(namespace_id, DeleteNamespaceOptions::default())
+            .await
+            .expect_err("closed registry refuses deletes");
+        assert_eq!(refused_delete.code(), ErrorCode::ShuttingDown);
+        assert!(registry.shared.lock_state().publishers.is_empty());
+        registry.drain().await.expect("nothing to drain");
     }
 }

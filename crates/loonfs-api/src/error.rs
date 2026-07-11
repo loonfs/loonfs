@@ -132,6 +132,7 @@ error_codes! {
     CommitIdReuseConflict => "commit_id_reuse_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
     CommitQueueFull => "commit_queue_full",
+    ShuttingDown => "shutting_down",
     CheckpointUnavailable => "checkpoint_unavailable",
     MaintenanceRequired => "maintenance_required",
     UploadNotFound => "upload_not_found",
@@ -160,6 +161,7 @@ impl ErrorCode {
             ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             ErrorCode::CommitQueueFull
+            | ErrorCode::ShuttingDown
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
