@@ -2,7 +2,7 @@
 // Handle integration tests use panic in helper assertions for precise diagnostics.
 
 //! Purpose-specific handle coverage: builder contracts, the background-work
-//! policy, close semantics, and cross-handle reads. Each test drives every
+//! policy, background-shutdown semantics, and cross-handle reads. Each test drives every
 //! handle from one runtime fixture, matching the runtime-ownership contract
 //! the handles document.
 
@@ -122,10 +122,22 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
         // cache counters, like writer and reader work through theirs.
         let _ = admin.runtime_cache_stats();
 
-        standalone.close().await.expect("close standalone reader");
-        derived.close().await.expect("close derived reader");
-        admin.close().await.expect("close admin");
-        writer.close().await.expect("close writer");
+        standalone
+            .shutdown_background()
+            .await
+            .expect("shut down standalone reader background work");
+        derived
+            .shutdown_background()
+            .await
+            .expect("shut down derived reader background work");
+        admin
+            .shutdown_background()
+            .await
+            .expect("shut down admin background work");
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
     });
 }
 
@@ -222,12 +234,15 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             status.wal_tail_segments < 32,
             "auto tick should have bounded the tail: {status:?}"
         );
-        writer.close().await.expect("close writer");
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
     });
 }
 
 #[test]
-fn closed_writer_rejects_new_background_work_but_keeps_writing() {
+fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     block_on(async {
@@ -236,15 +251,18 @@ fn closed_writer_rejects_new_background_work_but_keeps_writing() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        writer.close().await.expect("close writer");
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
 
-        // Foreground writes still work after close; only handle-owned
-        // background scheduling is rejected.
+        // Foreground writes still work after the background shutdown; only
+        // handle-owned background scheduling is rejected.
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         writer
             .wait_for_background_work()
             .await
-            .expect("nothing scheduled after close");
+            .expect("nothing scheduled after background shutdown");
 
         let admin = FsAdmin::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-admin")
@@ -254,15 +272,15 @@ fn closed_writer_rejects_new_background_work_but_keeps_writing() {
         let status = admin
             .namespace_status(&namespace_id)
             .await
-            .expect("status after post-close writes");
+            .expect("status after post-shutdown writes");
         assert_eq!(
             status.current_manifest_id,
             Some(ManifestId(0)),
-            "closed writer must not schedule checkpoints: {status:?}"
+            "shut-down writer must not schedule checkpoints: {status:?}"
         );
         assert!(
             status.wal_tail_segments >= 33,
-            "closed writer must leave the tail alone: {status:?}"
+            "shut-down writer must leave the tail alone: {status:?}"
         );
     });
 }

@@ -203,9 +203,10 @@ impl FsReader {
             .await
     }
 
-    /// Closes the reader. Readers own no background work, so this settles
-    /// immediately; it exists so every handle shares one shutdown shape.
-    pub async fn close(&self) -> Result<()> {
+    /// Shuts down handle-owned background work. Readers own none, so this
+    /// settles immediately; it exists so every handle shares one shutdown
+    /// shape.
+    pub async fn shutdown_background(&self) -> Result<()> {
         Ok(())
     }
 }

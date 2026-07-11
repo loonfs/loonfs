@@ -327,7 +327,10 @@ async fn serve_on(
     // The listener has drained; settle writer-owned maintenance so a
     // checkpoint tick in flight is not torn down mid-write-set. Panicked
     // ticks surface here rather than disappearing with the process.
-    writer.close().await.map_err(ServeError::Shutdown)
+    writer
+        .shutdown_background()
+        .await
+        .map_err(ServeError::Shutdown)
 }
 
 /// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container
