@@ -287,6 +287,13 @@ struct NamespacePublisherState {
     /// `shutting_down`; everything already batched keeps publishing.
     closed: bool,
     in_flight: HashMap<CommitId, InFlightRequest>,
+    /// A publish task owns this publisher's work loop. Set by whoever
+    /// spawns the task — not by the task's first unit-take — and cleared
+    /// only when the task exits, so at most one task processes work units
+    /// at a time. That single flight is what makes the delete barrier's
+    /// admission order deterministic: a delete arriving inside a batch's
+    /// coalescing window queues behind the sealed batch in the one live
+    /// task instead of racing it from a second one.
     publishing: bool,
     next_allowed_cas_at: Instant,
 }
@@ -407,10 +414,14 @@ impl NamespacePublisher {
                     notify: Arc::new(Notify::new()),
                 });
                 if should_spawn {
-                    // Registered while this lock is held, so a shutdown
-                    // drain that finds no tasks cannot miss the work this
-                    // admission is about to queue; the task blocks on this
-                    // same lock until the batch below is populated.
+                    // Ownership is taken here, under the admission lock, so
+                    // no other caller spawns a second task while this one
+                    // is still coalescing. Registered while this lock is
+                    // held, so a shutdown drain that finds no tasks cannot
+                    // miss the work this admission is about to queue; the
+                    // task blocks on this same lock until the batch below
+                    // is populated.
+                    state.publishing = true;
                     self.spawn_publish_task();
                 }
             }
@@ -482,8 +493,10 @@ impl NamespacePublisher {
                     waiters: vec![sender],
                 });
                 if !state.publishing {
-                    // Registered under the lock for the same shutdown-drain
+                    // Ownership taken and the task registered under the
+                    // lock, for the same single-flight and shutdown-drain
                     // atomicity as `admit`.
+                    state.publishing = true;
                     self.spawn_publish_task();
                 }
             }
@@ -574,7 +587,8 @@ impl NamespacePublisher {
                     .state
                     .lock()
                     .expect("namespace publisher mutex poisoned");
-                state.publishing = true;
+                // `publishing` is already true: the spawner took loop
+                // ownership before this task existed.
                 let unit = if let Some(pending) = state.pending_delete.as_mut() {
                     if let Some(batch) = pending.sealed_batch.take() {
                         Some(WorkUnit::Mutations(batch.candidates))
@@ -593,9 +607,10 @@ impl NamespacePublisher {
                         Some(unit)
                     }
                     None => {
-                        // Checked and cleared under one lock, so a racing
-                        // admit either sees `publishing` already false and
-                        // spawns, or queued before this check and was taken.
+                        // Ownership checked and released under one lock, so
+                        // a racing admit either sees `publishing` already
+                        // false and spawns its own task, or queued before
+                        // this check and was taken.
                         state.publishing = false;
                         None
                     }
@@ -927,8 +942,11 @@ impl Drop for PublishAbortGuard {
                     .as_ref()
                     .is_some_and(|batch| !batch.candidates.is_empty());
             if should_spawn_next {
-                // Registered under the lock so a shutdown drain joins the
-                // respawn instead of concluding while queued work remains.
+                // The respawn re-takes loop ownership and is registered
+                // under the lock, so a racing admit does not double-spawn
+                // and a shutdown drain joins the respawn instead of
+                // concluding while queued work remains.
+                state.publishing = true;
                 self.publisher.spawn_publish_task();
             }
         }
@@ -1408,6 +1426,16 @@ mod tests {
     /// fallback the production paths reserve for a dropped registry.
     fn standalone_publisher(namespace_id: &NamespaceId, fs: FsCore) -> NamespacePublisher {
         NamespacePublisher::new(namespace_id.clone(), fs, Weak::new())
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    async fn wait_past_cas_pacing() {
+        // Deliberate wall-clock wait past the per-namespace CAS pacing
+        // interval: before the work loop was single-flight, a racing second
+        // task released a queued delete after exactly that interval, so
+        // outlasting it proves the delete is ordered behind the sealed
+        // batch, not merely paced behind it.
+        tokio::time::sleep(MIN_NAMESPACE_CAS_INTERVAL + Duration::from_millis(300)).await;
     }
 
     fn create_directory_request(
@@ -2161,5 +2189,132 @@ mod tests {
         assert_eq!(refused_delete.code(), ErrorCode::ShuttingDown);
         assert!(registry.shared.lock_state().publishers.is_empty());
         registry.drain().await.expect("nothing to drain");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_inside_coalescing_window_waits_behind_the_sealed_batch() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let writer = test_writer(shared.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = PublisherRegistry::new(writer);
+
+        // The admitted commit's publish task is still inside its coalescing
+        // window when the delete arrives, and the batch's head CAS will
+        // block for longer than the pacing interval — the interleaving in
+        // which a second, racing task used to execute the delete first.
+        store.arm_next_head_cas();
+        let before = {
+            let registry = registry.clone();
+            let namespace_id = namespace_id.clone();
+            tokio::spawn(async move {
+                registry
+                    .submit_commit(namespace_id, create_directory_request("before", "before"))
+                    .await
+            })
+        };
+        let publisher = loop {
+            let existing = registry
+                .shared
+                .lock_state()
+                .publishers
+                .get(&namespace_id)
+                .cloned();
+            if let Some(publisher) = existing {
+                break publisher;
+            }
+            tokio::task::yield_now().await;
+        };
+        loop {
+            let batch_open = {
+                let state = publisher
+                    .state
+                    .lock()
+                    .expect("namespace publisher mutex poisoned");
+                state
+                    .batch
+                    .as_ref()
+                    .is_some_and(|batch| !batch.candidates.is_empty())
+            };
+            if batch_open {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let delete = {
+            let registry = registry.clone();
+            let namespace_id = namespace_id.clone();
+            tokio::spawn(async move {
+                registry
+                    .submit_delete(namespace_id, DeleteNamespaceOptions::default())
+                    .await
+            })
+        };
+        // Deterministic: the delete has sealed the open batch.
+        loop {
+            let sealed = {
+                let state = publisher
+                    .state
+                    .lock()
+                    .expect("namespace publisher mutex poisoned");
+                state.pending_delete.is_some()
+            };
+            if sealed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        store.wait_for_blocked_head_cas().await;
+
+        // Snapshots are taken while the CAS is blocked but asserted only
+        // after the gate is released: a regression then fails the test
+        // instead of hanging runtime teardown on the never-released gate.
+        let unfinished_tasks_while_blocked = registry
+            .shared
+            .lock_state()
+            .tasks
+            .iter()
+            .filter(|task| !task.is_finished())
+            .count();
+        // With the sealed batch still blocked at its head CAS, outlast the
+        // pacing interval: the delete must still not have run.
+        wait_past_cas_pacing().await;
+        let (deleted_while_blocked, delete_queued_while_blocked) = {
+            let state = publisher
+                .state
+                .lock()
+                .expect("namespace publisher mutex poisoned");
+            (state.deleted, state.pending_delete.is_some())
+        };
+
+        // Released: the admitted-before commit publishes, then the delete.
+        store.release_head_cas();
+        assert_eq!(
+            unfinished_tasks_while_blocked, 1,
+            "a delete must not spawn a racing second publish task"
+        );
+        assert!(
+            !deleted_while_blocked,
+            "delete executed while the sealed batch was still publishing"
+        );
+        assert!(
+            delete_queued_while_blocked,
+            "delete must stay queued behind the sealed batch"
+        );
+        let before_response = before
+            .await
+            .expect("before submit task")
+            .expect("admitted-before commit publishes before the delete");
+        assert_eq!(before_response.committed_seq, ChangeSeq(1));
+        let delete_response = delete
+            .await
+            .expect("delete task")
+            .expect("delete succeeds after the sealed batch");
+        assert_eq!(delete_response.head_seq, ChangeSeq(1));
+        registry.close_admission();
+        registry.drain().await.expect("drain settles both units");
     }
 }
