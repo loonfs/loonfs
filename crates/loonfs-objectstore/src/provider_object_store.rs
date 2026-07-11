@@ -14,6 +14,7 @@ use provider_store::{
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderObjectStoreConfig {
@@ -21,11 +22,54 @@ pub struct ProviderObjectStoreConfig {
     pub sha256_checksum_metadata: bool,
 }
 
+/// Bounded retry for transient write failures, mirroring the retry budget the
+/// provider client already applies to reads.
+///
+/// The provider client retries transport errors on reads because GET is
+/// idempotent by method, but it refuses to re-send a PUT or DELETE that may
+/// already have reached the store. LoonFS knows more than the HTTP layer:
+/// overwrite puts, create-if-absent puts, and deletes are idempotent-safe at
+/// this contract's semantics, so they get the same bounded retry reads have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TransportRetryPolicy {
+    max_retries: u32,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+}
+
+impl TransportRetryPolicy {
+    /// Matches the provider client's read retry budget: up to 10 retries with
+    /// exponential backoff from 100ms capped at 15s.
+    const DEFAULT: Self = Self {
+        max_retries: 10,
+        initial_backoff: Duration::from_millis(100),
+        max_backoff: Duration::from_secs(15),
+    };
+}
+
+fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duration {
+    // Deterministic doubling: workspace policy avoids ambient randomness, and
+    // a bounded per-operation retry does not need jitter.
+    let doublings = retry.saturating_sub(1).min(16);
+    policy
+        .initial_backoff
+        .saturating_mul(1u32 << doublings)
+        .min(policy.max_backoff)
+}
+
+#[allow(clippy::disallowed_methods)]
+async fn transport_retry_pause(backoff: Duration) {
+    // Write retries intentionally wait an isolated async timer between
+    // attempts, mirroring the backoff the provider client applies to reads.
+    tokio::time::sleep(backoff).await;
+}
+
 #[derive(Clone)]
 pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
     key_prefix: Option<String>,
     sha256_checksum_metadata: bool,
+    transport_retry: TransportRetryPolicy,
 }
 
 impl fmt::Debug for ProviderObjectStore {
@@ -46,7 +90,14 @@ impl ProviderObjectStore {
             inner,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             sha256_checksum_metadata: config.sha256_checksum_metadata,
+            transport_retry: TransportRetryPolicy::DEFAULT,
         })
+    }
+
+    #[cfg(test)]
+    fn with_transport_retry(mut self, transport_retry: TransportRetryPolicy) -> Self {
+        self.transport_retry = transport_retry;
+        self
     }
 
     fn to_path(&self, key: &str) -> Result<Path, ObjectStoreError> {
@@ -216,33 +267,120 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         let checksum_sha256 = self.sha256_checksum_metadata.then(|| sha256_digest(&bytes));
         let size_bytes = bytes.len() as u64;
-        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
-        let options = PutOptions {
-            mode: map_put_mode(mode),
-            ..Default::default()
-        };
 
-        match self
-            .inner
-            .put_opts(&path, PutPayload::from(bytes), options)
-            .await
-        {
-            Ok(result) => Ok(Self::from_put_result(result, size_bytes, checksum_sha256)),
-            Err(err) if compare_and_swap && provider_not_found(&err) => {
-                Err(ObjectStoreError::PreconditionFailed {
+        if matches!(mode, PutMode::CompareAndSwap { .. }) {
+            // Compare-and-swap is deliberately a single attempt: after an
+            // ambiguous transport failure the first attempt may have landed
+            // and changed the etag, so a blind re-send would report a false
+            // conflict for our own write. Callers own precondition semantics
+            // and recover by re-reading.
+            let options = PutOptions {
+                mode: map_put_mode(mode),
+                ..Default::default()
+            };
+            return match self
+                .inner
+                .put_opts(&path, PutPayload::from(bytes), options)
+                .await
+            {
+                Ok(result) => Ok(Self::from_put_result(result, size_bytes, checksum_sha256)),
+                Err(err) if provider_not_found(&err) => Err(ObjectStoreError::PreconditionFailed {
                     object_key: key.to_owned(),
-                })
+                }),
+                Err(err) => Err(map_provider_error(key, err)),
+            };
+        }
+
+        let create_if_absent = matches!(mode, PutMode::CreateIfAbsent);
+        let mut retries: u32 = 0;
+        // True once an attempt failed after possibly reaching the store, so a
+        // later "already exists" may be our own first attempt having landed.
+        let mut ambiguous_outcome = false;
+        loop {
+            let options = PutOptions {
+                mode: map_put_mode(mode.clone()),
+                ..Default::default()
+            };
+            let err = match self
+                .inner
+                .put_opts(&path, PutPayload::from(bytes.clone()), options)
+                .await
+            {
+                Ok(result) => {
+                    return Ok(Self::from_put_result(result, size_bytes, checksum_sha256))
+                }
+                Err(err) => err,
+            };
+
+            if create_if_absent && ambiguous_outcome && provider_precondition(&err) {
+                match self.get_with_metadata(key).await? {
+                    Some(body) if body.bytes.as_slice() == bytes.as_ref() => {
+                        // Our earlier attempt landed: report it as the
+                        // successful write it was, not a conflict.
+                        let mut metadata = body.metadata;
+                        metadata.checksum_sha256 = checksum_sha256;
+                        return Ok(metadata);
+                    }
+                    Some(_) => {
+                        return Err(ObjectStoreError::PreconditionFailed {
+                            object_key: key.to_owned(),
+                        })
+                    }
+                    // The conflicting object vanished, so the create can be
+                    // re-attempted within the remaining retry budget.
+                    None => {}
+                }
+            } else if provider_transport_retryable(&err) {
+                ambiguous_outcome = true;
+            } else {
+                return Err(map_provider_error(key, err));
             }
-            Err(err) => Err(map_provider_error(key, err)),
+
+            if retries >= self.transport_retry.max_retries {
+                return Err(map_provider_error(key, err));
+            }
+            retries += 1;
+            let backoff = transport_retry_backoff(&self.transport_retry, retries);
+            tracing::info!(
+                object_key = key,
+                operation = "put",
+                retry = retries,
+                max_retries = self.transport_retry.max_retries,
+                backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                error = %err,
+                "transient object store write failure, backing off before retry",
+            );
+            transport_retry_pause(backoff).await;
         }
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let path = self.to_path(key)?;
-        match self.inner.delete(&path).await {
-            Ok(()) => Ok(()),
-            Err(err) if provider_not_found(&err) => Ok(()),
-            Err(err) => Err(map_provider_error(key, err)),
+        let mut retries: u32 = 0;
+        loop {
+            // Delete is idempotent under this contract: not-found already
+            // reports success, so a retry after an attempt that landed
+            // converges to the same outcome.
+            let err = match self.inner.delete(&path).await {
+                Ok(()) => return Ok(()),
+                Err(err) if provider_not_found(&err) => return Ok(()),
+                Err(err) => err,
+            };
+            if !provider_transport_retryable(&err) || retries >= self.transport_retry.max_retries {
+                return Err(map_provider_error(key, err));
+            }
+            retries += 1;
+            let backoff = transport_retry_backoff(&self.transport_retry, retries);
+            tracing::info!(
+                object_key = key,
+                operation = "delete",
+                retry = retries,
+                max_retries = self.transport_retry.max_retries,
+                backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                error = %err,
+                "transient object store write failure, backing off before retry",
+            );
+            transport_retry_pause(backoff).await;
         }
     }
 
@@ -302,6 +440,24 @@ enum ProviderRange {
 
 fn provider_not_found(err: &provider_store::Error) -> bool {
     matches!(err, provider_store::Error::NotFound { .. })
+}
+
+fn provider_precondition(err: &provider_store::Error) -> bool {
+    matches!(
+        err,
+        provider_store::Error::AlreadyExists { .. } | provider_store::Error::Precondition { .. }
+    )
+}
+
+fn provider_transport_retryable(err: &provider_store::Error) -> bool {
+    // `Generic` is where the provider client surfaces request failures after
+    // its own retry policy gives up: for writes that includes mid-flight
+    // transport errors it refuses to re-send because a non-idempotent HTTP
+    // request may already have reached the store. The remaining variants are
+    // definite outcomes (not-found, already-exists, precondition), hard
+    // rejections (auth, invalid path, unsupported), or the store IO runtime
+    // shutting down (join error); re-sending those is wrong or futile.
+    matches!(err, provider_store::Error::Generic { .. })
 }
 
 fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
@@ -480,5 +636,404 @@ mod tests {
             stream.next().await,
             Some(Err(ObjectStoreError::InvalidKey { .. }))
         ));
+    }
+
+    use provider_store::{GetResult, ListResult, MultipartUpload, PutMultipartOptions};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    enum WriteScript {
+        FailWithoutLanding,
+        LandThenFail,
+        FailAuth,
+    }
+
+    #[derive(Debug)]
+    enum ReadScript {
+        NotFound,
+    }
+
+    /// Provider double that fails scripted attempts before delegating to an
+    /// in-memory store, so retry behavior is observable per attempt.
+    #[derive(Default)]
+    struct FlakyStore {
+        inner: InMemory,
+        put_script: Mutex<VecDeque<WriteScript>>,
+        get_script: Mutex<VecDeque<ReadScript>>,
+        delete_script: Mutex<VecDeque<WriteScript>>,
+        puts: AtomicUsize,
+        gets: AtomicUsize,
+        deletes: AtomicUsize,
+    }
+
+    impl fmt::Debug for FlakyStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FlakyStore").finish_non_exhaustive()
+        }
+    }
+
+    impl fmt::Display for FlakyStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "FlakyStore")
+        }
+    }
+
+    fn transport_glitch() -> provider_store::Error {
+        provider_store::Error::Generic {
+            store: "flaky",
+            source: "error sending request".into(),
+        }
+    }
+
+    fn auth_rejection(location: &Path) -> provider_store::Error {
+        provider_store::Error::PermissionDenied {
+            path: location.to_string(),
+            source: "access denied".into(),
+        }
+    }
+
+    #[async_trait]
+    impl provider_store::ObjectStore for FlakyStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> provider_store::Result<PutResult> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            let script = self.put_script.lock().expect("put script").pop_front();
+            match script {
+                Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
+                Some(WriteScript::LandThenFail) => {
+                    self.inner.put_opts(location, payload, opts).await?;
+                    Err(transport_glitch())
+                }
+                Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
+                None => self.inner.put_opts(location, payload, opts).await,
+            }
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> provider_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> provider_store::Result<GetResult> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            let script = self.get_script.lock().expect("get script").pop_front();
+            match script {
+                Some(ReadScript::NotFound) => Err(provider_store::Error::NotFound {
+                    path: location.to_string(),
+                    source: "scripted not found".into(),
+                }),
+                None => self.inner.get_opts(location, options).await,
+            }
+        }
+
+        async fn delete(&self, location: &Path) -> provider_store::Result<()> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            let script = self
+                .delete_script
+                .lock()
+                .expect("delete script")
+                .pop_front();
+            match script {
+                Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
+                Some(WriteScript::LandThenFail) => {
+                    self.inner.delete(location).await?;
+                    Err(transport_glitch())
+                }
+                Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
+                None => self.inner.delete(location).await,
+            }
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, provider_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> provider_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> provider_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> provider_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    fn retrying_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
+        ProviderObjectStore::new(
+            flaky,
+            ProviderObjectStoreConfig {
+                key_prefix: Some("tenant-a".to_owned()),
+                sha256_checksum_metadata: true,
+            },
+        )
+        .expect("provider store")
+        .with_transport_retry(TransportRetryPolicy {
+            max_retries: 4,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(1),
+        })
+    }
+
+    fn script_puts(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
+        flaky.put_script.lock().expect("put script").extend(script);
+    }
+
+    #[test]
+    fn transport_retry_backoff_doubles_and_caps() {
+        let policy = TransportRetryPolicy::DEFAULT;
+        assert_eq!(
+            transport_retry_backoff(&policy, 1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            transport_retry_backoff(&policy, 2),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            transport_retry_backoff(&policy, 8),
+            Duration::from_millis(12_800)
+        );
+        assert_eq!(transport_retry_backoff(&policy, 9), Duration::from_secs(15));
+        assert_eq!(
+            transport_retry_backoff(&policy, 10),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_put_retries_transient_transport_failures() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(
+            &flaky,
+            [
+                WriteScript::FailWithoutLanding,
+                WriteScript::FailWithoutLanding,
+            ],
+        );
+        let key = "namespaces/demo/uploads/upl_1.json";
+
+        let metadata = store
+            .put_overwrite(key, Bytes::from_static(b"session"))
+            .await
+            .expect("put succeeds after transient failures");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
+        assert!(metadata.etag.is_some());
+        assert_eq!(
+            store.get(key, None).await.expect("get"),
+            Some(Bytes::from_static(b"session"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_put_resolves_landed_first_attempt_as_success() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(&flaky, [WriteScript::LandThenFail]);
+        let key = "namespaces/demo/uploads/upl_2.json";
+
+        let metadata = store
+            .put_if_absent(key, Bytes::from_static(b"upload session"))
+            .await
+            .expect("landed first attempt reported as success");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            metadata.checksum_sha256,
+            Some(sha256_digest(b"upload session"))
+        );
+        let head = store.head(key).await.expect("head").expect("object exists");
+        assert_eq!(metadata.etag, head.etag);
+    }
+
+    #[tokio::test]
+    async fn create_put_reports_real_conflict_after_transport_failure() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/wal/00000001.json";
+        store
+            .put_overwrite(key, Bytes::from_static(b"theirs"))
+            .await
+            .expect("seed conflicting object");
+        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+
+        let error = store
+            .put_if_absent(key, Bytes::from_static(b"mine"))
+            .await
+            .expect_err("conflicting object is still a conflict");
+
+        assert!(matches!(
+            error,
+            ObjectStoreError::PreconditionFailed { object_key } if object_key == key
+        ));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.get(key, None).await.expect("get"),
+            Some(Bytes::from_static(b"theirs"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_put_without_ambiguity_keeps_precondition_semantics() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/wal/00000002.json";
+        store
+            .put_overwrite(key, Bytes::from_static(b"theirs"))
+            .await
+            .expect("seed existing object");
+
+        let error = store
+            .put_if_absent(key, Bytes::from_static(b"mine"))
+            .await
+            .expect_err("existing object fails the create precondition");
+
+        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn create_put_retries_when_conflicting_object_vanishes() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(&flaky, [WriteScript::LandThenFail]);
+        flaky
+            .get_script
+            .lock()
+            .expect("get script")
+            .push_back(ReadScript::NotFound);
+        let key = "namespaces/demo/uploads/upl_3.json";
+
+        let metadata = store
+            .put_if_absent(key, Bytes::from_static(b"payload"))
+            .await
+            .expect("create succeeds once the conflicting object vanishes");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 2);
+        assert!(metadata.etag.is_some());
+    }
+
+    #[tokio::test]
+    async fn compare_and_swap_never_retries_transport_failures() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/wal/head.json";
+        let seeded = store
+            .put_overwrite(key, Bytes::from_static(b"one"))
+            .await
+            .expect("seed head");
+        let etag = seeded.etag.expect("etag");
+        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+
+        let error = store
+            .compare_and_swap(key, &etag, Bytes::from_static(b"two"))
+            .await
+            .expect_err("compare-and-swap surfaces the transport failure");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store.get(key, None).await.expect("get"),
+            Some(Bytes::from_static(b"one"))
+        );
+    }
+
+    #[tokio::test]
+    async fn write_retries_are_bounded_by_policy() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(&flaky, (0..6).map(|_| WriteScript::FailWithoutLanding));
+        let key = "namespaces/demo/uploads/upl_4.json";
+
+        let error = store
+            .put_overwrite(key, Bytes::from_static(b"payload"))
+            .await
+            .expect_err("persistent transport failure surfaces after the retry budget");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn non_transport_provider_errors_are_not_retried() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(&flaky, [WriteScript::FailAuth]);
+        let key = "namespaces/demo/uploads/upl_5.json";
+
+        let error = store
+            .put_overwrite(key, Bytes::from_static(b"payload"))
+            .await
+            .expect_err("auth rejection surfaces immediately");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_retries_transient_failures_and_landed_deletes() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+
+        let landed_key = "namespaces/demo/uploads/upl_6.json";
+        store
+            .put_overwrite(landed_key, Bytes::from_static(b"payload"))
+            .await
+            .expect("seed object");
+        flaky
+            .delete_script
+            .lock()
+            .expect("delete script")
+            .push_back(WriteScript::LandThenFail);
+        store
+            .delete(landed_key)
+            .await
+            .expect("landed delete converges to success");
+        assert_eq!(flaky.deletes.load(Ordering::SeqCst), 2);
+        assert!(store.head(landed_key).await.expect("head").is_none());
+
+        let transient_key = "namespaces/demo/uploads/upl_7.json";
+        store
+            .put_overwrite(transient_key, Bytes::from_static(b"payload"))
+            .await
+            .expect("seed object");
+        flaky
+            .delete_script
+            .lock()
+            .expect("delete script")
+            .push_back(WriteScript::FailWithoutLanding);
+        store
+            .delete(transient_key)
+            .await
+            .expect("transient delete failure is retried");
+        assert_eq!(flaky.deletes.load(Ordering::SeqCst), 4);
+        assert!(store.head(transient_key).await.expect("head").is_none());
     }
 }
