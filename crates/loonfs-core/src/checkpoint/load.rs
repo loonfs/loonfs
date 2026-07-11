@@ -9,8 +9,7 @@
 //! Full-row inspection materialization exists only for tests.
 
 use super::cache::{
-    DecodedMetadataTableBlock, DecodedSegmentRowSet, MetadataTableBlockKind, MetadataTableCache,
-    MetadataTableCacheKey,
+    DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
 };
 use super::error::ManifestLoadError;
 #[cfg(test)]
@@ -489,27 +488,23 @@ where
         }
 
         for (descriptor, row_set) in descriptors.into_iter().zip(loaded_segments) {
+            let rows: Vec<MetadataRow> = row_set.rows().cloned().collect();
             match table.family {
                 MetadataTableFamily::DirentryBinds => {
-                    direntry_bind_rows.extend(row_set.rows.iter().cloned());
+                    direntry_bind_rows.extend(rows.iter().cloned());
                 }
                 MetadataTableFamily::DirentryChildBinds => {
-                    direntry_child_bind_rows.extend(row_set.rows.iter().cloned());
+                    direntry_child_bind_rows.extend(rows.iter().cloned());
                 }
                 MetadataTableFamily::Revisions => {
-                    revision_rows.extend(row_set.rows.iter().cloned());
+                    revision_rows.extend(rows.iter().cloned());
                 }
                 MetadataTableFamily::RevisionsByInodeDesc => {
-                    revision_by_inode_desc_rows.extend(row_set.rows.iter().cloned());
+                    revision_by_inode_desc_rows.extend(rows.iter().cloned());
                 }
                 _ => {}
             }
-            append_rows_to_metadata(
-                metadata_state,
-                table.family,
-                &descriptor.object_key,
-                &row_set.rows,
-            )?;
+            append_rows_to_metadata(metadata_state, table.family, &descriptor.object_key, &rows)?;
         }
     }
 
@@ -530,8 +525,54 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
-) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
+) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     load_manifest_segment_rows_with_cache(store, None, family, descriptor).await
+}
+
+/// The data blocks of one segment that can hold keys in
+/// `[lower_bound, upper_bound)`, shared straight from the decoded-block
+/// memo and caches. Row access borrows from the blocks: assembling an owned
+/// row set here re-cloned every row and key of every touched block on every
+/// scan, which dominated warm-read CPU.
+pub(crate) struct SegmentKeyRangeBlocks {
+    blocks: Vec<Arc<DecodedDataBlock>>,
+}
+
+impl SegmentKeyRangeBlocks {
+    /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order,
+    /// found by binary search over each block's decode-validated key order.
+    /// Express a prefix scan as `[prefix, string_prefix_upper_bound(prefix))`.
+    pub(super) fn rows_in_key_range<'a>(
+        &'a self,
+        lower_bound: &'a str,
+        upper_bound: Option<&'a str>,
+    ) -> impl Iterator<Item = (&'a str, &'a MetadataRow)> + 'a {
+        self.blocks.iter().flat_map(move |block| {
+            let start = block
+                .row_keys
+                .partition_point(|key| key.as_str() < lower_bound);
+            let end = upper_bound.map_or(block.row_keys.len(), |upper_bound| {
+                block
+                    .row_keys
+                    .partition_point(|key| key.as_str() < upper_bound)
+            });
+            let range = start..end.max(start);
+            block.row_keys[range.clone()]
+                .iter()
+                .zip(&block.rows[range])
+                .map(|(key, row)| (key.as_str(), row))
+        })
+    }
+
+    #[cfg(test)]
+    fn rows(&self) -> impl Iterator<Item = &MetadataRow> {
+        self.blocks.iter().flat_map(|block| block.rows.iter())
+    }
+
+    #[cfg(test)]
+    fn row_keys(&self) -> impl Iterator<Item = &String> {
+        self.blocks.iter().flat_map(|block| block.row_keys.iter())
+    }
 }
 
 /// Per-view memo of decoded blocks, so one operation never re-fetches or
@@ -581,7 +622,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
     table_cache: Option<&MetadataTableCache>,
     family: MetadataTableFamily,
     descriptor: &MetadataFileRef,
-) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
+) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let row_set = load_manifest_segment_rows_in_key_range_with_cache(
         store,
         table_cache,
@@ -593,17 +634,17 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         false,
     )
     .await?;
-    if row_set.rows.len() as u64 != descriptor.row_count {
+    let row_count = row_set.rows().count();
+    if row_count as u64 != descriptor.row_count {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
             object_key: descriptor.object_key.clone(),
             message: format!(
-                "row count mismatch: expected {}, actual {}",
+                "row count mismatch: expected {}, actual {row_count}",
                 descriptor.row_count,
-                row_set.rows.len()
             ),
         });
     }
-    if let (Some(first), Some(last)) = (row_set.row_keys.first(), row_set.row_keys.last()) {
+    if let (Some(first), Some(last)) = (row_set.row_keys().next(), row_set.row_keys().last()) {
         if descriptor.min_key != *first || descriptor.max_key != *last {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {
                 object_key: descriptor.object_key.clone(),
@@ -617,7 +658,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
 /// Loads the rows of one segment whose keys can fall in
 /// `[lower_bound, upper_bound)`: index first, then only the data blocks the
 /// index says can match. Callers trim edge blocks with
-/// [`DecodedSegmentRowSet::rows_in_key_range`].
+/// [`SegmentKeyRangeBlocks::rows_in_key_range`].
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
@@ -628,7 +669,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     lower_bound: &str,
     upper_bound: Option<&str>,
     readahead: bool,
-) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
+) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let index = load_segment_index(store, table_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
@@ -656,14 +697,12 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     .take(needed.len())
     .collect();
 
-    let mut rows = Vec::new();
-    let mut row_keys = Vec::new();
-    for block in blocks {
-        row_keys.extend(block.row_keys.iter().cloned());
-        rows.extend(block.rows.iter().cloned());
-    }
-    validate_manifest_row_seq_range(&descriptor.object_key, &rows, descriptor.run_seq)?;
-    Ok(Arc::new(DecodedSegmentRowSet { rows, row_keys }))
+    validate_manifest_row_seq_range(
+        &descriptor.object_key,
+        blocks.iter().flat_map(|block| block.rows.iter()),
+        descriptor.run_seq,
+    )?;
+    Ok(SegmentKeyRangeBlocks { blocks })
 }
 
 fn segment_block_cache_key(
@@ -1037,15 +1076,17 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     entries: &[SegmentIndexEntry],
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
     let mut blocks: Vec<Option<Arc<DecodedDataBlock>>> = vec![None; entries.len()];
+    // One probe key reused across the span: a fresh key per block would
+    // clone the segment checksum once per block on every warm scan.
+    let mut probe_key = segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, 0);
     for (position, entry) in entries.iter().enumerate() {
-        let cache_key =
-            segment_block_cache_key(descriptor, MetadataTableBlockKind::Data, entry.block.offset);
-        if let Some(DecodedMetadataTableBlock::Data { block, .. }) = memo.get(&cache_key) {
+        probe_key.block_offset = entry.block.offset;
+        if let Some(DecodedMetadataTableBlock::Data { block, .. }) = memo.get(&probe_key) {
             blocks[position] = Some(block);
             continue;
         }
         if let Some(cache) = table_cache {
-            if let Some(DecodedMetadataTableBlock::Data { block, .. }) = cache.get(&cache_key) {
+            if let Some(DecodedMetadataTableBlock::Data { block, .. }) = cache.get(&probe_key) {
                 blocks[position] = Some(block);
             }
         }

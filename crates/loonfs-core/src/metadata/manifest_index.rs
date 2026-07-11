@@ -11,7 +11,7 @@ use crate::metadata::{
     InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::lookup_keys;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::MetadataTableFamily;
 use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
@@ -68,7 +68,7 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
     };
     let upper_bound = string_prefix_upper_bound(&parent_prefix);
     Ok(tables
-        .scan_range_page(
+        .scan_range_page_with_keys(
             MetadataTableFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
@@ -77,7 +77,10 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(direntry_bind_candidate_from_manifest_row)
+        .filter_map(|(row_key, row)| {
+            direntry_bind_from_manifest_row(row)
+                .map(|record| ManifestDirentryBindCandidate { row_key, record })
+        })
         .collect())
 }
 
@@ -314,14 +317,6 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
         .into_iter()
         .filter_map(commit_receipt_from_manifest_row)
         .max_by_key(|receipt| receipt.committed_seq))
-}
-
-fn direntry_bind_candidate_from_manifest_row(
-    row: MetadataRow,
-) -> Option<ManifestDirentryBindCandidate> {
-    let row_key = row.row_key_for_family(MetadataTableFamily::DirentryBinds);
-    direntry_bind_from_manifest_row(row)
-        .map(|record| ManifestDirentryBindCandidate { row_key, record })
 }
 
 fn resume_after_row_key(row_key: &str) -> String {

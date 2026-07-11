@@ -1,10 +1,11 @@
 //! Verified row scans over a loaded manifest's tables, with per-segment
 //! caching and prefix-window pruning.
 
-use super::cache::{DecodedSegmentRowSet, MetadataTableCache};
+use super::cache::MetadataTableCache;
 use super::error::ManifestLoadError;
 use super::load::{
-    load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SessionBlockMemo,
+    load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SegmentKeyRangeBlocks,
+    SessionBlockMemo,
 };
 use super::runs::{MetadataRunManifest, MetadataTableManifest, CHECKPOINT_TABLE_FAMILIES};
 #[cfg(test)]
@@ -55,11 +56,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         key: &str,
         filter_probe: &str,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
+        // Matching on the stored row key: the scan already selected the rows
+        // by that key, and recomputing keys from rows allocates per row.
         Ok(self
             .scan_prefix_rows(family, key, Some(filter_probe), true)
             .await?
             .into_iter()
-            .find(|row| row.row_key_for_family(family) == key))
+            .find(|(row_key, _)| row_key == key)
+            .map(|(_, row)| row))
     }
 
     pub(crate) async fn scan_prefix(
@@ -67,7 +71,9 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         prefix: &str,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        self.scan_prefix_rows(family, prefix, None, true).await
+        Ok(strip_row_keys(
+            self.scan_prefix_rows(family, prefix, None, true).await?,
+        ))
     }
 
     /// [`Self::scan_prefix`] for a point lookup: `filter_probe` is the
@@ -82,8 +88,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         filter_probe: &str,
         readahead: bool,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        self.scan_prefix_rows(family, prefix, Some(filter_probe), readahead)
-            .await
+        Ok(strip_row_keys(
+            self.scan_prefix_rows(family, prefix, Some(filter_probe), readahead)
+                .await?,
+        ))
     }
 
     pub(crate) async fn scan_range_page(
@@ -93,6 +101,22 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         upper_bound: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        Ok(strip_row_keys(
+            self.scan_range_page_with_keys(family, lower_bound, upper_bound, limit)
+                .await?,
+        ))
+    }
+
+    /// [`Self::scan_range_page`], returning each row with its stored row
+    /// key, for callers that page by row key and would otherwise recompute
+    /// every key from its row.
+    pub(crate) async fn scan_range_page_with_keys(
+        &self,
+        family: MetadataTableFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -113,15 +137,17 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        self.scan_range_page_rows(
-            family,
-            lower_bound,
-            upper_bound,
-            limit,
-            Some(filter_probe),
-            true,
-        )
-        .await
+        Ok(strip_row_keys(
+            self.scan_range_page_rows(
+                family,
+                lower_bound,
+                upper_bound,
+                limit,
+                Some(filter_probe),
+                true,
+            )
+            .await?,
+        ))
     }
 
     /// A prefix scan is a range scan over `[prefix, upper_bound(prefix))`
@@ -132,7 +158,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         prefix: &str,
         filter_probe: Option<&str>,
         readahead: bool,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let upper_bound = string_prefix_upper_bound(prefix);
         self.scan_range_page_rows(
             family,
@@ -184,7 +210,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         limit: usize,
         filter_probe: Option<&str>,
         readahead: bool,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
             let table = manifest_table_for_family(&self.manifest_object_key, &run.tables, family)?;
@@ -229,9 +255,14 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
 
             for segment_rows in loaded_segments {
                 let matched_before = rows.len();
+                // Rows are ascending within a segment, so a row past the
+                // segment's first `limit` matches can never survive the
+                // merged truncation below; stopping there bounds how many
+                // rows a page clones out of the shared blocks.
                 rows.extend(
                     segment_rows
                         .rows_in_key_range(lower_bound, upper_bound)
+                        .take(limit)
                         .map(|(row_key, row)| (row_key.to_owned(), row.clone())),
                 );
                 if filter_probe.is_some() {
@@ -242,7 +273,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         }
 
         rows.truncate(limit);
-        Ok(rows.into_iter().map(|(_, row)| row).collect())
+        Ok(rows)
     }
 
     /// Drops the descriptors whose bloom filter rules the probe out; with no
@@ -281,7 +312,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         lower_bound: &str,
         upper_bound: Option<&str>,
         readahead: bool,
-    ) -> Result<Arc<DecodedSegmentRowSet>, ManifestLoadError> {
+    ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
         load_manifest_segment_rows_in_key_range_with_cache(
             self.store,
             self.table_cache,
@@ -294,6 +325,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         )
         .await
     }
+}
+
+fn strip_row_keys(rows: Vec<(String, MetadataRow)>) -> Vec<MetadataRow> {
+    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 pub(super) fn ordered_manifest_tables<'a>(
