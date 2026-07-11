@@ -63,7 +63,8 @@ const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL"
 
 /// Purpose-specific handles over one shared store client: read endpoints go
 /// through `reader`, mutations through `writer` (and its publisher),
-/// maintenance endpoints through `admin`.
+/// maintenance endpoints through `admin`. Shutdown-relevant handles also
+/// live in the [`ServerLifecycle`] returned beside the router.
 #[derive(Clone)]
 struct AppState {
     config: Arc<ServerConfig>,
@@ -74,14 +75,34 @@ struct AppState {
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 }
 
-pub async fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
-    Ok(app_parts(config).await?.0)
+/// Everything the app spawns that must settle at shutdown: the publisher
+/// registry's in-flight publications and the writer's scheduled background
+/// maintenance.
+///
+/// [`serve`] drives this itself. A host embedding the [`Router`] on its own
+/// HTTP server must call [`ServerLifecycle::shutdown`] after its listener
+/// drains, or publisher tasks and writer maintenance outlive the listener
+/// unobserved.
+pub struct ServerLifecycle {
+    writer: FsWriter,
+    publisher: PublisherRegistry,
 }
 
-/// Builds the router plus the writer handle `serve` keeps aside, so a
-/// graceful shutdown can settle writer-scheduled background maintenance
-/// after the listener drains.
-async fn app_parts(config: ServerConfig) -> Result<(Router, FsWriter), ServerConfigError> {
+impl ServerLifecycle {
+    /// Settles the app's spawned work, in dependency order: publisher
+    /// admission closes (later submissions fail with `shutting_down`),
+    /// admitted publications finish, then writer-scheduled maintenance
+    /// settles. Panicked tasks surface as the returned error.
+    pub async fn shutdown(self) -> Result<(), loonfs::RuntimeError> {
+        self.publisher.close_admission();
+        self.publisher.drain().await?;
+        self.writer.shutdown_background().await
+    }
+}
+
+/// Builds the HTTP application: the router that serves requests, and the
+/// lifecycle handle its host must shut down after draining the listener.
+pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), ServerConfigError> {
     let store = config.object_store()?;
     let transfer_issuer = store.transfer_issuer();
     let store = Arc::new(store) as SharedStore;
@@ -102,19 +123,23 @@ async fn app_with_store_and_transfer_issuer(
     config: ServerConfig,
     store: SharedStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
-) -> Result<(Router, FsWriter), ServerConfigError> {
+) -> Result<(Router, ServerLifecycle), ServerConfigError> {
     let (writer, reader, admin) = build_handles(&config, store).await?;
     let config = Arc::new(config);
     let publisher = PublisherRegistry::new(writer.clone());
+    let lifecycle = ServerLifecycle {
+        writer: writer.clone(),
+        publisher: publisher.clone(),
+    };
     let state = AppState {
         config,
-        writer: writer.clone(),
+        writer,
         reader,
         admin,
         publisher,
         transfer_issuer,
     };
-    Ok((router(state), writer))
+    Ok((router(state), lifecycle))
 }
 
 fn router(state: AppState) -> Router {
@@ -287,13 +312,14 @@ pub enum ServeError {
     },
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
-    #[error("background maintenance did not settle during shutdown: {0}")]
+    #[error("background work did not settle during shutdown: {0}")]
     Shutdown(#[source] loonfs::RuntimeError),
 }
 
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
-/// stops accepting, in-flight requests drain, and the writer's scheduled
-/// background maintenance settles before this returns.
+/// stops accepting, in-flight requests drain, publisher admission closes
+/// and admitted publications finish, and the writer's scheduled background
+/// maintenance settles before this returns.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
     serve_with_shutdown(config, shutdown_signal()).await
 }
@@ -319,18 +345,16 @@ async fn serve_on(
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
-    let (app, writer) = app_parts(config).await?;
-    axum::serve(listener, app)
+    let (router, lifecycle) = app(config).await?;
+    axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(ServeError::Serve)?;
-    // The listener has drained; settle writer-owned maintenance so a
-    // checkpoint tick in flight is not torn down mid-write-set. Panicked
-    // ticks surface here rather than disappearing with the process.
-    writer
-        .shutdown_background()
-        .await
-        .map_err(ServeError::Shutdown)
+    // The listener has drained; close publisher admission, finish admitted
+    // publications, then settle writer-owned maintenance so neither a
+    // publication nor a checkpoint tick is torn down mid-write. Panicked
+    // tasks surface here rather than disappearing with the process.
+    lifecycle.shutdown().await.map_err(ServeError::Shutdown)
 }
 
 /// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container
