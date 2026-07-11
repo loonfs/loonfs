@@ -135,12 +135,12 @@ pub(super) fn validate_manifest_materialization_ranges(
     Ok(())
 }
 
-pub(super) fn validate_manifest_row_seq_range(
+pub(super) fn validate_manifest_row_seq_range<'a>(
     object_key: &str,
-    rows: &[MetadataRow],
+    rows: impl IntoIterator<Item = &'a MetadataRow>,
     max_seq: ChangeSeq,
 ) -> Result<(), ManifestLoadError> {
-    for (row_index, row) in rows.iter().enumerate() {
+    for (row_index, row) in rows.into_iter().enumerate() {
         let row_seq = manifest_row_commit_seq(row);
         if row_seq > max_seq {
             return Err(ManifestLoadError::SegmentDescriptorMismatch {

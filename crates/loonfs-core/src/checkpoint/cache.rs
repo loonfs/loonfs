@@ -1,6 +1,6 @@
 use super::runs::MetadataRunManifest;
 use crate::metadata::MetadataState;
-use loonfs_api::wire::manifest::{MetadataRow, NamespaceManifestEnvelope};
+use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -59,41 +59,6 @@ pub(super) struct MetadataTableCacheKey {
     pub(super) identity: String,
     pub(super) block_kind: MetadataTableBlockKind,
     pub(super) block_offset: u64,
-}
-
-/// One segment's decoded rows with their stored row keys, assembled per
-/// call from the decoded blocks a range read touched.
-#[derive(Debug)]
-pub(super) struct DecodedSegmentRowSet {
-    pub(super) rows: Vec<MetadataRow>,
-    /// Stored row keys, parallel to `rows`, validated against
-    /// `row_key_for_family` and for ascending order at decode — a format
-    /// requirement — so scans never recompute keys and always binary-search.
-    pub(super) row_keys: Vec<String>,
-}
-
-impl DecodedSegmentRowSet {
-    /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order,
-    /// found by binary search over the decode-validated key order. Express a
-    /// prefix scan as `[prefix, string_prefix_upper_bound(prefix))`.
-    pub(super) fn rows_in_key_range<'a>(
-        &'a self,
-        lower_bound: &'a str,
-        upper_bound: Option<&'a str>,
-    ) -> impl Iterator<Item = (&'a str, &'a MetadataRow)> + 'a {
-        let start = self
-            .row_keys
-            .partition_point(|key| key.as_str() < lower_bound);
-        let end = upper_bound.map_or(self.row_keys.len(), |upper_bound| {
-            self.row_keys
-                .partition_point(|key| key.as_str() < upper_bound)
-        });
-        let range = start..end.max(start);
-        self.row_keys[range.clone()]
-            .iter()
-            .zip(&self.rows[range])
-            .map(|(key, row)| (key.as_str(), row))
-    }
 }
 
 /// One decoded, verified object the cache holds: a CRC-checked segment
