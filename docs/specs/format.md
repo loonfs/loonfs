@@ -1345,7 +1345,9 @@ publishing CAS) — under these rules:
 3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
    `checkpoints/` and `pins/`, re-reads the root, head, and floor, and drops
    from the batch anything reachable from that fresh root set. Candidate
-   selection may be arbitrarily stale; deletion may not.
+   selection may be arbitrarily stale; deletion may not. On large batches the
+   re-verification repeats at least every bounded number of deletion
+   decisions, so no deletion consults an arbitrarily stale root set.
 4. Roots: `metadata/root.json`; active, non-expired checkpoint records; pins
    (resolving pin -> checkpoint -> manifest -> tables); and the visible chain
    from `wal/head.json.visible_wal_tip` down to the floor.
@@ -1365,8 +1367,12 @@ publishing CAS) — under these rules:
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
-Pins whose target namespace is verifiably terminally deleted (target head
-`state = deleted`, re-checked at delete time) are releasable. The intended
+To keep that true, every readable checkpoint or pin record roots its basis
+for the duration of a pass, whatever its lifecycle or expiry; state and age
+gate only the record object itself, and a freed basis becomes collectable on
+the pass after its record is gone. Pins whose target namespace is verifiably
+terminally deleted (target head `state = deleted`, re-checked at delete
+time) are releasable. The intended
 end-state remains tracked deletion derived from manifest predecessor diffs,
 with the listing sweep demoted to a low-frequency backstop.
 

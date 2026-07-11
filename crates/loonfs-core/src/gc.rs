@@ -100,6 +100,24 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     config: &GcConfig,
     context: &MutationContext,
 ) -> Result<GcReport, CoreError> {
+    gc_namespace_with_reverify_chunk(store, namespace_id, config, context, SWEEP_REVERIFY_CHUNK)
+        .await
+}
+
+/// How many sweep candidates one delete-time live set may decide before the
+/// set must be re-collected (rule 3: candidate selection may be stale,
+/// deletion may not). The bound keeps "immediately before deleting" honest
+/// on large sweeps, where deciding the whole batch against one snapshot
+/// would leave the last deletions arbitrarily far behind it.
+const SWEEP_REVERIFY_CHUNK: usize = 1024;
+
+async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    config: &GcConfig,
+    context: &MutationContext,
+    reverify_chunk: usize,
+) -> Result<GcReport, CoreError> {
     config.validate()?;
     let config_key = namespace_config(namespace_id.as_str());
     let namespace_complete = store
@@ -146,15 +164,23 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .filter(|key| !mark.pin_keys.contains(key))
         .collect();
 
-    // ...and a second, fresh pass immediately before deletion decides
-    // (rule 3: candidate selection may be stale; deletion may not).
-    let sweep = collect_live_set(store, namespace_id, context.now_ms).await?;
-    report.degraded_retention = sweep.degraded;
+    // ...and fresh passes immediately before deletion decide (rule 3:
+    // candidate selection may be stale; deletion may not). The live set is
+    // re-collected every `reverify_chunk` candidates so a large sweep never
+    // runs far ahead of its verification snapshot.
+    let mut sweep =
+        SweepVerifier::collect(store, namespace_id, context.now_ms, reverify_chunk).await?;
 
-    // Data first, records last: a crash mid-sweep leaves orphaned data for
-    // the next pass, never a record whose data vanished under it.
+    // Data first, records last: every readable checkpoint or pin record
+    // roots its basis in the live set, so data referenced by a surviving
+    // record is never deleted in the pass that could delete the record. A
+    // crash mid-sweep therefore leaves orphaned data for the next pass,
+    // never a record whose data vanished under it.
     for key in segment_candidates {
-        if sweep.wal_segments.contains(&key) {
+        sweep
+            .refresh_if_due(store, namespace_id, context.now_ms)
+            .await?;
+        if sweep.live.wal_segments.contains(&key) {
             report.retained_candidates += 1;
             continue;
         }
@@ -162,31 +188,45 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
             report.deleted_wal_segments += 1;
         }
     }
-    if sweep.degraded {
-        report.retained_candidates +=
-            u64::try_from(table_candidates.len() + manifest_candidates.len()).unwrap_or(u64::MAX);
-    } else {
-        for key in table_candidates {
-            if sweep.tables.contains(&key) {
-                report.retained_candidates += 1;
-                continue;
-            }
-            if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-                report.deleted_metadata_tables += 1;
-            }
+    for key in table_candidates {
+        sweep
+            .refresh_if_due(store, namespace_id, context.now_ms)
+            .await?;
+        // Rule 5: ambiguous roots suppress manifest and table deletion for
+        // the whole pass; degradation seen by any re-collection is sticky.
+        if sweep.degraded {
+            report.retained_candidates += 1;
+            continue;
         }
-        for key in manifest_candidates {
-            if manifest_object_id_of(&key).is_some_and(|id| sweep.manifests.contains(&id)) {
-                report.retained_candidates += 1;
-                continue;
-            }
-            if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-                report.deleted_manifests += 1;
-            }
+        if sweep.live.tables.contains(&key) {
+            report.retained_candidates += 1;
+            continue;
+        }
+        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
+            report.deleted_metadata_tables += 1;
+        }
+    }
+    for key in manifest_candidates {
+        sweep
+            .refresh_if_due(store, namespace_id, context.now_ms)
+            .await?;
+        if sweep.degraded {
+            report.retained_candidates += 1;
+            continue;
+        }
+        if manifest_object_id_of(&key).is_some_and(|id| sweep.live.manifests.contains(&id)) {
+            report.retained_candidates += 1;
+            continue;
+        }
+        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
+            report.deleted_manifests += 1;
         }
     }
     for key in checkpoint_candidates {
-        if sweep.checkpoint_keys.contains(&key) {
+        sweep
+            .refresh_if_due(store, namespace_id, context.now_ms)
+            .await?;
+        if sweep.live.checkpoint_keys.contains(&key) {
             report.retained_candidates += 1;
             continue;
         }
@@ -195,7 +235,10 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         }
     }
     for key in pin_candidates {
-        if sweep.pin_keys.contains(&key) {
+        sweep
+            .refresh_if_due(store, namespace_id, context.now_ms)
+            .await?;
+        if sweep.live.pin_keys.contains(&key) {
             report.retained_candidates += 1;
             continue;
         }
@@ -203,8 +246,51 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
             report.released_pins += 1;
         }
     }
+    report.degraded_retention = sweep.degraded;
 
     Ok(report)
+}
+
+/// Delete-time re-verification state (rule 3): deletion decisions consult a
+/// live set no staler than `reverify_chunk` candidates. Rule 5 degradation
+/// is sticky for the pass once any collection observes it.
+struct SweepVerifier {
+    live: LiveSet,
+    degraded: bool,
+    reverify_chunk: usize,
+    decided_since_collect: usize,
+}
+
+impl SweepVerifier {
+    async fn collect<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        now_ms: u64,
+        reverify_chunk: usize,
+    ) -> Result<Self, CoreError> {
+        let live = collect_live_set(store, namespace_id, now_ms).await?;
+        Ok(Self {
+            degraded: live.degraded,
+            live,
+            reverify_chunk,
+            decided_since_collect: 0,
+        })
+    }
+
+    async fn refresh_if_due<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        namespace_id: &NamespaceId,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        if self.decided_since_collect >= self.reverify_chunk {
+            self.live = collect_live_set(store, namespace_id, now_ms).await?;
+            self.degraded |= self.live.degraded;
+            self.decided_since_collect = 0;
+        }
+        self.decided_since_collect += 1;
+        Ok(())
+    }
 }
 
 async fn collect_live_set<S: ObjectStore + ?Sized>(
@@ -238,10 +324,15 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
     };
     live.manifests.insert(root.manifest_object_id);
 
-    // Active, non-expired checkpoints are roots. Records inside the grace
-    // window are roots regardless of state, which the age check at delete
-    // time enforces; here every readable record's basis is retained so a
-    // young dead record can never strand its manifest.
+    // Records last: every readable checkpoint record roots its basis while
+    // the record exists, regardless of lifecycle or expiry, so a record can
+    // never outlive its manifest. This covers the young dead record whose
+    // deletion the grace window refuses, and the dead-record revival in
+    // `create_checkpoint` (deterministic ids), which must never flip a
+    // record Active after its basis was swept. Lifecycle and expiry decide
+    // only whether the record itself may be deleted; a dead or expired
+    // record's basis becomes collectable on the pass after the record is
+    // gone.
     for key in list_prefix(store, &checkpoint_prefix(namespace_id.as_str())).await? {
         let Some(bytes) = store
             .get(&key, None)
@@ -256,11 +347,11 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         ) {
             Ok(envelope) => {
                 let record = envelope.state;
+                live.manifests.insert(record.manifest_object_id);
                 let expired = record
                     .expires_at_ms
                     .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);
                 if record.state == CheckpointRecordLifecycle::Active && !expired {
-                    live.manifests.insert(record.manifest_object_id);
                     live.checkpoint_keys.insert(key);
                 }
             }
@@ -290,12 +381,13 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
             continue;
         };
         let pin = envelope.state;
-        // A pin whose target is verifiably terminally deleted is releasable;
-        // everything else keeps protecting through its checkpoint.
-        if pin_target_terminally_deleted(store, &pin.target_namespace_id).await? {
-            continue;
+        // A pin whose target is verifiably terminally deleted is releasable,
+        // but only the pin record itself: while the record exists it keeps
+        // rooting its checkpoint chain (records last), and the chain becomes
+        // collectable on the pass after the pin is gone.
+        if !pin_target_terminally_deleted(store, &pin.target_namespace_id).await? {
+            live.pin_keys.insert(key);
         }
-        live.pin_keys.insert(key.clone());
         match read_checkpoint_record(store, namespace_id, &pin.source_checkpoint_id).await {
             Ok(Some(record)) => {
                 // Pinned checkpoints protect their basis regardless of the
@@ -491,8 +583,11 @@ mod tests {
     use crate::path::read::{load_metadata_view, ReadLoadContext};
     use crate::publish::PathMutationIntent;
     use crate::storage::content::store_bytes_as_content;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
     use loonfs_api::{CommitId, PutBehavior};
     use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
     use tempfile::tempdir;
 
     const GRACE_MS: u64 = 60 * 60 * 1000;
@@ -537,8 +632,8 @@ mod tests {
         newest + offset_ms
     }
 
-    async fn write_file(
-        store: &LocalFsStore,
+    async fn write_file<S: ObjectStore>(
+        store: &S,
         namespace_id: &NamespaceId,
         path: &str,
         commit_id: &str,
@@ -568,13 +663,68 @@ mod tests {
             .expect("write file");
     }
 
-    async fn stat_root(store: &LocalFsStore, namespace_id: &NamespaceId) {
+    async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
         load_metadata_view(store, namespace_id, ReadLoadContext::latest())
             .await
             .expect("load latest view")
             .resolve_path("/")
             .await
             .expect("resolve root");
+    }
+
+    /// `LocalFsStore` with provider timestamps stripped: rule 1 reads an
+    /// object without a timestamp as young, so nothing ever ages out.
+    #[derive(Debug)]
+    struct TimestamplessStore(LocalFsStore);
+
+    fn strip_timestamp(mut metadata: ObjectMetadata) -> ObjectMetadata {
+        metadata.last_modified_ms = None;
+        metadata
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for TimestamplessStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            Ok(self.0.head(key).await?.map(strip_timestamp))
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            Ok(self.0.get_with_metadata(key).await?.map(|mut body| {
+                body.metadata = strip_timestamp(body.metadata);
+                body
+            }))
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.0.get(key, range).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            Ok(strip_timestamp(self.0.put(key, bytes, mode).await?))
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.0.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.0.list_prefix_stream(prefix)
+        }
     }
 
     #[tokio::test]
@@ -668,8 +818,11 @@ mod tests {
             .expect("tail commit stays readable");
     }
 
+    /// The reviewer scenario for rule 1 and "records last": a dead record
+    /// referencing an aged basis loses the record first, and the basis only
+    /// on the following pass — never the other way around.
     #[tokio::test]
-    async fn gc_reaps_dead_checkpoints_and_their_unreferenced_basis() {
+    async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -685,6 +838,12 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &setup)
             .await
             .expect("second checkpoint");
+        let first_record =
+            crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+                .await
+                .expect("read first record")
+                .expect("first record exists")
+                .state;
         set_checkpoint_record_state(
             &store,
             &namespace_id,
@@ -696,14 +855,14 @@ mod tests {
         .expect("mark first dead");
 
         let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
             .await
-            .expect("gc pass");
+            .expect("first gc pass");
 
-        assert_eq!(report.deleted_checkpoint_records, 1);
-        assert!(report.deleted_manifests >= 1, "dead basis manifest reaped");
-        assert!(!report.degraded_retention);
-        stat_root(&store, &namespace_id).await;
+        // Pass one deletes the dead record but the record still rooted its
+        // basis, so the referenced manifest and tables survive the pass.
+        assert_eq!(first_pass.deleted_checkpoint_records, 1);
+        assert!(!first_pass.degraded_retention);
         assert!(crate::checkpoint::read_checkpoint_record(
             &store,
             &namespace_id,
@@ -712,6 +871,40 @@ mod tests {
         .await
         .expect("read record")
         .is_none());
+        let basis = crate::checkpoint::load_namespace_manifest_envelope(
+            &store,
+            &namespace_id,
+            &first_record.manifest_object_id,
+        )
+        .await
+        .expect("dead basis manifest survives its record");
+        for file in &basis.payload.metadata_files {
+            assert!(
+                store
+                    .head(&file.object_key)
+                    .await
+                    .expect("head table")
+                    .is_some(),
+                "dead basis table survives its record"
+            );
+        }
+
+        // Pass two finds the basis unreferenced and aged, and reaps it.
+        let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("second gc pass");
+        assert!(
+            second_pass.deleted_manifests >= 1,
+            "dead basis manifest reaped once its record is gone"
+        );
+        assert!(crate::checkpoint::load_namespace_manifest_envelope(
+            &store,
+            &namespace_id,
+            &first_record.manifest_object_id,
+        )
+        .await
+        .is_err());
+        stat_root(&store, &namespace_id).await;
     }
 
     #[tokio::test]
@@ -786,6 +979,312 @@ mod tests {
             .expect("gc after target delete");
         assert_eq!(report.released_pins, 1);
         stat_root(&store, &source).await;
+    }
+
+    /// Rule 1 for pins: a pin younger than the grace window stays a root
+    /// even when its target namespace is already terminally deleted.
+    #[tokio::test]
+    async fn gc_retains_young_pins_of_terminally_deleted_targets() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let source = NamespaceId::parse("source").expect("namespace id");
+        let clone = NamespaceId::parse("clone").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &source, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+        fork_namespace(&store, &source, &clone, &setup)
+            .await
+            .expect("fork");
+        delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
+            .await
+            .expect("terminal delete of the fork target");
+
+        let young = context(now_after_newest_object(&store, &source, 0).await);
+        let report = gc_namespace(&store, &source, &config(), &young)
+            .await
+            .expect("gc pass");
+
+        assert_eq!(report.released_pins, 0);
+        assert!(report.retained_candidates > 0);
+        assert!(
+            !store
+                .list_prefix(&pin_prefix(source.as_str()))
+                .await
+                .expect("list pins")
+                .is_empty(),
+            "young pin survives even though it is releasable"
+        );
+        stat_root(&store, &source).await;
+    }
+
+    /// A released pin follows the same records-last cascade as checkpoint
+    /// records: the pin is deleted first, the checkpoint record it rooted on
+    /// the next pass, and the checkpoint's basis on the pass after that.
+    #[tokio::test]
+    async fn gc_releases_pins_before_their_checkpoint_chain_across_passes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let source = NamespaceId::parse("source").expect("namespace id");
+        let clone = NamespaceId::parse("clone").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &source, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+        fork_namespace(&store, &source, &clone, &setup)
+            .await
+            .expect("fork");
+        // Advance the source root past the pinned basis so the basis is
+        // reachable only through the pin -> record chain.
+        write_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
+        create_checkpoint(&store, &source, &setup)
+            .await
+            .expect("advance root past the pinned basis");
+
+        let pin_keys = store
+            .list_prefix(&pin_prefix(source.as_str()))
+            .await
+            .expect("list pins");
+        assert_eq!(pin_keys.len(), 1, "fork leaves one pin");
+        let pin_bytes = store
+            .get(&pin_keys[0], None)
+            .await
+            .expect("get pin")
+            .expect("pin exists");
+        let pin = decode_control_object::<NamespaceGcPinState>(
+            &pin_bytes,
+            ControlObjectKind::NamespaceGcPinState,
+        )
+        .expect("decode pin")
+        .state;
+        let pinned_record =
+            crate::checkpoint::read_checkpoint_record(&store, &source, &pin.source_checkpoint_id)
+                .await
+                .expect("read pinned record")
+                .expect("pinned record exists")
+                .state;
+
+        delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
+            .await
+            .expect("terminal delete of the fork target");
+        set_checkpoint_record_state(
+            &store,
+            &source,
+            &pin.source_checkpoint_id,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+            &setup.writer_version,
+        )
+        .await
+        .expect("mark pinned checkpoint dead");
+        let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+
+        // Pass one releases the pin; the pin still rooted its chain.
+        let first_pass = gc_namespace(&store, &source, &config(), &aged)
+            .await
+            .expect("first gc pass");
+        assert_eq!(first_pass.released_pins, 1);
+        assert_eq!(first_pass.deleted_checkpoint_records, 0);
+        assert!(
+            crate::checkpoint::read_checkpoint_record(&store, &source, &pin.source_checkpoint_id)
+                .await
+                .expect("read record")
+                .is_some(),
+            "pinned checkpoint record survives its pin"
+        );
+
+        // Pass two reaps the now-unpinned dead record; its basis stands.
+        let second_pass = gc_namespace(&store, &source, &config(), &aged)
+            .await
+            .expect("second gc pass");
+        assert_eq!(second_pass.deleted_checkpoint_records, 1);
+        assert!(
+            crate::checkpoint::load_namespace_manifest_envelope(
+                &store,
+                &source,
+                &pinned_record.manifest_object_id,
+            )
+            .await
+            .is_ok(),
+            "basis survives the pass that deletes its record"
+        );
+
+        // Pass three reaps the unreferenced basis.
+        let third_pass = gc_namespace(&store, &source, &config(), &aged)
+            .await
+            .expect("third gc pass");
+        assert!(third_pass.deleted_manifests >= 1);
+        assert!(crate::checkpoint::load_namespace_manifest_envelope(
+            &store,
+            &source,
+            &pinned_record.manifest_object_id,
+        )
+        .await
+        .is_err());
+        stat_root(&store, &source).await;
+    }
+
+    /// Rule 5's missing-root arm: a pin whose checkpoint record is gone (not
+    /// merely unreadable) is ambiguous and suppresses manifest and table
+    /// deletion for the pass.
+    #[tokio::test]
+    async fn gc_degrades_to_retention_when_a_pin_checkpoint_is_missing() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let source = NamespaceId::parse("source").expect("namespace id");
+        let clone = NamespaceId::parse("clone").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &source, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+        fork_namespace(&store, &source, &clone, &setup)
+            .await
+            .expect("fork");
+
+        for key in store
+            .list_prefix(&checkpoint_prefix(source.as_str()))
+            .await
+            .expect("list checkpoints")
+        {
+            store.delete(&key).await.expect("delete pinned record");
+        }
+
+        let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &source, &config(), &aged)
+            .await
+            .expect("gc pass");
+        assert!(report.degraded_retention);
+        assert_eq!(report.deleted_manifests, 0);
+        assert_eq!(report.deleted_metadata_tables, 0);
+    }
+
+    /// Unreadable checkpoint records are ambiguous roots on their own,
+    /// without any pin involved: the record is retained and the pass
+    /// degrades.
+    #[tokio::test]
+    async fn gc_retains_unreadable_checkpoint_records_and_degrades() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("checkpoint");
+
+        for key in store
+            .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+            .await
+            .expect("list checkpoints")
+        {
+            store
+                .put_overwrite(&key, bytes::Bytes::from_static(b"not json"))
+                .await
+                .expect("corrupt record");
+        }
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass");
+        assert!(report.degraded_retention);
+        assert_eq!(report.deleted_checkpoint_records, 0);
+        assert_eq!(report.deleted_manifests, 0);
+        assert_eq!(report.deleted_metadata_tables, 0);
+        assert!(
+            !store
+                .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+                .await
+                .expect("list checkpoints")
+                .is_empty(),
+            "unreadable record retained"
+        );
+    }
+
+    /// Rule 1's timestamp arm: an object without a provider timestamp reads
+    /// as young, so a store that reports none never deletes anything.
+    #[tokio::test]
+    async fn gc_retains_everything_without_provider_timestamps() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = TimestamplessStore(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("checkpoint");
+        advance_retention_floor(&store, &namespace_id, &setup)
+            .await
+            .expect("advance floor");
+
+        // Far past any window by wall clock, but no object carries a
+        // provider timestamp.
+        let aged = context(now_after_newest_object(&store.0, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass");
+
+        assert_eq!(report.deleted_wal_segments, 0);
+        assert_eq!(report.deleted_metadata_tables, 0);
+        assert_eq!(report.deleted_manifests, 0);
+        assert_eq!(report.deleted_checkpoint_records, 0);
+        assert_eq!(report.released_pins, 0);
+        assert!(report.retained_candidates > 0);
+        stat_root(&store, &namespace_id).await;
+    }
+
+    /// The chunked delete-time re-verification path (rule 3) must reach the
+    /// same outcomes as a whole-batch sweep; chunk size one re-collects the
+    /// live set before every candidate.
+    #[tokio::test]
+    async fn gc_sweep_reverification_chunks_preserve_outcomes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        let first = create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("first checkpoint");
+        write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("second checkpoint");
+        set_checkpoint_record_state(
+            &store,
+            &namespace_id,
+            &first.checkpoint_id,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+            &setup.writer_version,
+        )
+        .await
+        .expect("mark first dead");
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let first_pass =
+            gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
+                .await
+                .expect("first gc pass");
+        assert_eq!(first_pass.deleted_checkpoint_records, 1);
+        assert!(!first_pass.degraded_retention);
+
+        let second_pass =
+            gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
+                .await
+                .expect("second gc pass");
+        assert!(second_pass.deleted_manifests >= 1);
+        stat_root(&store, &namespace_id).await;
     }
 
     #[tokio::test]
