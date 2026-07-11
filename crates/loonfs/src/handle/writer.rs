@@ -333,15 +333,17 @@ impl FsWriter {
         self.core.wait_for_background_maintenance().await
     }
 
-    /// Closes the writer: rejects new writer-scheduled background work and
-    /// waits for in-flight maintenance tasks to settle, surfacing panics.
+    /// Shuts down writer-scheduled background work: rejects new scheduling
+    /// and waits for in-flight maintenance tasks to settle, surfacing
+    /// panics. Work that claimed its maintenance slot but has not started
+    /// when the shutdown lands is refused, never left running unobserved.
     ///
-    /// Foreground calls remain usable afterward; `close` only settles
+    /// Foreground calls remain usable afterward; this settles only
     /// handle-owned background work, and with
     /// [`FsBackgroundWork::ManualOnly`] it is nearly trivial. Dropping the
-    /// handle without closing is best-effort cleanup, not the documented
-    /// graceful shutdown path.
-    pub async fn close(&self) -> Result<()> {
+    /// handle without calling this is best-effort cleanup, not the
+    /// documented graceful shutdown path.
+    pub async fn shutdown_background(&self) -> Result<()> {
         self.core.shut_down_background();
         self.core.wait_for_background_maintenance().await
     }

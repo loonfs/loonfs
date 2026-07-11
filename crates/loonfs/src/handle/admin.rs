@@ -107,10 +107,10 @@ impl FsAdmin {
         self.core.gc_namespace(namespace_id, config).await
     }
 
-    /// Closes the admin handle. Admin calls are one-shot in the caller's
-    /// task, so this settles immediately; it exists so every handle shares
-    /// one shutdown shape.
-    pub async fn close(&self) -> Result<()> {
+    /// Shuts down handle-owned background work. Admin calls are one-shot in
+    /// the caller's task, so this settles immediately; it exists so every
+    /// handle shares one shutdown shape.
+    pub async fn shutdown_background(&self) -> Result<()> {
         Ok(())
     }
 }

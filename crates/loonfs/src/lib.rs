@@ -25,7 +25,7 @@
 //!
 //! LoonFS never creates a hidden maintenance runtime: any background work a
 //! handle starts is spawned on that handle's owning runtime, and each handle
-//! has an async `close()` that settles what it owns.
+//! has an async `shutdown_background()` that settles what it owns.
 #![warn(missing_docs)]
 
 mod background;
