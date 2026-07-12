@@ -5,7 +5,7 @@
 //! build through maintenance ticks, query through `FsReader`, disable.
 
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter, GrepRequest,
+    CreateNamespaceOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, GrepRequest,
     MaintenanceTickOptions, NamespaceId, PutFileOptions,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -147,6 +147,79 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
         panic!("expected a core error, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::NotSupported);
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Index catch-up is scheduled by index lag, not by the WAL-segment
+/// threshold: one small publish must still get the index built in the
+/// background, with no explicit ticks and a tail far below the threshold.
+#[tokio::test]
+async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: loonfs::SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("grams-auto-tick").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-auto-writer")
+        .commit_window_ms(0)
+        .background_work(FsBackgroundWork::Enabled)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-auto-admin")
+        .build()
+        .await
+        .expect("build admin");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+
+    // The writer runtime has not observed this namespace's feature yet, so
+    // this publish exercises the discovery path of the scheduling hint.
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/delta.txt",
+            b"a needle in delta\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write delta");
+    writer
+        .wait_for_background_work()
+        .await
+        .expect("background work quiesces");
+
+    let status = admin.namespace_status(&namespace_id).await.expect("status");
+    assert!(
+        status.wal_tail_segments < MaintenanceTickOptions::default().max_wal_tail_segments,
+        "the tail must stay below the flush threshold for this test to \
+         exercise index-only scheduling: {status:?}"
+    );
+
+    // A stale grep serves from the index alone, so a match here proves the
+    // background drain advanced the watermark past the publish.
+    let mut stale = grep_request("needle");
+    stale.allow_stale = true;
+    let response = reader
+        .grep(&namespace_id, &stale)
+        .await
+        .expect("stale grep after background catch-up");
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/delta.txt");
 
     writer.shutdown_background().await.expect("writer shutdown");
 }

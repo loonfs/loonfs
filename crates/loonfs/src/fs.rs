@@ -63,6 +63,12 @@ pub(crate) struct FsInner {
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     pub(crate) background: BackgroundWork,
     pub(crate) commit_windows: CommitWindows,
+    /// Per-namespace gram-index enablement, learned in-process: `None`
+    /// until any tick, enable, or disable observes the namespace. Publishes
+    /// consult it so index catch-up is scheduled by index lag, not only by
+    /// the WAL-segment threshold — one publish can add more tail files
+    /// than a grep will scan without ever crossing that threshold.
+    pub(crate) grams_enabled_hints: Mutex<BTreeMap<NamespaceId, bool>>,
 }
 
 /// Lock accessors for the runtime caches.
@@ -107,6 +113,7 @@ impl FsCore {
                 cache_stats: RuntimeCacheStatsInner::default(),
                 background,
                 commit_windows: CommitWindows::default(),
+                grams_enabled_hints: Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -399,6 +406,7 @@ impl FsCore {
             .enable_grams_index()
             .await
             .map_err(RuntimeError::Core)?;
+        self.record_grams_hint(namespace_id, true);
         self.invalidate_namespace_cache(namespace_id);
         match outcome {
             loonfs_core::GramIndexEnableOutcome::Enabled { built_through_seq } => {
@@ -434,6 +442,7 @@ impl FsCore {
             .disable_grams_index()
             .await
             .map_err(RuntimeError::Core)?;
+        self.record_grams_hint(namespace_id, false);
         self.invalidate_namespace_cache(namespace_id);
         match outcome {
             loonfs_core::GramIndexDisableOutcome::Disabled => Ok(DisableGramsIndexResponse {
@@ -450,6 +459,23 @@ impl FsCore {
                 )))
             }
         }
+    }
+
+    fn record_grams_hint(&self, namespace_id: &NamespaceId, enabled: bool) {
+        self.inner
+            .grams_enabled_hints
+            .lock()
+            .expect("grams hint lock poisoned")
+            .insert(namespace_id.clone(), enabled);
+    }
+
+    fn grams_hint(&self, namespace_id: &NamespaceId) -> Option<bool> {
+        self.inner
+            .grams_enabled_hints
+            .lock()
+            .expect("grams hint lock poisoned")
+            .get(namespace_id)
+            .copied()
     }
 
     /// One bounded gram index build step, then one bounded fold step. A
@@ -490,20 +516,35 @@ impl FsCore {
             loonfs_core::GramIndexBuildOutcome::NotEnabled
             | loonfs_core::GramIndexBuildOutcome::UpToDate { .. } => {}
         }
+        // `UnsupportedFeatureVersion` also records false: this writer cannot
+        // advance that index, so scheduling it a tick per publish is waste.
+        self.record_grams_hint(
+            namespace_id,
+            !matches!(
+                build.outcome,
+                loonfs_core::GramIndexBuildOutcome::NotEnabled
+                    | loonfs_core::GramIndexBuildOutcome::UnsupportedFeatureVersion { .. }
+            ),
+        );
         let fold = engine
             .fold_grams_index_step(loonfs_core::GramIndexBuildPolicy::default())
             .await
             .map_err(RuntimeError::Core)?;
-        if let loonfs_core::GramIndexFoldOutcome::UnitPublished {
-            merged_segments,
+        if let loonfs_core::GramIndexFoldOutcome::StepPublished {
+            merged_rows,
             segments_written,
+            completed,
         } = &fold.outcome
         {
+            // An unfinished fold keeps a cursor in the feature value; the
+            // drain loop keeps stepping it.
+            published |= !completed;
             self.invalidate_namespace_cache(namespace_id);
             tracing::info!(
-                merged_segments,
+                merged_rows,
                 segments_written,
-                "gram index fold unit published"
+                completed,
+                "gram index fold step published"
             );
         }
         Ok(published)
@@ -1361,7 +1402,17 @@ impl FsCore {
     /// this, as it tracks no tail projection to observe.
     fn maybe_auto_tick_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
         let options = MaintenanceTickOptions::default();
-        if wal_tail_segments < options.max_wal_tail_segments {
+        let run_full_tick = wal_tail_segments >= options.max_wal_tail_segments;
+        // Below the WAL threshold, index catch-up alone is still scheduled
+        // when the gram index is (or may be) enabled: index lag is measured
+        // in files, not segments, and one publish can put more files in the
+        // tail than a grep will scan. `None` means this process has not
+        // observed the namespace yet; the drain it schedules learns the
+        // answer, so the discovery cost is one cheap step per namespace per
+        // process. Flush cadence is unchanged — only the full tick moves
+        // WAL segments into tables.
+        let index_may_lag = self.grams_hint(namespace_id) != Some(false);
+        if !run_full_tick && !index_may_lag {
             return;
         }
         if !self.inner.background.try_claim(namespace_id) {
@@ -1372,16 +1423,25 @@ impl FsCore {
             namespace_id: namespace_id.clone(),
         };
         self.inner.background.spawn(async move {
-            let tick = claim
-                .fs
-                .maintenance_tick_namespace(&claim.namespace_id, options)
-                .await;
+            let tick = if run_full_tick {
+                claim
+                    .fs
+                    .maintenance_tick_namespace(&claim.namespace_id, options)
+                    .await
+                    .map(|_| ())
+            } else {
+                Ok(())
+            };
             let drained = match tick {
-                Ok(_) => {
-                    let folds = claim
-                        .fs
-                        .drain_reorganization_backlog(&claim.namespace_id)
-                        .await;
+                Ok(()) => {
+                    let folds = if run_full_tick {
+                        claim
+                            .fs
+                            .drain_reorganization_backlog(&claim.namespace_id)
+                            .await
+                    } else {
+                        Ok(())
+                    };
                     match folds {
                         Ok(()) => {
                             claim
