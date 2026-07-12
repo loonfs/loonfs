@@ -75,7 +75,9 @@ impl GcConfig {
 pub struct GcReport {
     pub deleted_wal_segments: u64,
     pub deleted_metadata_tables: u64,
-    /// Unreferenced derived-index segments deleted.
+    /// Unreferenced derived-index segments deleted. Additive: reports
+    /// serialized before the field decode with zero.
+    #[serde(default)]
     pub deleted_index_segments: u64,
     pub deleted_manifests: u64,
     pub deleted_checkpoint_records: u64,
