@@ -31,8 +31,8 @@ use loonfs_api::{
     CapabilityDocument, DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
     GrepRequest, GrepResponse, Page, PageRequest, PaginationPolicy, UploadId,
     FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROFILE_QUERY_V0, PROTOCOL_VERSION,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
@@ -207,7 +207,18 @@ impl FsCore {
                 (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
                 (FEATURE_QUERY_GREP.to_owned(), true),
             ]),
-            limits: PaginationPolicy::default().capability_limits(),
+            limits: {
+                let mut limits = PaginationPolicy::default().capability_limits();
+                limits.insert(
+                    LIMIT_QUERY_GREP_DEFAULT.to_owned(),
+                    loonfs_core::grep_limits::DEFAULT_GREP_PAGE_LIMIT as u64,
+                );
+                limits.insert(
+                    LIMIT_QUERY_GREP_MAX.to_owned(),
+                    loonfs_core::grep_limits::MAX_GREP_PAGE_LIMIT as u64,
+                );
+                limits
+            },
         }
     }
 

@@ -221,12 +221,18 @@ pub struct FileRevisionsPageCursor {
 /// offset. The cursor resumes strictly after the last returned match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepPageCursor {
-    /// Snapshot sequence captured by the first page.
+    /// Sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// Inode of the last returned match.
+    /// Inode of the last candidate the issuing page finished scanning.
     pub last_inode_id: InodeId,
-    /// Byte offset of the last returned match within its file.
+    /// Byte offset of the last returned match within that file, or
+    /// `u64::MAX` when the file was fully scanned (budget stops and
+    /// matchless candidates resume at the next inode).
     pub last_byte_offset: u64,
+    /// Fingerprint of the request (pattern, flags, scope) that issued the
+    /// cursor; a cursor replayed under a different request is rejected
+    /// instead of silently skipping results.
+    pub fingerprint: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +257,7 @@ enum EncodedPageCursor {
         head_seq: ChangeSeq,
         last_inode_id: InodeId,
         last_byte_offset: u64,
+        fingerprint: u64,
     },
 }
 
@@ -359,6 +366,7 @@ pub fn encode_grep_cursor(cursor: &GrepPageCursor) -> Result<String, PageCursorE
         head_seq: cursor.head_seq,
         last_inode_id: cursor.last_inode_id,
         last_byte_offset: cursor.last_byte_offset,
+        fingerprint: cursor.fingerprint,
     })
 }
 
@@ -369,11 +377,13 @@ pub fn decode_grep_cursor(value: &str) -> Result<GrepPageCursor, PageCursorError
             head_seq,
             last_inode_id,
             last_byte_offset,
+            fingerprint,
             ..
         } => Ok(GrepPageCursor {
             head_seq,
             last_inode_id,
             last_byte_offset,
+            fingerprint,
         }),
         other => Err(PageCursorError::WrongKind {
             expected: "grep",

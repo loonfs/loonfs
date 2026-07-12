@@ -21,9 +21,9 @@ use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Matches returned per page when the request names no limit.
-pub(super) const DEFAULT_GREP_PAGE_LIMIT: usize = 100;
+pub const DEFAULT_GREP_PAGE_LIMIT: usize = 100;
 /// Largest per-page match limit a request may name.
-pub(super) const MAX_GREP_PAGE_LIMIT: usize = 1000;
+pub const MAX_GREP_PAGE_LIMIT: usize = 1000;
 /// Unindexed-tail revisions one query will scan exhaustively before
 /// failing with `index_lagging` (or skipping the tail under `allow_stale`).
 pub(super) const MAX_GREP_TAIL_FILES: usize = 512;
@@ -31,6 +31,10 @@ pub(super) const MAX_GREP_TAIL_FILES: usize = 512;
 pub(super) const MAX_GREP_SCAN_FILES: usize = 4096;
 /// Longest match line returned, in bytes; longer lines are truncated.
 pub(super) const GREP_LINE_CAP_BYTES: usize = 512;
+/// Candidate files one page will read and verify before returning with a
+/// resume cursor, so a page's cost is bounded by its own budget rather
+/// than by how many false-positive candidates the plan admits.
+pub(super) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
 
 /// The revisions a query must examine, keyed by durable inode identity.
 #[derive(Debug, Default)]
@@ -244,25 +248,27 @@ pub(super) struct LineMatch {
 }
 
 /// Runs the pattern over content, one match per line, in offset order.
+/// One forward pass: matches arrive in offset order, so the current line's
+/// bounds and number advance monotonically — a file full of matches costs
+/// one scan of its bytes, never a rescan per match.
 pub(super) fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch> {
     let mut matches = Vec::new();
-    let mut lines_before = 0u64;
-    let mut counted_through = 0usize;
-    let mut last_line_start = usize::MAX;
+    let mut line_start = 0usize;
+    let mut line_number = 1u64;
+    let mut emitted_line_start = usize::MAX;
     for found in pattern.find_iter(content) {
-        let line_start = content[..found.start()]
+        // Advance the line window forward to the one holding this match.
+        while let Some(newline) = content[line_start..found.start()]
             .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |newline| newline + 1);
-        if line_start == last_line_start {
+            .position(|byte| *byte == b'\n')
+        {
+            line_start += newline + 1;
+            line_number += 1;
+        }
+        if line_start == emitted_line_start {
             continue;
         }
-        last_line_start = line_start;
-        lines_before += content[counted_through..line_start]
-            .iter()
-            .filter(|byte| **byte == b'\n')
-            .count() as u64;
-        counted_through = line_start;
+        emitted_line_start = line_start;
         let line_end = content[found.start()..]
             .iter()
             .position(|byte| *byte == b'\n')
@@ -271,7 +277,7 @@ pub(super) fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec
         let line_truncated = line_bytes.len() > GREP_LINE_CAP_BYTES;
         let line_bytes = &line_bytes[..line_bytes.len().min(GREP_LINE_CAP_BYTES)];
         matches.push(LineMatch {
-            line_number: lines_before + 1,
+            line_number,
             byte_offset: found.start() as u64,
             line: String::from_utf8_lossy(line_bytes).into_owned(),
             line_truncated,
@@ -288,9 +294,14 @@ pub(super) fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec
 pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
     view: &crate::metadata::MetadataView<'_, '_, S>,
     inode_id: InodeId,
-) -> Result<Option<String>> {
+) -> Result<Option<VisiblePathChain>> {
     const MAX_PATH_DEPTH: usize = 4096;
     let mut segments = Vec::new();
+    // The chain includes the inode itself and every ancestor up to the
+    // root, so scope filters test durable identity instead of comparing
+    // path strings (which would bypass name-policy folding and slash
+    // normalization).
+    let mut ancestors = vec![inode_id];
     let mut current = inode_id;
     while current != InodeId(1) {
         if segments.len() >= MAX_PATH_DEPTH {
@@ -301,6 +312,7 @@ pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
         };
         segments.push(binding.display_name.clone());
         current = binding.parent_inode_id;
+        ancestors.push(current);
     }
     segments.reverse();
     let path = format!("/{}", segments.join("/"));
@@ -311,24 +323,20 @@ pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
         Err(_) => return Ok(None),
     };
     match view.resolve_visible_path(&parsed).await {
-        Ok(resolved) if resolved.inode_id == inode_id => Ok(Some(path)),
+        Ok(resolved) if resolved.inode_id == inode_id => {
+            Ok(Some(VisiblePathChain { path, ancestors }))
+        }
         Ok(_) => Ok(None),
         Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-/// True when `path` sits at or under the absolute prefix, on a component
-/// boundary: `/docs` scopes `/docs` and `/docs/a`, never `/docsx`.
-pub(super) fn path_in_scope(path: &str, prefix: &str) -> bool {
-    let prefix = prefix.trim_end_matches('/');
-    if prefix.is_empty() {
-        return true;
-    }
-    match path.strip_prefix(prefix) {
-        Some(rest) => rest.is_empty() || rest.starts_with('/'),
-        None => false,
-    }
+/// A derived visible path plus the inode chain that produced it, root
+/// included.
+pub(super) struct VisiblePathChain {
+    pub(super) path: String,
+    pub(super) ancestors: Vec<InodeId>,
 }
 
 #[cfg(test)]
@@ -367,14 +375,5 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line_number, 2);
         assert_eq!(matches[0].line, "two needle");
-    }
-
-    #[test]
-    fn scope_prefixes_respect_component_boundaries() {
-        assert!(path_in_scope("/docs/a.txt", "/docs"));
-        assert!(path_in_scope("/docs", "/docs"));
-        assert!(path_in_scope("/docs/a.txt", "/docs/"));
-        assert!(!path_in_scope("/docsx/a.txt", "/docs"));
-        assert!(path_in_scope("/anything", "/"));
     }
 }

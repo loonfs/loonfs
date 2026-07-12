@@ -27,6 +27,11 @@ pub const FEATURE_QUERY_GREP: &str = "query.grep";
 /// Advisory limit: the largest request body accepted for service-proxied
 /// upload content requests.
 pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";
+/// Advisory limit: matches per grep page when the request omits `limit`.
+pub const LIMIT_QUERY_GREP_DEFAULT: &str = "query.grep.default_limit";
+/// Advisory limit: the largest accepted grep page limit. Distinct from the
+/// pagination keys — a grep item costs a verified file read, not a row.
+pub const LIMIT_QUERY_GREP_MAX: &str = "query.grep.max_limit";
 
 /// A deployment's self-description (API spec, "Capability discovery").
 ///

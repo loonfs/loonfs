@@ -1,7 +1,7 @@
 use super::grep::{
-    derive_visible_path, indexed_candidates, line_matches, path_in_scope, tail_revisions,
-    GrepCandidates, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES,
-    MAX_GREP_TAIL_FILES,
+    derive_visible_path, indexed_candidates, line_matches, tail_revisions, GrepCandidates,
+    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
+    MAX_GREP_VERIFIED_FILES_PER_PAGE,
 };
 use super::listing::{invalid_cursor, page_head_seq, validate_directory_cursor};
 use crate::checkpoint::{
@@ -297,9 +297,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// Content search over the view: index-accelerated candidates through
     /// the `index.grams` watermark, an exhaustive scan of the unindexed
     /// tail, and real-pattern verification of every candidate. Matches
-    /// order by `(inode_id, byte_offset)`; the cursor resumes strictly
-    /// after the last returned match. Each page is evaluated against the
-    /// view it runs on and reports that head in `head_seq`.
+    /// order by `(inode_id, byte_offset)`. Two budgets bound a page — the
+    /// match limit and a verified-candidate budget — and the cursor
+    /// resumes strictly after the last candidate the page finished
+    /// scanning, bound to the request that issued it. Each page is
+    /// evaluated against the view it runs on and reports that head in
+    /// `head_seq`.
     #[tracing::instrument(
         level = "info",
         name = "loon.phase",
@@ -314,14 +317,32 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<GrepResponse, CoreError> {
         use crate::query::grep_plan::{plan_pattern, GramPlanOutcome};
 
-        let limit = request
-            .limit
-            .map_or(DEFAULT_GREP_PAGE_LIMIT, |limit| limit as usize)
-            .clamp(1, MAX_GREP_PAGE_LIMIT);
+        let limit = match request.limit {
+            None => DEFAULT_GREP_PAGE_LIMIT,
+            Some(0) => {
+                return Err(CoreError::InvalidQuery(
+                    "limit must be greater than zero".to_owned(),
+                ));
+            }
+            Some(limit) if limit as usize > MAX_GREP_PAGE_LIMIT => {
+                return Err(CoreError::InvalidQuery(format!(
+                    "limit {limit} exceeds the maximum of {MAX_GREP_PAGE_LIMIT}"
+                )));
+            }
+            Some(limit) => limit as usize,
+        };
+        let fingerprint = request.fingerprint();
         let resume = match &request.cursor {
             Some(cursor) => {
                 let cursor = decode_grep_cursor(cursor)
                     .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+                if cursor.fingerprint != fingerprint {
+                    return Err(CoreError::InvalidCursor(
+                        "the cursor was issued by a different request; replaying it \
+                         under new criteria would silently skip results"
+                            .to_owned(),
+                    ));
+                }
                 if cursor.head_seq > self.head.seq {
                     return Err(MetadataViewError::SnapshotUnavailable {
                         requested_seq: cursor.head_seq,
@@ -333,9 +354,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             None => None,
         };
-        if let Some(prefix) = &request.path_prefix {
-            parse_absolute_path_for_core(prefix)?;
-        }
 
         let manifest = self.tables.manifest();
         let Some(value) = manifest.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
@@ -371,6 +389,33 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .multi_line(true)
             .build()
             .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
+
+        let view = self.metadata_view();
+        // The scope filter tests durable identity: resolve the prefix to
+        // its inode once, then require it among each candidate's ancestors,
+        // so name-policy folding and path normalization apply exactly as
+        // they do to every other read. A prefix that resolves to nothing
+        // has no matches.
+        let scope_root = match &request.path_prefix {
+            Some(prefix) => {
+                let parsed = parse_absolute_path_for_core(prefix)?;
+                match view.resolve_visible_path(&parsed).await {
+                    Ok(resolved) => Some(resolved.inode_id),
+                    Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => {
+                        return Ok(GrepResponse {
+                            namespace_id: self.namespace_id.clone(),
+                            head_seq: self.head.seq,
+                            built_through_seq: feature.built_through_seq,
+                            tail_scanned: true,
+                            matches: Vec::new(),
+                            next_cursor: None,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            None => None,
+        };
 
         let mut candidates = GrepCandidates::default();
         match plan_pattern(&request.pattern, request.case_insensitive)
@@ -411,12 +456,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             candidates.unfiltered.extend(tail.keys().copied());
         }
 
-        let view = self.metadata_view();
         let mut matches: Vec<GrepMatch> = Vec::new();
+        let mut verified_files = 0usize;
         let mut has_more = false;
+        // Where the next page resumes when this one stops early: the last
+        // candidate this page finished scanning (offset MAX), or the last
+        // emitted match when the page filled mid-file.
+        let mut resume_cursor: Option<(InodeId, u64)> = None;
         'inodes: for inode_id in candidates.inodes().collect::<Vec<_>>() {
-            if let Some((last_inode, _)) = resume {
-                if inode_id < last_inode {
+            if let Some((last_inode, last_offset)) = resume {
+                if inode_id < last_inode || (inode_id == last_inode && last_offset == u64::MAX) {
                     continue;
                 }
             }
@@ -426,21 +475,32 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             if !candidates.admits(inode_id, revision.revision_no) {
                 continue;
             }
-            let Some(path) = derive_visible_path(&view, inode_id).await? else {
+            // With the tail skipped (`allow_stale`), serve the index's cut
+            // and nothing newer: a candidate whose newest revision is past
+            // the watermark would otherwise be verified at an unindexed
+            // revision while tail-only files stay invisible — a mix of two
+            // snapshots rather than a stale-but-consistent one.
+            if !tail_scanned && revision.committed_seq > feature.built_through_seq {
+                continue;
+            }
+            let Some(chain) = derive_visible_path(&view, inode_id).await? else {
                 continue;
             };
-            if let Some(prefix) = &request.path_prefix {
-                if !path_in_scope(&path, prefix) {
+            if let Some(scope_root) = scope_root {
+                if !chain.ancestors.contains(&scope_root) {
                     continue;
                 }
             }
+            if verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
+                has_more = true;
+                break 'inodes;
+            }
+            verified_files += 1;
             let content =
                 read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
                     .await?;
-            if !crate::checkpoint::is_indexable_text_content(
-                &content.bytes,
-                crate::checkpoint::GramIndexBuildPolicy::default().max_file_bytes,
-            ) {
+            if !crate::checkpoint::is_indexable_text_content(&content.bytes) {
+                resume_cursor = Some((inode_id, u64::MAX));
                 continue;
             }
             for found in line_matches(&content.bytes, &pattern) {
@@ -453,8 +513,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     has_more = true;
                     break 'inodes;
                 }
+                resume_cursor = Some((inode_id, found.byte_offset));
                 matches.push(GrepMatch {
-                    absolute_path: path.clone(),
+                    absolute_path: chain.path.clone(),
                     inode_id,
                     revision_no: revision.revision_no,
                     line_number: found.line_number,
@@ -463,17 +524,22 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     line_truncated: found.line_truncated,
                 });
             }
+            // The file was fully scanned; a later stop resumes past it.
+            resume_cursor = Some((inode_id, u64::MAX));
         }
 
         let next_cursor = if has_more {
-            let last = matches
-                .last()
-                .expect("a full page precedes every truncation");
+            let (last_inode_id, last_byte_offset) = resume_cursor.or(resume).ok_or_else(|| {
+                CoreError::Internal(
+                    "a truncated page must have scanned at least one candidate".to_owned(),
+                )
+            })?;
             Some(
                 encode_grep_cursor(&GrepPageCursor {
                     head_seq: self.head.seq,
-                    last_inode_id: last.inode_id,
-                    last_byte_offset: last.byte_offset,
+                    last_inode_id,
+                    last_byte_offset,
+                    fingerprint,
                 })
                 .map_err(|error| CoreError::Internal(error.to_string()))?,
             )

@@ -3,6 +3,7 @@
 
 use crate::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh64::xxh64;
 
 /// One content-search request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,7 +20,10 @@ pub struct GrepRequest {
     /// Restrict matches to files under this absolute path prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
-    /// Resume cursor from a previous page; pages share one snapshot.
+    /// Resume cursor from a previous page. The cursor resumes strictly
+    /// after the last candidate the issuing page finished scanning and is
+    /// bound to that page's request; each page is evaluated against the
+    /// namespace head at page time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     /// Maximum matches per page.
@@ -34,6 +38,22 @@ pub struct GrepRequest {
     /// grams. Refused beyond the server's scan budget.
     #[serde(default)]
     pub allow_scan: bool,
+}
+
+impl GrepRequest {
+    /// Fingerprint of the fields that select results, binding cursors to
+    /// the request that issued them. Not a durable format: cursors are
+    /// opaque and short-lived, so this may change between builds.
+    pub fn fingerprint(&self) -> u64 {
+        let mut seed = xxh64(self.pattern.as_bytes(), 0);
+        seed = xxh64(self.path_prefix.as_deref().unwrap_or("").as_bytes(), seed);
+        let flags = [
+            u8::from(self.case_insensitive),
+            u8::from(self.allow_stale),
+            u8::from(self.allow_scan),
+        ];
+        xxh64(&flags, seed)
+    }
 }
 
 /// One line-oriented match.
@@ -63,14 +83,19 @@ pub struct GrepMatch {
 pub struct GrepResponse {
     /// Namespace searched.
     pub namespace_id: NamespaceId,
-    /// Snapshot sequence every page of this search reads.
+    /// Sequence this page was evaluated at. Pages are evaluated against
+    /// the namespace head at page time; the cursor is an ordering resume,
+    /// not a snapshot pin.
     pub head_seq: ChangeSeq,
     /// Commits at or below this sequence were answered from the index.
     pub built_through_seq: ChangeSeq,
     /// True when revisions after `built_through_seq` were scanned
     /// exhaustively; false only when `allow_stale` skipped them.
     pub tail_scanned: bool,
-    /// Matches in ascending `(inode_id, byte_offset)` order.
+    /// Matches in ascending `(inode_id, byte_offset)` order. A page may
+    /// return fewer matches than its limit and still carry a cursor: the
+    /// per-page verified-candidate budget bounds how much content one
+    /// request reads, whatever the plan's false-positive rate.
     pub matches: Vec<GrepMatch>,
     /// Present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]

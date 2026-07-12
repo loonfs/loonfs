@@ -3793,7 +3793,7 @@
               "string",
               "null"
             ],
-            "description": "Resume cursor from a previous page; pages share one snapshot."
+            "description": "Resume cursor from a previous page. The cursor resumes strictly\nafter the last candidate the issuing page finished scanning and is\nbound to that page's request; each page is evaluated against the\nnamespace head at page time."
           },
           "limit": {
             "type": [
@@ -3834,14 +3834,14 @@
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Snapshot sequence every page of this search reads."
+            "description": "Sequence this page was evaluated at. Pages are evaluated against\nthe namespace head at page time; the cursor is an ordering resume,\nnot a snapshot pin."
           },
           "matches": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/GrepMatch"
             },
-            "description": "Matches in ascending `(inode_id, byte_offset)` order."
+            "description": "Matches in ascending `(inode_id, byte_offset)` order. A page may\nreturn fewer matches than its limit and still carry a cursor: the\nper-page verified-candidate budget bounds how much content one\nrequest reads, whatever the plan's false-positive rate."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",

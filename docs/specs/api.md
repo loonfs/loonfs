@@ -78,7 +78,9 @@ therefore identical for both backends.
   },
   "limits": {
     "pagination.default_limit": 1000,
-    "pagination.max_limit": 1000
+    "pagination.max_limit": 1000,
+    "query.grep.default_limit": 100,
+    "query.grep.max_limit": 1000
   }
 }
 ```
@@ -109,6 +111,8 @@ Registered limit keys:
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Larger content should use `direct_put` uploads. |
+| `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
+| `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
 
 ### 2.2 Feature registry
 
@@ -864,13 +868,23 @@ the namespace's gram index (format spec, "Gram index segments"), scans
 revisions committed after `built_through_seq` exhaustively, and verifies
 every candidate against the real pattern, so index staleness affects cost,
 never answers. Matches order by `(inode_id, byte_offset)` and one match is
-reported per line. Each page is evaluated against the namespace head at
-page time and reports it in `head_seq`; the cursor resumes strictly after
-the last returned match. A pattern with no required literal bytes is
-rejected with `query_unindexable` unless `allow_scan` opts into a capped
-exhaustive scan, and a tail past the scan budget is rejected with
-`index_lagging` unless `allow_stale` accepts indexed-only results
-(reported via `tail_scanned: false`).
+reported per line. Two budgets bound a page: the match limit, and a
+per-page verified-candidate budget, so a page may return fewer matches
+than its limit and still carry a cursor. Each page is evaluated against
+the namespace head at page time and reports it in `head_seq`; the cursor
+resumes strictly after the last candidate the issuing page finished
+scanning and is bound to that request — replaying it with different
+criteria is rejected as `invalid_request`. A pattern with no required
+literal bytes is rejected with `query_unindexable` unless `allow_scan`
+opts into a capped exhaustive scan. A tail past the scan budget is
+rejected with `index_lagging` unless `allow_stale` accepts indexed-only
+results (reported via `tail_scanned: false`); stale results are a
+consistent cut at the index watermark — files whose newest revision
+postdates it are omitted entirely rather than mixed in. The `path_prefix`
+scope resolves to an inode under the namespace's name policy and filters
+by ancestry, so it follows the same normalization as every other path
+read. A missing data half answers `not_supported` with the `feature`
+field naming `index.grams`.
 
 ## 7. Conformance requirements
 
