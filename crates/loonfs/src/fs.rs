@@ -17,11 +17,12 @@ use crate::{
     ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
     CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, InodeId,
-    ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ObjectStore, PutFileOptions, RestoreRevisionOptions,
-    RevisionNo, RuntimeCacheStats, UploadContentResponse,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FlushWalOutcome,
+    FlushWalResponse, InodeId, ListChangesOptions, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult,
+    MoveOptions, MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ObjectStore, PutFileOptions, RestoreRevisionOptions, RevisionNo, RuntimeCacheStats,
+    UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -262,17 +263,15 @@ impl FsCore {
             });
         }
 
-        let checkpoint = match self.create_checkpoint(namespace_id).await {
-            Ok(checkpoint) => checkpoint,
+        let flush = match self.flush_wal(namespace_id).await {
+            Ok(flush) => flush,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 self.run_tick_reorganization(namespace_id).await?;
                 let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
-                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
-                        observed_head_seq,
-                    },
+                    outcome: MaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq },
                     gc,
                 });
             }
@@ -280,19 +279,15 @@ impl FsCore {
         };
         self.run_tick_reorganization(namespace_id).await?;
 
-        let outcome = if checkpoint.current_manifest_id == Some(checkpoint.manifest_id) {
-            MaintenanceTickOutcome::CheckpointPublished {
-                checkpoint_seq: checkpoint.checkpoint_seq,
-            }
-        } else {
-            let Some(current_manifest_id) = checkpoint.current_manifest_id else {
-                return Err(RuntimeError::Core(CoreError::Internal(
-                    "checkpoint publication returned no current manifest id".to_owned(),
-                )));
-            };
-            MaintenanceTickOutcome::CheckpointSuperseded {
-                attempted_seq: checkpoint.checkpoint_seq,
-                current_manifest_id,
+        let outcome = match flush.outcome {
+            FlushWalOutcome::Published => MaintenanceTickOutcome::WalFlushed {
+                manifest_head_seq: flush.manifest_head_seq,
+            },
+            FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::Superseded => {
+                MaintenanceTickOutcome::WalFlushSuperseded {
+                    attempted_seq: flush.target_head_seq,
+                    current_manifest_id: flush.manifest_id,
+                }
             }
         };
 
@@ -1279,6 +1274,30 @@ impl FsCore {
         let result = self
             .namespace_engine(namespace_id)
             .create_checkpoint()
+            .await
+            .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    /// Flushes the WAL tail and advances the metadata root, creating no
+    /// checkpoint record.
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        err,
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub(crate) async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
+        let result = self
+            .namespace_engine(namespace_id)
+            .flush_wal()
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)

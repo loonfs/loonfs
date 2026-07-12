@@ -1,7 +1,7 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;
-use loonfs_api::{GcResponse, MaintenanceTickOutcome};
+use loonfs_api::{FlushWalOutcome, GcResponse, MaintenanceTickOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -168,6 +168,17 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             response.checkpoint_id,
             response.manifest_id
         ),
+        CommandData::WalFlushed(response) => {
+            let outcome = match response.outcome {
+                FlushWalOutcome::AlreadyCurrent => "already current",
+                FlushWalOutcome::Published => "published",
+                FlushWalOutcome::Superseded => "superseded",
+            };
+            format!(
+                "flushed wal for {} to manifest {} @ seq {} ({outcome})",
+                response.namespace_id, response.manifest_id, response.manifest_head_seq.0
+            )
+        }
         CommandData::RetentionAdvanced(response) => format!(
             "advanced retention floor for {} to seq {}; changes before this floor are no longer replayable",
             response.namespace_id, response.retention_floor_seq.0
@@ -178,19 +189,19 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     "not needed (wal tail {} segments)",
                     response.status_before.wal_tail_segments
                 ),
-                MaintenanceTickOutcome::CheckpointPublished { checkpoint_seq } => {
-                    format!("checkpoint published @ seq {}", checkpoint_seq.0)
+                MaintenanceTickOutcome::WalFlushed { manifest_head_seq } => {
+                    format!("wal flushed @ seq {}", manifest_head_seq.0)
                 }
-                MaintenanceTickOutcome::CheckpointSuperseded {
+                MaintenanceTickOutcome::WalFlushSuperseded {
                     attempted_seq,
                     current_manifest_id,
                 } => format!(
-                    "checkpoint @ seq {} superseded (current manifest {})",
+                    "wal flush @ seq {} superseded (current manifest {})",
                     attempted_seq.0, current_manifest_id
                 ),
-                MaintenanceTickOutcome::CheckpointPublishRaceLost { observed_head_seq } => {
+                MaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq } => {
                     format!(
-                        "checkpoint race lost (head moved past seq {})",
+                        "wal flush race lost (head moved past seq {})",
                         observed_head_seq.0
                     )
                 }

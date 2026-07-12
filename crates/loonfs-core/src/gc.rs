@@ -907,6 +907,100 @@ mod tests {
         stat_root(&store, &namespace_id).await;
     }
 
+    /// The maintenance-retention property: repeated record-less WAL
+    /// flushes leave superseded manifests unpinned, so GC reclaims
+    /// them once aged — retained metadata stays bounded under maintenance.
+    #[tokio::test]
+    async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        for round in 0..3 {
+            write_file(
+                &store,
+                &namespace_id,
+                &format!("/docs/file-{round}.txt"),
+                &format!("gc-adv-{round}"),
+                &setup,
+            )
+            .await;
+            crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+                .await
+                .expect("flush wal");
+        }
+
+        // Record-less maintenance: nothing accumulates under `checkpoints/`.
+        assert!(
+            store
+                .list_prefix(&checkpoint_prefix(namespace_id.as_str()))
+                .await
+                .expect("list checkpoint records")
+                .is_empty(),
+            "a wal flush must not create checkpoint records"
+        );
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass");
+
+        // Three flushes superseded the bootstrap manifest and two
+        // intermediates; only the root's manifest is reachable. Its tables
+        // are all still referenced (a flush only appends L0 runs).
+        assert_eq!(report.deleted_manifests, 3);
+        assert!(!report.degraded_retention);
+        let manifests_left = list_prefix(&store, &metadata_manifest_prefix(namespace_id.as_str()))
+            .await
+            .expect("list manifests");
+        assert_eq!(manifests_left.len(), 1, "only the live root manifest stays");
+
+        // Reorganization folds the L0 runs into fresh base segments; the
+        // superseded run tables then age out on the next pass.
+        let fold_policy = crate::checkpoint::MetadataLsmPolicy {
+            max_l0_runs: 1,
+            ..Default::default()
+        };
+        for _ in 0..16 {
+            let report = crate::checkpoint::reorganize_metadata_step(
+                &store,
+                &namespace_id,
+                &setup,
+                fold_policy,
+            )
+            .await
+            .expect("reorganize step");
+            if matches!(
+                report.outcome,
+                crate::checkpoint::MetadataReorganizeOutcome::NotNeeded { .. }
+            ) {
+                break;
+            }
+        }
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let after_fold = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass after reorganization");
+        assert!(
+            after_fold.deleted_metadata_tables > 0,
+            "folded-away run tables become collectable"
+        );
+        assert!(!after_fold.degraded_retention);
+
+        stat_root(&store, &namespace_id).await;
+        let view = load_metadata_view(&store, &namespace_id, ReadLoadContext::latest())
+            .await
+            .expect("load view");
+        for round in 0..3 {
+            view.resolve_path(&format!("/docs/file-{round}.txt"))
+                .await
+                .expect("file readable after sweep");
+        }
+    }
+
     #[tokio::test]
     async fn gc_retains_active_checkpoint_bases() {
         let temp_dir = tempdir().expect("tempdir");

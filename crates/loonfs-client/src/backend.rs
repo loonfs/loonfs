@@ -20,9 +20,9 @@ use crate::{Client, ClientError, MutationOptions, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
-    CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode, GcRequest, GcResponse,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MutationResult,
-    NamespaceStatusResponse, NamespaceSummary, RevisionNo,
+    CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode, FlushWalResponse, GcRequest,
+    GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    MutationResult, NamespaceStatusResponse, NamespaceSummary, RevisionNo,
 };
 use thiserror::Error;
 
@@ -198,14 +198,17 @@ pub trait Backend {
         &self,
         namespace_id: &str,
     ) -> Result<CreateCheckpointResponse, BackendError>;
+    /// Flushes the WAL tail and advances the metadata root, creating no
+    /// checkpoint record.
+    async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError>;
     /// Advances the namespace retention floor. Irreversible: WAL history
     /// before the floor stops being replayable.
     async fn advance_retention(
         &self,
         namespace_id: &str,
     ) -> Result<AdvanceRetentionResponse, BackendError>;
-    /// Runs one bounded maintenance step: a checkpoint once the WAL tail
-    /// reaches the threshold, optionally followed by a GC pass.
+    /// Runs one bounded maintenance step: a root advancement once the WAL
+    /// tail reaches the threshold, optionally followed by a GC pass.
     async fn maintenance_tick(
         &self,
         namespace_id: &str,
@@ -408,6 +411,12 @@ impl Backend for RemoteBackend {
     ) -> Result<CreateCheckpointResponse, BackendError> {
         let namespace_id = namespace_id.to_owned();
         self.wire(move |client| client.create_checkpoint(&namespace_id))
+            .await
+    }
+
+    async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.flush_wal(&namespace_id))
             .await
     }
 

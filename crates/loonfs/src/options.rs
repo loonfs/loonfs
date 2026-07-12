@@ -15,10 +15,11 @@ use loonfs_api::v0::{
 /// Options for one maintenance tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaintenanceTickOptions {
-    /// Publish a checkpoint when the visible WAL tail reaches this many segments.
+    /// Flush the visible WAL tail into metadata tables when it reaches this many
+    /// segments.
     pub max_wal_tail_segments: u64,
-    /// Run the mark-and-sweep garbage collector after the tick's checkpoint
-    /// and retention work. Nothing sweeps unless this is set.
+    /// Run the mark-and-sweep garbage collector after the tick's
+    /// flush work. Nothing sweeps unless this is set.
     pub gc: Option<crate::GcConfig>,
 }
 
@@ -71,23 +72,24 @@ pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> G
 /// Outcome of one maintenance tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaintenanceTickOutcome {
-    /// No checkpoint was needed.
+    /// The WAL tail was below the threshold; the root was left alone.
     NotNeeded,
-    /// A checkpoint was published.
-    CheckpointPublished {
-        /// Sequence covered by the published checkpoint.
-        checkpoint_seq: ChangeSeq,
+    /// The tick flushed the WAL tail and advanced the metadata root.
+    WalFlushed {
+        /// Sequence covered by the published manifest.
+        manifest_head_seq: ChangeSeq,
     },
-    /// Another checkpoint already covered the attempted sequence.
-    CheckpointSuperseded {
-        /// Sequence this tick attempted to checkpoint.
+    /// The root already covered the attempted sequence — another publisher
+    /// got there first.
+    WalFlushSuperseded {
+        /// Sequence this tick attempted to flush through.
         attempted_seq: ChangeSeq,
-        /// Manifest pointer the head currently records.
+        /// Manifest the root currently references.
         current_manifest_id: ManifestId,
     },
     /// A concurrent head update won the race.
-    CheckpointPublishRaceLost {
-        /// Head sequence observed before the checkpoint attempt.
+    WalFlushRaceLost {
+        /// Head sequence observed before the advance attempt.
         observed_head_seq: ChangeSeq,
     },
 }
@@ -117,18 +119,18 @@ impl MaintenanceTickResult {
             status_before: self.status_before,
             outcome: match self.outcome {
                 MaintenanceTickOutcome::NotNeeded => WireMaintenanceTickOutcome::NotNeeded,
-                MaintenanceTickOutcome::CheckpointPublished { checkpoint_seq } => {
-                    WireMaintenanceTickOutcome::CheckpointPublished { checkpoint_seq }
+                MaintenanceTickOutcome::WalFlushed { manifest_head_seq } => {
+                    WireMaintenanceTickOutcome::WalFlushed { manifest_head_seq }
                 }
-                MaintenanceTickOutcome::CheckpointSuperseded {
+                MaintenanceTickOutcome::WalFlushSuperseded {
                     attempted_seq,
                     current_manifest_id,
-                } => WireMaintenanceTickOutcome::CheckpointSuperseded {
+                } => WireMaintenanceTickOutcome::WalFlushSuperseded {
                     attempted_seq,
                     current_manifest_id,
                 },
-                MaintenanceTickOutcome::CheckpointPublishRaceLost { observed_head_seq } => {
-                    WireMaintenanceTickOutcome::CheckpointPublishRaceLost { observed_head_seq }
+                MaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq } => {
+                    WireMaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq }
                 }
             },
         }

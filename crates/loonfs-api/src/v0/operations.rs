@@ -240,6 +240,36 @@ pub struct CreateCheckpointResponse {
     pub current_manifest_id: Option<ManifestId>,
 }
 
+/// How one WAL flush satisfied its goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FlushWalOutcome {
+    /// The root already covered the head; nothing was published.
+    AlreadyCurrent,
+    /// This call published a new manifest and advanced the root to it.
+    Published,
+    /// This call published a manifest, but a newer root already covered
+    /// the attempted sequence.
+    Superseded,
+}
+
+/// Result of one WAL flush: how the metadata root covers the head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FlushWalResponse {
+    /// Namespace whose WAL tail was flushed.
+    pub namespace_id: NamespaceId,
+    /// Head sequence the flush attempted to cover.
+    pub target_head_seq: ChangeSeq,
+    /// Manifest `metadata/root.json` references after the operation.
+    pub manifest_id: ManifestId,
+    /// Sequence covered by that manifest.
+    pub manifest_head_seq: ChangeSeq,
+    /// How the root came to cover the head.
+    pub outcome: FlushWalOutcome,
+}
+
 /// Optional overrides for one garbage-collection pass. Absent fields use
 /// the server's conservative defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,12 +323,12 @@ pub struct AdvanceRetentionResponse {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceTickRequest {
-    /// Publish a checkpoint when the visible WAL tail reaches this many
-    /// segments.
+    /// Flush the visible WAL tail into metadata tables when it reaches this
+    /// many segments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wal_tail_segments: Option<u64>,
-    /// Run the mark-and-sweep garbage collector after the tick's checkpoint
-    /// work. Nothing sweeps unless this is present.
+    /// Run the mark-and-sweep garbage collector after the tick's
+    /// flush work. Nothing sweeps unless this is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcRequest>,
 }
@@ -308,23 +338,24 @@ pub struct MaintenanceTickRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MaintenanceTickOutcome {
-    /// No checkpoint was needed.
+    /// The WAL tail was below the threshold; the root was left alone.
     NotNeeded,
-    /// A checkpoint was published.
-    CheckpointPublished {
-        /// Sequence covered by the published checkpoint.
-        checkpoint_seq: ChangeSeq,
+    /// The tick flushed the WAL tail and advanced the metadata root.
+    WalFlushed {
+        /// Sequence covered by the published manifest.
+        manifest_head_seq: ChangeSeq,
     },
-    /// Another checkpoint already covered the attempted sequence.
-    CheckpointSuperseded {
-        /// Sequence this tick attempted to checkpoint.
+    /// The root already covered the attempted sequence — another publisher
+    /// got there first.
+    WalFlushSuperseded {
+        /// Sequence this tick attempted to flush through.
         attempted_seq: ChangeSeq,
-        /// Manifest pointer the head currently records.
+        /// Manifest the root currently references.
         current_manifest_id: ManifestId,
     },
     /// A concurrent head update won the race.
-    CheckpointPublishRaceLost {
-        /// Head sequence observed before the checkpoint attempt.
+    WalFlushRaceLost {
+        /// Head sequence observed before the advance attempt.
         observed_head_seq: ChangeSeq,
     },
 }

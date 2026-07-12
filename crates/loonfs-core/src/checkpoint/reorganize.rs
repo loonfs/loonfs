@@ -24,7 +24,7 @@ use super::build::{
     build_manifest_tables_from_rows, debug_assert_manifest_table_segments_do_not_overlap,
     MetadataTableSegmentation,
 };
-use super::create::{next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT};
+use super::flush::{next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT};
 use super::load::{
     load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
     validate_direntry_child_bind_index, validate_revision_by_inode_desc_index,

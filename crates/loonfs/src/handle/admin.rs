@@ -5,10 +5,10 @@ use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::{
-    AdvanceRetentionResponse, CreateCheckpointResponse, GcConfig, GcReport, MaintenanceTickOptions,
-    MaintenanceTickResult, NamespaceId, NamespaceStatusResponse, ObjectStoreMetricsRecorder,
-    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
-    TraceMode, TraceStoreKind,
+    AdvanceRetentionResponse, CreateCheckpointResponse, FlushWalResponse, GcConfig, GcReport,
+    MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
+    ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -84,6 +84,18 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
         self.core.create_checkpoint(namespace_id).await
+    }
+
+    /// Flushes the WAL tail and advances the metadata root to a manifest
+    /// covering the current head.
+    ///
+    /// This is the latest-state maintenance operation: it absorbs the
+    /// visible WAL tail into a published manifest and advances
+    /// `metadata/root.json`, creating no checkpoint record. Superseded
+    /// manifests become garbage-collection candidates once nothing pins
+    /// them.
+    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+        self.core.flush_wal(namespace_id).await
     }
 
     /// Advances the namespace retention floor when a verified checkpoint

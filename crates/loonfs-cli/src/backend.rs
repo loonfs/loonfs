@@ -17,10 +17,10 @@ use loonfs::{
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
-    CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit, GcRequest, GcResponse,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
-    MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
-    PutBehavior, RevisionNo,
+    CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit, FlushWalResponse, GcRequest,
+    GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    MoveBehavior, MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    PaginationPolicy, PutBehavior, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -287,6 +287,14 @@ impl Backend for EmbeddedBackend {
         let parsed = parse_namespace_id(namespace_id)?;
         self.admin
             .create_checkpoint(&parsed)
+            .await
+            .map_err(map_runtime_error)
+    }
+
+    async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        self.admin
+            .flush_wal(&parsed)
             .await
             .map_err(map_runtime_error)
     }

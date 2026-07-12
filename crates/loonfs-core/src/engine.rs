@@ -16,8 +16,8 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
-    FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, ManifestId, ManifestObjectId,
-    NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
+    FileRevisionsPageCursor, FlushWalResponse, InodeId, ListFileRevisionsResponse, ManifestId,
+    ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -465,6 +465,18 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.mutation_context(),
         )
         .await
+    }
+
+    /// Flushes the visible WAL tail and advances `metadata/root.json` to a
+    /// manifest covering the current head.
+    ///
+    /// This is the latest-state maintenance operation: it absorbs the visible
+    /// WAL tail into a published manifest and advances the root, creating no
+    /// checkpoint record. Superseded manifests become garbage-collection
+    /// candidates once nothing pins them.
+    pub async fn flush_wal(&self) -> CoreResult<FlushWalResponse> {
+        crate::checkpoint::flush_wal(&self.store, &self.namespace_id, &self.mutation_context())
+            .await
     }
 
     /// Runs at most one metadata reorganization unit: folds one family

@@ -614,9 +614,9 @@ re-verification, this closes the create-vs-collect race: within the grace
 window any record is protected unconditionally by age.
 
 A namespace manifest is the durable object for one namespace file-set version.
-It may reference one or more immutable metadata runs and may include
-standalone checkpoint records under `checkpoints/` pin manifest versions for
-retention, fork, or stable read workflows. Each run is internally segmented without overlapping segment
+It may reference one or more immutable metadata runs; standalone checkpoint
+records under `checkpoints/` pin manifest versions for retention, fork, or
+stable read workflows. Each run is internally segmented without overlapping segment
 key ranges; different runs may overlap and readers apply the normal metadata
 visibility rules across all referenced runs. Within a segment, rows are stored
 in ascending row-key order (adjacent equal keys permitted); readers reject a
@@ -1026,15 +1026,21 @@ candidate; actual deletion additionally requires delete-time re-verification,
 and if the floor ever observably passes an active checkpoint's basis,
 retention wins ("Garbage collection").
 
-Creating a checkpoint pins the current durable namespace file-set version. If
-there is no manifest for the current head, the implementation first writes one
-and publishes it by monotonic CAS on `metadata/root.json` — never by touching
-the WAL head, so head watchers observe only commits. It then writes
-`checkpoints/{id}.json` (id derived deterministically from the basis identity,
-so repeating creation for the same pinned manifest returns the existing record
-without listing) and verifies the basis after the write, flipping the record
-to dead on failure. A live manifest does not need to be checkpoint-pinned;
-checkpoint records explain why a manifest version must be retained.
+A WAL flush materializes the current durable namespace
+file-set version: if there is no manifest for the current head, the
+implementation writes one absorbing the visible WAL tail and publishes it by
+monotonic CAS on `metadata/root.json` — never by touching the WAL head, so
+head watchers observe only commits. The flush is the latest-state
+maintenance operation and creates no checkpoint record; a superseded manifest
+becomes a garbage-collection candidate once nothing pins it.
+
+Creating a checkpoint pins one such manifest version deliberately. It first
+flushes the WAL tail as above, then writes `checkpoints/{id}.json` (id derived
+deterministically from the basis identity, so repeating creation for the same
+pinned manifest returns the existing record without listing) and verifies the
+basis after the write, flipping the record to dead on failure. A live
+manifest does not need to be checkpoint-pinned; checkpoint records explain
+why a manifest version must be retained after the root moves on.
 
 ### 3.9 Namespace forks
 
@@ -1244,7 +1250,7 @@ Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. Two behaviors keep an un-administered
 deployment's read costs bounded regardless of scheduling: the reference
 implementation schedules a background maintenance tick after any runtime
-publish that observes the WAL tail at or past the checkpoint threshold
+publish that observes the WAL tail at or past the WAL-flush threshold
 (32 segments at defaults), and every publish surface rejects with
 `maintenance_required` once the tail exceeds four times that threshold
 (128 at defaults). Reads never gate on tail length. Bounded reads are the
@@ -1289,7 +1295,7 @@ A base rebuild drops rows that no retained sequence can observe: revisions
 superseded at or below the retention floor, bindings superseded or unbound at
 or below the floor, spent unbind markers, and commit receipts below the
 floor. The floor is the single retention policy: history below it — including
-file revision history — is reclaimed, except where a named checkpoint record
+file revision history — is reclaimed, except where an active checkpoint record
 still pins an older manifest that can serve it. Tombstone and inode rows are always
 retained for now; reachability-based dropping for them is future work.
 
@@ -1302,12 +1308,12 @@ Invariants:
 - Compacted inputs MUST remain available until no retained manifest version,
   checkpoint record, or fork GC pin references them.
 
-Checkpoint records are standalone files under `checkpoints/`. Records for
-superseded bases are reaped by garbage collection under the grace-window and
-delete-time re-verification rules ("Garbage collection"); named or owned
-records persist until explicitly released. Fork sources are protected by
-their GC pins independently of maintenance records, so record cleanup never
-affects fork safety.
+Checkpoint records are standalone files under `checkpoints/`. Maintenance
+never creates one: automatic root advancement leaves superseded manifests and
+folded-away tables unpinned, and garbage collection reaps them under the
+grace-window and delete-time re-verification rules ("Garbage collection").
+A checkpoint record is a deliberate pin — fork sources and explicit admin
+checkpoints — and roots its basis for as long as the record exists.
 
 ### 6.3 Retention management
 

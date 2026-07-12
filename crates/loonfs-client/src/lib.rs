@@ -21,10 +21,11 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
     CommitId, ContentRef, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MutationResult, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, RestoreFileRevisionRequest, RevisionNo,
+    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, InodeId, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, MutationResult,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -591,6 +592,18 @@ impl Client {
             self.base_url
         );
         self.request_json::<(), CreateCheckpointResponse>(self.agent.post(&url), None)
+    }
+
+    /// Flushes the WAL tail and advances the metadata root to a manifest
+    /// covering the current head (admin plane). The latest-state maintenance operation: no checkpoint
+    /// record is created. The request carries no body.
+    pub fn flush_wal(&self, namespace: &str) -> Result<FlushWalResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/wal/flush",
+            self.base_url
+        );
+        self.request_json::<(), FlushWalResponse>(self.agent.post(&url), None)
     }
 
     /// Advances the namespace retention floor to what checkpoint state allows
