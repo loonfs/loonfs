@@ -40,7 +40,7 @@ use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use futures::future::try_join_all;
 use loonfs_api::wire::index_grams::{
     extract_grams, Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS,
-    INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_FORMAT_VERSION,
+    INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_FORMAT_VERSION, INDEX_GRAMS_MAX_FILE_BYTES,
 };
 use loonfs_api::wire::manifest::{
     hex_encode_bytes, IndexFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
@@ -75,10 +75,21 @@ pub struct GramIndexBuildPolicy {
     pub max_files_per_step: usize,
     /// Content bytes read per step.
     pub max_content_bytes_per_step: u64,
-    /// Revisions larger than this are never indexed.
-    pub max_file_bytes: u64,
     /// Rows per written index segment.
     pub max_rows_per_segment: usize,
+}
+
+impl GramIndexBuildPolicy {
+    /// Zero-valued budgets would report progress without doing work (a
+    /// zero file budget consumes no commit yet returns up to date); every
+    /// step normalizes to at least one unit of each budget.
+    fn normalized(self) -> Self {
+        Self {
+            max_files_per_step: self.max_files_per_step.max(1),
+            max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),
+            max_rows_per_segment: self.max_rows_per_segment.max(1),
+        }
+    }
 }
 
 impl Default for GramIndexBuildPolicy {
@@ -86,7 +97,6 @@ impl Default for GramIndexBuildPolicy {
         Self {
             max_files_per_step: 256,
             max_content_bytes_per_step: 64 * 1024 * 1024,
-            max_file_bytes: 8 * 1024 * 1024,
             max_rows_per_segment: 65_536,
         }
     }
@@ -146,8 +156,8 @@ pub enum GramIndexDisableOutcome {
 /// leading sample; a sample that ends inside a multi-byte character still
 /// counts as valid). The query path applies the same rule to unindexed
 /// data, so eligibility is uniform whether or not a revision was indexed.
-pub(crate) fn is_indexable_text_content(content: &[u8], max_file_bytes: u64) -> bool {
-    if content.len() as u64 > max_file_bytes {
+pub(crate) fn is_indexable_text_content(content: &[u8]) -> bool {
+    if content.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES {
         return false;
     }
     let sample = &content[..content.len().min(ELIGIBILITY_SAMPLE_BYTES)];
@@ -200,6 +210,12 @@ pub(crate) async fn enable_grams_index<S: ObjectStore + ?Sized>(
         built_through_seq,
         backfill_cursor: Some(String::new()),
     };
+    let predecessor_object_id = previous.payload.manifest_object_id.clone();
+    // Manifest publishers must gate the root swap behind the publication
+    // budget (format spec, "Garbage collection", rule 1); an enable is a
+    // publisher like any other.
+    let timer = StdMonotonicTimer::default();
+    let publication_started_ms = timer.monotonic_now_ms();
     let manifest = write_index_successor_manifest(
         store,
         namespace_id,
@@ -209,10 +225,12 @@ pub(crate) async fn enable_grams_index<S: ObjectStore + ?Sized>(
         &context.writer_version,
     )
     .await?;
+    ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
     match publish_metadata_root(
         store,
         namespace_id,
         &manifest,
+        &predecessor_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -260,6 +278,9 @@ pub(crate) async fn disable_grams_index<S: ObjectStore + ?Sized>(
     payload
         .index_files
         .retain(|descriptor| descriptor.family != INDEX_FAMILY_GRAMS);
+    let predecessor_object_id = previous.payload.manifest_object_id.clone();
+    let timer = StdMonotonicTimer::default();
+    let publication_started_ms = timer.monotonic_now_ms();
     let manifest = write_successor_manifest_from_payload(
         store,
         namespace_id,
@@ -268,10 +289,12 @@ pub(crate) async fn disable_grams_index<S: ObjectStore + ?Sized>(
         &context.writer_version,
     )
     .await?;
+    ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
     match publish_metadata_root(
         store,
         namespace_id,
         &manifest,
+        &predecessor_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -301,8 +324,8 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: GramIndexBuildPolicy,
 ) -> Result<GramIndexBuildReport> {
+    let policy = policy.normalized();
     let timer = StdMonotonicTimer::default();
-    let publication_started_ms = timer.monotonic_now_ms();
     let root = read_metadata_root_object(store, namespace_id)
         .await
         .map_err(|error| {
@@ -362,6 +385,11 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
     };
 
     let rows = gram_postings_rows(unit.postings)?;
+    // The publication budget starts at the first object write: it exists
+    // to bound how long written-but-unpublished objects can age toward the
+    // GC grace window, and content reads write nothing. One oversized
+    // commit may take arbitrarily long to read yet still publish.
+    let publication_started_ms = timer.monotonic_now_ms();
     let new_segments = write_index_segments(
         store,
         namespace_id,
@@ -380,6 +408,7 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
         backfill_cursor: unit.backfill_cursor.clone(),
     };
     let materialized = next_feature.is_materialized();
+    let predecessor_object_id = previous.payload.manifest_object_id.clone();
     let manifest = write_index_successor_manifest(
         store,
         namespace_id,
@@ -394,6 +423,7 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &manifest,
+        &predecessor_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -490,7 +520,6 @@ async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
                 inode_id,
                 revision_no,
                 &content_ref,
-                policy,
                 &mut unit.postings,
                 &mut content_bytes_read,
             )
@@ -600,7 +629,6 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
                         *inode_id,
                         *revision_no,
                         content_ref,
-                        policy,
                         &mut unit.postings,
                         &mut content_bytes_read,
                     )
@@ -631,18 +659,17 @@ async fn index_revision_content<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     revision_no: RevisionNo,
     content_ref: &ContentRef,
-    policy: GramIndexBuildPolicy,
     postings: &mut BTreeMap<Gram, Vec<GramPosting>>,
     content_bytes_read: &mut u64,
 ) -> Result<bool> {
     // The size cap is checked from the reference before any fetch; the
     // sniff needs bytes, so oversized files cost nothing to skip.
-    if content_ref.size_bytes > policy.max_file_bytes {
+    if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
         return Ok(false);
     }
     let content = read_durable_content_bytes(store, content_store_id, content_ref).await?;
     *content_bytes_read += content.bytes.len() as u64;
-    if !is_indexable_text_content(&content.bytes, policy.max_file_bytes) {
+    if !is_indexable_text_content(&content.bytes) {
         return Ok(false);
     }
     let posting = GramPosting {
@@ -840,14 +867,17 @@ mod tests {
 
     #[test]
     fn eligibility_accepts_text_and_rejects_binary_and_oversize() {
-        assert!(is_indexable_text_content(b"plain text\n", 1024));
-        assert!(is_indexable_text_content(&[], 1024));
-        assert!(is_indexable_text_content("Grüße".as_bytes(), 1024));
-        assert!(!is_indexable_text_content(b"bin\0ary", 1024));
-        assert!(!is_indexable_text_content(&[0xff, 0xfe, 0x00, 0x01], 1024));
-        assert!(!is_indexable_text_content(b"too big", 3));
+        assert!(is_indexable_text_content(b"plain text\n"));
+        assert!(is_indexable_text_content(&[]));
+        assert!(is_indexable_text_content("Grüße".as_bytes()));
+        assert!(!is_indexable_text_content(b"bin\0ary"));
+        assert!(!is_indexable_text_content(&[0xff, 0xfe, 0x00, 0x01]));
+        // The cap is a format constant of feature version 1; one byte over
+        // it is ineligible.
+        let oversized = vec![b'a'; INDEX_GRAMS_MAX_FILE_BYTES as usize + 1];
+        assert!(!is_indexable_text_content(&oversized));
         // Invalid UTF-8 that is not a truncated tail is rejected.
-        assert!(!is_indexable_text_content(&[b'a', 0xc3, b'a'], 1024));
+        assert!(!is_indexable_text_content(&[b'a', 0xc3, b'a']));
     }
 
     #[test]
@@ -857,10 +887,7 @@ mod tests {
         let mut content = vec![b'a'; super::ELIGIBILITY_SAMPLE_BYTES - 1];
         content.extend_from_slice("é".as_bytes());
         content.extend_from_slice(b" more text");
-        assert!(is_indexable_text_content(
-            &content,
-            2 * super::ELIGIBILITY_SAMPLE_BYTES as u64
-        ));
+        assert!(is_indexable_text_content(&content));
     }
 
     #[test]

@@ -10,6 +10,10 @@ use super::build::{
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
+use super::index_build::{
+    build_grams_index_step, disable_grams_index, enable_grams_index, GramIndexBuildOutcome,
+    GramIndexBuildPolicy, GramIndexDisableOutcome, GramIndexEnableOutcome,
+};
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
     load_manifest_metadata_state_for_inspection_from_manifest, load_verified_manifest_tables,
@@ -39,12 +43,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
+use loonfs_api::wire::index_grams::{
+    Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_GRAMS_FEATURE_KEY,
+};
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataFileRef,
     MetadataRow, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
-use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+use loonfs_api::wire::sst_blocks::{
+    decode_data_block_rows, decode_index_block, BlockHandle, SegmentBlocksBuilder,
+};
 use loonfs_api::{
     ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId, ManifestObjectId,
     NameKey, NamespaceId, PutBehavior, RevisionNo,
@@ -6329,4 +6338,72 @@ async fn grams_index_disable_drops_the_feature_and_references() {
         enabled_again,
         GramIndexEnableOutcome::Enabled { .. }
     ));
+}
+
+#[tokio::test]
+async fn forking_a_lagging_index_restarts_backfill_instead_of_inheriting_a_gap() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let source = NamespaceId::parse("grams-fork-source").expect("namespace id");
+    let target = NamespaceId::parse("grams-fork-target").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &source, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &source, "/one.txt", b"needle one\n", &context, None)
+        .await
+        .expect("write one");
+    create_checkpoint(&store, &source, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &source, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(&store, &source, &context, GramIndexBuildPolicy::default()).await;
+    let watermark = grams_feature(&store, &source)
+        .await
+        .expect("source feature")
+        .built_through_seq;
+
+    // Move the fork point past the watermark without building the index:
+    // the fork target will never hold the WAL that covers this gap.
+    write_file_bytes(
+        &store,
+        &source,
+        "/gap.txt",
+        b"needle in the gap\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write gap");
+    crate::namespace::fork::fork_namespace(&store, &source, &target, &context)
+        .await
+        .expect("fork");
+
+    let feature = grams_feature(&store, &target)
+        .await
+        .expect("target feature");
+    assert!(
+        feature.built_through_seq > watermark,
+        "fork point is past the watermark"
+    );
+    assert!(
+        !feature.is_materialized(),
+        "a lagging inherited index must restart backfill"
+    );
+
+    // Backfill over the copied metadata tables rebuilds the gap.
+    drain_grams_index(&store, &target, &context, GramIndexBuildPolicy::default()).await;
+    let feature = grams_feature(&store, &target)
+        .await
+        .expect("target feature after drain");
+    assert!(feature.is_materialized());
+    let gap_postings = stored_gram_postings(&store, &target, Gram(*b"gap")).await;
+    assert!(
+        !gap_postings.is_empty(),
+        "the fork gap must be indexed on the target"
+    );
+    let old_postings = stored_gram_postings(&store, &target, Gram(*b"one")).await;
+    assert!(!old_postings.is_empty());
 }
