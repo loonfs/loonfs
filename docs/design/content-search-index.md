@@ -27,11 +27,15 @@ pattern -> required grams -> posting intersection -> candidates
         -> read content, verify with the real pattern -> matches
 ```
 
-Verification carries the whole correctness burden, and that is
-what makes the index safe to build lazily in the background: a
-stale or lossy index can make a query slower — more candidates to
-verify, a larger unindexed tail to scan — but it can never change
-the answer. Every choice below leans on that property.
+Verification carries half the correctness burden: it removes
+false positives, so a candidate set may be arbitrarily loose
+without changing answers. The other half is a completeness
+invariant that every builder must uphold: every eligible revision
+at or below the index watermark has complete postings, under the
+same eligibility rule queries apply. Verification cannot repair a
+missing candidate; a stale tail is exact only because revisions
+past the watermark are scanned exhaustively. Every choice below
+leans on those two properties together.
 
 ## What gets indexed
 
@@ -39,9 +43,17 @@ Eligibility is decided when a revision is indexed, not when it is
 uploaded, so the write path and the wire are untouched. A revision
 is eligible when:
 
-- its content is at or below a size cap (default 8 MiB), and
+- its content is at or below the version's size cap (8 MiB), and
 - a sample of its first 8 KiB contains no NUL byte and is valid
   UTF-8 — the binary-detection heuristic grep-family tools use.
+
+The whole rule — cap and sniff — is a format constant of feature
+version 1, not a tunable: queries decide the exhaustive-scan and
+verification cut with the same rule the builder used, and a
+divergence would turn into silent false negatives once the
+watermark passes a file one side considers eligible and the other
+does not. Loosening the rule is a feature-version bump and a
+rebuild.
 
 Ineligible files are simply absent from the index, and the query
 path applies the same rule to unindexed data, so the contract is
@@ -123,9 +135,15 @@ segments become unreachable, and garbage collection reclaims them
 under the normal grace-window and delete-time re-verification
 rules, once its mark phase learns to read the new list from every
 live manifest and its sweep learns the new object prefix. A fork
-copies the manifest, so a fork inherits a working index for free,
-protected by the same fork-owned checkpoint records that protect
-its metadata segments.
+copies the manifest, so a fork usually inherits a working index
+for free, protected by the same fork-owned checkpoint records
+that protect its metadata segments. The one exception is a source
+index that trails the fork point: the target does not inherit the
+source WAL, so the gap between the watermark and the fork
+sequence could never be replayed. The fork keeps the segments but
+restarts the backfill cursor, so the target rebuilds the gap from
+its copied metadata tables; duplicate postings from the re-walk
+are harmless.
 
 ## Building
 
@@ -157,9 +175,20 @@ Two rules keep the cycle honest:
   operator action, so this is one refusal, not a scheduler.
 
 When delta index segments accumulate past the same threshold the
-metadata families use, reorganization folds them — the index is
-one more family group, merged and re-batched into a fresh base,
-one group per tick, published through the normal path.
+metadata families use, reorganization folds them. A gram base can
+grow far past what any metadata family reaches, so index folds
+are partitioned rather than whole-family: a fold snapshots the
+segment set it will consume, then walks the gram keyspace in
+bounded row-count steps, each step merging one key range from the
+snapshot into fresh base segments and publishing a manifest that
+records the outputs and the resume cursor inside the feature
+value. Until the walk completes, snapshot inputs and outputs are
+both referenced and both served — postings are add-only, so
+readers that union them see duplicates, never gaps — and segments
+that arrive during the fold stay out of the snapshot and survive
+it. The completing step swaps the snapshot out for the outputs; a
+fold interrupted anywhere resumes from the cursor the last
+published manifest carries.
 
 Enabling the index on a namespace that already has data starts a
 backfill: a cursor inside the feature value walks the revisions
@@ -225,11 +254,20 @@ Execution, in the read order segments are built for:
 A match reports inode id, revision number, derived absolute
 path, line number, byte offset, and the matching line (truncated
 to a cap). Results return as pages in the existing pagination
-idiom, and the cursor pins the snapshot the way directory listing
-cursors do: every page of one search reads the same `head_seq`,
-resuming after the last emitted position. There is no streaming
-response; pages keep the wire boring and compose with the client
-helpers that already exist.
+idiom. Two budgets bound a page: the match limit, and a
+verified-candidate budget, so a selective-looking pattern with
+many false positives cannot read the whole corpus for one page.
+The cursor therefore resumes strictly after the last candidate
+the previous page finished scanning — not only after emitted
+matches — and it carries a fingerprint of the request (pattern,
+flags, scope) so a cursor replayed under a different request is
+rejected instead of silently skipping results. Each page is
+evaluated against the namespace head at page time and reports
+that head in the response; pinning every page of one search to a
+single snapshot needs read anchors that outlive a request and is
+deliberately future work. There is no streaming response; pages
+keep the wire boring and compose with the client helpers that
+already exist.
 
 **Freshness.** The index trails the head by design, so a query at
 a pinned sequence is answered in two parts: the index covers
@@ -267,15 +305,17 @@ default-on decision:
 Following the segment-format convention, two different contracts:
 
 - **Format constants.** The tokenizer (ASCII-case-folded byte
-  trigrams), the posting row key shape, and the batch encoding
-  are durable bytes, pinned by `"index.grams": {"version": 1}`.
-  Changing any of them is a feature-version bump and a rebuild —
-  cheap by construction, since the index is derived work.
-- **Writer-side defaults.** The eligibility size cap (8 MiB), the
-  per-tick build budgets (256 files or 64 MiB), the posting batch
-  target (about 256), page limits, and the query tail budget are
-  writer- or server-side tunables; readers take what the manifest
-  and descriptors describe.
+  trigrams), the eligibility rule (the 8 MiB cap and the text
+  sniff), the posting row key shape, and the batch encoding are
+  pinned by `"index.grams": {"version": 1}`. Changing any of
+  them is a feature-version bump and a rebuild — cheap by
+  construction, since the index is derived work.
+- **Writer-side defaults.** The per-tick build budgets (256
+  files or 64 MiB), the fold step's row budget, the posting
+  batch target (about 256), page limits, the verified-candidate
+  budget, and the query tail budget are writer- or server-side
+  tunables; readers take what the manifest and descriptors
+  describe.
 
 ## Deferred, with intent
 
