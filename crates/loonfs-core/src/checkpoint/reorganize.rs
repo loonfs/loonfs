@@ -257,6 +257,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         store,
         namespace_id,
         &manifest,
+        &root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )

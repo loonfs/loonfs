@@ -215,6 +215,11 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &manifest,
+        &projection
+            .manifest_tables
+            .manifest()
+            .payload
+            .manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )

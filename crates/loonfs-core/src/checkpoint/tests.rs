@@ -3894,6 +3894,7 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         &store,
         &namespace_id,
         &first_manifest,
+        &materialization.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -3913,6 +3914,7 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         &store,
         &namespace_id,
         &second_manifest,
+        &materialization.root.manifest_object_id,
         context.now_ms + 1,
         &context.writer_version,
     )
@@ -3984,6 +3986,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &store,
         &namespace_id,
         &manifest_without_checkpoint,
+        &materialization.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -4506,6 +4509,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         &store,
         &namespace_id,
         &manifest,
+        &materialization_before.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -4569,6 +4573,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &store,
         &namespace_id,
         &manifest,
+        &materialization.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -4627,6 +4632,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
         &store,
         &namespace_id,
         &manifest,
+        &materialization.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -4707,6 +4713,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         &store,
         &namespace_id,
         &candidate_manifest,
+        &materialization.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -4934,6 +4941,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         &store,
         &namespace_id,
         &compacted,
+        &materialization.root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -5818,4 +5826,107 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         report.outcome,
         super::MetadataReorganizeOutcome::UnitPublished { .. }
     ));
+}
+
+#[tokio::test]
+async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
+    // The review's flush race: a publisher builds from root A while a
+    // sibling publishes B from the same basis, then tries to win on a
+    // higher head. Its carried-forward state predates B, so head ordering
+    // must not decide the winner — the predecessor gate must.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/one.txt", b"one\n", &context, None)
+        .await
+        .expect("write one");
+    let sibling_basis = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("sibling basis");
+
+    // The stale publisher observes a newer head against the same root.
+    write_file_bytes(&store, &namespace_id, "/two.txt", b"two\n", &context, None)
+        .await
+        .expect("write two");
+    let stale_basis = load_current_projection(&store, &namespace_id)
+        .await
+        .expect("stale basis");
+    assert_eq!(
+        sibling_basis.root.manifest_object_id,
+        stale_basis.root.manifest_object_id
+    );
+    assert!(stale_basis.head.seq > sibling_basis.head.seq);
+
+    let sibling = build_manifest_from_projection(
+        &store,
+        &namespace_id,
+        &sibling_basis,
+        &context,
+        ManifestId(sibling_basis.root.manifest_id.0 + 1),
+    )
+    .await;
+    let stale_higher_head = build_manifest_from_projection(
+        &store,
+        &namespace_id,
+        &stale_basis,
+        &context,
+        ManifestId(stale_basis.root.manifest_id.0 + 1),
+    )
+    .await;
+    assert!(stale_higher_head.payload.head_seq > sibling.payload.head_seq);
+    write_namespace_manifest(&store, &sibling)
+        .await
+        .expect("write sibling manifest");
+    write_namespace_manifest(&store, &stale_higher_head)
+        .await
+        .expect("write stale manifest");
+
+    let sibling_outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &sibling,
+        &sibling_basis.root.manifest_object_id,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await
+    .expect("sibling publication");
+    assert!(matches!(
+        sibling_outcome,
+        ManifestPublicationOutcome::Published(_)
+    ));
+
+    let stale_outcome = publish_metadata_root(
+        &store,
+        &namespace_id,
+        &stale_higher_head,
+        &stale_basis.root.manifest_object_id,
+        context.now_ms + 1,
+        &context.writer_version,
+    )
+    .await
+    .expect("stale publication");
+    match stale_outcome {
+        ManifestPublicationOutcome::Superseded(root) => {
+            assert_eq!(
+                root.manifest_object_id, sibling.payload.manifest_object_id,
+                "the sibling's acknowledged publication must survive"
+            );
+        }
+        other => panic!("a stale-basis candidate must be superseded, got {other:?}"),
+    }
+
+    let root_after = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+    assert_eq!(
+        root_after.manifest_object_id,
+        sibling.payload.manifest_object_id
+    );
 }
