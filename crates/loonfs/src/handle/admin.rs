@@ -6,10 +6,10 @@ use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    FlushWalResponse, GcConfig, GcReport, MaintenanceTickOptions, MaintenanceTickResult,
-    NamespaceId, NamespaceStatusResponse, ObjectStoreMetricsRecorder, ReleaseCheckpointResponse,
-    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
-    TraceMode, TraceStoreKind,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, FlushWalResponse, GcConfig, GcReport,
+    MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
+    ObjectStoreMetricsRecorder, ReleaseCheckpointResponse, Result, RuntimeCacheConfig,
+    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -72,6 +72,25 @@ impl FsAdmin {
         self.core
             .maintenance_tick_namespace(namespace_id, options)
             .await
+    }
+
+    /// Publishes the `index.grams` feature entry for a namespace: gram
+    /// index backfill starts on the next maintenance tick, and ticks keep
+    /// the index current from then on. Idempotent.
+    pub async fn enable_grams_index(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<EnableGramsIndexResponse> {
+        self.core.enable_grams_index(namespace_id).await
+    }
+
+    /// Removes the `index.grams` feature entry and its segment references;
+    /// garbage collection reclaims the segments. Idempotent.
+    pub async fn disable_grams_index(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<DisableGramsIndexResponse> {
+        self.core.disable_grams_index(namespace_id).await
     }
 
     /// Creates or reuses a named checkpoint pinning the current namespace

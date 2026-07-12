@@ -37,7 +37,7 @@ use self::handlers_namespace::{
     advance_retention, create_checkpoint, create_namespace, delete_namespace, flush_wal,
     fork_namespace, gc_namespace, maintenance_tick, namespace_status, release_checkpoint,
 };
-use self::handlers_query::grep;
+use self::handlers_query::{disable_grams_index, enable_grams_index, grep};
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::async_trait;
@@ -170,6 +170,14 @@ fn router(state: AppState) -> Router {
             get(get_content),
         )
         .route("/v0/namespaces/:namespace/query/grep", post(grep))
+        .route(
+            "/v0/admin/namespaces/:namespace/index/grams/enable",
+            post(enable_grams_index),
+        )
+        .route(
+            "/v0/admin/namespaces/:namespace/index/grams/disable",
+            post(disable_grams_index),
+        )
         .route(
             "/v0/namespaces/:namespace/filesystem/revisions",
             get(list_path_revisions),

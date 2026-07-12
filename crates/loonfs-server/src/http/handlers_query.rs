@@ -7,7 +7,9 @@ use axum::http::HeaderMap;
 use axum::Json;
 #[cfg(feature = "openapi")]
 use loonfs_api::v0::ApiError;
-use loonfs_api::v0::{GrepRequest, GrepResponse};
+use loonfs_api::v0::{
+    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepRequest, GrepResponse,
+};
 
 #[cfg_attr(
     feature = "openapi",
@@ -41,6 +43,70 @@ pub(super) async fn grep(
     let response = state
         .reader
         .grep(&namespace_id, &request)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/index/grams/enable",
+        tag = "admin",
+        summary = "Enable the gram index",
+        description = "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next maintenance tick and the index stays current from then on. Idempotent.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Feature entry published or already present", body = EnableGramsIndexResponse),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 503, description = "Lost a manifest publication race; retry", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn enable_grams_index(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<EnableGramsIndexResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let response = state
+        .admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/index/grams/disable",
+        tag = "admin",
+        summary = "Disable the gram index",
+        description = "Removes the namespace's index.grams feature entry and its segment references; garbage collection reclaims the segments. Idempotent.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Feature entry removed or already absent", body = DisableGramsIndexResponse),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 503, description = "Lost a manifest publication race; retry", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn disable_grams_index(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<DisableGramsIndexResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let response = state
+        .admin
+        .disable_grams_index(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

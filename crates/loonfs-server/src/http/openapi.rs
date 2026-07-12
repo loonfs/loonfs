@@ -63,7 +63,9 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_namespace::advance_retention,
         crate::http::handlers_namespace::maintenance_tick,
         crate::http::handlers_namespace::gc_namespace,
-        crate::http::handlers_query::grep
+        crate::http::handlers_query::grep,
+        crate::http::handlers_query::enable_grams_index,
+        crate::http::handlers_query::disable_grams_index
     ),
     components(schemas(
         loonfs_api::CapabilityDocument,
@@ -126,7 +128,9 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         ChangesResponse,
         loonfs_api::v0::GrepRequest,
         loonfs_api::v0::GrepMatch,
-        loonfs_api::v0::GrepResponse
+        loonfs_api::v0::GrepResponse,
+        loonfs_api::v0::EnableGramsIndexResponse,
+        loonfs_api::v0::DisableGramsIndexResponse
     )),
     tags(
         (name = "health", description = "Server health"),

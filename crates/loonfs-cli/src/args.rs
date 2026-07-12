@@ -353,6 +353,8 @@ pub(crate) enum AdminCommand {
     RetentionAdvance(AdminNamespaceArgs),
     Tick(AdminTickArgs),
     Gc(AdminGcArgs),
+    IndexEnable(AdminNamespaceArgs),
+    IndexDisable(AdminNamespaceArgs),
 }
 
 #[derive(Debug, Args)]
@@ -469,6 +471,8 @@ pub(crate) enum CommandKind {
     AdminRetentionAdvance,
     AdminTick,
     AdminGc,
+    AdminIndexEnable,
+    AdminIndexDisable,
     ConfigPath,
     ConfigShow,
     Version,
@@ -508,6 +512,8 @@ impl CommandKind {
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
             CommandKind::AdminTick => "admin_tick",
             CommandKind::AdminGc => "admin_gc",
+            CommandKind::AdminIndexEnable => "admin_index_enable",
+            CommandKind::AdminIndexDisable => "admin_index_disable",
             CommandKind::ConfigPath => "config_path",
             CommandKind::ConfigShow => "config_show",
             CommandKind::Version => "version",
@@ -558,6 +564,8 @@ impl Cli {
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
                 AdminCommand::Tick(_) => CommandKind::AdminTick,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
+                AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
+                AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
             },
             Command::Config { command } => match command {
                 ConfigCommand::Path => CommandKind::ConfigPath,
