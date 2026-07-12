@@ -3556,7 +3556,7 @@
           "deleted_metadata_tables",
           "deleted_manifests",
           "deleted_checkpoint_records",
-          "released_pins",
+          "released_fork_checkpoints",
           "reaped_abandoned_objects",
           "retained_candidates",
           "degraded_retention"
@@ -3569,7 +3569,7 @@
           "deleted_checkpoint_records": {
             "type": "integer",
             "format": "int64",
-            "description": "Dead or expired checkpoint records deleted.",
+            "description": "Released or expired checkpoint records deleted.",
             "minimum": 0
           },
           "deleted_manifests": {
@@ -3600,10 +3600,10 @@
             "description": "Objects removed while reaping an abandoned bootstrap tree.",
             "minimum": 0
           },
-          "released_pins": {
+          "released_fork_checkpoints": {
             "type": "integer",
             "format": "int64",
-            "description": "Pins released because their target namespace is terminally deleted.",
+            "description": "Fork-owned checkpoint records released because their target namespace\nis provably gone.",
             "minimum": 0
           },
           "retained_candidates": {

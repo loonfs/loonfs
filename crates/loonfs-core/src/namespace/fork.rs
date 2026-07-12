@@ -1,7 +1,7 @@
 use super::bootstrap::BootstrapNamespaceError;
 use crate::checkpoint::{
-    create_checkpoint, load_verified_manifest_tables, read_checkpoint_record,
-    write_namespace_manifest,
+    create_checkpoint, freshen_fork_checkpoint, load_verified_manifest_tables,
+    read_checkpoint_record, write_namespace_manifest,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
@@ -13,20 +13,16 @@ use crate::namespace::catalog::{
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
-    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
-    NamespaceGcPinStateEnvelope, NamespaceState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
+    encode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind, HeadState,
+    HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope,
+    NamespaceConfigState, NamespaceState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
     WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
-use loonfs_api::{
-    sha256_digest, CheckpointId, GcPinId, ManifestId, ManifestObjectId, NamespaceId,
-    NamespaceSummary, WriterEpoch,
-};
-use loonfs_objectstore::keys::{metadata_root, namespace_config, pin, wal_head};
+use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, WriterEpoch};
+use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -60,8 +56,9 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    // Fork routes through a fork-owned source checkpoint: the pin will
-    // reference the checkpoint only, and reachability resolves through it.
+    // Fork routes through a fork-owned source checkpoint: the record is the
+    // reachability root protecting every source-owned metadata file the
+    // target will reference, for as long as the target lives.
     let checkpoint = create_checkpoint(
         store,
         source_namespace_id,
@@ -145,32 +142,16 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         ),
     )
     .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    let gc_pin_envelope = NamespaceGcPinStateEnvelope::from_state(
-        ControlObjectKind::NamespaceGcPinState,
-        &context.writer_version,
-        NamespaceGcPinState {
-            pin_id: deterministic_gc_pin_id(
-                source_namespace_id,
-                new_namespace_id,
-                &source_checkpoint_id,
-            ),
-            source_namespace_id: source_namespace_id.clone(),
-            target_namespace_id: new_namespace_id.clone(),
-            source_checkpoint_id: source_checkpoint_id.clone(),
-            created_at_ms: context.now_ms,
-        },
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    let gc_pin_key = pin(
-        source_namespace_id.as_str(),
-        gc_pin_envelope.state.pin_id.as_str(),
-    );
-    write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope).await?;
-    verify_written_gc_pin(
+    // Freshen the record before the first target write: the compare-and-swap
+    // serializes this fork against a concurrent GC release, and the fresh
+    // provider timestamp keeps the abandoned-fork age rule from firing under
+    // a live retry.
+    freshen_fork_checkpoint(
         store,
         source_namespace_id,
-        &gc_pin_key,
-        &gc_pin_envelope.state,
+        &source_checkpoint_id,
+        new_namespace_id,
+        &context.writer_version,
     )
     .await?;
     write_namespace_manifest(store, &target_manifest)
@@ -287,115 +268,6 @@ fn fork_target_manifest_payload(
     }
 }
 
-async fn write_source_gc_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected: &NamespaceGcPinStateEnvelope,
-) -> Result<()> {
-    let bytes = encode_control_object(expected)
-        .map_err(|err| CoreError::Internal(format!("failed to encode GC pin object: {err}")))?;
-    match store.put_if_absent(object_key, Bytes::from(bytes)).await {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            verify_existing_gc_pin(store, object_key, expected).await
-        }
-        Err(err) => Err(CoreError::store(object_key, &err)),
-    }
-}
-
-fn deterministic_gc_pin_id(
-    source_namespace_id: &NamespaceId,
-    target_namespace_id: &NamespaceId,
-    source_checkpoint_id: &CheckpointId,
-) -> GcPinId {
-    let identity = format!(
-        "loonfs.gc-pin.v1\0source={}\0target={}\0checkpoint={}",
-        source_namespace_id.as_str(),
-        target_namespace_id.as_str(),
-        source_checkpoint_id,
-    );
-    let digest = sha256_digest(identity.as_bytes());
-    let hex = digest
-        .strip_prefix("sha256:")
-        .expect("sha256_digest returns a sha256-prefixed digest");
-    GcPinId::parse(format!("pin_{}", &hex[..32]))
-        .expect("sha256-derived pin body is a valid gc pin id")
-}
-
-/// Pin creation is write-then-verify, like checkpoints: after the pin is
-/// durable, the referenced checkpoint must still load, be active, and sit at
-/// or above the source floor. On failure the pin is deleted so it cannot
-/// stand as a reachability root for a basis that was never safe.
-async fn verify_written_gc_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    source_namespace_id: &NamespaceId,
-    pin_key: &str,
-    pin: &NamespaceGcPinState,
-) -> Result<()> {
-    let verified = match crate::checkpoint::read_checkpoint_record(
-        store,
-        source_namespace_id,
-        &pin.source_checkpoint_id,
-    )
-    .await?
-    {
-        Some(record) if record.state.state == CheckpointRecordLifecycle::Active => {
-            crate::checkpoint::verify_checkpoint_basis(store, &record.state).await?
-        }
-        _ => false,
-    };
-    if verified {
-        return Ok(());
-    }
-    store
-        .delete(pin_key)
-        .await
-        .map_err(|error| CoreError::store(pin_key, &error))?;
-    Err(CoreError::CheckpointUnavailable(format!(
-        "fork pin `{}` failed verification against source checkpoint `{}`",
-        pin.pin_id, pin.source_checkpoint_id
-    )))
-}
-
-async fn verify_existing_gc_pin<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected: &NamespaceGcPinStateEnvelope,
-) -> Result<()> {
-    let Some(bytes) = store
-        .get(object_key, None)
-        .await
-        .map_err(|err| CoreError::store(object_key, &err))?
-    else {
-        return Err(CoreError::Store {
-            object_key: object_key.to_owned(),
-            message: "GC pin write conflicted, but the existing object is missing".to_owned(),
-        });
-    };
-    let existing: NamespaceGcPinStateEnvelope =
-        decode_control_object(&bytes, ControlObjectKind::NamespaceGcPinState).map_err(|err| {
-            CoreError::NamespaceCorrupt(format!("GC pin `{object_key}` is invalid: {err}"))
-        })?;
-    if gc_pin_matches(expected, &existing) {
-        Ok(())
-    } else {
-        Err(CoreError::NamespaceCorrupt(format!(
-            "GC pin `{object_key}` conflicts with expected fork provenance"
-        )))
-    }
-}
-
-fn gc_pin_matches(
-    expected: &NamespaceGcPinStateEnvelope,
-    existing: &NamespaceGcPinStateEnvelope,
-) -> bool {
-    existing.format_version == expected.format_version
-        && existing.state.pin_id == expected.state.pin_id
-        && existing.state.source_namespace_id == expected.state.source_namespace_id
-        && existing.state.target_namespace_id == expected.state.target_namespace_id
-        && existing.state.source_checkpoint_id == expected.state.source_checkpoint_id
-}
-
 async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -441,107 +313,16 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
 
 #[cfg(test)]
 mod tests {
-    use super::{deterministic_gc_pin_id, fork_target_manifest_payload, write_source_gc_pin};
-    use crate::error::CoreError;
-    use bytes::Bytes;
+    use super::fork_target_manifest_payload;
     use loonfs_api::wire::control::{
         CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     };
-    use loonfs_api::wire::control::{
-        ControlObjectKind, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
-    };
     use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
     use loonfs_api::{
-        ChangeSeq, CheckpointId, CommitId, GcPinId, InodeId, ManifestId, ManifestObjectId,
-        NamespaceId, WriterEpoch,
+        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, NamespaceId,
+        WriterEpoch,
     };
-    use loonfs_objectstore::keys::pin;
-    use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::ObjectStore;
     use std::collections::BTreeMap;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn gc_pin_id_is_deterministic_for_same_source_target_checkpoint() {
-        let source = NamespaceId::parse("source").expect("source namespace");
-        let target = NamespaceId::parse("target").expect("target namespace");
-        let checkpoint_id =
-            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
-        let first = deterministic_gc_pin_id(&source, &target, &checkpoint_id);
-        let second = deterministic_gc_pin_id(&source, &target, &checkpoint_id);
-
-        assert_eq!(first, second);
-        GcPinId::parse(first.as_str()).expect("valid deterministic pin id");
-    }
-
-    #[tokio::test]
-    async fn gc_pin_conflict_same_payload_is_idempotent() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let expected = gc_pin_envelope("source", "target", 1_000);
-        let object_key = pin("source", expected.state.pin_id.as_str());
-
-        write_source_gc_pin(&store, &object_key, &expected)
-            .await
-            .expect("first write");
-        write_source_gc_pin(&store, &object_key, &expected)
-            .await
-            .expect("conflict is idempotent");
-    }
-
-    #[tokio::test]
-    async fn gc_pin_conflict_different_payload_is_error() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let expected = gc_pin_envelope("source", "target", 1_000);
-        let mut conflicting = gc_pin_envelope("source", "other-target", 1_000);
-        conflicting.state.pin_id = expected.state.pin_id.clone();
-        let conflicting = NamespaceGcPinStateEnvelope::from_state(
-            ControlObjectKind::NamespaceGcPinState,
-            "test-writer/0.1.0",
-            conflicting.state,
-        )
-        .expect("conflicting envelope");
-        let object_key = pin("source", expected.state.pin_id.as_str());
-        store
-            .put_if_absent(
-                &object_key,
-                Bytes::from(
-                    super::encode_control_object(&conflicting).expect("encode conflicting pin"),
-                ),
-            )
-            .await
-            .expect("write conflicting pin");
-
-        let error = write_source_gc_pin(&store, &object_key, &expected)
-            .await
-            .expect_err("conflicting pin should fail");
-
-        assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
-    }
-
-    fn gc_pin_envelope(
-        source_namespace_id: &str,
-        target_namespace_id: &str,
-        created_at_ms: u64,
-    ) -> NamespaceGcPinStateEnvelope {
-        let source = NamespaceId::parse(source_namespace_id).expect("source namespace");
-        let target = NamespaceId::parse(target_namespace_id).expect("target namespace");
-        let checkpoint_id =
-            CheckpointId::parse("chk_00000000000000000000000000000001").expect("checkpoint id");
-        NamespaceGcPinStateEnvelope::from_state(
-            ControlObjectKind::NamespaceGcPinState,
-            "test-writer/0.1.0",
-            NamespaceGcPinState {
-                pin_id: deterministic_gc_pin_id(&source, &target, &checkpoint_id),
-                source_namespace_id: source,
-                target_namespace_id: target,
-                source_checkpoint_id: checkpoint_id,
-                created_at_ms,
-            },
-        )
-        .expect("pin envelope")
-    }
 
     fn manifest_object_id(manifest_id: ManifestId) -> ManifestObjectId {
         ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_id.0))

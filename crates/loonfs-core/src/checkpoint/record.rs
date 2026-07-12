@@ -190,6 +190,95 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     )))
 }
 
+/// Re-stamps a fork-owned record by compare-and-swap before its fork writes
+/// any target object.
+///
+/// The rewrite does two jobs at once. It refreshes the record's provider
+/// timestamp, so the abandoned-fork age rule ("Garbage collection", rule 9)
+/// cannot fire under a live retry. And it serializes the fork against a
+/// concurrent GC release on the record's etag: whichever compare-and-swap
+/// lands second fails, so the fork either owns a fresh active record or
+/// observes the release and revives it here — re-verifying the basis —
+/// before proceeding.
+pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+    expected_target: &NamespaceId,
+    writer_version: &str,
+) -> Result<CheckpointRecordState, CoreError> {
+    const FRESHEN_CAS_ATTEMPTS: usize = 4;
+    let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
+    for _attempt in 0..FRESHEN_CAS_ATTEMPTS {
+        let Some(loaded) = read_checkpoint_record(store, namespace_id, checkpoint_id).await? else {
+            return Err(CoreError::CheckpointUnavailable(format!(
+                "fork checkpoint `{checkpoint_id}` disappeared before the fork could freshen it"
+            )));
+        };
+        match &loaded.state.owner {
+            CheckpointOwner::Fork {
+                target_namespace_id,
+            } if target_namespace_id == expected_target => {}
+            other => {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "checkpoint record `{object_key}` carries owner {other:?}, not the fork \
+                     target `{expected_target}`"
+                )));
+            }
+        }
+        let revived = loaded.state.state == CheckpointRecordLifecycle::Released;
+        let mut next = loaded.state;
+        next.state = CheckpointRecordLifecycle::Active;
+        let envelope = CheckpointRecordEnvelope::from_state(
+            ControlObjectKind::CheckpointRecord,
+            writer_version,
+            next.clone(),
+        )
+        .map_err(|err| {
+            CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
+        })?;
+        let encoded = encode_control_object(&envelope).map_err(|err| {
+            CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
+        })?;
+        let Some(etag) = loaded.etag.as_deref() else {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "missing etag for checkpoint record `{object_key}`"
+            )));
+        };
+        match store
+            .compare_and_swap(&object_key, etag, Bytes::from(encoded))
+            .await
+        {
+            Ok(_) => {
+                // A revival raced a release; the record rooted its basis the
+                // whole time it existed, but re-verify before trusting it.
+                if revived && !verify_checkpoint_basis(store, &next).await? {
+                    set_checkpoint_record_state(
+                        store,
+                        namespace_id,
+                        checkpoint_id,
+                        CheckpointRecordLifecycle::Released,
+                        writer_version,
+                    )
+                    .await?;
+                    return Err(CoreError::CheckpointUnavailable(format!(
+                        "fork checkpoint `{checkpoint_id}` failed re-verification after a \
+                         release race"
+                    )));
+                }
+                return Ok(next);
+            }
+            Err(
+                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+            ) => continue,
+            Err(error) => return Err(CoreError::store(&object_key, &error)),
+        }
+    }
+    Err(CoreError::Internal(format!(
+        "checkpoint record `{object_key}` freshen retries exhausted"
+    )))
+}
+
 /// The post-write verification that closes the create-vs-collect race:
 /// after the record is durable, the basis must still be at or above the
 /// live floor and the basis manifest must still load and validate.

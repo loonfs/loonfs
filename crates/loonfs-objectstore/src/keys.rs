@@ -64,16 +64,6 @@ pub fn checkpoint_prefix(namespace: &str) -> String {
     ObjectLayout::new().checkpoint_prefix(namespace)
 }
 
-pub fn pin(source_namespace: &str, pin_id: &str) -> String {
-    ObjectLayout::new()
-        .pin(source_namespace, pin_id)
-        .into_string()
-}
-
-pub fn pin_prefix(source_namespace: &str) -> String {
-    ObjectLayout::new().pin_prefix(source_namespace)
-}
-
 pub fn upload_session_prefix(namespace: &str) -> String {
     ObjectLayout::new().upload_session_prefix(namespace)
 }
@@ -100,7 +90,7 @@ pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectS
 mod tests {
     use super::{
         checkpoint_record, content_blob, content_store_descriptor, metadata_manifest_object,
-        metadata_root, metadata_table, namespace_config, pin, upload_session, wal_floor, wal_head,
+        metadata_root, metadata_table, namespace_config, upload_session, wal_floor, wal_head,
         wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::ManifestObjectId;
@@ -159,7 +149,6 @@ mod tests {
                 )
                 .replace("{checkpoint_id}", "chk-1")
                 .replace("{table_id}", "tbl-1")
-                .replace("{pin_id}", "pin-1")
                 .replace("{upload_id}", "up-1")
                 .replace("{hex[0..2]}", &HEX[0..2])
                 .replace("{hex[2..4]}", &HEX[2..4])
@@ -183,7 +172,6 @@ mod tests {
             ),
             ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
-            ("Pins", pin("ns-1", "pin-1")),
             ("Upload sessions", upload_session("ns-1", "up-1")),
             ("Content-store descriptor", content_store_descriptor("cs-1")),
             ("Metadata root", metadata_root("ns-1")),
@@ -252,10 +240,6 @@ mod tests {
         assert_eq!(
             checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
             "namespaces/ns-1/checkpoints/chk_00000000000000000000000000000001.json"
-        );
-        assert_eq!(
-            pin("source-ns", "pin_00000000000000000000000000000001"),
-            "namespaces/source-ns/pins/pin_00000000000000000000000000000001.json"
         );
         assert_eq!(
             content_blob(

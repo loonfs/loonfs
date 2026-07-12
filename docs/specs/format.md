@@ -62,7 +62,6 @@ The required durable object families and standard key patterns are:
 | **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); written active, verified after the write, flipped released on verification failure or owner release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Pins** | Immutable | Explicit reachability roots referencing a source checkpoint only (reachability resolves pin -> checkpoint -> manifest -> tables); stored under the **source** namespace, whose GC is the consumer. | `namespaces/{source_namespace_id}/pins/{pin_id}.json` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
@@ -88,7 +87,8 @@ Namespace object keys are built through the central object layout API in
 `loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`.
 Forks are copy-on-write: the target manifest may reference source-owned
 metadata tables through a source checkpoint-backed manifest, and the source
-records a pin referencing that checkpoint.
+holds a fork-owned checkpoint record protecting that basis for the target's
+lifetime.
 
 WAL segment names sort by history position (section 1.3); recovery still
 follows `head.visible_wal_tip` and the predecessor links inside verified WAL
@@ -98,7 +98,7 @@ recovery authority. `wal/head.json` and `wal/floor.json` live outside the
 only segment keys.
 
 WAL and metadata table deletion is reachability-driven from the live
-manifest, checkpoint records, pins, and the retention floor.
+manifest, checkpoint records, and the retention floor.
 
 ### 1.3 Durable naming conventions
 
@@ -109,9 +109,9 @@ The namespace tree's lifecycle can be read off its grammar:
   and `metadata/root.json`) that are never swept. If a
   singleton cannot be explained in one sentence, it is too broad.
 - **Collections are never authoritative via enumeration** (`wal/segments/`,
-  `metadata/manifests/`, `metadata/tables/`, `pins/`, `uploads/`,
+  `metadata/manifests/`, `metadata/tables/`, `uploads/`,
   `content-stores/.../blobs/`). A record in a collection matters only when a
-  pointer, chain link, checkpoint, or pin reaches it — except to GC, which
+  pointer, chain link, or checkpoint reaches it — except to GC, which
   lists collections to find garbage and roots. WAL segments and metadata
   manifests use ordered prefixes plus random suffixes so listings stay useful
   while concurrent writers avoid fighting for one immutable object name.
@@ -511,18 +511,18 @@ Namespace deletion does not imply content-store deletion. In v0, content-store
 deletion and destructive content garbage collection are unsupported
 operator-only work, and deletion does not physically reclaim metadata
 objects; reclamation is future maintenance work bound by the invariants in
-section 6 (notably: objects protected by fork GC pins survive, so clones of
-a deleted source stay readable).
+section 6 (notably: objects protected by fork-owned checkpoint records
+survive, so clones of a deleted source stay readable).
 
 ### 2.6 Forks
 
 Forking a namespace creates a new namespace with independent metadata history
 and the same `content_store_id` as the source namespace. The fork point is the
 source namespace's current head. The implementation creates or reuses a
-verified source checkpoint at that head, writes a source-side GC pin for the
-source checkpoint/manifest pair, then initializes the target namespace with a
-manifest that references immutable metadata files owned by the source
-namespace. The target descriptor is written last as the publish/list marker.
+verified fork-owned source checkpoint at that head, freshens that record by
+compare-and-swap, then initializes the target namespace with a manifest that
+references immutable metadata files owned by the source namespace. The target
+descriptor is written last as the publish/list marker.
 
 Fork provenance is stored in the target namespace manifest. Normal reads and
 recovery use the target descriptor, head, manifest, and WAL only. After fork, the clone must remain readable even
@@ -1071,11 +1071,16 @@ The fork protocol is:
    initialized.
 2. Resolve and verify the source namespace descriptor, content-store
    descriptor, head, checkpoint, and WAL visibility chain.
-3. Create or reuse a verified source checkpoint at the current source head.
+3. Create or reuse a verified fork-owned source checkpoint at the current
+   source head (owner: the target namespace id).
 4. Build the target head, target manifest, and descriptor using the source
    namespace's `content_store_id`.
-5. Write, then verify, a source-local GC pin referencing the source checkpoint
-   pair referenced by the target namespace manifest.
+5. Freshen the fork-owned record by compare-and-swap before any target
+   write: the rewrite re-stamps the record's provider timestamp so the
+   abandoned-fork rule cannot fire under a live retry, and it serializes the
+   fork against a concurrent GC release — whichever compare-and-swap lands
+   second fails, so a released record is observed (and revived, re-verifying
+   the basis) rather than raced.
 6. Write a target namespace manifest that references the source-owned
    immutable metadata files for the source checkpoint.
 7. Write the target `head.json` to reserve the namespace and point at the
@@ -1164,7 +1169,7 @@ Two rules make these envelopes evolvable:
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
-| Control objects (head, descriptors, GC pin, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
+| Control objects (head, descriptors, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -1321,8 +1326,8 @@ Invariants:
   every retained `seq` is identical before and after.
 - Compaction MUST publish its results through the normal manifest publication
   path; readers never observe a partially compacted state.
-- Compacted inputs MUST remain available until no retained manifest version,
-  checkpoint record, or fork GC pin references them.
+- Compacted inputs MUST remain available until no retained manifest version
+  or checkpoint record references them.
 
 Checkpoint records are standalone files under `checkpoints/`. Maintenance
 never creates one: automatic root advancement leaves superseded manifests and
@@ -1349,7 +1354,7 @@ the admin endpoint or an explicit maintenance-tick opt-in.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `checkpoints/`, `pins/`, and `wal/segments/` collections.
+`metadata/tables/`, `checkpoints/`, and `wal/segments/` collections.
 Because floor, root, and checkpoint publication no longer serialize through
 one head CAS, two cross-object races must be closed explicitly —
 create-vs-collect (a record written while GC concludes its basis is
@@ -1359,23 +1364,24 @@ publishing CAS) — under these rules:
 1. **Grace window.** A configured window `T`, with
    `T > publish_budget + request_timeout` and
    `T > verify_budget + request_timeout` by comfortable margin. GC never
-   deletes any object younger than `T`, reachable or not, and treats any
-   checkpoint or pin record younger than `T` as a root regardless of state.
-   An object without a provider timestamp reads as young.
+   deletes or releases any object younger than `T`, reachable or not, and
+   treats any checkpoint record younger than `T` as a root regardless of
+   state. An object without a provider timestamp reads as young.
 2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
    nominates an object for deletion.
 3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
-   `checkpoints/` and `pins/`, re-reads the root, head, and floor, and drops
-   from the batch anything reachable from that fresh root set. Candidate
-   selection may be arbitrarily stale; deletion may not. On large batches the
+   `checkpoints/`, re-reads the root, head, and floor, and drops from the
+   batch anything reachable from that fresh root set. Candidate selection
+   may be arbitrarily stale; deletion may not. On large batches the
    re-verification repeats at least every bounded number of deletion
    decisions, so no deletion consults an arbitrarily stale root set.
-4. Roots: `metadata/root.json`; active, non-expired checkpoint records; pins
-   (resolving pin -> checkpoint -> manifest -> tables); and the visible chain
-   from `wal/head.json.visible_wal_tip` down to the floor.
+4. Roots: `metadata/root.json`; active, non-expired checkpoint records whose
+   owner still stands (a fork-owned record stops rooting once its target is
+   provably gone); and the visible chain from
+   `wal/head.json.visible_wal_tip` down to the floor.
 5. Missing, corrupt, or ambiguous roots cause retention, not deletion — an
-   unreadable pin checkpoint suppresses manifest and table deletion for the
-   whole pass.
+   unreadable checkpoint record suppresses manifest and table deletion for
+   the whole pass.
 6. Only validated manifests are trusted to protect data.
 7. WAL needed to replay from the chosen metadata root to the head is never
    deleted.
@@ -1384,19 +1390,25 @@ publishing CAS) — under these rules:
    reconciling the floor is an explicit recovery action.
 9. **Abandoned bootstraps.** A namespace tree with no `namespace.json` whose
    newest object is older than the reap window `R` (`R >= T`) may be reaped,
-   re-checking the marker's absence immediately before deleting. Pins whose
-   target namespace never completed bootstrap are reaped under the same rule.
+   re-checking the marker's absence immediately before deleting. A fork-owned
+   checkpoint record whose target tree is completely gone is released under
+   the same window: the record must be older than `R`, since a live fork
+   retry freshens it before writing any target object.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
-To keep that true, every readable checkpoint or pin record roots its basis
-for the duration of a pass, whatever its lifecycle or expiry; state and age
-gate only the record object itself, and a freed basis becomes collectable on
-the pass after its record is gone. Pins whose target namespace is verifiably
-terminally deleted (target head `state = deleted`, re-checked at delete
-time) are releasable. The intended
-end-state remains tracked deletion derived from manifest predecessor diffs,
-with the listing sweep demoted to a low-frequency backstop.
+To keep that true, every readable checkpoint record roots its basis for the
+duration of a pass, whatever its lifecycle, expiry, or owner; state, age,
+and owner fate gate only the record object itself, and a freed basis becomes
+collectable on the pass after its record is gone. A fork-owned record whose
+target namespace is verifiably terminally deleted (target head
+`state = deleted`, re-checked at delete time) or provably abandoned (rule 9)
+is released by compare-and-swap on the record's freshly observed etag —
+never deleted while active — so a racing fork freshen always wins or always
+observes the release; the released record then reaps by age on a later pass.
+The intended end-state remains tracked deletion derived from manifest
+predecessor diffs, with the listing sweep demoted to a low-frequency
+backstop.
 
 ### 6.5 Control-object cleanup
 

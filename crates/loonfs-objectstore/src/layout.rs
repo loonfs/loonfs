@@ -26,6 +26,10 @@ pub enum DurableObjectFamily {
     MetadataManifest,
     MetadataTable,
     CheckpointRecord,
+    /// Retired protocol family: fork protection lives on fork-owned
+    /// checkpoint records, and nothing writes
+    /// `pins/`. The grammar stays parseable because the frozen `loonfs-sim`
+    /// contract classifies and counts it.
     Pin,
     UploadSession,
     ContentStoreDescriptor,

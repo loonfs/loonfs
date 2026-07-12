@@ -22,8 +22,8 @@ use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
     CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlCodecError,
     ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState,
-    NamespaceGcPinState, NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState,
-    WalSegmentPointer, WriterBlock,
+    NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState, WalSegmentPointer,
+    WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
@@ -36,8 +36,8 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
-    GcPinId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
-    NamePolicy, NamespaceId, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
+    InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamePolicy,
+    NamespaceId, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -469,18 +469,6 @@ fn control_objects_match_golden_bytes() {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
             state: CheckpointRecordLifecycle::Active,
-        },
-    );
-    check_control_golden(
-        "control_namespace_gc_pin_state.v1.json",
-        ControlObjectKind::NamespaceGcPinState,
-        NamespaceGcPinState {
-            pin_id: GcPinId::parse("pin_0123456789abcdef0123456789abcdef")
-                .expect("valid gc pin id"),
-            source_namespace_id: namespace_id(),
-            target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
-            source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
-            created_at_ms: 1_000,
         },
     );
     check_control_golden(
