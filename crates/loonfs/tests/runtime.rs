@@ -2372,7 +2372,7 @@ fn maintenance_tick_below_threshold_is_not_needed() {
 }
 
 #[test]
-fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
+fn maintenance_tick_at_segment_threshold_flushes_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-publish-test");
     let namespace_id = namespace_id();
@@ -2399,20 +2399,34 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     assert_eq!(tick.status_before.head_seq, ChangeSeq(1));
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublished {
-            checkpoint_seq: ChangeSeq(1)
+        MaintenanceTickOutcome::WalFlushed {
+            manifest_head_seq: ChangeSeq(1)
         }
     );
 
     let status = fs
         .namespace_status_blocking(&namespace_id)
-        .expect("status after checkpoint");
+        .expect("status after wal flush");
     assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(status.wal_tail_segments, 0);
+
+    // Maintenance is record-less: flushing the WAL must leave nothing
+    // under `checkpoints/`.
+    let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let records = block_on(
+        raw_store.list_prefix(&loonfs_objectstore::keys::checkpoint_prefix(
+            namespace_id.as_str(),
+        )),
+    )
+    .expect("list checkpoint records");
+    assert!(
+        records.is_empty(),
+        "maintenance tick created checkpoint records: {records:?}"
+    );
 }
 
 #[test]
-fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
+fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
     let namespace_id = namespace_id();
@@ -2453,14 +2467,14 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
         .expect("second maintenance tick");
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublished {
-            checkpoint_seq: ChangeSeq(2)
+        MaintenanceTickOutcome::WalFlushed {
+            manifest_head_seq: ChangeSeq(2)
         }
     );
 
     let status = fs
         .namespace_status_blocking(&namespace_id)
-        .expect("status after l0 checkpoint");
+        .expect("status after l0 wal flush");
     assert_eq!(status.current_manifest_id, Some(ManifestId(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
@@ -2476,7 +2490,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    // Checkpoints only append: the base marker stays the seed's until
+    // A WAL flush only appends: the base marker stays the seed's until
     // reorganization folds the delta runs.
     assert_eq!(manifest.payload.base_seq, ChangeSeq(0));
     let l0_files = manifest
@@ -2568,8 +2582,8 @@ fn maintenance_tick_counts_segments_not_commits() {
     assert_eq!(tick.status_before.wal_tail_segments, 2);
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublished {
-            checkpoint_seq: ChangeSeq(3)
+        MaintenanceTickOutcome::WalFlushed {
+            manifest_head_seq: ChangeSeq(3)
         }
     );
 }
@@ -2631,7 +2645,7 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
 
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublishRaceLost {
+        MaintenanceTickOutcome::WalFlushRaceLost {
             observed_head_seq: ChangeSeq(1)
         }
     );

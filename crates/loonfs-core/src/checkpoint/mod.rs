@@ -5,8 +5,11 @@
 //! version for retention, forks, stable reads, and restore. Submodules follow
 //! the manifest lifecycle:
 //!
-//! - [`create`] orchestrates checkpoint creation: project a manifest from the
-//!   current materialization, then publish it.
+//! - [`flush`] folds the visible WAL tail into metadata tables and
+//!   advances `metadata/root.json` — the record-less latest-state
+//!   maintenance path.
+//! - [`create`] orchestrates checkpoint creation: flush, then pin
+//!   the resulting manifest under one durable record.
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`publish`] writes manifest objects and advances `current_manifest_id`
 //!   on the head by compare-and-swap.
@@ -22,6 +25,7 @@ mod build;
 mod cache;
 mod create;
 mod error;
+mod flush;
 mod load;
 mod publish;
 pub(crate) mod record;
@@ -45,6 +49,7 @@ pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
+pub(crate) use self::flush::flush_wal;
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,
     load_verified_manifest_tables_with_cache,

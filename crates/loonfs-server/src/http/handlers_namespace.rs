@@ -10,7 +10,7 @@ use loonfs::{ChangeSeq, CreateNamespaceOptions, DeleteNamespaceOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
-    AdvanceRetentionResponse, CreateCheckpointResponse, CreateNamespaceRequest,
+    AdvanceRetentionResponse, CreateCheckpointResponse, CreateNamespaceRequest, FlushWalResponse,
     ForkNamespaceRequest, GcRequest, GcResponse, MaintenanceTickRequest, MaintenanceTickResponse,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
@@ -204,7 +204,7 @@ pub(super) async fn fork_namespace(
         path = "/v0/admin/namespaces/{namespace}/checkpoint",
         tag = "admin",
         summary = "Create checkpoint",
-        description = "Records a checkpoint of the current namespace view. Unnamed checkpoints are maintenance bookkeeping: a manifest retains only the four newest, so this is not a durable pin with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
+        description = "Creates or reuses a durable checkpoint record pinning the current namespace view. The record is a garbage-collection root until it is retired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
@@ -226,6 +226,40 @@ pub(super) async fn create_checkpoint(
     let response = state
         .admin
         .create_checkpoint(&namespace_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/wal/flush",
+        tag = "admin",
+        summary = "Flush WAL",
+        description = "Folds the visible WAL tail into metadata tables, publishes a manifest, and advances the metadata root to cover the current head. No checkpoint record is created; superseded manifests become garbage-collection candidates once nothing pins them. This is the routine latest-state maintenance operation.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Metadata root covers the current head", body = FlushWalResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "Lost the root race", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn flush_wal(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<FlushWalResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let response = state
+        .admin
+        .flush_wal(&namespace_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -306,7 +340,7 @@ pub(super) async fn gc_namespace(
         path = "/v0/admin/namespaces/{namespace}/maintenance/tick",
         tag = "admin",
         summary = "Run maintenance tick",
-        description = "Runs one bounded maintenance step: publishes a checkpoint once the visible WAL tail reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing a checkpoint race is an outcome, not an error.",
+        description = "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing the root race is an outcome, not an error.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body(content = MaintenanceTickRequest, description = "Optional threshold and GC overrides"),
         responses(

@@ -16,9 +16,9 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointResponse,
     CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, ForkNamespaceRequest, GcRequest, GcResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MaintenanceTickResponse, RestoreFileRevisionRequest, RevisionNo,
+    FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
+    GcRequest, GcResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickOutcome,
+    MaintenanceTickRequest, MaintenanceTickResponse, RestoreFileRevisionRequest, RevisionNo,
 };
 
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
@@ -57,6 +57,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_filesystem::commit_operations,
         crate::http::handlers_filesystem::list_changes,
         crate::http::handlers_namespace::create_checkpoint,
+        crate::http::handlers_namespace::flush_wal,
         crate::http::handlers_namespace::advance_retention,
         crate::http::handlers_namespace::maintenance_tick,
         crate::http::handlers_namespace::gc_namespace
@@ -79,6 +80,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         ListFileRevisionsResponse,
         RestoreFileRevisionRequest,
         CreateCheckpointResponse,
+        FlushWalOutcome,
+        FlushWalResponse,
         AdvanceRetentionResponse,
         MaintenanceTickRequest,
         MaintenanceTickOutcome,

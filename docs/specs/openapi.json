@@ -41,7 +41,7 @@
           "admin"
         ],
         "summary": "Create checkpoint",
-        "description": "Records a checkpoint of the current namespace view. Unnamed checkpoints are maintenance bookkeeping: a manifest retains only the four newest, so this is not a durable pin with a checkpoint. This is a maintenance/admin operation, not a file mutation.",
+        "description": "Creates or reuses a durable checkpoint record pinning the current namespace view. The record is a garbage-collection root until it is retired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
         "operationId": "create_checkpoint",
         "parameters": [
           {
@@ -198,7 +198,7 @@
           "admin"
         ],
         "summary": "Run maintenance tick",
-        "description": "Runs one bounded maintenance step: publishes a checkpoint once the visible WAL tail reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing a checkpoint race is an outcome, not an error.",
+        "description": "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing the root race is an outcome, not an error.",
         "operationId": "maintenance_tick",
         "parameters": [
           {
@@ -328,6 +328,89 @@
           },
           "404": {
             "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/wal/flush": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Flush WAL",
+        "description": "Folds the visible WAL tail into metadata tables, publishes a manifest, and advances the metadata root to cover the current head. No checkpoint record is created; superseded manifests become garbage-collection candidates once nothing pins them. This is the routine latest-state maintenance operation.",
+        "operationId": "flush_wal",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata root covers the current head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlushWalResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Lost the root race",
             "content": {
               "application/json": {
                 "schema": {
@@ -3271,6 +3354,48 @@
           }
         }
       },
+      "FlushWalOutcome": {
+        "type": "string",
+        "description": "How one WAL flush satisfied its goal.",
+        "enum": [
+          "already_current",
+          "published",
+          "superseded"
+        ]
+      },
+      "FlushWalResponse": {
+        "type": "object",
+        "description": "Result of one WAL flush: how the metadata root covers the head.",
+        "required": [
+          "namespace_id",
+          "target_head_seq",
+          "manifest_id",
+          "manifest_head_seq",
+          "outcome"
+        ],
+        "properties": {
+          "manifest_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence covered by that manifest."
+          },
+          "manifest_id": {
+            "$ref": "#/components/schemas/ManifestId",
+            "description": "Manifest `metadata/root.json` references after the operation."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose WAL tail was flushed."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/FlushWalOutcome",
+            "description": "How the root came to cover the head."
+          },
+          "target_head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence the flush attempted to cover."
+          }
+        }
+      },
       "ForkNamespaceRequest": {
         "type": "object",
         "description": "Request to fork a namespace.",
@@ -3469,7 +3594,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "No checkpoint was needed.",
+            "description": "The WAL tail was below the threshold; the root was left alone.",
             "required": [
               "kind"
             ],
@@ -3484,27 +3609,27 @@
           },
           {
             "type": "object",
-            "description": "A checkpoint was published.",
+            "description": "The tick flushed the WAL tail and advanced the metadata root.",
             "required": [
-              "checkpoint_seq",
+              "manifest_head_seq",
               "kind"
             ],
             "properties": {
-              "checkpoint_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence covered by the published checkpoint."
-              },
               "kind": {
                 "type": "string",
                 "enum": [
-                  "checkpoint_published"
+                  "wal_flushed"
                 ]
+              },
+              "manifest_head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence covered by the published manifest."
               }
             }
           },
           {
             "type": "object",
-            "description": "Another checkpoint already covered the attempted sequence.",
+            "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
             "required": [
               "attempted_seq",
               "current_manifest_id",
@@ -3513,16 +3638,16 @@
             "properties": {
               "attempted_seq": {
                 "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence this tick attempted to checkpoint."
+                "description": "Sequence this tick attempted to flush through."
               },
               "current_manifest_id": {
                 "$ref": "#/components/schemas/ManifestId",
-                "description": "Manifest pointer the head currently records."
+                "description": "Manifest the root currently references."
               },
               "kind": {
                 "type": "string",
                 "enum": [
-                  "checkpoint_superseded"
+                  "wal_flush_superseded"
                 ]
               }
             }
@@ -3538,12 +3663,12 @@
               "kind": {
                 "type": "string",
                 "enum": [
-                  "checkpoint_publish_race_lost"
+                  "wal_flush_race_lost"
                 ]
               },
               "observed_head_seq": {
                 "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Head sequence observed before the checkpoint attempt."
+                "description": "Head sequence observed before the advance attempt."
               }
             }
           }
@@ -3561,7 +3686,7 @@
               },
               {
                 "$ref": "#/components/schemas/GcRequest",
-                "description": "Run the mark-and-sweep garbage collector after the tick's checkpoint\nwork. Nothing sweeps unless this is present."
+                "description": "Run the mark-and-sweep garbage collector after the tick's\nflush work. Nothing sweeps unless this is present."
               }
             ]
           },
@@ -3571,7 +3696,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Publish a checkpoint when the visible WAL tail reaches this many\nsegments.",
+            "description": "Flush the visible WAL tail into metadata tables when it reaches this\nmany segments.",
             "minimum": 0
           }
         }

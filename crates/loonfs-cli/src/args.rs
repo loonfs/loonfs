@@ -324,6 +324,7 @@ pub(crate) struct ChangesArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminCommand {
     Checkpoint(AdminNamespaceArgs),
+    Flush(AdminNamespaceArgs),
     RetentionAdvance(AdminNamespaceArgs),
     Tick(AdminTickArgs),
     Gc(AdminGcArgs),
@@ -339,11 +340,11 @@ pub(crate) struct AdminNamespaceArgs {
 pub(crate) struct AdminTickArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Publish a checkpoint when the visible WAL tail reaches this many
+    /// Flush the visible WAL tail into metadata tables when it reaches this many
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,
-    /// Run a garbage-collection pass after the tick's checkpoint work.
+    /// Run a garbage-collection pass after the tick's flush work.
     #[arg(long)]
     pub gc: bool,
 }
@@ -416,6 +417,7 @@ pub(crate) enum CommandKind {
     FilesystemCp,
     Changes,
     AdminCheckpoint,
+    AdminFlush,
     AdminRetentionAdvance,
     AdminTick,
     AdminGc,
@@ -452,6 +454,7 @@ impl CommandKind {
             CommandKind::FilesystemCp => "filesystem_cp",
             CommandKind::Changes => "changes",
             CommandKind::AdminCheckpoint => "admin_checkpoint",
+            CommandKind::AdminFlush => "admin_flush",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
             CommandKind::AdminTick => "admin_tick",
             CommandKind::AdminGc => "admin_gc",
@@ -499,6 +502,7 @@ impl Cli {
             Command::Changes(_) => CommandKind::Changes,
             Command::Admin { command } => match command {
                 AdminCommand::Checkpoint(_) => CommandKind::AdminCheckpoint,
+                AdminCommand::Flush(_) => CommandKind::AdminFlush,
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
                 AdminCommand::Tick(_) => CommandKind::AdminTick,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,

@@ -33,8 +33,8 @@ use self::handlers_filesystem::{
     list_entries, list_inode_revisions, list_path_revisions, restore_inode_revision, stat_entry,
 };
 use self::handlers_namespace::{
-    advance_retention, create_checkpoint, create_namespace, delete_namespace, fork_namespace,
-    gc_namespace, maintenance_tick, namespace_status,
+    advance_retention, create_checkpoint, create_namespace, delete_namespace, flush_wal,
+    fork_namespace, gc_namespace, maintenance_tick, namespace_status,
 };
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
@@ -202,6 +202,7 @@ fn router(state: AppState) -> Router {
             "/v0/admin/namespaces/:namespace/checkpoint",
             post(create_checkpoint),
         )
+        .route("/v0/admin/namespaces/:namespace/wal/flush", post(flush_wal))
         .route(
             "/v0/admin/namespaces/:namespace/retention/advance",
             post(advance_retention),

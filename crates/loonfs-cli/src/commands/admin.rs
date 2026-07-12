@@ -13,6 +13,7 @@ pub(crate) async fn run_admin_command(
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
         AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, args).await,
+        AdminCommand::Flush(args) => run_admin_flush(kind, args).await,
         AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
         AdminCommand::Tick(args) => run_admin_tick(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
@@ -105,6 +106,33 @@ async fn run_admin_checkpoint(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::CheckpointCreated(response),
+    })
+}
+
+async fn run_admin_flush(
+    kind: CommandKind,
+    args: AdminNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let response = context
+        .target
+        .backend()
+        .flush_wal(&context.namespace)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::WalFlushed(response),
     })
 }
 

@@ -1691,8 +1691,8 @@ async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
         assert_eq!(idle.outcome, loonfs_api::MaintenanceTickOutcome::NotNeeded);
         assert!(idle.gc.is_none());
 
-        // Forcing the threshold to one segment publishes a checkpoint and
-        // runs the opted-in GC pass.
+        // Forcing the threshold to one segment flushes the WAL tail
+        // and runs the opted-in GC pass.
         let forced: loonfs_api::MaintenanceTickResponse = client
             .maintenance_tick(
                 namespace,
@@ -1704,8 +1704,8 @@ async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
             .expect("forced tick");
         assert_eq!(
             forced.outcome,
-            loonfs_api::MaintenanceTickOutcome::CheckpointPublished {
-                checkpoint_seq: ChangeSeq(1),
+            loonfs_api::MaintenanceTickOutcome::WalFlushed {
+                manifest_head_seq: ChangeSeq(1),
             }
         );
         let gc = forced.gc.expect("gc report present when opted in");
