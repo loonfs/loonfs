@@ -11,8 +11,9 @@ use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::index_build::{
-    build_grams_index_step, disable_grams_index, enable_grams_index, GramIndexBuildOutcome,
-    GramIndexBuildPolicy, GramIndexDisableOutcome, GramIndexEnableOutcome,
+    build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
+    GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexDisableOutcome, GramIndexEnableOutcome,
+    GramIndexFoldOutcome,
 };
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
@@ -6406,4 +6407,113 @@ async fn forking_a_lagging_index_restarts_backfill_instead_of_inheriting_a_gap()
     );
     let old_postings = stored_gram_postings(&store, &target, Gram(*b"one")).await;
     assert!(!old_postings.is_empty());
+}
+
+#[tokio::test]
+async fn grams_index_fold_merges_delta_segments_into_a_base() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Every file shares the word "shared" so the fold must merge one gram's
+    // batches across segments; a one-file page budget forces one delta
+    // segment per backfill step.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/bravo.txt",
+        b"bravo shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write bravo");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/charlie.txt",
+        b"charlie shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write charlie");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        max_l0_segments: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+
+    let delta_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        delta_segments.len() >= 3,
+        "expected one delta segment per backfill step, got {}",
+        delta_segments.len()
+    );
+    let shared_before = stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await;
+    assert_eq!(
+        shared_before,
+        vec![posting(2, 1), posting(3, 1), posting(4, 1)]
+    );
+
+    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("fold step");
+    match report.outcome {
+        GramIndexFoldOutcome::UnitPublished {
+            merged_segments,
+            segments_written,
+        } => {
+            assert_eq!(merged_segments, delta_segments.len());
+            assert_eq!(segments_written, 1, "small corpora fold to one base");
+        }
+        other => panic!("expected a published fold unit, got {other:?}"),
+    }
+
+    let base_segments = live_index_files(&store, &namespace_id).await;
+    assert_eq!(base_segments.len(), 1);
+    assert!(base_segments
+        .iter()
+        .all(|descriptor| descriptor.level == CHECKPOINT_BASE_RUN_LEVEL));
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        shared_before,
+        "folding must not change what the index answers"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"alp")).await,
+        vec![posting(2, 1)]
+    );
+
+    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("second fold step");
+    assert!(
+        matches!(
+            report.outcome,
+            GramIndexFoldOutcome::NotNeeded { l0_segments: 0 }
+        ),
+        "a folded family has no delta segments left"
+    );
 }

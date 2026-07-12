@@ -326,6 +326,9 @@ pub struct GcResponse {
     pub deleted_wal_segments: u64,
     /// Unreferenced metadata tables deleted.
     pub deleted_metadata_tables: u64,
+    /// Unreferenced derived-index segments deleted.
+    #[serde(default)]
+    pub deleted_index_segments: u64,
     /// Unreferenced manifests deleted.
     pub deleted_manifests: u64,
     /// Released or expired checkpoint records deleted.

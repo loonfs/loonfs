@@ -26,7 +26,7 @@ use super::flush::{
 };
 use super::load::{load_namespace_manifest_envelope_if_present, load_verified_manifest_tables};
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
-use super::runs::{CHECKPOINT_L0_RUN_LEVEL, MAX_MAINTENANCE_TABLE_IO};
+use super::runs::{CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, MAX_MAINTENANCE_TABLE_IO};
 use super::scan::string_prefix_upper_bound;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -77,6 +77,9 @@ pub struct GramIndexBuildPolicy {
     pub max_content_bytes_per_step: u64,
     /// Rows per written index segment.
     pub max_rows_per_segment: usize,
+    /// Delta-level segments that trigger a fold into a fresh base, the
+    /// same threshold shape as metadata L0 runs.
+    pub max_l0_segments: usize,
 }
 
 impl GramIndexBuildPolicy {
@@ -98,6 +101,7 @@ impl Default for GramIndexBuildPolicy {
             max_files_per_step: 256,
             max_content_bytes_per_step: 64 * 1024 * 1024,
             max_rows_per_segment: 65_536,
+            max_l0_segments: 8,
         }
     }
 }
@@ -148,6 +152,30 @@ pub enum GramIndexDisableOutcome {
     /// the segments become garbage-collection candidates.
     Disabled,
     NotEnabled,
+    Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GramIndexFoldReport {
+    pub namespace_id: NamespaceId,
+    pub outcome: GramIndexFoldOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GramIndexFoldOutcome {
+    NotEnabled,
+    UnsupportedFeatureVersion {
+        found: u32,
+    },
+    /// Fewer delta segments than the fold threshold; nothing rewritten.
+    NotNeeded {
+        l0_segments: usize,
+    },
+    /// Every gram segment was merged into a fresh base and published.
+    UnitPublished {
+        merged_segments: usize,
+        segments_written: u64,
+    },
     Superseded,
 }
 
@@ -781,6 +809,236 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         filter_inline,
         payload_checksum: sha256_digest(&built.bytes),
     })
+}
+
+/// Runs at most one gram index fold unit: when delta-level segments have
+/// accumulated past the policy threshold, every gram segment is read,
+/// posting batches are merged and re-batched, and a fresh base is
+/// published, swapping only the grams family's references. Reorganization
+/// for the index family, following the same publication discipline.
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "fold_grams_index", key_class = "manifest")
+)]
+pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: GramIndexBuildPolicy,
+) -> Result<GramIndexFoldReport> {
+    let timer = StdMonotonicTimer::default();
+    let publication_started_ms = timer.monotonic_now_ms();
+    let root = read_metadata_root_object(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?
+        .envelope
+        .state;
+    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+        })?;
+    let previous = tables.manifest();
+
+    let Some(value) = previous.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
+        return Ok(GramIndexFoldReport {
+            namespace_id: namespace_id.clone(),
+            outcome: GramIndexFoldOutcome::NotEnabled,
+        });
+    };
+    if let Err(loonfs_api::wire::index_grams::IndexGramsCodecError::UnsupportedFeatureVersion {
+        found,
+        ..
+    }) = IndexGramsFeature::from_value(value)
+    {
+        return Ok(GramIndexFoldReport {
+            namespace_id: namespace_id.clone(),
+            outcome: GramIndexFoldOutcome::UnsupportedFeatureVersion { found },
+        });
+    }
+
+    let grams_segments: Vec<IndexFileRef> = previous
+        .payload
+        .index_files
+        .iter()
+        .filter(|descriptor| descriptor.family == INDEX_FAMILY_GRAMS)
+        .cloned()
+        .collect();
+    let l0_segments = grams_segments
+        .iter()
+        .filter(|descriptor| descriptor.level == CHECKPOINT_L0_RUN_LEVEL)
+        .count();
+    if l0_segments < policy.max_l0_segments.max(1) {
+        return Ok(GramIndexFoldReport {
+            namespace_id: namespace_id.clone(),
+            outcome: GramIndexFoldOutcome::NotNeeded { l0_segments },
+        });
+    }
+
+    // Merge every gram segment — base and deltas — into one posting map.
+    // The fold rewrites the whole family, like a metadata base rebuild, so
+    // batches split across runs re-pack into full rows.
+    let mut postings = BTreeMap::<Gram, Vec<GramPosting>>::new();
+    let mut merged_segments = 0usize;
+    let mut pending = grams_segments.iter();
+    loop {
+        let chunk = pending
+            .by_ref()
+            .take(MAX_MAINTENANCE_TABLE_IO)
+            .collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break;
+        }
+        let segment_rows = try_join_all(
+            chunk
+                .into_iter()
+                .map(|descriptor| load_grams_segment_rows(store, descriptor)),
+        )
+        .await?;
+        for rows in segment_rows {
+            merged_segments += 1;
+            for row in rows {
+                let IndexRow::GramPostings { gram, .. } = &row;
+                let gram = *gram;
+                let batch = row.postings().map_err(|error| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "index segment carries an unreadable posting batch: {error}"
+                    ))
+                })?;
+                postings.entry(gram).or_default().extend(batch);
+            }
+        }
+    }
+
+    let run_seq = grams_segments
+        .iter()
+        .map(|descriptor| descriptor.run_seq)
+        .max()
+        .unwrap_or(previous.payload.head_seq);
+    let rows = gram_postings_rows(postings)?;
+    let new_segments = write_index_base_segments(
+        store,
+        namespace_id,
+        run_seq,
+        rows,
+        policy.max_rows_per_segment,
+    )
+    .await?;
+    let segments_written = new_segments.len() as u64;
+
+    let mut index_files: Vec<IndexFileRef> = previous
+        .payload
+        .index_files
+        .iter()
+        .filter(|descriptor| descriptor.family != INDEX_FAMILY_GRAMS)
+        .cloned()
+        .collect();
+    index_files.extend(new_segments);
+    let mut payload = previous.payload.clone();
+    payload.index_files = index_files;
+    let manifest = write_successor_manifest_from_payload(
+        store,
+        namespace_id,
+        previous,
+        payload,
+        &context.writer_version,
+    )
+    .await?;
+    ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
+    match publish_metadata_root(
+        store,
+        namespace_id,
+        &manifest,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await?
+    {
+        ManifestPublicationOutcome::Published(_) => Ok(GramIndexFoldReport {
+            namespace_id: namespace_id.clone(),
+            outcome: GramIndexFoldOutcome::UnitPublished {
+                merged_segments,
+                segments_written,
+            },
+        }),
+        ManifestPublicationOutcome::Superseded(_) | ManifestPublicationOutcome::RootCasRaceLost => {
+            Ok(GramIndexFoldReport {
+                namespace_id: namespace_id.clone(),
+                outcome: GramIndexFoldOutcome::Superseded,
+            })
+        }
+    }
+}
+
+/// Reads one gram segment whole and decodes every row through the
+/// descriptor's handles; each section's CRC is verified on decode.
+async fn load_grams_segment_rows<S: ObjectStore + ?Sized>(
+    store: &S,
+    descriptor: &IndexFileRef,
+) -> Result<Vec<IndexRow>> {
+    use loonfs_api::wire::sst_blocks::{decode_data_block_rows, decode_index_block};
+    let bytes = store
+        .get(&descriptor.object_key, None)
+        .await
+        .map_err(|error| CoreError::store(&descriptor.object_key, &error))?
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "manifest references missing index segment `{}`",
+                descriptor.object_key
+            ))
+        })?;
+    let section = |handle: &loonfs_api::wire::sst_blocks::BlockHandle| -> Result<&[u8]> {
+        let start = usize::try_from(handle.offset)
+            .ok()
+            .filter(|start| start + handle.stored_len as usize <= bytes.len())
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!(
+                    "index segment `{}` descriptor names bytes outside the object",
+                    descriptor.object_key
+                ))
+            })?;
+        Ok(&bytes[start..start + handle.stored_len as usize])
+    };
+    let index = decode_index_block(section(&descriptor.index_block)?, &descriptor.index_block)
+        .map_err(|error| {
+            CoreError::NamespaceCorrupt(format!(
+                "index segment `{}` carries an unreadable index block: {error}",
+                descriptor.object_key
+            ))
+        })?;
+    let mut rows = Vec::with_capacity(descriptor.row_count as usize);
+    for entry in &index {
+        let block = decode_data_block_rows::<IndexRow>(section(&entry.block)?, &entry.block)
+            .map_err(|error| {
+                CoreError::NamespaceCorrupt(format!(
+                    "index segment `{}` carries an unreadable data block: {error}",
+                    descriptor.object_key
+                ))
+            })?;
+        rows.extend(block.rows);
+    }
+    Ok(rows)
+}
+
+/// [`write_index_segments`] at the base level, for fold outputs.
+async fn write_index_base_segments<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    run_seq: ChangeSeq,
+    rows: Vec<IndexRow>,
+    max_rows_per_segment: usize,
+) -> Result<Vec<IndexFileRef>> {
+    let mut descriptors =
+        write_index_segments(store, namespace_id, run_seq, rows, max_rows_per_segment).await?;
+    for descriptor in &mut descriptors {
+        descriptor.level = CHECKPOINT_BASE_RUN_LEVEL;
+    }
+    Ok(descriptors)
 }
 
 fn decode_feature(
