@@ -13,9 +13,9 @@ use crate::namespace::catalog::{
 use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
-    NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
+    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
+    CheckpointRecordState, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
+    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState, NamespaceGcPinState,
     NamespaceGcPinStateEnvelope, NamespaceState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
     WriterBlock,
 };
@@ -62,7 +62,16 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
 
     // Fork routes through a fork-owned source checkpoint: the pin will
     // reference the checkpoint only, and reachability resolves through it.
-    let checkpoint = create_checkpoint(store, source_namespace_id, context).await?;
+    let checkpoint = create_checkpoint(
+        store,
+        source_namespace_id,
+        CheckpointOwner::Fork {
+            target_namespace_id: new_namespace_id.clone(),
+        },
+        None,
+        context,
+    )
+    .await?;
     let source_record =
         read_checkpoint_record(store, source_namespace_id, &checkpoint.checkpoint_id)
             .await?
@@ -435,7 +444,9 @@ mod tests {
     use super::{deterministic_gc_pin_id, fork_target_manifest_payload, write_source_gc_pin};
     use crate::error::CoreError;
     use bytes::Bytes;
-    use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
+    use loonfs_api::wire::control::{
+        CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
+    };
     use loonfs_api::wire::control::{
         ControlObjectKind, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
     };
@@ -553,7 +564,9 @@ mod tests {
             head_commit_id: CommitId::parse(head_commit_id).expect("commit id"),
             created_at_ms: 1_000,
             expires_at_ms: None,
-            name: None,
+            owner: CheckpointOwner::Fork {
+                target_namespace_id: NamespaceId::parse("target").expect("target namespace"),
+            },
             state: CheckpointRecordLifecycle::Active,
         }
     }

@@ -8,7 +8,7 @@ use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
 use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
-use super::create::{create_checkpoint, load_checkpoint_projection_metadata_state};
+use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
@@ -60,6 +60,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+
+/// Every lifecycle test in this file pins as one user owner; owner-specific
+/// behavior (fork owners, distinct-owner records) is exercised explicitly
+/// where it matters.
+async fn create_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> crate::error::Result<loonfs_api::CreateCheckpointResponse> {
+    super::create::create_checkpoint(
+        store,
+        namespace_id,
+        loonfs_api::wire::control::CheckpointOwner::User {
+            name: "test-pin".to_owned(),
+        },
+        None,
+        context,
+    )
+    .await
+}
 
 #[derive(Debug)]
 struct CurrentProjection {
@@ -724,7 +744,7 @@ async fn create_checkpoint_revives_a_dead_record_for_a_verified_basis() {
         &store,
         &namespace_id,
         &first.checkpoint_id,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Released,
         &context.writer_version,
     )
     .await
@@ -783,7 +803,9 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         created_at_ms: context.now_ms,
         expires_at_ms: None,
-        name: None,
+        owner: loonfs_api::wire::control::CheckpointOwner::User {
+            name: "test-pin".to_owned(),
+        },
         state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active,
     };
     let verified = crate::checkpoint::verify_checkpoint_basis(&store, &stale)

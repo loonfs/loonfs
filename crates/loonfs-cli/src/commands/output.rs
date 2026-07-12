@@ -6,7 +6,7 @@ use loonfs_api::v0::ChangesResponse;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, CreateCheckpointResponse,
     DeleteNamespaceResponse, FileRevision, FlushWalResponse, GcResponse, MaintenanceTickResponse,
-    NamespaceSummary,
+    NamespaceSummary, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 
@@ -47,6 +47,7 @@ pub(crate) enum CommandData {
     NamespaceSummary(NamespaceSummary),
     NamespaceDeleted(DeleteNamespaceResponse),
     CheckpointCreated(CreateCheckpointResponse),
+    CheckpointReleased(ReleaseCheckpointResponse),
     WalFlushed(FlushWalResponse),
     RetentionAdvanced(AdvanceRetentionResponse),
     MaintenanceTicked(MaintenanceTickResponse),

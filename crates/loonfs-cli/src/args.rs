@@ -323,7 +323,8 @@ pub(crate) struct ChangesArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminCommand {
-    Checkpoint(AdminNamespaceArgs),
+    Checkpoint(AdminCheckpointArgs),
+    CheckpointRelease(AdminCheckpointReleaseArgs),
     Flush(AdminNamespaceArgs),
     RetentionAdvance(AdminNamespaceArgs),
     Tick(AdminTickArgs),
@@ -334,6 +335,27 @@ pub(crate) enum AdminCommand {
 pub(crate) struct AdminNamespaceArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminCheckpointArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Label recorded on the checkpoint record (a label, not a key).
+    #[arg(long)]
+    pub name: String,
+    /// Optional lifetime; the record expires this many milliseconds from
+    /// now. Omitted means the pin holds until explicitly released.
+    #[arg(long)]
+    pub ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminCheckpointReleaseArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Checkpoint id to release.
+    pub checkpoint_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -417,6 +439,7 @@ pub(crate) enum CommandKind {
     FilesystemCp,
     Changes,
     AdminCheckpoint,
+    AdminCheckpointRelease,
     AdminFlush,
     AdminRetentionAdvance,
     AdminTick,
@@ -454,6 +477,7 @@ impl CommandKind {
             CommandKind::FilesystemCp => "filesystem_cp",
             CommandKind::Changes => "changes",
             CommandKind::AdminCheckpoint => "admin_checkpoint",
+            CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
             CommandKind::AdminFlush => "admin_flush",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
             CommandKind::AdminTick => "admin_tick",
@@ -502,6 +526,7 @@ impl Cli {
             Command::Changes(_) => CommandKind::Changes,
             Command::Admin { command } => match command {
                 AdminCommand::Checkpoint(_) => CommandKind::AdminCheckpoint,
+                AdminCommand::CheckpointRelease(_) => CommandKind::AdminCheckpointRelease,
                 AdminCommand::Flush(_) => CommandKind::AdminFlush,
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
                 AdminCommand::Tick(_) => CommandKind::AdminTick,

@@ -1595,6 +1595,20 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
         assert_eq!(repeated, first);
 
+        // Release is idempotent the same way: the first call flips the
+        // record, the repeat observes the settled end state.
+        let released =
+            post_checkpoint_release(&server_url, namespace, first.checkpoint_id.as_str())
+                .expect("release checkpoint");
+        assert!(released.was_active);
+        let released_again =
+            post_checkpoint_release(&server_url, namespace, first.checkpoint_id.as_str())
+                .expect("repeat release");
+        assert!(!released_again.was_active);
+        let bogus_release = post_checkpoint_release(&server_url, namespace, "not-a-checkpoint-id")
+            .expect_err("malformed checkpoint id");
+        assert_eq!(bogus_release.code, "invalid_request");
+
         let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
         assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 
@@ -1978,8 +1992,22 @@ fn post_checkpoint(
     server_url: &str,
     namespace: &str,
 ) -> Result<CreateCheckpointResponse, ApiError> {
-    post_admin_json(
+    post_admin_json_body(
         &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoint"),
+        "test-token",
+        serde_json::json!({ "name": "nightly" }),
+    )
+}
+
+fn post_checkpoint_release(
+    server_url: &str,
+    namespace: &str,
+    checkpoint_id: &str,
+) -> Result<loonfs_api::ReleaseCheckpointResponse, ApiError> {
+    post_admin_json(
+        &format!(
+            "{server_url}/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release"
+        ),
         "test-token",
     )
 }
@@ -2016,7 +2044,22 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
     auth_token: &str,
 ) -> Result<T, ApiError> {
     let request = ureq::post(url).set("authorization", &format!("Bearer {auth_token}"));
-    match request.call() {
+    decode_admin_response(request.call())
+}
+
+fn post_admin_json_body<T: serde::de::DeserializeOwned>(
+    url: &str,
+    auth_token: &str,
+    body: serde_json::Value,
+) -> Result<T, ApiError> {
+    let request = ureq::post(url).set("authorization", &format!("Bearer {auth_token}"));
+    decode_admin_response(request.send_json(body))
+}
+
+fn decode_admin_response<T: serde::de::DeserializeOwned>(
+    result: Result<ureq::Response, ureq::Error>,
+) -> Result<T, ApiError> {
+    match result {
         Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
             code: "invalid_json".to_owned(),
             feature: None,

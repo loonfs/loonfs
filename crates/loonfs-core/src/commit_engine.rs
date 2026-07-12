@@ -546,9 +546,17 @@ mod tests {
             .results
             .remove(0)
             .expect("seed publish");
-        crate::checkpoint::create_checkpoint(&store, &namespace_id, &writer)
-            .await
-            .expect("checkpoint");
+        crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            loonfs_api::wire::control::CheckpointOwner::User {
+                name: "test-pin".to_owned(),
+            },
+            None,
+            &writer,
+        )
+        .await
+        .expect("checkpoint");
 
         // Without a cache, every publish view re-fetches the table blocks
         // its validation walks need.

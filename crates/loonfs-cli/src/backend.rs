@@ -10,17 +10,18 @@ use crate::error::CliError;
 use async_trait::async_trait;
 use loonfs::{
     gc_config_from_request, gc_response_from_report, BootstrapNamespaceError, ChangesResponse,
-    CopyOptions, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader,
-    FsWriter, ListChangesOptions, MaintenanceTickOptions, MaintenanceTickResult, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind,
+    CopyOptions, CoreError, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
+    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, ListChangesOptions,
+    MaintenanceTickOptions, MaintenanceTickResult, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind,
 };
 use loonfs_api::{
-    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
-    CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit, FlushWalResponse, GcRequest,
-    GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
-    MoveBehavior, MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    PaginationPolicy, PutBehavior, RevisionNo,
+    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit,
+    FlushWalResponse, GcRequest, GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -283,10 +284,26 @@ impl Backend for EmbeddedBackend {
     async fn create_checkpoint(
         &self,
         namespace_id: &str,
+        request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError> {
         let parsed = parse_namespace_id(namespace_id)?;
         self.admin
-            .create_checkpoint(&parsed)
+            .create_checkpoint(&parsed, CreateCheckpointOptions::from_request(request))
+            .await
+            .map_err(map_runtime_error)
+    }
+
+    async fn release_checkpoint(
+        &self,
+        namespace_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<ReleaseCheckpointResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        let checkpoint_id = CheckpointId::parse(checkpoint_id).map_err(|error| {
+            BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+        })?;
+        self.admin
+            .release_checkpoint(&parsed, &checkpoint_id)
             .await
             .map_err(map_runtime_error)
     }
@@ -548,7 +565,7 @@ mod tests {
     use super::{map_bootstrap_error, map_core_error, Backend, EmbeddedTarget};
     use crate::config::StoreConfig;
     use loonfs::{BootstrapNamespaceError, CoreError, ErrorCode};
-    use loonfs_api::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+    use loonfs_api::{ChangeSeq, CreateCheckpointRequest, InodeId, NamespaceId, RevisionNo};
     use loonfs_client::NamespacePath;
     use tempfile::tempdir;
 
@@ -633,7 +650,13 @@ mod tests {
 
         let checkpoint = target
             .backend
-            .create_checkpoint("missing")
+            .create_checkpoint(
+                "missing",
+                CreateCheckpointRequest {
+                    name: "nightly".to_owned(),
+                    ttl_ms: None,
+                },
+            )
             .await
             .expect_err("checkpoint on missing namespace");
         assert_eq!(checkpoint.code, ErrorCode::NamespaceNotFound.as_str());

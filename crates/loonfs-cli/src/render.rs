@@ -161,13 +161,30 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             "deleted {} (head_seq {})",
             response.namespace_id, response.head_seq.0
         ),
-        CommandData::CheckpointCreated(response) => format!(
-            "checkpointed {} @ seq {} (checkpoint {}, manifest {})",
-            response.namespace_id,
-            response.checkpoint_seq.0,
-            response.checkpoint_id,
-            response.manifest_id
-        ),
+        CommandData::CheckpointCreated(response) => {
+            let expiry = match response.expires_at_ms {
+                Some(expires_at_ms) => format!(", expires at {expires_at_ms}"),
+                None => String::new(),
+            };
+            format!(
+                "checkpointed {} @ seq {} (checkpoint {}, manifest {}{expiry})",
+                response.namespace_id,
+                response.checkpoint_seq.0,
+                response.checkpoint_id,
+                response.manifest_id
+            )
+        }
+        CommandData::CheckpointReleased(response) => {
+            let state = if response.was_active {
+                "released"
+            } else {
+                "already released or gone"
+            };
+            format!(
+                "checkpoint {} in {}: {state}",
+                response.checkpoint_id, response.namespace_id
+            )
+        }
         CommandData::WalFlushed(response) => {
             let outcome = match response.outcome {
                 FlushWalOutcome::AlreadyCurrent => "already current",

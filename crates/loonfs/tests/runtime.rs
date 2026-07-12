@@ -8,13 +8,13 @@ use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder, InodeId,
-    InodeKind, ListChangesOptions, MaintenanceTickOptions, MaintenanceTickOutcome,
-    MaintenanceTickResult, ManifestId, MoveOptions, MutationResult, NamespaceId,
-    NamespaceStatusResponse, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind, UploadContentResponse,
-    UploadId,
+    CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
+    FsWriter, FsWriterBuilder, InodeId, InodeKind, ListChangesOptions, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
+    NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy, PutBehavior,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind,
+    UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_head};
@@ -183,7 +183,15 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<CreateCheckpointResponse> {
-        self.admin.create_checkpoint(namespace_id).await
+        self.admin
+            .create_checkpoint(
+                namespace_id,
+                CreateCheckpointOptions {
+                    name: "test-pin".to_owned(),
+                    ttl_ms: None,
+                },
+            )
+            .await
     }
 
     async fn begin_direct_put_upload_target(
@@ -539,7 +547,13 @@ impl FsTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<CreateCheckpointResponse> {
-        block_on(self.admin.create_checkpoint(namespace_id))
+        block_on(self.admin.create_checkpoint(
+            namespace_id,
+            CreateCheckpointOptions {
+                name: "test-pin".to_owned(),
+                ttl_ms: None,
+            },
+        ))
     }
 
     fn advance_retention_floor_blocking(

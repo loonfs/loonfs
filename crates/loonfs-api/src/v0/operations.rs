@@ -224,6 +224,19 @@ pub struct RestoreFileRevisionRequest {
     pub base_revision_no: RevisionNo,
 }
 
+/// Request to create a durable checkpoint pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateCheckpointRequest {
+    /// Label recorded on the checkpoint record. A label, not a key: several
+    /// records may carry the same name over different bases.
+    pub name: String,
+    /// Optional lifetime; the server computes the record's expiry from its
+    /// own clock. Absent means the pin holds until explicitly released.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+}
+
 /// Result of creating or reusing a checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -238,6 +251,23 @@ pub struct CreateCheckpointResponse {
     pub manifest_id: ManifestId,
     /// Manifest `metadata/root.json` references after the operation.
     pub current_manifest_id: Option<ManifestId>,
+    /// Expiry recorded on the record, when the request carried a `ttl_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Result of releasing a checkpoint pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReleaseCheckpointResponse {
+    /// Namespace the checkpoint belonged to.
+    pub namespace_id: NamespaceId,
+    /// Checkpoint the release targeted.
+    pub checkpoint_id: CheckpointId,
+    /// True when this call flipped an active record to released; false when
+    /// the record was already released or no longer exists. Release is
+    /// idempotent — the end state is the same either way.
+    pub was_active: bool,
 }
 
 /// How one WAL flush satisfied its goal.

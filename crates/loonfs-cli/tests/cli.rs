@@ -964,6 +964,8 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
             "admin/v0",
             &[
                 &["admin", "checkpoint"],
+                &["admin", "checkpoint-release"],
+                &["admin", "flush"],
                 &["admin", "retention-advance"],
                 &["admin", "tick"],
                 &["admin", "gc"],
@@ -1089,16 +1091,57 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(resumed_data["changes"].as_array().unwrap().len(), 1);
         assert_eq!(resumed_data["changes"][0]["seq"], 2);
 
-        let checkpoint = harness.run(&["--json", "admin", "checkpoint", "--profile", profile]);
+        let checkpoint = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint",
+            "--name",
+            "nightly",
+            "--profile",
+            profile,
+        ]);
         assert_success(&checkpoint);
         let checkpoint_data = json_data(&checkpoint);
         assert_eq!(checkpoint_data["kind"], "checkpoint_created");
         assert_eq!(checkpoint_data["namespace_id"], "demo");
         assert_eq!(checkpoint_data["checkpoint_seq"], 2);
-        assert!(checkpoint_data["checkpoint_id"]
+        let checkpoint_id = checkpoint_data["checkpoint_id"]
             .as_str()
             .unwrap()
-            .starts_with("chk_"));
+            .to_owned();
+        assert!(checkpoint_id.starts_with("chk_"));
+
+        let flush = harness.run(&["--json", "admin", "flush", "--profile", profile]);
+        assert_success(&flush);
+        let flush_data = json_data(&flush);
+        assert_eq!(flush_data["kind"], "wal_flushed");
+        assert_eq!(flush_data["namespace_id"], "demo");
+        assert_eq!(flush_data["outcome"], "already_current");
+
+        let release = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint-release",
+            &checkpoint_id,
+            "--profile",
+            profile,
+        ]);
+        assert_success(&release);
+        let release_data = json_data(&release);
+        assert_eq!(release_data["kind"], "checkpoint_released");
+        assert_eq!(release_data["checkpoint_id"], checkpoint_id.as_str());
+        assert_eq!(release_data["was_active"], true);
+
+        let release_again = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint-release",
+            &checkpoint_id,
+            "--profile",
+            profile,
+        ]);
+        assert_success(&release_again);
+        assert_eq!(json_data(&release_again)["was_active"], false);
 
         let retention =
             harness.run(&["--json", "admin", "retention-advance", "--profile", profile]);
@@ -1134,6 +1177,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--json",
             "admin",
             "checkpoint",
+            "--name",
+            "nightly",
             "--profile",
             profile,
             "--namespace",

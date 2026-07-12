@@ -20,9 +20,10 @@ use crate::{Client, ClientError, MutationOptions, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
-    CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode, FlushWalResponse, GcRequest,
-    GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
-    MutationResult, NamespaceStatusResponse, NamespaceSummary, RevisionNo,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode,
+    FlushWalResponse, GcRequest, GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -97,9 +98,9 @@ impl From<ClientError> for BackendError {
                 Self::invalid_config(format!("invalid `{field}`: {reason}"))
             }
             ClientError::InvalidNamespacePath(message) => Self::invalid_input(message),
-            ClientError::InvalidCommitId(message) => {
+            ClientError::InvalidCommitId(message) | ClientError::InvalidCheckpointId(message) => {
                 // The registry code core and server report for a malformed
-                // commit id, so pre-flight client validation matches backend
+                // id, so pre-flight client validation matches backend
                 // behavior.
                 Self::new(ErrorCode::InvalidRequest.as_str(), message)
             }
@@ -193,11 +194,19 @@ pub trait Backend {
 
     // --- maintenance/admin plane (`admin/v0`) ---
 
-    /// Creates or reuses a checkpoint pinning the namespace's current view.
+    /// Creates or reuses a named, user-owned checkpoint pinning the
+    /// namespace's current view.
     async fn create_checkpoint(
         &self,
         namespace_id: &str,
+        request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError>;
+    /// Releases a user-owned checkpoint pin by id. Idempotent.
+    async fn release_checkpoint(
+        &self,
+        namespace_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<ReleaseCheckpointResponse, BackendError>;
     /// Flushes the WAL tail and advances the metadata root, creating no
     /// checkpoint record.
     async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError>;
@@ -408,9 +417,21 @@ impl Backend for RemoteBackend {
     async fn create_checkpoint(
         &self,
         namespace_id: &str,
+        request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError> {
         let namespace_id = namespace_id.to_owned();
-        self.wire(move |client| client.create_checkpoint(&namespace_id))
+        self.wire(move |client| client.create_checkpoint(&namespace_id, &request))
+            .await
+    }
+
+    async fn release_checkpoint(
+        &self,
+        namespace_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<ReleaseCheckpointResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        let checkpoint_id = checkpoint_id.to_owned();
+        self.wire(move |client| client.release_checkpoint(&namespace_id, &checkpoint_id))
             .await
     }
 

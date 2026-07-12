@@ -29,6 +29,7 @@ mod flush;
 mod load;
 mod publish;
 pub(crate) mod record;
+mod release;
 mod reorganize;
 mod retention;
 mod row;
@@ -56,6 +57,7 @@ pub(crate) use self::load::{
 };
 pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::record::{read_checkpoint_record, verify_checkpoint_basis};
+pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
 pub(crate) use self::scan::{string_prefix_upper_bound, VerifiedMetadataTables};

@@ -19,12 +19,12 @@ use loonfs_api::{
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
-    CommitId, ContentRef, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
+    CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
     ForkNamespaceRequest, GcRequest, GcResponse, InodeId, ListFileRevisionsResponse,
     ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, MutationResult,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
     RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
@@ -97,6 +97,8 @@ pub enum ClientError {
     InvalidNamespacePath(String),
     #[error("invalid commit_id `{0}`")]
     InvalidCommitId(String),
+    #[error("invalid checkpoint_id `{0}`")]
+    InvalidCheckpointId(String),
     #[error("http error: {0}")]
     Http(String),
     #[error("server returned {status} {code}: {message}")]
@@ -579,19 +581,37 @@ impl Client {
         self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
     }
 
-    /// Creates or reuses a checkpoint pinning the namespace's current view
-    /// (admin plane). This is a maintenance operation, not a file mutation;
-    /// the request carries no body.
+    /// Creates or reuses a named, user-owned checkpoint pinning the
+    /// namespace's current view (admin plane). This is a maintenance
+    /// operation, not a file mutation. The record is a garbage-collection
+    /// root until released or expired.
     pub fn create_checkpoint(
         &self,
         namespace: &str,
+        request: &CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!(
             "{}/v0/admin/namespaces/{namespace}/checkpoint",
             self.base_url
         );
-        self.request_json::<(), CreateCheckpointResponse>(self.agent.post(&url), None)
+        self.request_json(self.agent.post(&url), Some(request))
+    }
+
+    /// Releases a user-owned checkpoint pin by id (admin plane). Idempotent:
+    /// releasing an already-released or reaped record succeeds.
+    pub fn release_checkpoint(
+        &self,
+        namespace: &str,
+        checkpoint_id: &str,
+    ) -> Result<ReleaseCheckpointResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let checkpoint_id = checkpoint_id_url_segment(checkpoint_id)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
+            self.base_url
+        );
+        self.request_json::<(), ReleaseCheckpointResponse>(self.agent.post(&url), None)
     }
 
     /// Flushes the WAL tail and advances the metadata root to a manifest
@@ -959,6 +979,14 @@ fn namespace_url_segment(namespace: &str) -> Result<&str, ClientError> {
         .map_err(invalid_namespace_id_error)
 }
 
+/// Validated checkpoint ids are URL-safe by construction, like the other
+/// parsed id segments interpolated into paths.
+fn checkpoint_id_url_segment(checkpoint_id: &str) -> Result<&str, ClientError> {
+    loonfs_api::CheckpointId::parse(checkpoint_id)
+        .map(|_| checkpoint_id)
+        .map_err(|error| ClientError::InvalidCheckpointId(error.to_string()))
+}
+
 fn invalid_namespace_id_error(error: loonfs_api::NamespaceIdValidationError) -> ClientError {
     ClientError::InvalidNamespacePath(error.to_string())
 }
@@ -1037,7 +1065,8 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, Client, ClientConfig, ClientError, ErrorCode, ErrorKind, NamespacePath,
+        BeginUploadRequest, Client, ClientConfig, ClientError, CreateCheckpointRequest, ErrorCode,
+        ErrorKind, NamespacePath,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -1172,7 +1201,19 @@ auth_token = "   "
             client
                 .begin_upload("bad/name", &BeginUploadRequest::default())
                 .map(|_| ()),
-            client.create_checkpoint("bad/name").map(|_| ()),
+            client
+                .create_checkpoint(
+                    "bad/name",
+                    &CreateCheckpointRequest {
+                        name: "nightly".to_owned(),
+                        ttl_ms: None,
+                    },
+                )
+                .map(|_| ()),
+            client
+                .release_checkpoint("bad/name", "chk_00000000000000000000000000000001")
+                .map(|_| ()),
+            client.flush_wal("bad/name").map(|_| ()),
             client.advance_retention("bad/name").map(|_| ()),
         ] {
             assert!(matches!(result, Err(ClientError::InvalidNamespacePath(_))));

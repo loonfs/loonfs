@@ -14,14 +14,15 @@ use crate::time::current_time_ms;
 use crate::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
-    ChangesResponse, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions, CoreError,
-    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, ErrorCode, FlushWalOutcome,
-    FlushWalResponse, InodeId, ListChangesOptions, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult,
-    MoveOptions, MutationResult, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ObjectStore, PutFileOptions, RestoreRevisionOptions, RevisionNo, RuntimeCacheStats,
+    ChangesResponse, CheckpointId, CommitId, CommitOp, CommitPrecondition, CommitRequest,
+    CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
+    CoreError, CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, InodeId, ListChangesOptions,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, ObjectStore, PutFileOptions,
+    ReleaseCheckpointResponse, RestoreRevisionOptions, RevisionNo, RuntimeCacheStats,
     UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
@@ -1268,12 +1269,27 @@ impl FsCore {
     pub(crate) async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
+        options: CreateCheckpointOptions,
     ) -> Result<CreateCheckpointResponse> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         let result = self
             .namespace_engine(namespace_id)
-            .create_checkpoint()
+            .create_checkpoint(options.name, options.ttl_ms)
+            .await
+            .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    /// Releases a user-owned checkpoint by id. Idempotent.
+    pub(crate) async fn release_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<ReleaseCheckpointResponse> {
+        let result = self
+            .namespace_engine(namespace_id)
+            .release_checkpoint(checkpoint_id)
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)

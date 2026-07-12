@@ -135,16 +135,31 @@ pub struct ContentStoreDescriptorState {
 
 /// Lifecycle of a durable checkpoint record.
 ///
-/// Only `active`, non-expired checkpoints are long-term GC roots; `dead`
-/// records are collectable tombstones of failed or released checkpoints.
-/// Any record younger than the GC grace window is a root regardless of
-/// state.
+/// Only `active`, non-expired checkpoints are long-term GC roots; `released`
+/// records are collectable tombstones — failed verification, an explicit
+/// owner release, or a fork owner proven gone all end here. Any record
+/// younger than the GC grace window is a root regardless of state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointRecordLifecycle {
     #[default]
     Active,
-    Dead,
+    Released,
+}
+
+/// Durable owner of a checkpoint record: the party whose lifecycle decides
+/// when the pin is released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointOwner {
+    /// An operator-created pin, released explicitly by checkpoint id or by
+    /// its declared expiry. The name is a label, not a key: several records
+    /// may carry the same name over different bases.
+    User { name: String },
+    /// A fork target keeping its source basis alive. Released only once the
+    /// target namespace is terminally deleted or its abandoned bootstrap is
+    /// proven dead.
+    Fork { target_namespace_id: NamespaceId },
 }
 
 /// Durable stable-view pin to a metadata manifest.
@@ -152,7 +167,7 @@ pub enum CheckpointRecordLifecycle {
 /// First-class file under `checkpoints/`; never part of a manifest and never
 /// an input to latest visibility. Created write-then-verify: the record is
 /// written `active`, then the basis manifest is re-verified against the
-/// floor; a failed verification flips the record to `dead`.
+/// floor; a failed verification flips the record to `released`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordState {
     pub checkpoint_id: CheckpointId,
@@ -164,10 +179,10 @@ pub struct CheckpointRecordState {
     pub manifest_payload_checksum: String,
     pub head_commit_id: CommitId,
     pub created_at_ms: u64,
+    /// Expiry for user-owned records; fork-owned records never expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub owner: CheckpointOwner,
     pub state: CheckpointRecordLifecycle,
 }
 

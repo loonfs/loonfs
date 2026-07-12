@@ -8,8 +8,9 @@ use crate::{
     MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
 };
 use loonfs_api::v0::{
-    GcRequest, GcResponse, MaintenanceTickOutcome as WireMaintenanceTickOutcome,
-    MaintenanceTickRequest, MaintenanceTickResponse,
+    CreateCheckpointRequest, GcRequest, GcResponse,
+    MaintenanceTickOutcome as WireMaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse,
 };
 
 /// Options for one maintenance tick.
@@ -133,6 +134,29 @@ impl MaintenanceTickResult {
                     WireMaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq }
                 }
             },
+        }
+    }
+}
+
+/// Options for creating a durable checkpoint pin.
+///
+/// The name is a label recorded on the record, not a key. No `Default`:
+/// a checkpoint always names its owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCheckpointOptions {
+    /// Label recorded on the checkpoint record.
+    pub name: String,
+    /// Optional lifetime; the record's expiry is computed from the runtime's
+    /// clock. Absent means the pin holds until explicitly released.
+    pub ttl_ms: Option<u64>,
+}
+
+impl CreateCheckpointOptions {
+    /// Resolves the wire-level create request onto runtime options.
+    pub fn from_request(request: CreateCheckpointRequest) -> Self {
+        Self {
+            name: request.name,
+            ttl_ms: request.ttl_ms,
         }
     }
 }

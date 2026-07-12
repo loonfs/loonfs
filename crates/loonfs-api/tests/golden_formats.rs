@@ -19,11 +19,11 @@
 //!   re-encoding.
 
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
-    CompletedUpload, ContentStoreDescriptorState, ControlCodecError, ControlObjectEnvelope,
-    ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState, NamespaceGcPinState,
-    NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState, WalSegmentPointer,
-    WriterBlock,
+    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
+    CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlCodecError,
+    ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState,
+    NamespaceGcPinState, NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
@@ -443,7 +443,31 @@ fn control_objects_match_golden_bytes() {
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             expires_at_ms: None,
-            name: None,
+            owner: CheckpointOwner::User {
+                name: "nightly".to_owned(),
+            },
+            state: CheckpointRecordLifecycle::Active,
+        },
+    );
+    // The fork owner is a durable encoding of its own: the tagged `owner`
+    // changes the document.
+    check_control_golden(
+        "control_checkpoint_record_fork.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        CheckpointRecordState {
+            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000004"),
+            namespace_id: namespace_id(),
+            manifest_id: ManifestId(4),
+            manifest_object_id: manifest_object_id(4, "0123456789abcdef"),
+            manifest_head_seq: ChangeSeq(4),
+            manifest_payload_checksum:
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            head_commit_id: commit_id(),
+            created_at_ms: 3_000,
+            expires_at_ms: None,
+            owner: CheckpointOwner::Fork {
+                target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
+            },
             state: CheckpointRecordLifecycle::Active,
         },
     );
@@ -475,10 +499,10 @@ fn control_objects_match_golden_bytes() {
             created_at_ms: 1_000,
         },
     );
-    // The dead lifecycle and the direct-put session shape are durable
+    // The released lifecycle and the direct-put session shape are durable
     // encodings of their own: `state` and `mode` change the document.
     check_control_golden(
-        "control_checkpoint_record_dead.v1.json",
+        "control_checkpoint_record_released.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
@@ -491,8 +515,10 @@ fn control_objects_match_golden_bytes() {
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
             expires_at_ms: Some(9_000),
-            name: Some("nightly".to_owned()),
-            state: CheckpointRecordLifecycle::Dead,
+            owner: CheckpointOwner::User {
+                name: "nightly".to_owned(),
+            },
+            state: CheckpointRecordLifecycle::Released,
         },
     );
     check_control_golden(
