@@ -278,7 +278,10 @@ async fn maintenance_never_touches_the_wal_head() {
         .expect("read head")
         .expect("head exists");
 
-    engine.create_checkpoint().await.expect("checkpoint");
+    engine
+        .create_checkpoint("test-pin".to_owned(), None)
+        .await
+        .expect("checkpoint");
     engine
         .advance_retention_floor()
         .await

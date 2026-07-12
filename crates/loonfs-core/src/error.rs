@@ -94,6 +94,8 @@ pub enum CoreError {
     ShuttingDown,
     #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
+    #[error("invalid checkpoint request: {0}")]
+    InvalidCheckpointRequest(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -296,6 +298,7 @@ impl CoreError {
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
+            CoreError::InvalidCheckpointRequest(_) => ErrorCode::InvalidRequest,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,

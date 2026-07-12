@@ -3,15 +3,16 @@
 
 use super::error::ApiResponseError;
 use super::{authorize, parse_namespace_id, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
-use axum::extract::{Query, State};
-use axum::http::HeaderMap;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs::{ChangeSeq, CreateNamespaceOptions, DeleteNamespaceOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
-    AdvanceRetentionResponse, CreateCheckpointResponse, CreateNamespaceRequest, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, MaintenanceTickRequest, MaintenanceTickResponse, ReleaseCheckpointResponse,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
@@ -204,11 +205,12 @@ pub(super) async fn fork_namespace(
         path = "/v0/admin/namespaces/{namespace}/checkpoint",
         tag = "admin",
         summary = "Create checkpoint",
-        description = "Creates or reuses a durable checkpoint record pinning the current namespace view. The record is a garbage-collection root until it is retired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
+        description = "Creates or reuses a named, user-owned checkpoint record pinning the current namespace view. The record is a garbage-collection root until released or expired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
         params(("namespace" = String, Path, description = "Namespace id")),
+        request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
             (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 400, description = "Invalid namespace id, name, or lifetime", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
@@ -220,15 +222,71 @@ pub(super) async fn create_checkpoint(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
+    AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let response = state
         .admin
-        .create_checkpoint(&namespace_id)
+        .create_checkpoint(
+            &namespace_id,
+            loonfs::CreateCheckpointOptions::from_request(request),
+        )
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
+        tag = "admin",
+        summary = "Release checkpoint",
+        description = "Releases a user-owned checkpoint pin by id. Idempotent: releasing an already-released or reaped record succeeds. The record is reaped by a later garbage-collection pass; its pinned data becomes collectable only on the pass after that.",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("checkpoint_id" = String, Path, description = "Checkpoint id")
+        ),
+        responses(
+            (status = 200, description = "Checkpoint released (or already gone)", body = ReleaseCheckpointResponse),
+            (status = 400, description = "Invalid id, or the checkpoint is fork-owned", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn release_checkpoint(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    AxumPath(CheckpointPathParams { checkpoint_id }): AxumPath<CheckpointPathParams>,
+    headers: HeaderMap,
+) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let checkpoint_id = parse_checkpoint_id(&checkpoint_id)?;
+    let response = state
+        .admin
+        .release_checkpoint(&namespace_id, &checkpoint_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct CheckpointPathParams {
+    checkpoint_id: String,
+}
+
+fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
+    CheckpointId::parse(value).map_err(|error| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &format!("invalid checkpoint_id `{value}`: {error}"),
+        )
+    })
 }
 
 #[cfg_attr(

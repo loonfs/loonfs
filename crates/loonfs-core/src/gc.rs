@@ -573,8 +573,28 @@ fn load_error(error: ControlObjectLoadError) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::advance_retention_floor;
     use crate::checkpoint::record::set_checkpoint_record_state;
-    use crate::checkpoint::{advance_retention_floor, create_checkpoint};
+    use loonfs_api::wire::control::CheckpointOwner;
+
+    /// GC lifecycle tests pin as one user owner; owner-specific release
+    /// rules are exercised in the fork and release suites.
+    async fn create_checkpoint<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+    ) -> Result<loonfs_api::CreateCheckpointResponse, CoreError> {
+        crate::checkpoint::create_checkpoint(
+            store,
+            namespace_id,
+            CheckpointOwner::User {
+                name: "test-pin".to_owned(),
+            },
+            None,
+            context,
+        )
+        .await
+    }
     use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::delete::delete_namespace;
@@ -848,7 +868,7 @@ mod tests {
             &store,
             &namespace_id,
             &first.checkpoint_id,
-            loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Released,
             &setup.writer_version,
         )
         .await
@@ -999,6 +1019,281 @@ mod tests {
                 .await
                 .expect("file readable after sweep");
         }
+    }
+
+    /// The user release lifecycle end to end: release flips the record,
+    /// the record reaps first, and the basis follows one pass later.
+    #[tokio::test]
+    async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        let pinned = create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("pin checkpoint");
+        write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("advance past the pinned basis");
+
+        let first_release = crate::checkpoint::release_checkpoint(
+            &store,
+            &namespace_id,
+            &pinned.checkpoint_id,
+            &setup,
+        )
+        .await
+        .expect("release");
+        assert!(first_release.was_active);
+        let repeat_release = crate::checkpoint::release_checkpoint(
+            &store,
+            &namespace_id,
+            &pinned.checkpoint_id,
+            &setup,
+        )
+        .await
+        .expect("repeat release");
+        assert!(!repeat_release.was_active);
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("first gc pass");
+        assert_eq!(first_pass.deleted_checkpoint_records, 1);
+
+        let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("second gc pass");
+        assert!(second_pass.deleted_manifests >= 1);
+        // Releasing an already-reaped record stays idempotent success.
+        let after_reap = crate::checkpoint::release_checkpoint(
+            &store,
+            &namespace_id,
+            &pinned.checkpoint_id,
+            &setup,
+        )
+        .await
+        .expect("release after reap");
+        assert!(!after_reap.was_active);
+        stat_root(&store, &namespace_id).await;
+    }
+
+    /// An expiring pin protects until its expiry, then follows the same
+    /// records-first cascade with no explicit release.
+    #[tokio::test]
+    async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        // Expiry compares the caller's `now_ms` against the record's stamp;
+        // object ages come from provider timestamps. Pin one record already
+        // expired at any provider-derived "now" and one that never expires.
+        let expiring = crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            CheckpointOwner::User {
+                name: "short-lived".to_owned(),
+            },
+            Some(setup.now_ms + GRACE_MS),
+            &setup,
+        )
+        .await
+        .expect("expiring checkpoint");
+        let lasting = crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            CheckpointOwner::User {
+                name: "long-lived".to_owned(),
+            },
+            Some(u64::MAX),
+            &setup,
+        )
+        .await
+        .expect("lasting checkpoint");
+        write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("advance past the expiring basis");
+
+        // Past expiry: record first, basis on the following pass.
+        let expired = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        assert!(
+            expired.now_ms > 1_000 + GRACE_MS,
+            "provider clock sits past the expiry"
+        );
+        let first_pass = gc_namespace(&store, &namespace_id, &config(), &expired)
+            .await
+            .expect("post-expiry pass");
+        assert_eq!(first_pass.deleted_checkpoint_records, 1);
+        let second_pass = gc_namespace(&store, &namespace_id, &config(), &expired)
+            .await
+            .expect("second post-expiry pass");
+        let _ = second_pass;
+        assert!(crate::checkpoint::read_checkpoint_record(
+            &store,
+            &namespace_id,
+            &expiring.checkpoint_id
+        )
+        .await
+        .expect("read record")
+        .is_none());
+        // The unexpired pin — same basis, different owner — still roots it.
+        let survivor = crate::checkpoint::read_checkpoint_record(
+            &store,
+            &namespace_id,
+            &lasting.checkpoint_id,
+        )
+        .await
+        .expect("read lasting record")
+        .expect("lasting record survives")
+        .state;
+        assert!(crate::checkpoint::load_namespace_manifest_envelope(
+            &store,
+            &namespace_id,
+            &survivor.manifest_object_id,
+        )
+        .await
+        .is_ok());
+        stat_root(&store, &namespace_id).await;
+    }
+
+    /// Two owners of one basis hold two records: releasing one leaves the
+    /// other rooting the shared basis.
+    #[tokio::test]
+    async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        let first = crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            CheckpointOwner::User {
+                name: "keeper".to_owned(),
+            },
+            None,
+            &setup,
+        )
+        .await
+        .expect("first owner");
+        let second = crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            CheckpointOwner::User {
+                name: "releaser".to_owned(),
+            },
+            None,
+            &setup,
+        )
+        .await
+        .expect("second owner");
+        assert_ne!(first.checkpoint_id, second.checkpoint_id);
+        assert_eq!(first.manifest_id, second.manifest_id);
+        write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("advance past the shared basis");
+
+        crate::checkpoint::release_checkpoint(&store, &namespace_id, &second.checkpoint_id, &setup)
+            .await
+            .expect("release one owner");
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("first gc pass");
+        assert_eq!(first_pass.deleted_checkpoint_records, 1);
+        let second_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("second gc pass");
+        let _ = second_pass;
+        assert!(
+            crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+                .await
+                .expect("read keeper record")
+                .is_some(),
+            "the surviving owner's record stays"
+        );
+        let keeper =
+            crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+                .await
+                .expect("read keeper record")
+                .expect("keeper record exists")
+                .state;
+        assert!(
+            crate::checkpoint::load_namespace_manifest_envelope(
+                &store,
+                &namespace_id,
+                &keeper.manifest_object_id,
+            )
+            .await
+            .is_ok(),
+            "shared basis survives while any owner remains"
+        );
+    }
+
+    /// Fork-owned records refuse the user release operation: their release
+    /// is decided by garbage collection from the fork target's fate.
+    #[tokio::test]
+    async fn fork_owned_checkpoints_reject_user_release() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let source = NamespaceId::parse("source").expect("namespace id");
+        let clone = NamespaceId::parse("clone").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &source, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+        fork_namespace(&store, &source, &clone, &setup)
+            .await
+            .expect("fork");
+
+        let pin_keys = store
+            .list_prefix(&pin_prefix(source.as_str()))
+            .await
+            .expect("list pins");
+        let pin_bytes = store
+            .get(&pin_keys[0], None)
+            .await
+            .expect("get pin")
+            .expect("pin exists");
+        let pin = decode_control_object::<NamespaceGcPinState>(
+            &pin_bytes,
+            ControlObjectKind::NamespaceGcPinState,
+        )
+        .expect("decode pin")
+        .state;
+
+        let error = crate::checkpoint::release_checkpoint(
+            &store,
+            &source,
+            &pin.source_checkpoint_id,
+            &setup,
+        )
+        .await
+        .expect_err("fork-owned release must fail");
+        assert!(
+            matches!(
+                &error,
+                CoreError::InvalidCheckpointRequest(message)
+                    if message.contains("owned by fork target")
+            ),
+            "expected invalid checkpoint request, got {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -1167,7 +1462,7 @@ mod tests {
             &store,
             &source,
             &pin.source_checkpoint_id,
-            loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Released,
             &setup.writer_version,
         )
         .await
@@ -1359,7 +1654,7 @@ mod tests {
             &store,
             &namespace_id,
             &first.checkpoint_id,
-            loonfs_api::wire::control::CheckpointRecordLifecycle::Dead,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Released,
             &setup.writer_version,
         )
         .await

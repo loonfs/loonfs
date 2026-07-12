@@ -60,7 +60,7 @@ The required durable object families and standard key patterns are:
 | **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
 | **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
-| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest; written active, verified after the write, flipped dead on failure or release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
+| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); written active, verified after the write, flipped released on verification failure or owner release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Pins** | Immutable | Explicit reachability roots referencing a source checkpoint only (reachability resolves pin -> checkpoint -> manifest -> tables); stored under the **source** namespace, whose GC is the consumer. | `namespaces/{source_namespace_id}/pins/{pin_id}.json` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
@@ -603,15 +603,30 @@ observes at least the root's seq; this race is not corruption.
 A checkpoint is a durable pin to a namespace manifest version, stored as a
 first-class record under `checkpoints/` — never inside a manifest, and never
 an input to latest visibility. A record carries its basis facts (manifest id,
-seq, payload checksum, head commit id), an optional name and expiry, and a
-lifecycle `state` of `active` or `dead`. Only active, non-expired records are
-long-term GC roots; dead records are collectable tombstones. Creation is
-write-then-verify: write the record active, then verify — under the
-self-enforced verify budget — that the floor has not passed the basis and the
-basis manifest still loads; on failure flip the record to dead and retry
-against a newer basis. Combined with the GC grace window and delete-time
-re-verification, this closes the create-vs-collect race: within the grace
-window any record is protected unconditionally by age.
+seq, payload checksum, head commit id), a required tagged `owner` — a `user`
+owner with a name label, or a `fork` owner naming the target namespace the
+pin protects — an optional expiry (user-owned records only; fork pins never
+expire), and a lifecycle `state` of `active` or `released`. Only active,
+non-expired records are long-term GC roots; released records are collectable
+tombstones, whether verification failed or the owner let go. A user-owned
+record persists until released or expired; a fork-owned record persists while
+its fork target may still read the basis. Creation is write-then-verify:
+write the record active, then verify — under the self-enforced verify
+budget — that the floor has not passed the basis and the basis manifest still
+loads; on failure flip the record to released and retry against a newer
+basis. Combined with the GC grace window and delete-time re-verification,
+this closes the create-vs-collect race: within the grace window any record is
+protected unconditionally by age.
+
+Record ids derive deterministically from the basis identity plus the owner
+identity: repeating creation for the same pinned manifest and owner returns
+the existing record (reviving a released one after re-verification) without
+listing, while distinct owners of one basis hold distinct records with
+independent lifecycles. Explicit release flips a user-owned record
+`active -> released` by compare-and-swap and is idempotent; the record itself
+is reaped by a later garbage-collection pass, and its basis becomes
+collectable only on the pass after that (records-last, "Garbage
+collection").
 
 A namespace manifest is the durable object for one namespace file-set version.
 It may reference one or more immutable metadata runs; standalone checkpoint
@@ -1034,13 +1049,14 @@ head watchers observe only commits. The flush is the latest-state
 maintenance operation and creates no checkpoint record; a superseded manifest
 becomes a garbage-collection candidate once nothing pins it.
 
-Creating a checkpoint pins one such manifest version deliberately. It first
-flushes the WAL tail as above, then writes `checkpoints/{id}.json` (id derived
-deterministically from the basis identity, so repeating creation for the same
-pinned manifest returns the existing record without listing) and verifies the
-basis after the write, flipping the record to dead on failure. A live
-manifest does not need to be checkpoint-pinned; checkpoint records explain
-why a manifest version must be retained after the root moves on.
+Creating a checkpoint pins one such manifest version deliberately for one
+owner. It first flushes the WAL tail as above, then writes
+`checkpoints/{id}.json` (id derived deterministically from the basis identity
+plus the owner identity, so repeating creation for the same pinned manifest
+and owner returns the existing record without listing) and verifies the basis
+after the write, flipping the record to released on failure. A live manifest
+does not need to be checkpoint-pinned; checkpoint records explain why a
+manifest version must be retained after the root moves on.
 
 ### 3.9 Namespace forks
 

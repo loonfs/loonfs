@@ -11,13 +11,14 @@ use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
-use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::control::{CheckpointOwner, HeadState};
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
+    CheckpointId, ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
     FileRevisionsPageCursor, FlushWalResponse, InodeId, ListFileRevisionsResponse, ManifestId,
-    ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest, RevisionNo, UploadId,
+    ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse,
+    RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -453,15 +454,44 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Creates or reuses a checkpoint for the current namespace head.
+    /// Creates or reuses a named checkpoint pinning the current namespace
+    /// head for the calling user.
     ///
     /// A checkpoint pins a manifest version for retention/provenance. If the
     /// current head has no manifest yet, this first publishes one for the
-    /// current durable namespace state; it is not a request to compact metadata.
-    pub async fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
+    /// current durable namespace state; it is not a request to compact
+    /// metadata. `ttl_ms` computes the record's expiry from the engine's
+    /// clock; absent means the pin holds until explicitly released.
+    pub async fn create_checkpoint(
+        &self,
+        name: String,
+        ttl_ms: Option<u64>,
+    ) -> CoreResult<CreateCheckpointResponse> {
+        let context = self.mutation_context();
+        let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::checkpoint::create_checkpoint(
             &self.store,
             &self.namespace_id,
+            CheckpointOwner::User { name },
+            expires_at_ms,
+            &context,
+        )
+        .await
+    }
+
+    /// Releases a user-owned checkpoint by id.
+    ///
+    /// Idempotent: releasing an already-released or reaped record succeeds.
+    /// The record is reaped by a later garbage-collection pass; its basis
+    /// becomes collectable only on the pass after that.
+    pub async fn release_checkpoint(
+        &self,
+        checkpoint_id: &CheckpointId,
+    ) -> CoreResult<ReleaseCheckpointResponse> {
+        crate::checkpoint::release_checkpoint(
+            &self.store,
+            &self.namespace_id,
+            checkpoint_id,
             &self.mutation_context(),
         )
         .await

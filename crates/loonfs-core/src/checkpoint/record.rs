@@ -3,8 +3,8 @@
 //! A checkpoint is a durable stable-view pin to a metadata manifest,
 //! created write-then-verify: the record is written `active`, then the
 //! basis is re-verified against the live floor; a failed verification
-//! flips the record to `dead`. Records never define latest visibility and
-//! never live inside manifests.
+//! flips the record to `released`. Records never define latest visibility
+//! and never live inside manifests.
 
 use super::load::load_namespace_manifest_envelope;
 use crate::error::CoreError;
@@ -12,7 +12,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::namespace::control::read_wal_floor_seq_or_zero;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointRecordEnvelope,
+    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordEnvelope,
     CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind,
 };
 use loonfs_api::{CheckpointId, ManifestId, ManifestObjectId, NamespaceId};
@@ -20,15 +20,18 @@ use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use sha2::{Digest, Sha256};
 
-/// Repeated checkpoint creation for the same pinned manifest must return the
-/// existing record instead of stacking duplicates, without listing the
-/// collection. Deriving the id from the basis identity makes the record
-/// naturally idempotent under `put_if_absent`.
+/// Repeated checkpoint creation for the same pinned manifest and owner must
+/// return the existing record instead of stacking duplicates, without
+/// listing the collection. Deriving the id from the basis identity plus the
+/// owner identity makes the record naturally idempotent under
+/// `put_if_absent`, while distinct owners of one basis hold distinct records
+/// with independent lifecycles.
 pub(crate) fn deterministic_checkpoint_id(
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
     manifest_object_id: &ManifestObjectId,
     manifest_payload_checksum: &str,
+    owner: &CheckpointOwner,
 ) -> CheckpointId {
     let mut hasher = Sha256::new();
     hasher.update(b"loonfs.checkpoint.basis.v1\0");
@@ -39,6 +42,19 @@ pub(crate) fn deterministic_checkpoint_id(
     hasher.update(manifest_object_id.as_str().as_bytes());
     hasher.update(b"\0");
     hasher.update(manifest_payload_checksum.as_bytes());
+    hasher.update(b"\0");
+    match owner {
+        CheckpointOwner::User { name } => {
+            hasher.update(b"user\0");
+            hasher.update(name.as_bytes());
+        }
+        CheckpointOwner::Fork {
+            target_namespace_id,
+        } => {
+            hasher.update(b"fork\0");
+            hasher.update(target_namespace_id.as_str().as_bytes());
+        }
+    }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(36);
     hex.push_str("chk_");

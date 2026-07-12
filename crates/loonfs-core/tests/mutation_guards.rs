@@ -222,7 +222,10 @@ fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::CreateCheckpointResponse, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).create_checkpoint())
+    block_on(
+        namespace_engine(store, namespace_id, context)
+            .create_checkpoint("test-pin".to_owned(), None),
+    )
 }
 
 fn test_commit_id(commit_id: Option<&str>) -> CommitId {
@@ -3618,8 +3621,11 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         Some("seed-shared"),
     )
     .expect("seed shared file");
-    block_on(namespace_engine(&store, &source_namespace_id, &context).create_checkpoint())
-        .expect("create source checkpoint before fork");
+    block_on(
+        namespace_engine(&store, &source_namespace_id, &context)
+            .create_checkpoint("test-pin".to_owned(), None),
+    )
+    .expect("create source checkpoint before fork");
 
     let source_head =
         block_on(load_namespace_head_control(&store, &source_namespace_id)).expect("source head");
@@ -3888,9 +3894,11 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         Some("seed-shared"),
     )
     .expect("seed shared file");
-    let checkpoint =
-        block_on(namespace_engine(&store, &source_namespace_id, &context).create_checkpoint())
-            .expect("create source checkpoint");
+    let checkpoint = block_on(
+        namespace_engine(&store, &source_namespace_id, &context)
+            .create_checkpoint("test-pin".to_owned(), None),
+    )
+    .expect("create source checkpoint");
 
     let source_record = block_on(
         loonfs_core::control::load_namespace_checkpoint_record_control(

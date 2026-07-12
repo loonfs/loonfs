@@ -73,13 +73,13 @@ pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
     AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
-    GcRequest, GcResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
-    MutationResult, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
-    RestoreFileRevisionRequest,
+    CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceStatusResponse,
+    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

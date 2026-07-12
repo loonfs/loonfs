@@ -19,7 +19,9 @@ use crate::error::Result;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
+use loonfs_api::wire::control::{
+    CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
+};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -37,9 +39,15 @@ pub(super) const CHECKPOINT_PUBLICATION_RETRY_LIMIT: usize = 8;
 
 pub(crate) const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
 
+/// Longest accepted user checkpoint name. A label bound, not a durable
+/// format limit.
+const CHECKPOINT_NAME_MAX_CHARS: usize = 128;
+
 pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    owner: CheckpointOwner,
+    expires_at_ms: Option<u64>,
     context: &MutationContext,
 ) -> Result<CreateCheckpointResponse> {
     // Checkpoint creation pins a manifest version as a first-class record
@@ -51,8 +59,9 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     // 3. Verify, after the write is durable, that the floor has not passed
     //    the basis and the basis manifest still loads, under the verify
     //    budget.
-    // 4. On verification failure, flip the record to dead and retry against
-    //    a newer basis.
+    // 4. On verification failure, flip the record to released and retry
+    //    against a newer basis.
+    validate_checkpoint_owner(&owner, expires_at_ms)?;
     let mut saw_root_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
         let basis = match try_flush_wal(store, namespace_id, context).await? {
@@ -68,6 +77,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             basis.manifest_id,
             &basis.manifest_object_id,
             &basis.manifest_payload_checksum,
+            &owner,
         );
         let record = CheckpointRecordState {
             checkpoint_id: checkpoint_id.clone(),
@@ -78,8 +88,8 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             manifest_payload_checksum: basis.manifest_payload_checksum.clone(),
             head_commit_id: basis.head_commit_id.clone(),
             created_at_ms: context.now_ms,
-            expires_at_ms: None,
-            name: None,
+            expires_at_ms,
+            owner: owner.clone(),
             state: CheckpointRecordLifecycle::Active,
         };
         let timer = StdMonotonicTimer::default();
@@ -91,10 +101,10 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verified && within_budget {
             if let CheckpointRecordWrite::Existing(existing) = written {
-                // Deterministic ids make re-creation idempotent; a dead
-                // record for the same verified basis is revived rather than
-                // duplicated.
-                if existing.state == CheckpointRecordLifecycle::Dead {
+                // Deterministic ids make re-creation idempotent; a released
+                // record for the same verified basis and owner is revived
+                // rather than duplicated.
+                if existing.state == CheckpointRecordLifecycle::Released {
                     set_checkpoint_record_state(
                         store,
                         namespace_id,
@@ -111,6 +121,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
                 checkpoint_seq: basis.manifest_head_seq,
                 manifest_id: basis.manifest_id,
                 current_manifest_id: Some(basis.manifest_id.max(basis.root_manifest_id_at_load)),
+                expires_at_ms,
             });
         }
 
@@ -120,7 +131,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             store,
             namespace_id,
             &checkpoint_id,
-            CheckpointRecordLifecycle::Dead,
+            CheckpointRecordLifecycle::Released,
             &context.writer_version,
         )
         .await?;
@@ -132,6 +143,34 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         Err(CoreError::CheckpointUnavailable(
             "checkpoint publication retry exhausted".to_owned(),
         ))
+    }
+}
+
+fn validate_checkpoint_owner(owner: &CheckpointOwner, expires_at_ms: Option<u64>) -> Result<()> {
+    match owner {
+        CheckpointOwner::User { name } => {
+            if name.is_empty() {
+                return Err(CoreError::InvalidCheckpointRequest(
+                    "checkpoint name must not be empty".to_owned(),
+                ));
+            }
+            if name.chars().count() > CHECKPOINT_NAME_MAX_CHARS {
+                return Err(CoreError::InvalidCheckpointRequest(format!(
+                    "checkpoint name exceeds {CHECKPOINT_NAME_MAX_CHARS} characters"
+                )));
+            }
+            Ok(())
+        }
+        CheckpointOwner::Fork { .. } => {
+            // A fork pin lives exactly as long as its target may read the
+            // basis; wall-clock expiry can never bound that.
+            if expires_at_ms.is_some() {
+                return Err(CoreError::InvalidCheckpointRequest(
+                    "fork-owned checkpoints must not carry an expiry".to_owned(),
+                ));
+            }
+            Ok(())
+        }
     }
 }
 

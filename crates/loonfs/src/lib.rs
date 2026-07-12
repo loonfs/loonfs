@@ -49,15 +49,15 @@ pub use loonfs_api::v0::{
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointResponse,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DirectoryPageCursor, DisplayName,
-    EffectiveLimit, FileRevision, FileRevisionsPageCursor, FilesystemOperationResponse,
-    FlushWalOutcome, FlushWalResponse, InodeId, InodeKind, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ManifestId, MutationResult, NameKey, NamePolicy, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy, PutBehavior,
-    RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROTOCOL_VERSION,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
+    CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DirectoryPageCursor, DisplayName, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
+    FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse, InodeId, InodeKind,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult, NameKey,
+    NamePolicy, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
+    PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
@@ -98,10 +98,10 @@ pub use config::{
 };
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use options::{
-    gc_config_from_request, gc_response_from_report, CopyOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions,
+    gc_config_from_request, gc_response_from_report, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

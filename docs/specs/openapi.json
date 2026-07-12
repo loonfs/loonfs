@@ -41,7 +41,7 @@
           "admin"
         ],
         "summary": "Create checkpoint",
-        "description": "Creates or reuses a durable checkpoint record pinning the current namespace view. The record is a garbage-collection root until it is retired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
+        "description": "Creates or reuses a named, user-owned checkpoint record pinning the current namespace view. The record is a garbage-collection root until released or expired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
         "operationId": "create_checkpoint",
         "parameters": [
           {
@@ -54,6 +54,17 @@
             }
           }
         ],
+        "requestBody": {
+          "description": "Checkpoint name and optional lifetime",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCheckpointRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Checkpoint created or reused",
@@ -66,7 +77,7 @@
             }
           },
           "400": {
-            "description": "Invalid namespace id",
+            "description": "Invalid namespace id, name, or lifetime",
             "content": {
               "application/json": {
                 "schema": {
@@ -107,6 +118,78 @@
           },
           "503": {
             "description": "Checkpoint unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Release checkpoint",
+        "description": "Releases a user-owned checkpoint pin by id. Idempotent: releasing an already-released or reaped record succeeds. The record is reaped by a later garbage-collection pass; its pinned data becomes collectable only on the pass after that.",
+        "operationId": "release_checkpoint",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "checkpoint_id",
+            "in": "path",
+            "description": "Checkpoint id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Checkpoint released (or already gone)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCheckpointResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id, or the checkpoint is fork-owned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -3039,6 +3122,28 @@
         "type": "string",
         "description": "Durable id for an immutable content store.\n\nContent stores own file bytes. Namespaces point at content stores."
       },
+      "CreateCheckpointRequest": {
+        "type": "object",
+        "description": "Request to create a durable checkpoint pin.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Label recorded on the checkpoint record. A label, not a key: several\nrecords may carry the same name over different bases."
+          },
+          "ttl_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional lifetime; the server computes the record's expiry from its\nown clock. Absent means the pin holds until explicitly released.",
+            "minimum": 0
+          }
+        }
+      },
       "CreateCheckpointResponse": {
         "type": "object",
         "description": "Result of creating or reusing a checkpoint.",
@@ -3067,6 +3172,15 @@
                 "description": "Manifest `metadata/root.json` references after the operation."
               }
             ]
+          },
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Expiry recorded on the record, when the request carried a `ttl_ms`.",
+            "minimum": 0
           },
           "manifest_id": {
             "$ref": "#/components/schemas/ManifestId",
@@ -3865,6 +3979,29 @@
           "no_replace",
           "replace"
         ]
+      },
+      "ReleaseCheckpointResponse": {
+        "type": "object",
+        "description": "Result of releasing a checkpoint pin.",
+        "required": [
+          "namespace_id",
+          "checkpoint_id",
+          "was_active"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Checkpoint the release targeted."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the checkpoint belonged to."
+          },
+          "was_active": {
+            "type": "boolean",
+            "description": "True when this call flipped an active record to released; false when\nthe record was already released or no longer exists. Release is\nidempotent — the end state is the same either way."
+          }
+        }
       },
       "RestoreFileRevisionRequest": {
         "type": "object",

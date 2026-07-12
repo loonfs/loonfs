@@ -5,10 +5,11 @@ use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::{
-    AdvanceRetentionResponse, CreateCheckpointResponse, FlushWalResponse, GcConfig, GcReport,
-    MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
-    ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
-    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
+    FlushWalResponse, GcConfig, GcReport, MaintenanceTickOptions, MaintenanceTickResult,
+    NamespaceId, NamespaceStatusResponse, ObjectStoreMetricsRecorder, ReleaseCheckpointResponse,
+    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -73,17 +74,35 @@ impl FsAdmin {
             .await
     }
 
-    /// Creates or reuses a checkpoint for the current namespace head.
+    /// Creates or reuses a named checkpoint pinning the current namespace
+    /// head.
     ///
-    /// A checkpoint pins a manifest version for retention and provenance. If
-    /// the current head has no manifest yet, one is published first for the
+    /// A checkpoint pins a manifest version for retention and provenance,
+    /// and is a garbage-collection root until released or expired. If the
+    /// current head has no manifest yet, one is published first for the
     /// current durable namespace state; this is not a request to compact
     /// metadata.
     pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
+        options: CreateCheckpointOptions,
     ) -> Result<CreateCheckpointResponse> {
-        self.core.create_checkpoint(namespace_id).await
+        self.core.create_checkpoint(namespace_id, options).await
+    }
+
+    /// Releases a user-owned checkpoint by id.
+    ///
+    /// Idempotent: releasing an already-released or reaped record succeeds.
+    /// The record is reaped by a later garbage-collection pass; its basis
+    /// becomes collectable only on the pass after that.
+    pub async fn release_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<ReleaseCheckpointResponse> {
+        self.core
+            .release_checkpoint(namespace_id, checkpoint_id)
+            .await
     }
 
     /// Flushes the WAL tail and advances the metadata root to a manifest

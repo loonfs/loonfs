@@ -25,7 +25,7 @@ within a plane is expressed as **named features** (section 2).
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Trigger WAL flushes; trigger checkpoint creation; trigger retention-floor advancement; run one-shot maintenance ticks; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
+| `admin/v0` | Maintenance plane | Trigger WAL flushes; create and release checkpoints; trigger retention-floor advancement; run one-shot maintenance ticks; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | — | **Reserved name only.** Materializes only if derived indexes introduce endpoints beyond the core ops; until that decision, no ops are specified and no `query.*` feature keys are registered. |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
@@ -307,7 +307,8 @@ A representative v0 binding is shown below.
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
-| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
+| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` (body carries the required `name` and optional `ttl_ms`; the record is user-owned and a GC root until released or expired) |
+| Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
 | Flush the WAL tail | `POST /v0/admin/namespaces/{ns}/wal/flush` (folds the visible WAL tail into metadata tables and advances the metadata root; creates no checkpoint record) |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; flush races surface as outcomes, not errors) |

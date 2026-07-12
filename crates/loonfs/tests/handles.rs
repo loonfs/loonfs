@@ -7,8 +7,8 @@
 //! the handles document.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter, MaintenanceTickOptions,
-    ManifestId, NamespaceId, PutFileOptions, RuntimeError, StoreConfig,
+    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter,
+    MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeError, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -338,7 +338,13 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("build admin");
         let checkpoint = admin
-            .create_checkpoint(&namespace_id)
+            .create_checkpoint(
+                &namespace_id,
+                CreateCheckpointOptions {
+                    name: "handle-pin".to_owned(),
+                    ttl_ms: None,
+                },
+            )
             .await
             .expect("create checkpoint");
         assert!(checkpoint.manifest_id > ManifestId(0));
