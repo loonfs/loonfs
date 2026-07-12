@@ -510,15 +510,6 @@ pub fn manifest_object_id_manifest_id(object_id: &str) -> Option<ManifestId> {
 }
 
 string_id! {
-    /// Durable id for one GC pin.
-    ///
-    /// Pins prevent a source namespace's GC from collecting metadata files a
-    /// fork still shares.
-    GcPinId,
-    prefix = "pin"
-}
-
-string_id! {
     /// Durable id for one WAL segment.
     WalSegmentId,
     error = GeneratedIdValidationError,
@@ -641,7 +632,7 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeSeq, CheckpointId, CommitId, ContentStoreId, GcPinId, ManifestId, ManifestObjectId,
+        ChangeSeq, CheckpointId, CommitId, ContentStoreId, ManifestId, ManifestObjectId,
         MetadataTableId, NameKey, NamespaceId, UploadId, WalSegmentId,
     };
     use std::collections::BTreeSet;
@@ -817,7 +808,6 @@ mod tests {
     fn generated_upload_wal_segment_table_and_pin_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
         assert!(MetadataTableId::parse("tbl_00000000000000000000000000000001").is_ok());
-        assert!(GcPinId::parse("pin_00000000000000000000000000000001").is_ok());
         assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());
         assert!(UploadId::parse(["upl", "123"].join("-")).is_err());
         assert!(WalSegmentId::parse("00000000000000000412-9f2a6c0e4b7d4a90").is_ok());
@@ -829,7 +819,6 @@ mod tests {
         assert!(ManifestObjectId::parse("mf_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(WalSegmentId::parse("seg_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").is_err());
         assert!(MetadataTableId::parse(["tbl", "123"].join("-")).is_err());
-        assert!(GcPinId::parse(["pin", "123"].join("-")).is_err());
         assert!(CheckpointId::parse(["chk", "123"].join("-")).is_err());
     }
 
@@ -839,7 +828,6 @@ mod tests {
         let wal_segment_id = WalSegmentId::generate(ChangeSeq(412));
         let manifest_object_id = ManifestObjectId::generate(ManifestId(413));
         let metadata_table_id = MetadataTableId::generate();
-        let gc_pin_id = GcPinId::generate();
         let checkpoint_id = CheckpointId::generate();
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
@@ -848,13 +836,11 @@ mod tests {
             .as_str()
             .starts_with("00000000000000000413-"));
         assert_generated_id_shape(metadata_table_id.as_str(), "tbl");
-        assert_generated_id_shape(gc_pin_id.as_str(), "pin");
         assert_generated_id_shape(checkpoint_id.as_str(), "chk");
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(WalSegmentId::parse(wal_segment_id.as_str()).is_ok());
         assert!(ManifestObjectId::parse(manifest_object_id.as_str()).is_ok());
         assert!(MetadataTableId::parse(metadata_table_id.as_str()).is_ok());
-        assert!(GcPinId::parse(gc_pin_id.as_str()).is_ok());
         assert!(CheckpointId::parse(checkpoint_id.as_str()).is_ok());
     }
 

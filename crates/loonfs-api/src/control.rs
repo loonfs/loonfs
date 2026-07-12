@@ -3,7 +3,7 @@ use crate::envelope::EnvelopeProbe;
 use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, GcPinId, InodeId, ManifestId,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId,
     ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId,
 };
 use serde::de::DeserializeOwned;
@@ -20,19 +20,17 @@ pub enum ControlObjectKind {
     WalFloor,
     MetadataRoot,
     CheckpointRecord,
-    NamespaceGcPinState,
     UploadSession,
 }
 
 impl ControlObjectKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::NamespaceConfig,
         Self::ContentStoreDescriptor,
         Self::WalHead,
         Self::WalFloor,
         Self::MetadataRoot,
         Self::CheckpointRecord,
-        Self::NamespaceGcPinState,
         Self::UploadSession,
     ];
 
@@ -50,7 +48,6 @@ impl ControlObjectKind {
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
             Self::CheckpointRecord => 1,
-            Self::NamespaceGcPinState => 1,
             Self::UploadSession => 1,
         }
     }
@@ -63,7 +60,6 @@ impl ControlObjectKind {
             Self::WalFloor => "wal_floor",
             Self::MetadataRoot => "metadata_root",
             Self::CheckpointRecord => "checkpoint_record",
-            Self::NamespaceGcPinState => "namespace_gc_pin_state",
             Self::UploadSession => "upload_session",
         }
     }
@@ -184,19 +180,6 @@ pub struct CheckpointRecordState {
     pub expires_at_ms: Option<u64>,
     pub owner: CheckpointOwner,
     pub state: CheckpointRecordLifecycle,
-}
-
-/// Pin that prevents the source namespace's GC from collecting the metadata
-/// files a fork still shares. A pin references its source checkpoint only;
-/// reachability resolves through it (pin -> checkpoint -> manifest ->
-/// tables), so manifest facts are never duplicated here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceGcPinState {
-    pub pin_id: GcPinId,
-    pub source_namespace_id: NamespaceId,
-    pub target_namespace_id: NamespaceId,
-    pub source_checkpoint_id: CheckpointId,
-    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,7 +347,6 @@ pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
 pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
 pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
-pub type NamespaceGcPinStateEnvelope = ControlObjectEnvelope<NamespaceGcPinState>;
 
 /// Durable layout of a control object: the envelope fields plus the payload
 /// as a raw JSON fragment. The payload stays inline (rather than as encoded

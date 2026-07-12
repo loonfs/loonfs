@@ -812,9 +812,9 @@ Representative response:
 
 The server forks from the source namespace's current head. The new namespace
 shares the source namespace's content store and starts with independent future
-namespace metadata. The fork records provenance and a source-side GC pin for
-the source checkpoint/manifest pair so source-owned immutable metadata files
-remain available while the target manifest references them.
+namespace metadata. The fork records provenance and a fork-owned source
+checkpoint so source-owned immutable metadata files remain available while
+the target manifest references them.
 
 ## 7. Conformance requirements
 

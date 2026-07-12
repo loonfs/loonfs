@@ -808,7 +808,7 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
         },
         state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active,
     };
-    let verified = crate::checkpoint::verify_checkpoint_basis(&store, &stale)
+    let verified = super::record::verify_checkpoint_basis(&store, &stale)
         .await
         .expect("verification runs");
     assert!(!verified, "sub-floor basis must not verify");

@@ -56,7 +56,7 @@ pub(crate) use self::load::{
     load_verified_manifest_tables_with_cache,
 };
 pub(crate) use self::publish::write_namespace_manifest;
-pub(crate) use self::record::{read_checkpoint_record, verify_checkpoint_basis};
+pub(crate) use self::record::{freshen_fork_checkpoint, read_checkpoint_record};
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;

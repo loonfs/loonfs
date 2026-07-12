@@ -14,6 +14,12 @@ fn gc_summary(report: &GcResponse) -> String {
         report.deleted_checkpoint_records,
         report.retained_candidates
     );
+    if report.released_fork_checkpoints > 0 {
+        summary.push_str(&format!(
+            "; released {} fork checkpoints",
+            report.released_fork_checkpoints
+        ));
+    }
     if report.degraded_retention {
         summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
     }

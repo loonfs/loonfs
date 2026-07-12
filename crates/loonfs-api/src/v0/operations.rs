@@ -325,10 +325,11 @@ pub struct GcResponse {
     pub deleted_metadata_tables: u64,
     /// Unreferenced manifests deleted.
     pub deleted_manifests: u64,
-    /// Dead or expired checkpoint records deleted.
+    /// Released or expired checkpoint records deleted.
     pub deleted_checkpoint_records: u64,
-    /// Pins released because their target namespace is terminally deleted.
-    pub released_pins: u64,
+    /// Fork-owned checkpoint records released because their target namespace
+    /// is provably gone.
+    pub released_fork_checkpoints: u64,
     /// Objects removed while reaping an abandoned bootstrap tree.
     pub reaped_abandoned_objects: u64,
     /// Candidates retained at delete time (grace window, missing

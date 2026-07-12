@@ -13,10 +13,10 @@ use loonfs_api::{
         ValidatedContentToken,
     },
     wire::control::{
-        decode_control_object, encode_control_object, ContentStoreDescriptorEnvelope,
-        ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceConfigEnvelope,
-        NamespaceConfigState, NamespaceGcPinStateEnvelope, UploadSessionEnvelope,
-        UploadSessionState, WriterBlock,
+        decode_control_object, encode_control_object, CheckpointOwner,
+        ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState, HeadStateEnvelope,
+        NamespaceConfigEnvelope, NamespaceConfigState, UploadSessionEnvelope, UploadSessionState,
+        WriterBlock,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
@@ -46,7 +46,7 @@ use loonfs_core::{
 };
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, metadata_manifest_object, namespace_config,
-    pin as pin_key, upload_session, upload_session_prefix, wal_head,
+    upload_session, upload_session_prefix, wal_head,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -3731,31 +3731,24 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         "COW fork should not copy metadata SSTs into the target namespace"
     );
 
-    let pin_keys = store
-        .list_prefix(&format!(
-            "namespaces/{}/pins/",
-            source_namespace_id.as_str()
-        ))
-        .await
-        .expect("list source pins");
-    assert_eq!(
-        pin_keys.len(),
-        1,
-        "fork should write one source-local GC pin"
+    assert!(
+        matches!(
+            &source_record.owner,
+            CheckpointOwner::Fork { target_namespace_id }
+                if *target_namespace_id == clone_namespace_id
+        ),
+        "fork record is owned by its target namespace"
     );
-    let pin_bytes = store
-        .get(&pin_keys[0], None)
-        .await
-        .expect("read source pin")
-        .expect("source pin exists");
-    let pin: NamespaceGcPinStateEnvelope =
-        decode_control_object(&pin_bytes, ControlObjectKind::NamespaceGcPinState)
-            .expect("decode source pin");
-    assert_eq!(pin.state.source_namespace_id, source_namespace_id);
-    assert_eq!(pin.state.target_namespace_id, clone_namespace_id);
-    assert_eq!(
-        pin.state.source_checkpoint_id,
-        fork_provenance.source_checkpoint_id
+    assert!(
+        store
+            .list_prefix(&format!(
+                "namespaces/{}/pins/",
+                source_namespace_id.as_str()
+            ))
+            .await
+            .expect("list source pins")
+            .is_empty(),
+        "fork protection lives on the fork-owned record; no pin objects are written"
     );
     let referenced_metadata_files = target_manifest
         .payload
@@ -3763,14 +3756,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .iter()
         .map(|metadata_file| metadata_file.object_key.clone())
         .collect::<Vec<_>>();
-    assert!(store
-        .head(&pin_key(
-            source_namespace_id.as_str(),
-            pin.state.pin_id.as_str()
-        ))
-        .await
-        .expect("head source pin")
-        .is_some());
 
     let duplicate_error =
         fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
@@ -3989,22 +3974,25 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
+async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
+        KeyMatcher::Prefix(format!(
+            "namespaces/{}/checkpoints/",
+            source_namespace_id.as_str()
+        )),
         InjectedCreateFailure::Transport {
-            message: "injected source gc pin failure",
+            message: "injected source checkpoint failure",
         },
     );
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .expect_err("source GC pin failure should abort fork before target publication");
+        .expect_err("source checkpoint failure should abort fork before target publication");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
