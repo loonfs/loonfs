@@ -27,6 +27,7 @@ mod s3_compatible;
 mod secret;
 mod store_config;
 mod store_io_runtime;
+pub mod timing;
 
 /// Compatibility alias for [`local_fs_store`], kept so existing imports of
 /// `loonfs_objectstore::fs::LocalFsStore` keep resolving.
@@ -37,6 +38,9 @@ pub use object_store::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     SharedObjectStore,
 };
-pub use provider_object_store::{ProviderObjectStore, ProviderObjectStoreConfig};
+pub use provider_object_store::{
+    ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
+    PROVIDER_CONNECT_TIMEOUT, PROVIDER_OP_DEADLINE,
+};
 pub use secret::SecretString;
 pub use store_config::{StoreConfig, StoreConfigError};

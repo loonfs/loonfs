@@ -45,6 +45,8 @@ impl GcpGcsStore {
         let io_runtime = StoreIoRuntime::new()?;
         let builder = GoogleCloudStorageBuilder::new()
             .with_http_connector(io_runtime.connector())
+            .with_client_options(crate::provider_object_store::provider_client_options())
+            .with_retry(crate::provider_object_store::provider_retry_config())
             .with_bucket_name(config.bucket)
             .with_service_account_path(config.service_account_key_path);
 
