@@ -9,6 +9,7 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, WalFloorBasis, WalFloorEnvelope, WalFloorState,
 };
+use loonfs_api::wire::index_grams::{IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY};
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -46,7 +47,25 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             manifest_tables.manifest().payload_checksum,
         )));
     }
-    let target_floor = manifest_tables.manifest().payload.head_seq;
+    let mut target_floor = manifest_tables.manifest().payload.head_seq;
+    // The gram index replays the WAL from its watermark, so while the
+    // feature is enabled the floor may not advance past `built_through_seq`
+    // (format spec, "Namespace features map"). Clamping — rather than
+    // refusing — lets retention advance as far as the index has caught up.
+    if let Some(value) = manifest_tables
+        .manifest()
+        .payload
+        .features
+        .get(INDEX_GRAMS_FEATURE_KEY)
+    {
+        let feature = IndexGramsFeature::from_value(value).map_err(|error| {
+            CoreError::NamespaceCorrupt(format!(
+                "namespace `{}` carries an unreadable index.grams feature value: {error}",
+                namespace_id.as_str()
+            ))
+        })?;
+        target_floor = target_floor.min(feature.built_through_seq);
+    }
     let current_floor = read_wal_floor_object(store, namespace_id)
         .await
         .map_err(|error| {
@@ -68,24 +87,33 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // must never remove an object reachable from the current manifest or a
     // retained checkpoint or pin (format spec, "Garbage collection").
     // Corruption discovered later is caught by read-path checksums.
-    for metadata_files in manifest_tables
+    let segment_keys = manifest_tables
         .manifest()
         .payload
         .metadata_files
-        .chunks(MAX_RETENTION_PROBE_IO)
-    {
-        let probes = metadata_files.iter().map(|metadata_file| async move {
+        .iter()
+        .map(|metadata_file| metadata_file.object_key.as_str())
+        .chain(
+            manifest_tables
+                .manifest()
+                .payload
+                .index_files
+                .iter()
+                .map(|index_file| index_file.object_key.as_str()),
+        )
+        .collect::<Vec<_>>();
+    for segment_keys in segment_keys.chunks(MAX_RETENTION_PROBE_IO) {
+        let probes = segment_keys.iter().copied().map(|object_key| async move {
             let present = store
-                .head(&metadata_file.object_key)
+                .head(object_key)
                 .await
-                .map_err(|error| CoreError::store(&metadata_file.object_key, &error))?
+                .map_err(|error| CoreError::store(object_key, &error))?
                 .is_some();
             if present {
                 Ok(())
             } else {
                 Err(CoreError::CheckpointUnavailable(format!(
-                    "retention floor cannot advance: missing metadata segment `{}`",
-                    metadata_file.object_key
+                    "retention floor cannot advance: missing metadata segment `{object_key}`"
                 )))
             }
         });

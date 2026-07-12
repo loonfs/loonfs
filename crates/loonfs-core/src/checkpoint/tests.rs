@@ -5930,3 +5930,403 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         sibling.payload.manifest_object_id
     );
 }
+// ---------------------------------------------------------------------------
+// Gram index build
+// ---------------------------------------------------------------------------
+
+async fn grams_feature(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> Option<IndexGramsFeature> {
+    let root = read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state;
+    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+        .await
+        .expect("load manifest tables");
+    tables
+        .manifest()
+        .payload
+        .features
+        .get(INDEX_GRAMS_FEATURE_KEY)
+        .map(|value| IndexGramsFeature::from_value(value).expect("decode feature value"))
+}
+
+async fn live_index_files(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+) -> Vec<loonfs_api::wire::manifest::IndexFileRef> {
+    let root = read_metadata_root_object(store, namespace_id)
+        .await
+        .expect("read metadata root")
+        .envelope
+        .state;
+    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+        .await
+        .expect("load manifest tables");
+    tables.manifest().payload.index_files.clone()
+}
+
+/// Brute reader over every referenced index segment: the union of postings
+/// stored for `gram`, in ascending order.
+async fn stored_gram_postings(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    gram: Gram,
+) -> Vec<GramPosting> {
+    fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
+        &bytes[handle.offset as usize..handle.offset as usize + handle.stored_len as usize]
+    }
+    let mut postings = Vec::new();
+    for descriptor in live_index_files(store, namespace_id).await {
+        let bytes = store
+            .get(&descriptor.object_key, None)
+            .await
+            .expect("read index segment")
+            .expect("index segment exists");
+        let index = decode_index_block(
+            section(&bytes, &descriptor.index_block),
+            &descriptor.index_block,
+        )
+        .expect("decode index block");
+        for entry in &index {
+            let block =
+                decode_data_block_rows::<IndexRow>(section(&bytes, &entry.block), &entry.block)
+                    .expect("decode index data block");
+            for row in &block.rows {
+                let IndexRow::GramPostings { gram: row_gram, .. } = row;
+                if *row_gram == gram {
+                    postings.extend(row.postings().expect("decode postings"));
+                }
+            }
+        }
+    }
+    postings.sort_unstable();
+    postings
+}
+
+/// Runs build steps until the index reports up to date, returning how many
+/// steps published work.
+async fn drain_grams_index(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: GramIndexBuildPolicy,
+) -> u64 {
+    let mut published = 0u64;
+    loop {
+        let report = build_grams_index_step(store, namespace_id, context, policy)
+            .await
+            .expect("build step");
+        match report.outcome {
+            GramIndexBuildOutcome::Published { .. } => published += 1,
+            GramIndexBuildOutcome::UpToDate { .. } => return published,
+            other => panic!("unexpected build outcome: {other:?}"),
+        }
+    }
+}
+
+fn posting(inode: u64, revision: u64) -> GramPosting {
+    GramPosting {
+        inode_id: InodeId(inode),
+        revision_no: RevisionNo(revision),
+    }
+}
+
+#[tokio::test]
+async fn grams_index_backfill_covers_existing_text_and_skips_binary() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-backfill").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Inode allocation is sequential from the root: alpha 2, bravo 3, bin 4.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha alpha\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/bravo.txt",
+        b"bravo file\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write bravo");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/blob.bin",
+        b"zz\0binary",
+        &context,
+        None,
+    )
+    .await
+    .expect("write binary");
+    let checkpoint_seq = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint")
+        .checkpoint_seq;
+
+    let enabled = enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    assert_eq!(
+        enabled,
+        GramIndexEnableOutcome::Enabled {
+            built_through_seq: checkpoint_seq
+        }
+    );
+    let feature = grams_feature(&store, &namespace_id).await.expect("feature");
+    assert!(!feature.is_materialized(), "backfill starts unmaterialized");
+
+    // A two-file page budget forces the backfill across several steps.
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    let published = drain_grams_index(&store, &namespace_id, &context, policy).await;
+    assert!(
+        published >= 2,
+        "expected a multi-step backfill, got {published}"
+    );
+
+    let feature = grams_feature(&store, &namespace_id).await.expect("feature");
+    assert!(feature.is_materialized());
+    assert_eq!(feature.built_through_seq, checkpoint_seq);
+
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"alp")).await,
+        vec![posting(2, 1)]
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"rav")).await,
+        vec![posting(3, 1)]
+    );
+    // The binary file contributed nothing.
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"nar")).await,
+        Vec::new()
+    );
+
+    assert_eq!(
+        drain_grams_index(&store, &namespace_id, &context, policy).await,
+        0,
+        "an up-to-date index publishes nothing"
+    );
+}
+
+#[tokio::test]
+async fn grams_index_steady_state_follows_the_wal_and_survives_flush() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-steady").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha one\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let policy = GramIndexBuildPolicy::default();
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+
+    // New commits after materialization arrive through WAL replay, without
+    // any checkpoint in between.
+    let charlie = write_file_bytes(
+        &store,
+        &namespace_id,
+        "/charlie.txt",
+        b"charlie code\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write charlie");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha two\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("overwrite alpha");
+
+    let published = drain_grams_index(&store, &namespace_id, &context, policy).await;
+    assert!(published >= 1);
+    let feature = grams_feature(&store, &namespace_id).await.expect("feature");
+    assert!(feature.built_through_seq > charlie.committed_seq);
+
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"har")).await,
+        vec![posting(3, 1)]
+    );
+    // Both revisions of alpha are retained history; both stay indexed.
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"alp")).await,
+        vec![posting(2, 1), posting(2, 2)]
+    );
+
+    // A checkpoint flush publishes a successor manifest; the feature entry
+    // and the index segment references must carry forward verbatim.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/delta.txt",
+        b"delta\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write delta");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint after index");
+    let feature = grams_feature(&store, &namespace_id)
+        .await
+        .expect("feature survives flush");
+    assert!(feature.is_materialized());
+    assert!(
+        !live_index_files(&store, &namespace_id).await.is_empty(),
+        "index segments survive flush"
+    );
+}
+
+#[tokio::test]
+async fn retention_floor_clamps_to_the_grams_watermark() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-retention").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/one.txt", b"one\n", &context, None)
+        .await
+        .expect("write one");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let policy = GramIndexBuildPolicy::default();
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+    let watermark = grams_feature(&store, &namespace_id)
+        .await
+        .expect("feature")
+        .built_through_seq;
+
+    // Move the manifest head past the watermark without building the index.
+    write_file_bytes(&store, &namespace_id, "/two.txt", b"two\n", &context, None)
+        .await
+        .expect("write two");
+    let head_seq = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint")
+        .checkpoint_seq;
+    assert!(head_seq > watermark);
+
+    let clamped = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance retention");
+    assert_eq!(
+        clamped.retention_floor_seq, watermark,
+        "the floor must not pass the index watermark"
+    );
+
+    // Catch the index up; the floor may then advance to the head.
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+    let advanced = advance_retention_floor(&store, &namespace_id, &context)
+        .await
+        .expect("advance retention after catch-up");
+    assert_eq!(advanced.retention_floor_seq, head_seq);
+}
+
+#[tokio::test]
+async fn grams_index_disable_drops_the_feature_and_references() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-disable").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/one.txt",
+        b"searchable\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write one");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+    assert!(!live_index_files(&store, &namespace_id).await.is_empty());
+
+    let disabled = disable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("disable");
+    assert_eq!(disabled, GramIndexDisableOutcome::Disabled);
+    assert!(grams_feature(&store, &namespace_id).await.is_none());
+    assert!(live_index_files(&store, &namespace_id).await.is_empty());
+
+    let report = build_grams_index_step(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await
+    .expect("build step after disable");
+    assert_eq!(report.outcome, GramIndexBuildOutcome::NotEnabled);
+
+    let enabled_again = enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("re-enable");
+    assert!(matches!(
+        enabled_again,
+        GramIndexEnableOutcome::Enabled { .. }
+    ));
+}
