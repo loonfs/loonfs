@@ -20,9 +20,11 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
+use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{read_head_and_metadata_root, read_wal_floor_seq_or_zero};
+use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, MetadataRootState, NamespaceState};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
@@ -82,8 +84,18 @@ pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<FlushWalResponse> {
+    let timer = StdMonotonicTimer::default();
+    flush_wal_with_timer(store, namespace_id, context, &timer).await
+}
+
+pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    timer: &dyn MonotonicTimer,
+) -> Result<FlushWalResponse> {
     for _attempt in 0..WAL_FLUSH_RETRY_LIMIT {
-        match try_flush_wal(store, namespace_id, context).await? {
+        match try_flush_wal(store, namespace_id, context, timer).await? {
             TryFlushWal::Flushed(basis) => {
                 return Ok(FlushWalResponse {
                     namespace_id: namespace_id.clone(),
@@ -100,11 +112,18 @@ pub(crate) async fn flush_wal<S: ObjectStore + ?Sized>(
 }
 
 /// One flush attempt against one fresh projection.
+///
+/// The metadata publication budget covers this attempt end to end: the
+/// measurement starts before any table object is written and gates the root
+/// compare-and-swap, so an over-budget build aborts with only unreachable
+/// immutable outputs behind it.
 pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
+    timer: &dyn MonotonicTimer,
 ) -> Result<TryFlushWal> {
+    let publication_started_ms = timer.monotonic_now_ms();
     let projection = load_root_projection(store, namespace_id)
         .instrument(tracing::info_span!(
             "loon.phase",
@@ -185,6 +204,11 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
             "manifest id allocation retry exhausted".to_owned(),
         ));
     };
+    // The publication budget gates the root compare-and-swap: past it, the
+    // written tables and manifest may have aged into the GC grace window,
+    // so this attempt must abort without publishing (format spec, "Garbage
+    // collection", rule 1). The orphans are reclaimed by a later pass.
+    ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
     // Advance the root for readers. A superseded outcome is fine: the
     // manifest we wrote stays durable and valid as a basis even when a
     // newer root already won.
@@ -338,6 +362,31 @@ pub(super) fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId> 
         .checked_add(1)
         .map(ManifestId)
         .ok_or_else(|| CoreError::Internal("manifest id overflow".to_owned()))
+}
+
+/// Refuses to initiate a root compare-and-swap once the publication budget
+/// is spent (format spec, "Garbage collection", rule 1).
+pub(super) fn ensure_metadata_publication_budget(
+    timer: &dyn MonotonicTimer,
+    publication_started_ms: u64,
+    namespace_id: &NamespaceId,
+) -> Result<()> {
+    let elapsed_ms = timer
+        .monotonic_now_ms()
+        .saturating_sub(publication_started_ms);
+    if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
+        return Ok(());
+    }
+    tracing::error!(
+        namespace_id = namespace_id.as_str(),
+        elapsed_ms,
+        budget_ms = METADATA_PUBLICATION_BUDGET_MS,
+        "metadata publication overran its budget; aborting before the root compare-and-swap",
+    );
+    Err(CoreError::MetadataPublicationBudgetExceeded {
+        elapsed_ms,
+        budget_ms: METADATA_PUBLICATION_BUDGET_MS,
+    })
 }
 
 async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(

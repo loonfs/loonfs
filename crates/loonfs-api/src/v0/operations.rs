@@ -305,10 +305,13 @@ pub struct FlushWalResponse {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcRequest {
-    /// Objects younger than this are never deleted, reachable or not.
+    /// Objects younger than this are never deleted, reachable or not. The
+    /// window has a derived safety floor (publication budgets plus provider
+    /// deadlines); a smaller value is rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Abandoned bootstrap trees older than this may be reaped.
+    /// Abandoned bootstrap trees older than this may be reaped. Must be at
+    /// least the grace window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reap_window_ms: Option<u64>,
 }

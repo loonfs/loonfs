@@ -1609,6 +1609,17 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .expect_err("malformed checkpoint id");
         assert_eq!(bogus_release.code, "invalid_request");
 
+        // The GC grace window's derived safety floor is enforced at the API:
+        // a sub-minimum override is rejected, not honored.
+        let unsafe_gc: Result<loonfs_api::GcResponse, ApiError> = post_admin_json_body(
+            &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+            "test-token",
+            serde_json::json!({ "grace_window_ms": 1 }),
+        );
+        let unsafe_gc = unsafe_gc.expect_err("sub-minimum grace window is rejected");
+        assert_eq!(unsafe_gc.code, "invalid_request");
+        assert!(unsafe_gc.message.contains("derived safety minimum"));
+
         let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
         assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 

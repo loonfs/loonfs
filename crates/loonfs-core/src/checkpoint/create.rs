@@ -37,7 +37,7 @@ use crate::metadata::MetadataStateBuilder;
 // newest current manifest.
 pub(super) const CHECKPOINT_PUBLICATION_RETRY_LIMIT: usize = 8;
 
-pub(crate) const CHECKPOINT_VERIFY_BUDGET_MS: u64 = 60_000;
+pub(crate) use crate::limits::CHECKPOINT_VERIFY_BUDGET_MS;
 
 /// Longest accepted user checkpoint name. A label bound, not a durable
 /// format limit.
@@ -62,9 +62,10 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     // 4. On verification failure, flip the record to released and retry
     //    against a newer basis.
     validate_checkpoint_owner(&owner, expires_at_ms)?;
+    let timer = StdMonotonicTimer::default();
     let mut saw_root_cas_race = false;
     for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
-        let basis = match try_flush_wal(store, namespace_id, context).await? {
+        let basis = match try_flush_wal(store, namespace_id, context, &timer).await? {
             TryFlushWal::Flushed(basis) => basis,
             TryFlushWal::RaceLost => {
                 saw_root_cas_race = true;
@@ -92,7 +93,6 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             owner: owner.clone(),
             state: CheckpointRecordLifecycle::Active,
         };
-        let timer = StdMonotonicTimer::default();
         let verify_started_ms = timer.monotonic_now_ms();
         let written = write_checkpoint_record(store, &record, &context.writer_version).await?;
 

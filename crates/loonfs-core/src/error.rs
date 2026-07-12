@@ -96,6 +96,13 @@ pub enum CoreError {
     CheckpointUnavailable(String),
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
+    #[error(
+        "metadata publication budget exceeded after {elapsed_ms}ms (budget {budget_ms}ms); \
+         the root was not published"
+    )]
+    MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
+    #[error("invalid gc configuration: {0}")]
+    InvalidGcConfig(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -299,6 +306,10 @@ impl CoreError {
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
             CoreError::InvalidCheckpointRequest(_) => ErrorCode::InvalidRequest,
+            // An over-budget publication aborts pre-CAS and is retryable
+            // after maintenance, exactly the checkpoint_unavailable contract.
+            CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::CheckpointUnavailable,
+            CoreError::InvalidGcConfig(_) => ErrorCode::InvalidRequest,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
