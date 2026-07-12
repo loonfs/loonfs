@@ -34,7 +34,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeMap;
 use tracing::Instrument;
 
 // Manifest id allocation can race with other manifest publishers. Exhausting
@@ -434,8 +433,12 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             initialized: true,
             verified: true,
             fork: None,
-            features: BTreeMap::new(),
+            // A checkpoint appends one delta run; it never changes what is
+            // materialized on the namespace, so feature declarations and
+            // derived-index segments carry forward verbatim.
+            features: previous_manifest.payload.features.clone(),
             metadata_files,
+            index_files: previous_manifest.payload.index_files.clone(),
         },
     )
     .map_err(|err| {

@@ -25,6 +25,7 @@ pub enum DurableObjectFamily {
     MetadataRoot,
     MetadataManifest,
     MetadataTable,
+    IndexSegment,
     CheckpointRecord,
     /// Retired protocol family: fork protection lives on fork-owned
     /// checkpoint records, and nothing writes
@@ -77,6 +78,7 @@ typed_key!(WalSegmentKey);
 typed_key!(MetadataRootKey);
 typed_key!(MetadataManifestKey);
 typed_key!(MetadataTableKey);
+typed_key!(IndexSegmentKey);
 typed_key!(CheckpointRecordKey);
 typed_key!(PinKey);
 typed_key!(UploadSessionKey);
@@ -212,6 +214,19 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/metadata/tables/")
     }
 
+    /// Derived-index segment (format spec, "Derived work"): same block
+    /// grammar as a metadata table, feature-owned row payload, referenced
+    /// from the manifest's `index_files` list.
+    pub fn index_segment(&self, namespace: &str, segment_id: &str) -> IndexSegmentKey {
+        IndexSegmentKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/metadata/index/{segment_id}.idx.zst"
+        )))
+    }
+
+    pub fn index_segment_prefix(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/metadata/index/")
+    }
+
     /// Durable stable-view pin to a metadata manifest.
     pub fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> CheckpointRecordKey {
         CheckpointRecordKey(ObjectKey::new(format!(
@@ -303,6 +318,11 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         }
         ["namespaces", namespace, "metadata", "tables", table] if table.ends_with(".sst.zst") => {
             parsed(DurableObjectFamily::MetadataTable, Some(namespace))
+        }
+        ["namespaces", namespace, "metadata", "index", segment]
+            if segment.ends_with(".idx.zst") =>
+        {
+            parsed(DurableObjectFamily::IndexSegment, Some(namespace))
         }
         ["namespaces", namespace, "checkpoints", checkpoint] if checkpoint.ends_with(".json") => {
             parsed(DurableObjectFamily::CheckpointRecord, Some(namespace))

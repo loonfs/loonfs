@@ -1,4 +1,4 @@
-//! Block-granular encoding for metadata SST segments.
+//! Block-granular encoding for metadata SST and derived-index segments.
 //!
 //! A segment object is a sequence of independently readable sections:
 //! data blocks, then one filter block, then one index block. There is no
@@ -7,11 +7,17 @@
 //! Readers fetch the byte range a handle names, verify its CRC32C, and
 //! decode just that section; nothing here performs IO.
 //!
+//! The block grammar is row-payload-agnostic: the builder and decoders
+//! carry any CBOR row type, and the segment's descriptor family says which
+//! one to expect — [`MetadataRow`] for metadata tables, `IndexRow` for gram
+//! index segments. The section framing, key compression, filter hashing,
+//! and checksums are identical either way.
+//!
 //! Durable layout, frozen by this module:
 //!
 //! - A **data block** holds prefix-compressed entries: each entry stores
 //!   `(shared_prefix_len, key_suffix_len)` as LEB128 varints, the key
-//!   suffix bytes, then the row as a CBOR-encoded [`MetadataRow`] length-
+//!   suffix bytes, then the row as a CBOR-encoded payload length-
 //!   prefixed with a varint. Every [`RESTART_INTERVAL`]th entry is a
 //!   restart point storing its full key (shared prefix length zero). The
 //!   block ends with the restart offsets as little-endian `u32`s and their
@@ -83,10 +89,12 @@ pub struct BuiltSegmentBlocks {
 }
 
 /// One decoded data block: row keys and rows, parallel and in key order.
+/// The row type defaults to [`MetadataRow`]; index segments decode their
+/// own row payload through [`decode_data_block_rows`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedDataBlock {
+pub struct DecodedDataBlock<R = MetadataRow> {
     pub row_keys: Vec<String>,
-    pub rows: Vec<MetadataRow>,
+    pub rows: Vec<R>,
 }
 
 /// A decoded bloom filter; answers "definitely absent" or "maybe present".
@@ -153,12 +161,14 @@ impl SegmentBlocksBuilder {
     }
 
     /// Appends one row. `filter_key` is the lookup prefix point reads will
-    /// probe for this row; the caller derives it per family.
-    pub fn push(
+    /// probe for this row; the caller derives it per family. The row is any
+    /// CBOR payload; a segment must hold one row type throughout, named by
+    /// the descriptor family that references it.
+    pub fn push<R: Serialize>(
         &mut self,
         row_key: &str,
         filter_key: &str,
-        row: &MetadataRow,
+        row: &R,
     ) -> Result<(), SstBlockCodecError> {
         if self.row_count > 0 && row_key < self.previous_key.as_str() {
             return Err(SstBlockCodecError::RowKeysOutOfOrder {
@@ -279,6 +289,15 @@ pub fn decode_data_block(
     stored: &[u8],
     handle: &BlockHandle,
 ) -> Result<DecodedDataBlock, SstBlockCodecError> {
+    decode_data_block_rows::<MetadataRow>(stored, handle)
+}
+
+/// Decodes one data block whose rows are `R`, for segment families whose
+/// row payload is not [`MetadataRow`] (gram index segments).
+pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
+    stored: &[u8],
+    handle: &BlockHandle,
+) -> Result<DecodedDataBlock<R>, SstBlockCodecError> {
     let payload = decode_section(stored, handle, true)?;
     if payload.len() < 4 {
         return Err(SstBlockCodecError::Malformed(
@@ -317,7 +336,7 @@ pub fn decode_data_block(
         key.push_str(suffix);
         let row_len = read_varint(entries, &mut cursor)? as usize;
         let row_bytes = take_slice(entries, &mut cursor, row_len)?;
-        let row: MetadataRow = ciborium::de::from_reader(row_bytes)
+        let row: R = ciborium::de::from_reader(row_bytes)
             .map_err(|error| SstBlockCodecError::Codec(error.to_string()))?;
         // Ascending row-key order is a format requirement; readers
         // binary-search on it, so an out-of-order block is malformed.
@@ -493,7 +512,7 @@ fn shared_prefix_len(previous: &str, current: &str) -> usize {
     len
 }
 
-fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
+pub(crate) fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
     loop {
         let byte = (value & 0x7f) as u8;
         value >>= 7;
@@ -505,7 +524,7 @@ fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
     }
 }
 
-fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCodecError> {
+pub(crate) fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SstBlockCodecError> {
     let mut value = 0u64;
     let mut shift = 0u32;
     loop {

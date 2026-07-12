@@ -63,6 +63,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
             | DurableObjectFamily::WalIndexRun
             | DurableObjectFamily::MetadataRoot
             | DurableObjectFamily::CheckpointRecord
+            | DurableObjectFamily::IndexSegment
             | DurableObjectFamily::UploadSession
             | DurableObjectFamily::ContentStoreDescriptor
             | DurableObjectFamily::ContentBlob => {}

@@ -25,9 +25,13 @@ use loonfs_api::wire::control::{
     NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState, WalSegmentPointer,
     WriterBlock,
 };
+use loonfs_api::wire::index_grams::{
+    decode_gram_postings, encode_gram_postings, Gram, GramPosting, IndexGramsFeature, IndexRow,
+    INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
+};
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
-    MetadataTableFamily, NamespaceManifestCodecError, NamespaceManifestEnvelope,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, IndexFileRef, MetadataFileRef,
+    MetadataRow, MetadataTableFamily, NamespaceManifestCodecError, NamespaceManifestEnvelope,
     NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::wire::wal::{
@@ -36,8 +40,8 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
-    InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamePolicy,
-    NamespaceId, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
+    IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
+    NamePolicy, NamespaceId, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -271,6 +275,9 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 filter_inline: None,
                 payload_checksum: sha256_digest(b"sst payload"),
             }],
+            // Empty and omitted from the document: the fixture predating
+            // derived indexes pins that the field is additive.
+            index_files: Vec::new(),
         },
     )
     .expect("manifest envelope")
@@ -969,4 +976,182 @@ fn sst_block_index_entry_schema_matches_golden_bytes() {
     let decoded: Vec<SegmentIndexEntry> =
         ciborium::de::from_reader(encoded.as_slice()).expect("decode index entries");
     assert_eq!(decoded, entries);
+}
+
+// ---------------------------------------------------------------------------
+// Gram index segments (format spec section 4.2.2): posting batches, rows,
+// block payloads, and the manifest `index_files` list
+// ---------------------------------------------------------------------------
+
+fn sample_gram_postings() -> Vec<GramPosting> {
+    [(2u64, 1u64), (2, 3), (5, 1), (900, 7)]
+        .into_iter()
+        .map(|(inode, revision)| GramPosting {
+            inode_id: InodeId(inode),
+            revision_no: RevisionNo(revision),
+        })
+        .collect()
+}
+
+fn sample_index_rows() -> Vec<IndexRow> {
+    // Grams in row-key order; `fox` carries the multi-posting batch.
+    [b"box", b"fox", b"the"]
+        .into_iter()
+        .map(|gram| {
+            let postings = if gram == b"fox" {
+                sample_gram_postings()
+            } else {
+                vec![GramPosting {
+                    inode_id: InodeId(2),
+                    revision_no: RevisionNo(1),
+                }]
+            };
+            IndexRow::gram_postings(Gram(*gram), &postings).expect("sample row")
+        })
+        .collect()
+}
+
+fn index_segment_id() -> IndexSegmentId {
+    IndexSegmentId::parse("idx_0123456789abcdef0123456789abcdef").expect("valid index segment id")
+}
+
+fn sample_manifest_with_index_envelope() -> NamespaceManifestEnvelope {
+    let mut payload = sample_manifest_envelope().payload;
+    payload.features.insert(
+        INDEX_GRAMS_FEATURE_KEY.to_owned(),
+        IndexGramsFeature::new(ChangeSeq(2)).to_value(),
+    );
+    payload.index_files = vec![IndexFileRef {
+        owner_namespace_id: namespace_id(),
+        segment_id: index_segment_id(),
+        object_key: "namespaces/demo/metadata/index/idx_0123456789abcdef0123456789abcdef.idx.zst"
+            .to_owned(),
+        family: INDEX_FAMILY_GRAMS.to_owned(),
+        run_seq: ChangeSeq(2),
+        level: 0,
+        segment_index: 0,
+        row_count: 3,
+        min_key: "gram-626f78-00000000000000000002".to_owned(),
+        max_key: "gram-746865-00000000000000000002".to_owned(),
+        index_block: loonfs_api::wire::sst_blocks::BlockHandle {
+            offset: 2_000,
+            stored_len: 150,
+            decoded_len: 300,
+            crc32c: 0x2468_ace0,
+        },
+        filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
+            offset: 1_900,
+            stored_len: 100,
+            decoded_len: 100,
+            crc32c: 0x1357_9bdf,
+        },
+        filter_inline: None,
+        payload_checksum: sha256_digest(b"index segment payload"),
+    }];
+    NamespaceManifestEnvelope::from_payload(WRITER_VERSION, payload)
+        .expect("manifest envelope with index")
+}
+
+#[test]
+fn index_gram_posting_batch_matches_golden_bytes() {
+    let batch = encode_gram_postings(&sample_gram_postings()).expect("encode batch");
+    assert_matches_golden("index_gram_postings.v1.bin", &batch);
+    assert_eq!(
+        decode_gram_postings(&read_golden("index_gram_postings.v1.bin"))
+            .expect("decode golden batch"),
+        sample_gram_postings()
+    );
+}
+
+#[test]
+fn index_row_matches_golden_bytes_and_pins_its_keys() {
+    let row = &sample_index_rows()[1];
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(row, &mut encoded).expect("encode index row");
+    assert_matches_golden("index_row_gram_postings.v1.cbor", &encoded);
+
+    let decoded: IndexRow =
+        ciborium::de::from_reader(read_golden("index_row_gram_postings.v1.cbor").as_slice())
+            .expect("decode golden index row");
+    assert_eq!(&decoded, row);
+    assert_eq!(decoded.row_key(), "gram-666f78-00000000000000000002");
+    assert_eq!(decoded.filter_key(), "gram-666f78");
+    assert_eq!(
+        decoded.postings().expect("postings"),
+        sample_gram_postings()
+    );
+
+    // The kind tag is durable bytes in every index row.
+    let tag = serde_json::to_value(row).expect("row tag");
+    assert_eq!(tag["kind"], "gram_postings");
+}
+
+#[test]
+fn index_segment_data_payload_matches_golden_bytes() {
+    use loonfs_api::wire::sst_blocks::{
+        decode_data_block_rows, decode_filter_block, decode_index_block, SegmentBlocksBuilder,
+    };
+    let mut builder = SegmentBlocksBuilder::default();
+    for row in sample_index_rows() {
+        builder
+            .push(&row.row_key(), &row.filter_key(), &row)
+            .expect("push index row");
+    }
+    let built = builder.finish().expect("finish index segment");
+
+    let index = decode_index_block(segment_section(&built.bytes, &built.index), &built.index)
+        .expect("decode index");
+    assert_matches_golden(
+        "index_segment_data.v1.bin",
+        &unzstd(segment_section(&built.bytes, &index[0].block)),
+    );
+
+    let block = decode_data_block_rows::<IndexRow>(
+        segment_section(&built.bytes, &index[0].block),
+        &index[0].block,
+    )
+    .expect("decode index data block");
+    assert_eq!(block.rows, sample_index_rows());
+    assert_eq!(block.row_keys[1], "gram-666f78-00000000000000000002");
+
+    // The shared bloom machinery answers gram probes through the row's
+    // filter key.
+    let filter = decode_filter_block(segment_section(&built.bytes, &built.filter), &built.filter)
+        .expect("decode filter");
+    assert!(filter.may_contain("gram-666f78"));
+    assert!(!filter.may_contain("gram-7a7a7a"));
+}
+
+#[test]
+fn namespace_manifest_with_index_matches_golden_bytes() {
+    let encoded =
+        encode_namespace_manifest_json(&sample_manifest_with_index_envelope()).expect("encode");
+    assert_matches_golden("metadata_manifest_index_grams.v1.json", &encoded);
+}
+
+#[test]
+fn namespace_manifest_with_index_golden_decodes_to_sample() {
+    let decoded =
+        decode_namespace_manifest_json(&read_golden("metadata_manifest_index_grams.v1.json"))
+            .expect("decode golden manifest with index");
+    assert_eq!(decoded, sample_manifest_with_index_envelope());
+    let feature = IndexGramsFeature::from_value(
+        decoded
+            .payload
+            .features
+            .get(INDEX_GRAMS_FEATURE_KEY)
+            .expect("index.grams feature"),
+    )
+    .expect("decode feature value");
+    assert_eq!(feature.built_through_seq, ChangeSeq(2));
+    assert!(feature.is_materialized());
+    assert_eq!(decoded.payload.index_files[0].family, INDEX_FAMILY_GRAMS);
+}
+
+#[test]
+fn index_grams_registry_names_are_durable() {
+    // Both strings appear in durable manifests; neither may drift from the
+    // format spec ("Namespace features map" and section 4.2.2).
+    assert_eq!(INDEX_GRAMS_FEATURE_KEY, "index.grams");
+    assert_eq!(INDEX_FAMILY_GRAMS, "grams");
 }

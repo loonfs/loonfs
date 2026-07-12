@@ -1990,6 +1990,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             fork: None,
             features: BTreeMap::new(),
             metadata_files,
+            index_files: Vec::new(),
         },
     )
     .expect("build malformed manifest");
@@ -4478,6 +4479,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
             fork: None,
             features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(tables),
+            index_files: Vec::new(),
         },
     )
     .expect("build manifest");
@@ -5640,6 +5642,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             fork: None,
             features: BTreeMap::new(),
             metadata_files,
+            index_files: Vec::new(),
         },
     )
     .map_err(|err| {
