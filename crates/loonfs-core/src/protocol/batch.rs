@@ -27,12 +27,7 @@ use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use tracing::Instrument;
 
-/// Self-enforced budget between starting the WAL segment PUT and initiating
-/// the head CAS. Sized so budget + request timeout sit well inside the GC
-/// grace window; overrunning it abandons the segment instead of publishing a
-/// stale-timed one. Local monotonic elapsed time only — never a validity
-/// input (format spec, "WAL head").
-pub(crate) const PUBLISH_BUDGET_MS: u64 = 60_000;
+pub(crate) use crate::limits::WAL_PUBLISH_BUDGET_MS as PUBLISH_BUDGET_MS;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstViewResult {

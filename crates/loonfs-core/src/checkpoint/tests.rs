@@ -5653,3 +5653,166 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
     payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0) && payload.fork.is_none()
 }
+
+/// Deterministic timer advancing a fixed step per reading, so publication
+/// budgets are consumed by observations instead of wall time.
+#[derive(Debug)]
+struct SteppingTimer {
+    now_ms: std::sync::atomic::AtomicU64,
+    step_ms: u64,
+}
+
+impl SteppingTimer {
+    fn new(step_ms: u64) -> Self {
+        Self {
+            now_ms: std::sync::atomic::AtomicU64::new(0),
+            step_ms,
+        }
+    }
+}
+
+impl crate::timing::MonotonicTimer for SteppingTimer {
+    fn monotonic_now_ms(&self) -> u64 {
+        self.now_ms
+            .fetch_add(self.step_ms, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// An over-budget WAL flush aborts before the root compare-and-swap:
+/// the root keeps its previous basis, the orphan outputs are harmless GC
+/// candidates, and an in-budget retry succeeds.
+#[tokio::test]
+async fn over_budget_wal_flush_aborts_without_publishing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = MutationContext {
+        writer_id: "budget-test".to_owned(),
+        writer_session_id: "wrs_budget_test".to_owned(),
+        writer_version: "budget-test/0.1.0".to_owned(),
+        now_ms: 1_000,
+    };
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/budget.txt",
+        b"body",
+        PutBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .await
+    .expect("seed file");
+    let root_before = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+
+    // Every reading advances 20 minutes against the 15-minute budget: the
+    // pre-CAS check observes the publication as over budget.
+    let overrun = SteppingTimer::new(20 * 60 * 1000);
+    let error = super::flush::flush_wal_with_timer(&store, &namespace_id, &context, &overrun)
+        .await
+        .expect_err("over-budget publication must abort");
+    assert!(
+        matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
+        "expected budget error, got {error:?}"
+    );
+
+    let root_after = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+    assert_eq!(
+        root_after, root_before,
+        "an aborted publication must not move the root"
+    );
+
+    // The in-budget retry publishes normally over fresh outputs.
+    let advanced = super::flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("in-budget retry succeeds");
+    assert_eq!(advanced.outcome, loonfs_api::FlushWalOutcome::Published);
+    assert!(advanced.manifest_id > root_before.manifest_id);
+}
+
+/// An over-budget reorganization unit aborts the same way: no root motion,
+/// orphan tables left for garbage collection.
+#[tokio::test]
+async fn over_budget_reorganization_aborts_without_publishing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = MutationContext {
+        writer_id: "budget-test".to_owned(),
+        writer_session_id: "wrs_budget_test".to_owned(),
+        writer_version: "budget-test/0.1.0".to_owned(),
+        now_ms: 1_000,
+    };
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/fold.txt",
+        b"body",
+        PutBehavior::NoReplace,
+        &context,
+        None,
+    )
+    .await
+    .expect("seed file");
+    super::flush::flush_wal(&store, &namespace_id, &context)
+        .await
+        .expect("publish an L0 run to fold");
+    let root_before = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+
+    let fold_everything = MetadataLsmPolicy {
+        max_l0_runs: 1,
+        ..Default::default()
+    };
+    let overrun = SteppingTimer::new(20 * 60 * 1000);
+    let error = super::reorganize::reorganize_metadata_step_with_timer(
+        &store,
+        &namespace_id,
+        &context,
+        fold_everything,
+        &overrun,
+    )
+    .await
+    .expect_err("over-budget reorganization must abort");
+    assert!(
+        matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
+        "expected budget error, got {error:?}"
+    );
+
+    let root_after = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+    assert_eq!(root_after, root_before);
+
+    let report = super::reorganize::reorganize_metadata_step(
+        &store,
+        &namespace_id,
+        &context,
+        fold_everything,
+    )
+    .await
+    .expect("in-budget retry folds the unit");
+    assert!(matches!(
+        report.outcome,
+        super::MetadataReorganizeOutcome::UnitPublished { .. }
+    ));
+}

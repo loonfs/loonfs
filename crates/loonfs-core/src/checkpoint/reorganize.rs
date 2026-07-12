@@ -24,7 +24,9 @@ use super::build::{
     build_manifest_tables_from_rows, debug_assert_manifest_table_segments_do_not_overlap,
     MetadataTableSegmentation,
 };
-use super::flush::{next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT};
+use super::flush::{
+    ensure_metadata_publication_budget, next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT,
+};
 use super::load::{
     load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
     validate_direntry_child_bind_index, validate_revision_by_inode_desc_index,
@@ -37,6 +39,7 @@ use super::runs::{
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::{read_metadata_root_object, read_wal_floor_seq_or_zero};
+use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
@@ -106,6 +109,21 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<MetadataReorganizeReport> {
+    let timer = StdMonotonicTimer::default();
+    reorganize_metadata_step_with_timer(store, namespace_id, context, policy, &timer).await
+}
+
+pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+    timer: &dyn MonotonicTimer,
+) -> Result<MetadataReorganizeReport> {
+    // The publication budget covers the whole unit: measurement starts
+    // before any table object is written and gates the root
+    // compare-and-swap below.
+    let publication_started_ms = timer.monotonic_now_ms();
     let root = read_metadata_root_object(store, namespace_id)
         .await
         .map_err(|error| {
@@ -234,6 +252,7 @@ pub(crate) async fn reorganize_metadata_step<S: ObjectStore + ?Sized>(
     )
     .await?;
 
+    ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
     match publish_metadata_root(
         store,
         namespace_id,

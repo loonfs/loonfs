@@ -61,6 +61,7 @@ mod engine;
 mod error;
 pub mod gc;
 mod invariants;
+pub mod limits;
 pub mod metadata;
 pub mod namespace;
 mod options;

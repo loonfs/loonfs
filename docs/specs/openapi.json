@@ -3533,7 +3533,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Objects younger than this are never deleted, reachable or not.",
+            "description": "Objects younger than this are never deleted, reachable or not. The\nwindow has a derived safety floor (publication budgets plus provider\ndeadlines); a smaller value is rejected as `invalid_request`.",
             "minimum": 0
           },
           "reap_window_ms": {
@@ -3542,7 +3542,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Abandoned bootstrap trees older than this may be reaped.",
+            "description": "Abandoned bootstrap trees older than this may be reaped. Must be at\nleast the grace window.",
             "minimum": 0
           }
         }

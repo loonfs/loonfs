@@ -11,6 +11,7 @@
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::namespace::control::{
     read_head_object, read_metadata_root_object, read_wal_floor_object, ControlObjectLoadError,
 };
@@ -51,14 +52,19 @@ impl Default for GcConfig {
 
 impl GcConfig {
     fn validate(&self) -> Result<(), CoreError> {
-        if self.grace_window_ms == 0 {
-            return Err(CoreError::Internal(
-                "gc grace_window_ms must be greater than zero".to_owned(),
-            ));
+        // The grace window's floor is derived from the enforced publication
+        // budgets and provider deadlines (`limits`), never tuned per pass:
+        // below it, the publish-in-flight safety proof does not hold, so the
+        // configuration is rejected as an invalid request.
+        if self.grace_window_ms < GC_MIN_GRACE_WINDOW_MS {
+            return Err(CoreError::InvalidGcConfig(format!(
+                "grace_window_ms {} is below the derived safety minimum {}",
+                self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
+            )));
         }
         if self.reap_window_ms < self.grace_window_ms {
-            return Err(CoreError::Internal(
-                "gc reap_window_ms must be at least the grace window".to_owned(),
+            return Err(CoreError::InvalidGcConfig(
+                "reap_window_ms must be at least the grace window".to_owned(),
             ));
         }
         Ok(())
@@ -840,6 +846,42 @@ mod tests {
         ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
             self.0.list_prefix_stream(prefix)
         }
+    }
+
+    /// The derived floor is enforced at validation: a pass configured below
+    /// it is rejected as an invalid request before touching the store.
+    #[tokio::test]
+    async fn gc_rejects_grace_windows_below_the_derived_minimum() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+
+        let too_small = GcConfig {
+            grace_window_ms: GC_MIN_GRACE_WINDOW_MS - 1,
+            reap_window_ms: REAP_MS,
+        };
+        let error = gc_namespace(&store, &namespace_id, &too_small, &context(1_000))
+            .await
+            .expect_err("sub-minimum grace window must be rejected");
+        assert!(
+            matches!(&error, CoreError::InvalidGcConfig(message)
+                if message.contains("below the derived safety minimum")),
+            "expected invalid gc config, got {error:?}"
+        );
+        assert_eq!(
+            error.code(),
+            crate::error::ErrorCode::InvalidRequest,
+            "the rejection surfaces as invalid_request"
+        );
+
+        let inverted = GcConfig {
+            grace_window_ms: GRACE_MS,
+            reap_window_ms: GRACE_MS - 1,
+        };
+        let error = gc_namespace(&store, &namespace_id, &inverted, &context(1_000))
+            .await
+            .expect_err("reap below grace must be rejected");
+        assert!(matches!(error, CoreError::InvalidGcConfig(_)));
     }
 
     #[tokio::test]

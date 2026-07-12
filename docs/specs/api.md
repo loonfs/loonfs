@@ -312,7 +312,7 @@ A representative v0 binding is shown below.
 | Flush the WAL tail | `POST /v0/admin/namespaces/{ns}/wal/flush` (folds the visible WAL tail into metadata tables and advances the metadata root; creates no checkpoint record) |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; flush races surface as outcomes, not errors) |
-| Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; nothing sweeps without an explicit call) |
+| Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile; everything else
 shown belongs to `core/v0`.

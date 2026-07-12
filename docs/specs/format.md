@@ -1049,6 +1049,16 @@ head watchers observe only commits. The flush is the latest-state
 maintenance operation and creates no checkpoint record; a superseded manifest
 becomes a garbage-collection candidate once nothing pins it.
 
+Every metadata publication — WAL flush and reorganization alike —
+self-enforces the metadata publication budget, measured from before its
+first table object is written until its root compare-and-swap is initiated.
+A publication that exceeds the budget aborts without publishing: its
+immutable outputs stay unreachable and are reclaimed by garbage collection
+after the grace window. This bound (with the WAL publish budget for
+commits) is what makes the GC grace window's floor derivable ("Garbage
+collection", rule 1); maintenance therefore needs no durable build-intent
+protocol.
+
 Creating a checkpoint pins one such manifest version deliberately for one
 owner. It first flushes the WAL tail as above, then writes
 `checkpoints/{id}.json` (id derived deterministically from the basis identity
@@ -1361,12 +1371,27 @@ create-vs-collect (a record written while GC concludes its basis is
 unreferenced) and publish-in-flight (an object written moments before its
 publishing CAS) — under these rules:
 
-1. **Grace window.** A configured window `T`, with
-   `T > publish_budget + request_timeout` and
-   `T > verify_budget + request_timeout` by comfortable margin. GC never
-   deletes or releases any object younger than `T`, reachable or not, and
-   treats any checkpoint record younger than `T` as a root regardless of
-   state. An object without a provider timestamp reads as young.
+1. **Grace window.** A configured window `T` with a derived floor, not a
+   free tuning parameter:
+
+   ```
+   T >= max(WAL_PUBLISH_BUDGET, CHECKPOINT_VERIFY_BUDGET,
+            METADATA_PUBLICATION_BUDGET)
+        + PROVIDER_OP_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT
+        + GC_SAFETY_MARGIN
+   ```
+
+   The constants live in one place (`loonfs-core`'s `limits` module; the
+   provider bounds in `loonfs-objectstore`), every publication self-enforces
+   its budget by refusing to initiate its root compare-and-swap once the
+   budget is spent, and provider operations consume one deadline across
+   retries. A window below the floor is rejected as `invalid_request` at
+   every surface. Under the floor's inequality, any acknowledged root
+   publication lands its compare-and-swap before an object it references
+   could age past `T`, so GC never deletes or releases any object younger
+   than `T`, reachable or not, and treats any checkpoint record younger
+   than `T` as a root regardless of state. An object without a provider
+   timestamp reads as young.
 2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
    nominates an object for deletion.
 3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
