@@ -1,6 +1,7 @@
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
+use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +23,42 @@ pub struct ProviderObjectStoreConfig {
     pub sha256_checksum_metadata: bool,
 }
 
+/// One HTTP attempt's request timeout, applied through the provider client's
+/// options. An attempt that makes no progress for this long fails and counts
+/// against the operation deadline instead of consuming it invisibly.
+pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One HTTP attempt's connect timeout.
+pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard deadline for one logical object-store operation, consumed across
+/// every retry of that operation rather than restarting per attempt. Reads
+/// get it as the provider client's retry timeout; writes and deletes get it
+/// through `TransportRetryPolicy`. The deadline gates starting another
+/// attempt, so one operation's total wall time is bounded by
+/// `PROVIDER_OP_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT`. The GC grace window is
+/// derived above this bound (format spec, "Garbage collection", rule 1).
+pub const PROVIDER_OP_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Client options every provider builder applies: explicit per-attempt
+/// request and connect timeouts, so attempt time is bounded by these named
+/// constants instead of an upstream default.
+pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
+    provider_store::ClientOptions::new()
+        .with_timeout(PROVIDER_ATTEMPT_TIMEOUT)
+        .with_connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+}
+
+/// Retry configuration every provider builder applies: the client's internal
+/// read retries consume [`PROVIDER_OP_DEADLINE`] as one per-operation budget,
+/// matching the write loops above.
+pub(crate) fn provider_retry_config() -> provider_store::RetryConfig {
+    provider_store::RetryConfig {
+        retry_timeout: PROVIDER_OP_DEADLINE,
+        ..Default::default()
+    }
+}
+
 /// Bounded retry for transient write failures, mirroring the retry budget the
 /// provider client already applies to reads.
 ///
@@ -30,20 +67,25 @@ pub struct ProviderObjectStoreConfig {
 /// already have reached the store. LoonFS knows more than the HTTP layer:
 /// overwrite puts, create-if-absent puts, and deletes are idempotent-safe at
 /// this contract's semantics, so they get the same bounded retry reads have.
+/// Both attempt count and elapsed time bound the loop: `op_deadline` is one
+/// deadline for the whole logical operation, never restarted per attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransportRetryPolicy {
     max_retries: u32,
     initial_backoff: Duration,
     max_backoff: Duration,
+    op_deadline: Duration,
 }
 
 impl TransportRetryPolicy {
     /// Matches the provider client's read retry budget: up to 10 retries with
-    /// exponential backoff from 100ms capped at 15s.
+    /// exponential backoff from 100ms capped at 15s, all inside one
+    /// operation deadline.
     const DEFAULT: Self = Self {
         max_retries: 10,
         initial_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(15),
+        op_deadline: PROVIDER_OP_DEADLINE,
     };
 }
 
@@ -55,6 +97,36 @@ fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duratio
         .initial_backoff
         .saturating_mul(1u32 << doublings)
         .min(policy.max_backoff)
+}
+
+/// Elapsed-time state for one logical operation's retry loop: refuses new
+/// attempts once the deadline is consumed and never sleeps past it.
+struct OperationDeadline<'timer> {
+    timer: &'timer dyn MonotonicTimer,
+    started_ms: u64,
+    deadline: Duration,
+}
+
+impl<'timer> OperationDeadline<'timer> {
+    fn start(timer: &'timer dyn MonotonicTimer, deadline: Duration) -> Self {
+        Self {
+            timer,
+            started_ms: timer.monotonic_now_ms(),
+            deadline,
+        }
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        let elapsed_ms = self
+            .timer
+            .monotonic_now_ms()
+            .saturating_sub(self.started_ms);
+        let deadline_ms = u64::try_from(self.deadline.as_millis()).unwrap_or(u64::MAX);
+        if elapsed_ms >= deadline_ms {
+            return None;
+        }
+        Some(Duration::from_millis(deadline_ms - elapsed_ms))
+    }
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -70,6 +142,7 @@ pub struct ProviderObjectStore {
     key_prefix: Option<String>,
     sha256_checksum_metadata: bool,
     transport_retry: TransportRetryPolicy,
+    timer: Arc<dyn MonotonicTimer>,
 }
 
 impl fmt::Debug for ProviderObjectStore {
@@ -91,12 +164,19 @@ impl ProviderObjectStore {
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             sha256_checksum_metadata: config.sha256_checksum_metadata,
             transport_retry: TransportRetryPolicy::DEFAULT,
+            timer: Arc::new(StdMonotonicTimer::default()),
         })
     }
 
     #[cfg(test)]
     fn with_transport_retry(mut self, transport_retry: TransportRetryPolicy) -> Self {
         self.transport_retry = transport_retry;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+        self.timer = timer;
         self
     }
 
@@ -292,6 +372,8 @@ impl ObjectStore for ProviderObjectStore {
         }
 
         let create_if_absent = matches!(mode, PutMode::CreateIfAbsent);
+        let deadline =
+            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
         let mut retries: u32 = 0;
         // True once an attempt failed after possibly reaching the store, so a
         // later "already exists" may be our own first attempt having landed.
@@ -339,8 +421,21 @@ impl ObjectStore for ProviderObjectStore {
             if retries >= self.transport_retry.max_retries {
                 return Err(map_provider_error(key, err));
             }
+            // The operation deadline is consumed across attempts, never
+            // restarted: no new attempt starts once it is spent, and the
+            // backoff never sleeps past it.
+            let Some(remaining) = deadline.remaining() else {
+                tracing::warn!(
+                    object_key = key,
+                    operation = "put",
+                    retry = retries,
+                    error = %err,
+                    "object store operation deadline exhausted; not retrying",
+                );
+                return Err(map_provider_error(key, err));
+            };
             retries += 1;
-            let backoff = transport_retry_backoff(&self.transport_retry, retries);
+            let backoff = transport_retry_backoff(&self.transport_retry, retries).min(remaining);
             tracing::info!(
                 object_key = key,
                 operation = "put",
@@ -356,6 +451,8 @@ impl ObjectStore for ProviderObjectStore {
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let path = self.to_path(key)?;
+        let deadline =
+            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
         let mut retries: u32 = 0;
         loop {
             // Delete is idempotent under this contract: not-found already
@@ -369,8 +466,18 @@ impl ObjectStore for ProviderObjectStore {
             if !provider_transport_retryable(&err) || retries >= self.transport_retry.max_retries {
                 return Err(map_provider_error(key, err));
             }
+            let Some(remaining) = deadline.remaining() else {
+                tracing::warn!(
+                    object_key = key,
+                    operation = "delete",
+                    retry = retries,
+                    error = %err,
+                    "object store operation deadline exhausted; not retrying",
+                );
+                return Err(map_provider_error(key, err));
+            };
             retries += 1;
-            let backoff = transport_retry_backoff(&self.transport_retry, retries);
+            let backoff = transport_retry_backoff(&self.transport_retry, retries).min(remaining);
             tracing::info!(
                 object_key = key,
                 operation = "delete",
@@ -793,7 +900,31 @@ mod tests {
             max_retries: 4,
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
+            op_deadline: PROVIDER_OP_DEADLINE,
         })
+    }
+
+    /// Deterministic timer that advances a fixed step per reading, so a
+    /// deadline is consumed by observations instead of wall time.
+    #[derive(Debug)]
+    struct SteppingTimer {
+        now_ms: std::sync::atomic::AtomicU64,
+        step_ms: u64,
+    }
+
+    impl SteppingTimer {
+        fn new(step_ms: u64) -> Self {
+            Self {
+                now_ms: std::sync::atomic::AtomicU64::new(0),
+                step_ms,
+            }
+        }
+    }
+
+    impl MonotonicTimer for SteppingTimer {
+        fn monotonic_now_ms(&self) -> u64 {
+            self.now_ms.fetch_add(self.step_ms, Ordering::SeqCst)
+        }
     }
 
     fn script_puts(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
@@ -979,6 +1110,73 @@ mod tests {
 
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 5);
+    }
+
+    /// The operation deadline is one budget across every retry: once the
+    /// elapsed observations consume it, the loop refuses further attempts
+    /// even though the count budget has room.
+    #[tokio::test]
+    async fn write_retries_stop_once_the_operation_deadline_is_spent() {
+        let flaky = Arc::new(FlakyStore::default());
+        // Each timer reading advances 45s against a 120s deadline: the
+        // deadline check after the second failed attempt finds it spent.
+        let store = retrying_store(Arc::clone(&flaky))
+            .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
+        script_puts(&flaky, (0..6).map(|_| WriteScript::FailWithoutLanding));
+        let key = "namespaces/demo/uploads/upl_9.json";
+
+        let error = store
+            .put_overwrite(key, Bytes::from_static(b"payload"))
+            .await
+            .expect_err("deadline exhaustion surfaces the transport failure");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        let attempts = flaky.puts.load(Ordering::SeqCst);
+        assert!(
+            attempts < 5,
+            "deadline must stop the loop before the count budget ({attempts} attempts)"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_retries_stop_once_the_operation_deadline_is_spent() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky))
+            .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
+        let key = "namespaces/demo/uploads/upl_10.json";
+        store
+            .put_overwrite(key, Bytes::from_static(b"payload"))
+            .await
+            .expect("seed object");
+        for _ in 0..6 {
+            flaky
+                .delete_script
+                .lock()
+                .expect("delete script")
+                .push_back(WriteScript::FailWithoutLanding);
+        }
+
+        let error = store
+            .delete(key)
+            .await
+            .expect_err("deadline exhaustion surfaces the transport failure");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        let attempts = flaky.deletes.load(Ordering::SeqCst);
+        assert!(
+            attempts < 5,
+            "deadline must stop the loop before the count budget ({attempts} attempts)"
+        );
+    }
+
+    #[test]
+    fn operation_deadline_remaining_caps_at_zero() {
+        let timer = SteppingTimer::new(70_000);
+        let deadline = OperationDeadline::start(&timer, Duration::from_secs(120));
+        // First reading after start: 70s elapsed, 50s left.
+        assert_eq!(deadline.remaining(), Some(Duration::from_secs(50)));
+        // Second reading: 140s elapsed, spent.
+        assert_eq!(deadline.remaining(), None);
     }
 
     #[tokio::test]

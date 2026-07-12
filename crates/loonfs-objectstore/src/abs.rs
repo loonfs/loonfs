@@ -52,6 +52,8 @@ impl AzureAbsStore {
         let io_runtime = StoreIoRuntime::new()?;
         let mut builder = MicrosoftAzureBuilder::new()
             .with_http_connector(io_runtime.connector())
+            .with_client_options(crate::provider_object_store::provider_client_options())
+            .with_retry(crate::provider_object_store::provider_retry_config())
             .with_account(config.account_name)
             .with_container_name(config.container_name)
             .with_access_key(config.access_key.expose());
