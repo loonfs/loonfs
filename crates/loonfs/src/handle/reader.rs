@@ -6,10 +6,10 @@ use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, ChangesResponse,
-    DirectoryPageCursor, FileRevisionsPageCursor, InodeId, ListChangesOptions,
-    ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId, ObjectStoreMetricsRecorder,
-    PageRequest, Result, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
-    StoreConfig, TraceMode, TraceStoreKind,
+    DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest, GrepResponse, InodeId,
+    ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId,
+    ObjectStoreMetricsRecorder, PageRequest, Result, RevisionNo, RuntimeCacheConfig,
+    RuntimeCacheStats, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -118,6 +118,17 @@ impl FsReader {
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
         self.core.read_file_bytes(namespace_id, absolute_path).await
+    }
+
+    /// Content search over the namespace's gram index: index-accelerated
+    /// candidates plus an exhaustive scan of the unindexed tail, every
+    /// candidate verified against the real pattern.
+    pub async fn grep(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse> {
+        self.core.grep(namespace_id, request).await
     }
 
     /// Lists the revision history of a file path.

@@ -67,6 +67,7 @@ pub mod namespace;
 mod options;
 pub mod path;
 mod protocol;
+mod query;
 mod storage;
 pub mod timing;
 mod wal;

@@ -26,7 +26,7 @@ within a plane is expressed as **named features** (section 2).
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Trigger WAL flushes; create and release checkpoints; trigger retention-floor advancement; run one-shot maintenance ticks; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
-| `query/v0` | Query plane | — | **Reserved name only.** Materializes only if derived indexes introduce endpoints beyond the core ops; until that decision, no ops are specified and no `query.*` feature keys are registered. |
+| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Gram-index search is the `query.grep` **feature** within this profile; using it also requires the namespace's `index.grams` feature entry (format spec, "Namespace features map"). | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -68,12 +68,13 @@ therefore identical for both backends.
 ```json
 {
   "protocol_version": "v0",
-  "profiles": ["core/v0", "admin/v0"],
+  "profiles": ["core/v0", "admin/v0", "query/v0"],
   "features": {
     "core.namespaces.create": true,
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
-    "core.uploads.direct_put": false
+    "core.uploads.direct_put": false,
+    "query.grep": true
   },
   "limits": {
     "pagination.default_limit": 1000,
@@ -121,9 +122,10 @@ hoc.
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. Raw object keys and caller-managed object-store writes are not part of this feature. |
+| `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires the namespace's `index.grams` feature entry, and a namespace without it answers `not_supported` whatever this key advertises. |
 
-`admin/v0` currently has required ops only and no feature keys. `query.*` and
-`acl.*` keys are unregistered until their planes materialize.
+`admin/v0` currently has required ops only and no feature keys. `acl.*` keys
+are unregistered until that plane materializes.
 
 Namespace listing is intentionally not supported in v0. Callers must address
 namespaces by id until LoonFS has a scalable namespace catalog/index design.
@@ -188,6 +190,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
+| `query_unindexable` | 400 | The pattern requires no literal bytes, so the gram index cannot narrow candidates; rewrite the pattern or set `allow_scan`. |
 | `rebootstrap_required` | 409 | The resume position — a change cursor or listing snapshot — is no longer available; restart from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
@@ -195,6 +198,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
+| `index_lagging` | 503 | The gram index trails the head past the exhaustive-scan budget; run maintenance (or set `allow_stale`) and retry. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
 
@@ -313,9 +317,11 @@ A representative v0 binding is shown below.
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; flush races surface as outcomes, not errors) |
 | Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
+| Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires the namespace's `index.grams` feature entry) |
 
-Routes under `/v0/admin/` belong to the `admin/v0` profile; everything else
-shown belongs to `core/v0`.
+Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
+`/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
+`core/v0`.
 
 For `direct_put`, the client requests a presigned upload capability:
 
@@ -815,6 +821,56 @@ shares the source namespace's content store and starts with independent future
 namespace metadata. The fork records provenance and a fork-owned source
 checkpoint so source-owned immutable metadata files remain available while
 the target manifest references them.
+
+### 6.12 `POST /query/grep`
+
+Representative request:
+
+```json
+{
+  "pattern": "fn (grep|search)",
+  "case_insensitive": false,
+  "path_prefix": "/src",
+  "limit": 100
+}
+```
+
+Representative response:
+
+```json
+{
+  "namespace_id": "demo",
+  "head_seq": 418,
+  "built_through_seq": 410,
+  "tail_scanned": true,
+  "matches": [
+    {
+      "absolute_path": "/src/search.rs",
+      "inode_id": 42,
+      "revision_no": 3,
+      "line_number": 17,
+      "byte_offset": 512,
+      "line": "fn grep(&self) {",
+      "line_truncated": false
+    }
+  ],
+  "next_cursor": "..."
+}
+```
+
+The pattern uses the Rust `regex` crate's dialect (no backreferences or
+lookaround), compiled line-anchored: `^` and `$` match line boundaries. The server plans required grams from the pattern, intersects
+the namespace's gram index (format spec, "Gram index segments"), scans
+revisions committed after `built_through_seq` exhaustively, and verifies
+every candidate against the real pattern, so index staleness affects cost,
+never answers. Matches order by `(inode_id, byte_offset)` and one match is
+reported per line. Each page is evaluated against the namespace head at
+page time and reports it in `head_seq`; the cursor resumes strictly after
+the last returned match. A pattern with no required literal bytes is
+rejected with `query_unindexable` unless `allow_scan` opts into a capped
+exhaustive scan, and a tail past the scan budget is rejected with
+`index_lagging` unless `allow_stale` accepts indexed-only results
+(reported via `tail_scanned: false`).
 
 ## 7. Conformance requirements
 

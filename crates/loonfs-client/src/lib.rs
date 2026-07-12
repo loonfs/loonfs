@@ -22,10 +22,11 @@ use loonfs_api::{
     CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, MutationResult,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
-    RestoreFileRevisionRequest, RevisionNo,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, MutationResult, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
+    RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -667,6 +668,20 @@ impl Client {
     ) -> Result<GcResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/admin/namespaces/{namespace}/gc", self.base_url);
+        self.request_json(self.agent.post(&url), Some(request))
+    }
+
+    /// Content search over the namespace's gram index (query plane).
+    /// Gate on the `query.grep` capability before calling against unknown
+    /// deployments; the namespace must also have `index.grams`
+    /// materialized or the server answers `not_supported`.
+    pub fn grep(
+        &self,
+        namespace: &str,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!("{}/v0/namespaces/{namespace}/query/grep", self.base_url);
         self.request_json(self.agent.post(&url), Some(request))
     }
 

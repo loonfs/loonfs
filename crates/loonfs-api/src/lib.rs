@@ -51,8 +51,9 @@ pub mod wire {
 
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
@@ -66,11 +67,11 @@ pub use ids::{
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{
-    decode_directory_cursor, decode_file_revisions_cursor, encode_directory_cursor,
-    encode_file_revisions_cursor, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
-    LimitError, Page, PageCursorError, PageRequest, PaginationPolicy, PaginationPolicyError,
-    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
-    PAGE_CURSOR_VERSION,
+    decode_directory_cursor, decode_file_revisions_cursor, decode_grep_cursor,
+    encode_directory_cursor, encode_file_revisions_cursor, encode_grep_cursor, DirectoryPageCursor,
+    EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError, Page, PageCursorError,
+    PageRequest, PaginationPolicy, PaginationPolicyError, DEFAULT_MAX_PAGE_LIMIT,
+    DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, PAGE_CURSOR_VERSION,
 };
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
 
@@ -81,10 +82,11 @@ pub use v0::{
     CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
     FilesystemOperationRequest, FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, MutationResult,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
+    RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

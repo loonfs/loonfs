@@ -9,6 +9,8 @@ pub const PROTOCOL_VERSION: &str = "v0";
 pub const PROFILE_CORE_V0: &str = "core/v0";
 /// The optional maintenance plane.
 pub const PROFILE_ADMIN_V0: &str = "admin/v0";
+/// The optional derived-index query plane.
+pub const PROFILE_QUERY_V0: &str = "query/v0";
 
 /// Gates namespace creation.
 pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
@@ -18,6 +20,9 @@ pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
+/// Gates gram-index content search: the serving half of the capability;
+/// the namespace's `index.grams` feature entry is the data half.
+pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
 /// Advisory limit: the largest request body accepted for service-proxied
 /// upload content requests.

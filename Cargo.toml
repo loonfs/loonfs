@@ -35,6 +35,8 @@ http = "1"
 futures = "0.3"
 fs4 = "0.13"
 object_store = { version = "=0.12.4", default-features = false, features = ["aws", "gcp", "azure"] }
+regex = { version = "1.11", default-features = false, features = ["std", "perf"] }
+regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }

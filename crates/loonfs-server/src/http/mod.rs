@@ -18,6 +18,7 @@
 mod error;
 mod handlers_filesystem;
 mod handlers_namespace;
+mod handlers_query;
 mod handlers_uploads;
 #[cfg(feature = "openapi")]
 mod openapi;
@@ -36,6 +37,7 @@ use self::handlers_namespace::{
     advance_retention, create_checkpoint, create_namespace, delete_namespace, flush_wal,
     fork_namespace, gc_namespace, maintenance_tick, namespace_status, release_checkpoint,
 };
+use self::handlers_query::grep;
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::async_trait;
@@ -167,6 +169,7 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/:namespace/filesystem/content",
             get(get_content),
         )
+        .route("/v0/namespaces/:namespace/query/grep", post(grep))
         .route(
             "/v0/namespaces/:namespace/filesystem/revisions",
             get(list_path_revisions),

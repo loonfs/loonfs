@@ -1861,6 +1861,109 @@
         }
       }
     },
+    "/v0/namespaces/{namespace}/query/grep": {
+      "post": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Content search",
+        "description": "Searches file content with a regular expression, accelerated by the namespace's gram index (`index.grams`). Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires the index to be materialized on the namespace.",
+        "operationId": "grep",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrepRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "One page of matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrepResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid pattern, cursor, or an unindexable pattern without allow_scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The gram index is not materialized on this namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The index trails the head past the scan budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/namespaces/{namespace}/uploads": {
       "post": {
         "tags": [
@@ -3620,6 +3723,143 @@
           }
         }
       },
+      "GrepMatch": {
+        "type": "object",
+        "description": "One line-oriented match.",
+        "required": [
+          "absolute_path",
+          "inode_id",
+          "revision_no",
+          "line_number",
+          "byte_offset",
+          "line"
+        ],
+        "properties": {
+          "absolute_path": {
+            "type": "string",
+            "description": "The file's absolute path, derived at the snapshot."
+          },
+          "byte_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Byte offset of the match within the file.",
+            "minimum": 0
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Durable identity of the matched file."
+          },
+          "line": {
+            "type": "string",
+            "description": "The matching line, truncated to the server's line cap."
+          },
+          "line_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "One-based line number of the match.",
+            "minimum": 0
+          },
+          "line_truncated": {
+            "type": "boolean",
+            "description": "True when `line` was truncated."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "The matched revision (the newest visible one at the snapshot)."
+          }
+        }
+      },
+      "GrepRequest": {
+        "type": "object",
+        "description": "One content-search request.",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "allow_scan": {
+            "type": "boolean",
+            "description": "Permit a capped exhaustive scan when the pattern yields no required\ngrams. Refused beyond the server's scan budget."
+          },
+          "allow_stale": {
+            "type": "boolean",
+            "description": "When the unindexed tail exceeds the scan budget, return\nindexed-only results (reported via `tail_scanned: false`) instead\nof failing with `index_lagging`."
+          },
+          "case_insensitive": {
+            "type": "boolean",
+            "description": "Match case-insensitively. Verification is exact; the index remains\nconsulted through its case-folded grams."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resume cursor from a previous page; pages share one snapshot."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum matches per page.",
+            "minimum": 0
+          },
+          "path_prefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Restrict matches to files under this absolute path prefix."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "The pattern, in the Rust `regex` crate's dialect (no backreferences\nor lookaround). Patterns that require no literal bytes are rejected\nwith `query_unindexable` unless `allow_scan` is set."
+          }
+        }
+      },
+      "GrepResponse": {
+        "type": "object",
+        "description": "One content-search page.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "built_through_seq",
+          "tail_scanned",
+          "matches"
+        ],
+        "properties": {
+          "built_through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Commits at or below this sequence were answered from the index."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Snapshot sequence every page of this search reads."
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrepMatch"
+            },
+            "description": "Matches in ascending `(inode_id, byte_offset)` order."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace searched."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when another page follows."
+          },
+          "tail_scanned": {
+            "type": "boolean",
+            "description": "True when revisions after `built_through_seq` were scanned\nexhaustively; false only when `allow_stale` skipped them."
+          }
+        }
+      },
       "InodeId": {
         "type": "integer",
         "format": "int64",
@@ -4116,6 +4356,10 @@
     {
       "name": "admin",
       "description": "Administrative maintenance APIs"
+    },
+    {
+      "name": "query",
+      "description": "Derived-index query APIs"
     }
   ]
 }

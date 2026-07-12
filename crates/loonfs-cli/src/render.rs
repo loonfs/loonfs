@@ -272,6 +272,29 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        CommandData::GrepMatches {
+            pattern,
+            matches,
+            tail_scanned,
+        } => {
+            let mut lines: Vec<String> = matches
+                .iter()
+                .map(|found| {
+                    format!(
+                        "{}:{}:{}",
+                        found.absolute_path, found.line_number, found.line
+                    )
+                })
+                .collect();
+            lines.push(format!("{} matches for `{pattern}`", matches.len()));
+            if !tail_scanned {
+                lines.push(
+                    "warning: recent commits were not scanned (allow_stale); results may be stale"
+                        .to_owned(),
+                );
+            }
+            lines.join("\n")
+        }
         CommandData::PathEntry(entry) => {
             let mut lines = vec![
                 format!("path: {}", entry.absolute_path),

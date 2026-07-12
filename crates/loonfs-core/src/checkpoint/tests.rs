@@ -6615,3 +6615,215 @@ async fn fold_refuses_an_unreadable_feature_value() {
     .expect_err("folding corrupt feature state must refuse");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
+// ---------------------------------------------------------------------------
+// Grep (content search) over the gram index
+// ---------------------------------------------------------------------------
+
+async fn grep_now(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    request: &loonfs_api::GrepRequest,
+) -> crate::error::Result<loonfs_api::GrepResponse> {
+    let view = crate::path::read::load_metadata_view(
+        store,
+        namespace_id,
+        crate::path::read::ReadLoadContext::latest(),
+    )
+    .await?;
+    view.grep(store, request).await
+}
+
+fn grep_request(pattern: &str) -> loonfs_api::GrepRequest {
+    loonfs_api::GrepRequest {
+        pattern: pattern.to_owned(),
+        case_insensitive: false,
+        path_prefix: None,
+        cursor: None,
+        limit: None,
+        allow_stale: false,
+        allow_scan: false,
+    }
+}
+
+#[tokio::test]
+async fn grep_verifies_indexed_tail_and_visibility_semantics() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grep-e2e").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"a needle in alpha\nplain line\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/bravo.txt",
+        b"nothing here\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write bravo");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/charlie.txt",
+        b"another needle in charlie\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write charlie");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/blob.bin",
+        b"needle\0binary",
+        &context,
+        None,
+    )
+    .await
+    .expect("write binary");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+
+    // Before the feature is enabled the query names the missing data half.
+    let error = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect_err("grep without the feature must be refused");
+    assert_eq!(error.code(), ErrorCode::NotSupported);
+
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+
+    // Indexed matches: verified, path-derived, ordered by inode; the
+    // binary file and the non-matching file contribute nothing.
+    let response = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep");
+    assert!(response.tail_scanned);
+    let paths: Vec<&str> = response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["/alpha.txt", "/docs/charlie.txt"]);
+    assert_eq!(response.matches[0].line_number, 1);
+    assert_eq!(response.matches[0].line, "a needle in alpha");
+    assert!(response.next_cursor.is_none());
+
+    // Case-insensitive queries fold through the same index.
+    let mut request = grep_request("NEEDLE");
+    request.case_insensitive = true;
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("grep ci");
+    assert_eq!(response.matches.len(), 2);
+
+    // Scope filters on component boundaries.
+    let mut request = grep_request("needle");
+    request.path_prefix = Some("/docs".to_owned());
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("grep scoped");
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/docs/charlie.txt");
+
+    // Pagination: one match per page, resumed by cursor, same results.
+    let mut request = grep_request("needle");
+    request.limit = Some(1);
+    let first = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("page one");
+    assert_eq!(first.matches.len(), 1);
+    let cursor = first.next_cursor.clone().expect("second page follows");
+    request.cursor = Some(cursor);
+    let second = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("page two");
+    assert_eq!(second.matches.len(), 1);
+    assert_eq!(first.matches[0].absolute_path, "/alpha.txt");
+    assert_eq!(second.matches[0].absolute_path, "/docs/charlie.txt");
+    assert!(second.next_cursor.is_none());
+
+    // Commits after the watermark are served from the exhaustive tail.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/delta.txt",
+        b"fresh needle\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write delta");
+    let response = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep with tail");
+    assert!(response.tail_scanned);
+    assert!(response.head_seq > response.built_through_seq);
+    assert!(response
+        .matches
+        .iter()
+        .any(|found| found.absolute_path == "/delta.txt"));
+
+    // Overwriting a file supersedes its postings: the stale posting stays
+    // harmless because only the newest visible revision is verified.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"nothing to see\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("overwrite alpha");
+    // Deleting a file removes it from path visibility.
+    delete_path(&store, &namespace_id, "/docs/charlie.txt", &context, None)
+        .await
+        .expect("delete charlie");
+    let response = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep after churn");
+    let paths: Vec<&str> = response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["/delta.txt"]);
+
+    // A pattern with no required grams is refused, and allow_scan opts
+    // into the capped exhaustive scan instead.
+    let error = grep_now(&store, &namespace_id, &grep_request("n."))
+        .await
+        .expect_err("gram-free patterns are refused");
+    assert_eq!(error.code(), ErrorCode::QueryUnindexable);
+    let mut request = grep_request("n.edle");
+    request.allow_scan = true;
+    request.pattern = "needle$".to_owned();
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("anchored grep");
+    assert_eq!(response.matches.len(), 1);
+}

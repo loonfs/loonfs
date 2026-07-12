@@ -214,6 +214,21 @@ pub struct FileRevisionsPageCursor {
     pub last_revision_delta_index: u32,
 }
 
+/// Cursor for one content-search (grep) snapshot.
+///
+/// Matches advance in ascending `(inode_id, byte_offset)` order: candidate
+/// files by durable inode identity, match positions within a file by byte
+/// offset. The cursor resumes strictly after the last returned match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrepPageCursor {
+    /// Snapshot sequence captured by the first page.
+    pub head_seq: ChangeSeq,
+    /// Inode of the last returned match.
+    pub last_inode_id: InodeId,
+    /// Byte offset of the last returned match within its file.
+    pub last_byte_offset: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum EncodedPageCursor {
@@ -231,12 +246,18 @@ enum EncodedPageCursor {
         last_committed_seq: ChangeSeq,
         last_revision_delta_index: u32,
     },
+    Grep {
+        v: u8,
+        head_seq: ChangeSeq,
+        last_inode_id: InodeId,
+        last_byte_offset: u64,
+    },
 }
 
 impl EncodedPageCursor {
     fn version(&self) -> u8 {
         match self {
-            Self::Directory { v, .. } | Self::FileRevisions { v, .. } => *v,
+            Self::Directory { v, .. } | Self::FileRevisions { v, .. } | Self::Grep { v, .. } => *v,
         }
     }
 
@@ -244,6 +265,7 @@ impl EncodedPageCursor {
         match self {
             Self::Directory { .. } => "directory",
             Self::FileRevisions { .. } => "file_revisions",
+            Self::Grep { .. } => "grep",
         }
     }
 
@@ -325,6 +347,36 @@ pub fn decode_file_revisions_cursor(
         }),
         other => Err(PageCursorError::WrongKind {
             expected: "file_revisions",
+            actual: other.kind(),
+        }),
+    }
+}
+
+/// Encodes a grep cursor as an opaque string for clients.
+pub fn encode_grep_cursor(cursor: &GrepPageCursor) -> Result<String, PageCursorError> {
+    encode_cursor(&EncodedPageCursor::Grep {
+        v: PAGE_CURSOR_VERSION,
+        head_seq: cursor.head_seq,
+        last_inode_id: cursor.last_inode_id,
+        last_byte_offset: cursor.last_byte_offset,
+    })
+}
+
+/// Decodes a grep cursor returned by [`encode_grep_cursor`].
+pub fn decode_grep_cursor(value: &str) -> Result<GrepPageCursor, PageCursorError> {
+    match decode_cursor(value)? {
+        EncodedPageCursor::Grep {
+            head_seq,
+            last_inode_id,
+            last_byte_offset,
+            ..
+        } => Ok(GrepPageCursor {
+            head_seq,
+            last_inode_id,
+            last_byte_offset,
+        }),
+        other => Err(PageCursorError::WrongKind {
+            expected: "grep",
             actual: other.kind(),
         }),
     }

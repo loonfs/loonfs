@@ -21,9 +21,9 @@ use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
     CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode,
-    FlushWalResponse, GcRequest, GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo,
+    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, MutationResult, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -149,6 +149,12 @@ pub trait Backend {
         -> Result<AuthoritativePathEntry, BackendError>;
     /// Reads a file's current content.
     async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError>;
+    /// Content search over a namespace's gram index.
+    async fn grep(
+        &self,
+        namespace_id: &str,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse, BackendError>;
     /// Reads a retained file revision's content.
     async fn read_file_revision_bytes(
         &self,
@@ -330,6 +336,17 @@ impl Backend for RemoteBackend {
     async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
         let spec = spec.clone();
         self.wire(move |client| client.read_file_bytes(&spec)).await
+    }
+
+    async fn grep(
+        &self,
+        namespace_id: &str,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        let request = request.clone();
+        self.wire(move |client| client.grep(&namespace_id, &request))
+            .await
     }
 
     async fn read_file_revision_bytes(

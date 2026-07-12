@@ -1,3 +1,4 @@
+mod grep;
 mod listing;
 mod materialized_view;
 

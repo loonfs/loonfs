@@ -103,6 +103,17 @@ pub enum CoreError {
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("invalid gc configuration: {0}")]
     InvalidGcConfig(String),
+    #[error("invalid search query: {0}")]
+    InvalidQuery(String),
+    #[error("the pattern requires no literal bytes and cannot use the index: {0}")]
+    QueryUnindexable(String),
+    #[error(
+        "the gram index trails the head by {behind_commits} commits, past the \
+         exhaustive-scan budget; run maintenance or set allow_stale"
+    )]
+    IndexLagging { behind_commits: u64 },
+    #[error("feature `{feature}` is not materialized on this namespace")]
+    FeatureNotMaterialized { feature: String },
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -310,6 +321,10 @@ impl CoreError {
             // after maintenance, exactly the checkpoint_unavailable contract.
             CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::CheckpointUnavailable,
             CoreError::InvalidGcConfig(_) => ErrorCode::InvalidRequest,
+            CoreError::InvalidQuery(_) => ErrorCode::InvalidRequest,
+            CoreError::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
+            CoreError::IndexLagging { .. } => ErrorCode::IndexLagging,
+            CoreError::FeatureNotMaterialized { .. } => ErrorCode::NotSupported,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,

@@ -1,0 +1,380 @@
+//! Content-search machinery: gram posting reads over index segments, the
+//! exhaustive-scan tail, and line-oriented match extraction. The
+//! orchestrating `grep` read lives on `LoadedMetadataView`
+//! (`materialized_view.rs`); this module holds the pieces that need no
+//! access to the view's internals.
+
+use crate::checkpoint::string_prefix_upper_bound;
+use crate::error::{CoreError, Result};
+use crate::query::grep_plan::GramQueryPlan;
+use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
+use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::index_grams::{lookup, Gram, IndexRow, INDEX_FAMILY_GRAMS};
+use loonfs_api::wire::manifest::{hex_decode_bytes, IndexFileRef};
+use loonfs_api::wire::sst_blocks::{
+    decode_data_block_rows, decode_filter_block, decode_index_block, index_blocks_for_key_range,
+    BlockHandle,
+};
+use loonfs_api::wire::wal::WalDelta;
+use loonfs_api::{ChangeSeq, ContentRef, InodeId, NamespaceId, RevisionNo};
+use loonfs_objectstore::{ByteRange, ObjectStore};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Matches returned per page when the request names no limit.
+pub(super) const DEFAULT_GREP_PAGE_LIMIT: usize = 100;
+/// Largest per-page match limit a request may name.
+pub(super) const MAX_GREP_PAGE_LIMIT: usize = 1000;
+/// Unindexed-tail revisions one query will scan exhaustively before
+/// failing with `index_lagging` (or skipping the tail under `allow_stale`).
+pub(super) const MAX_GREP_TAIL_FILES: usize = 512;
+/// Files a plan-less `allow_scan` query will scan before refusing.
+pub(super) const MAX_GREP_SCAN_FILES: usize = 4096;
+/// Longest match line returned, in bytes; longer lines are truncated.
+pub(super) const GREP_LINE_CAP_BYTES: usize = 512;
+
+/// The revisions a query must examine, keyed by durable inode identity.
+#[derive(Debug, Default)]
+pub(super) struct GrepCandidates {
+    /// Index-supplied candidates: the revisions whose content contained
+    /// every required gram. A candidate survives only if the inode's
+    /// newest visible revision is in its set.
+    pub(super) indexed: BTreeMap<InodeId, BTreeSet<RevisionNo>>,
+    /// Tail- or scan-supplied candidates: examined whatever their newest
+    /// visible revision is, because no gram filter applies to them.
+    pub(super) unfiltered: BTreeSet<InodeId>,
+}
+
+impl GrepCandidates {
+    pub(super) fn inodes(&self) -> impl Iterator<Item = InodeId> + '_ {
+        let mut merged: BTreeSet<InodeId> = self.indexed.keys().copied().collect();
+        merged.extend(self.unfiltered.iter().copied());
+        merged.into_iter()
+    }
+
+    /// Whether the inode's newest visible revision should be verified.
+    pub(super) fn admits(&self, inode_id: InodeId, revision_no: RevisionNo) -> bool {
+        if self.unfiltered.contains(&inode_id) {
+            return true;
+        }
+        self.indexed
+            .get(&inode_id)
+            .is_some_and(|revisions| revisions.contains(&revision_no))
+    }
+}
+
+/// Evaluates the plan against every gram index segment: for each AND set,
+/// the union of its grams' postings; the candidates are the intersection.
+pub(super) async fn indexed_candidates<S: ObjectStore + ?Sized>(
+    store: &S,
+    segments: &[IndexFileRef],
+    plan: &GramQueryPlan,
+) -> Result<BTreeMap<InodeId, BTreeSet<RevisionNo>>> {
+    let mut intersection: Option<BTreeSet<(InodeId, RevisionNo)>> = None;
+    for or_set in &plan.required {
+        let mut set_postings = BTreeSet::new();
+        for gram in or_set {
+            set_postings.extend(postings_for_gram(store, segments, *gram).await?);
+        }
+        intersection = Some(match intersection {
+            None => set_postings,
+            Some(current) => current.intersection(&set_postings).copied().collect(),
+        });
+        if intersection.as_ref().is_some_and(BTreeSet::is_empty) {
+            break;
+        }
+    }
+    let mut candidates: BTreeMap<InodeId, BTreeSet<RevisionNo>> = BTreeMap::new();
+    for (inode_id, revision_no) in intersection.unwrap_or_default() {
+        candidates.entry(inode_id).or_default().insert(revision_no);
+    }
+    Ok(candidates)
+}
+
+/// The union of one gram's postings across every segment, pruned per
+/// segment by key range and bloom filter, reading only the blocks the
+/// segment index names.
+async fn postings_for_gram<S: ObjectStore + ?Sized>(
+    store: &S,
+    segments: &[IndexFileRef],
+    gram: Gram,
+) -> Result<BTreeSet<(InodeId, RevisionNo)>> {
+    let probe = lookup::gram_probe(gram);
+    let prefix = lookup::gram_prefix(gram);
+    let upper = string_prefix_upper_bound(&prefix);
+    let mut postings = BTreeSet::new();
+    for descriptor in segments {
+        if descriptor.family != INDEX_FAMILY_GRAMS {
+            continue;
+        }
+        // Key-range pruning first (free, already in the descriptor).
+        if descriptor.max_key.as_str() < probe.as_str()
+            || upper
+                .as_deref()
+                .is_some_and(|upper| descriptor.min_key.as_str() >= upper)
+        {
+            continue;
+        }
+        let filter_bytes = match &descriptor.filter_inline {
+            Some(inline) => hex_decode_bytes(inline).map_err(|error| {
+                CoreError::NamespaceCorrupt(format!(
+                    "index segment `{}` carries undecodable inline filter hex: {error}",
+                    descriptor.object_key
+                ))
+            })?,
+            None => fetch_section(store, &descriptor.object_key, &descriptor.filter_block).await?,
+        };
+        let filter = decode_filter_block(&filter_bytes, &descriptor.filter_block)
+            .map_err(|error| segment_corrupt(&descriptor.object_key, "filter block", &error))?;
+        if !filter.may_contain(&probe) {
+            continue;
+        }
+        let index_bytes =
+            fetch_section(store, &descriptor.object_key, &descriptor.index_block).await?;
+        let entries = decode_index_block(&index_bytes, &descriptor.index_block)
+            .map_err(|error| segment_corrupt(&descriptor.object_key, "index block", &error))?;
+        let range = index_blocks_for_key_range(&entries, &prefix, upper.as_deref());
+        for entry in &entries[range] {
+            let block_bytes = fetch_section(store, &descriptor.object_key, &entry.block).await?;
+            let block = decode_data_block_rows::<IndexRow>(&block_bytes, &entry.block)
+                .map_err(|error| segment_corrupt(&descriptor.object_key, "data block", &error))?;
+            for row in &block.rows {
+                let IndexRow::GramPostings { gram: row_gram, .. } = row;
+                if *row_gram != gram {
+                    continue;
+                }
+                let batch = row.postings().map_err(|error| {
+                    segment_corrupt(&descriptor.object_key, "posting batch", &error)
+                })?;
+                postings.extend(
+                    batch
+                        .into_iter()
+                        .map(|posting| (posting.inode_id, posting.revision_no)),
+                );
+            }
+        }
+    }
+    Ok(postings)
+}
+
+fn segment_corrupt(object_key: &str, what: &str, error: &dyn std::fmt::Display) -> CoreError {
+    CoreError::NamespaceCorrupt(format!(
+        "index segment `{object_key}` carries an unreadable {what}: {error}"
+    ))
+}
+
+async fn fetch_section<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    handle: &BlockHandle,
+) -> Result<Vec<u8>> {
+    let range = ByteRange {
+        start_inclusive: handle.offset,
+        end_exclusive: handle.offset + u64::from(handle.stored_len),
+    };
+    let bytes = store
+        .get(object_key, Some(range))
+        .await
+        .map_err(|error| CoreError::store(object_key, &error))?
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "manifest references missing index segment `{object_key}`"
+            ))
+        })?;
+    Ok(bytes.to_vec())
+}
+
+/// The file revisions committed after the index watermark, newest revision
+/// per inode, from WAL replay — the exhaustive-scan tail.
+pub(super) async fn tail_revisions<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    floor_seq: ChangeSeq,
+    built_through_seq: ChangeSeq,
+) -> Result<BTreeMap<InodeId, (RevisionNo, ContentRef)>> {
+    let mut tail = BTreeMap::new();
+    if built_through_seq >= head.seq {
+        return Ok(tail);
+    }
+    let wal_chain = load_validated_wal_chain(
+        store,
+        WalChainLoadRequest {
+            namespace_id,
+            chain_base_seq: floor_seq,
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
+            stop_after_seq: Some(built_through_seq),
+            recent_segments: &head.recent_segments,
+        },
+    )
+    .await
+    .map_err(|error| {
+        crate::error::CoreError::MetadataProjection(
+            crate::error::MetadataProjectionLoadError::WalChainLoad(error),
+        )
+    })?;
+    for segment in wal_chain.segments() {
+        for record in segment.records() {
+            if record.seq <= built_through_seq {
+                continue;
+            }
+            for delta in &record.deltas {
+                if let WalDelta::AppendFileRevision {
+                    inode_id,
+                    revision_no,
+                    content_ref,
+                    ..
+                } = &delta.delta
+                {
+                    tail.insert(*inode_id, (*revision_no, content_ref.clone()));
+                }
+            }
+        }
+    }
+    Ok(tail)
+}
+
+/// One verified line match inside a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LineMatch {
+    pub(super) line_number: u64,
+    pub(super) byte_offset: u64,
+    pub(super) line: String,
+    pub(super) line_truncated: bool,
+}
+
+/// Runs the pattern over content, one match per line, in offset order.
+pub(super) fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch> {
+    let mut matches = Vec::new();
+    let mut lines_before = 0u64;
+    let mut counted_through = 0usize;
+    let mut last_line_start = usize::MAX;
+    for found in pattern.find_iter(content) {
+        let line_start = content[..found.start()]
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |newline| newline + 1);
+        if line_start == last_line_start {
+            continue;
+        }
+        last_line_start = line_start;
+        lines_before += content[counted_through..line_start]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count() as u64;
+        counted_through = line_start;
+        let line_end = content[found.start()..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(content.len(), |newline| found.start() + newline);
+        let line_bytes = &content[line_start..line_end];
+        let line_truncated = line_bytes.len() > GREP_LINE_CAP_BYTES;
+        let line_bytes = &line_bytes[..line_bytes.len().min(GREP_LINE_CAP_BYTES)];
+        matches.push(LineMatch {
+            line_number: lines_before + 1,
+            byte_offset: found.start() as u64,
+            line: String::from_utf8_lossy(line_bytes).into_owned(),
+            line_truncated,
+        });
+    }
+    matches
+}
+
+/// Derives the inode's visible absolute path by walking active parent
+/// bindings to the root, then verifies the derived path forward under the
+/// full visibility rules — tombstones, unbinds, kinds — by resolving it
+/// back to the same inode. `None` means the inode is not visible at the
+/// view's sequence.
+pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
+    view: &crate::metadata::MetadataView<'_, '_, S>,
+    inode_id: InodeId,
+) -> Result<Option<String>> {
+    const MAX_PATH_DEPTH: usize = 4096;
+    let mut segments = Vec::new();
+    let mut current = inode_id;
+    while current != InodeId(1) {
+        if segments.len() >= MAX_PATH_DEPTH {
+            return Ok(None);
+        }
+        let Some(binding) = view.current_parent_binding_for_child(current).await? else {
+            return Ok(None);
+        };
+        segments.push(binding.display_name.clone());
+        current = binding.parent_inode_id;
+    }
+    segments.reverse();
+    let path = format!("/{}", segments.join("/"));
+    let parsed = match crate::path::helpers::parse_absolute_path_for_core(&path) {
+        Ok(parsed) => parsed,
+        // A display name the path grammar rejects cannot be served as a
+        // path result; the file is unreachable by path and skipped.
+        Err(_) => return Ok(None),
+    };
+    match view.resolve_visible_path(&parsed).await {
+        Ok(resolved) if resolved.inode_id == inode_id => Ok(Some(path)),
+        Ok(_) => Ok(None),
+        Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// True when `path` sits at or under the absolute prefix, on a component
+/// boundary: `/docs` scopes `/docs` and `/docs/a`, never `/docsx`.
+pub(super) fn path_in_scope(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return true;
+    }
+    match path.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pattern(text: &str) -> regex::bytes::Regex {
+        regex::bytes::Regex::new(text).expect("pattern")
+    }
+
+    #[test]
+    fn line_matches_report_positions_once_per_line() {
+        let content = b"alpha\nneedle one needle\nomega needle\n";
+        let matches = line_matches(content, &pattern("needle"));
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].line_number, 2);
+        assert_eq!(matches[0].byte_offset, 6);
+        assert_eq!(matches[0].line, "needle one needle");
+        assert_eq!(matches[1].line_number, 3);
+        assert_eq!(matches[1].line, "omega needle");
+    }
+
+    #[test]
+    fn line_matches_truncate_long_lines() {
+        let mut content = vec![b'x'; GREP_LINE_CAP_BYTES + 64];
+        content.extend_from_slice(b"needle");
+        let matches = line_matches(&content, &pattern("needle"));
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].line_truncated);
+        assert_eq!(matches[0].line.len(), GREP_LINE_CAP_BYTES);
+    }
+
+    #[test]
+    fn matches_on_the_last_unterminated_line_are_reported() {
+        let matches = line_matches(b"one\ntwo needle", &pattern("needle"));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].line_number, 2);
+        assert_eq!(matches[0].line, "two needle");
+    }
+
+    #[test]
+    fn scope_prefixes_respect_component_boundaries() {
+        assert!(path_in_scope("/docs/a.txt", "/docs"));
+        assert!(path_in_scope("/docs", "/docs"));
+        assert!(path_in_scope("/docs/a.txt", "/docs/"));
+        assert!(!path_in_scope("/docsx/a.txt", "/docs"));
+        assert!(path_in_scope("/anything", "/"));
+    }
+}

@@ -4,9 +4,9 @@ use super::context::{
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
-    CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemLsArgs, FilesystemPathArgs,
-    FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemTransferArgs,
-    RuntimeBehavior,
+    CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
+    FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs,
+    FilesystemTransferArgs, RuntimeBehavior,
 };
 use crate::error::CliError;
 use loonfs_api::{InodeKind, RevisionNo};
@@ -86,6 +86,55 @@ pub(crate) async fn run_filesystem_stat(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::PathEntry(entry),
+    })
+}
+
+pub(crate) async fn run_filesystem_grep(
+    kind: CommandKind,
+    args: FilesystemGrepArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let mut request = loonfs_api::GrepRequest {
+        pattern: args.pattern.clone(),
+        case_insensitive: args.ignore_case,
+        path_prefix: args.path_prefix.clone(),
+        cursor: None,
+        limit: args.limit,
+        allow_stale: args.allow_stale,
+        allow_scan: args.allow_scan,
+    };
+    let mut matches = Vec::new();
+    let mut tail_scanned = true;
+    loop {
+        let response = context
+            .target
+            .backend()
+            .grep(&context.namespace, &request)
+            .await
+            .map_err(|error| {
+                fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    error,
+                )
+            })?;
+        matches.extend(response.matches);
+        tail_scanned &= response.tail_scanned;
+        match response.next_cursor {
+            Some(cursor) => request.cursor = Some(cursor),
+            None => break,
+        }
+    }
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::GrepMatches {
+            pattern: args.pattern,
+            matches,
+            tail_scanned,
+        },
     })
 }
 

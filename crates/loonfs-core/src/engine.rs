@@ -16,9 +16,9 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
-    FileRevisionsPageCursor, FlushWalResponse, InodeId, ListFileRevisionsResponse, ManifestId,
-    ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse,
-    RevisionNo, UploadId,
+    FileRevisionsPageCursor, FlushWalResponse, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, Page,
+    PageRequest, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -189,6 +189,18 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<AuthoritativeFileBytes> {
         self.read_file_with_context(path.as_ref(), runtime_read_load_context(options))
             .await
+    }
+
+    #[doc(hidden)]
+    pub async fn grep_with_runtime_context(
+        &self,
+        request: &GrepRequest,
+        options: &RuntimeReadContext,
+    ) -> CoreResult<GrepResponse> {
+        let view = self
+            .load_read_view(runtime_read_load_context(options))
+            .await?;
+        view.grep(&self.store, request).await
     }
 
     #[doc(hidden)]
