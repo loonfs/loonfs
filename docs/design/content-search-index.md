@@ -111,7 +111,7 @@ block builder is generalized over the row payload to make this
 possible; metadata families keep byte-identical output.
 
 Segments live under a new durable object family
-(`metadata/index/...`, a new row in the format section 1.2 table)
+(`metadata/indexes/...`, a new row in the format section 1.2 table)
 and are referenced from a new list in the manifest payload, one
 descriptor per segment with the same key-range, index-block, and
 filter-block fields that metadata descriptors carry. The list is

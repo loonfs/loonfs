@@ -62,7 +62,7 @@ The required durable object families and standard key patterns are:
 | **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, derived-index segment references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); written active, verified after the write, flipped released on verification failure or owner release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Index segments** | Immutable | Store derived-index rows referenced by manifests ("Derived work"): the metadata-table block grammar with a feature-owned row payload. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/index/{segment_id}.idx.zst` |
+| **Index segments** | Immutable | Store derived-index rows referenced by manifests ("Derived work"): the metadata-table block grammar with a feature-owned row payload. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/indexes/{segment_id}.idx.zst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
@@ -1419,7 +1419,7 @@ the admin endpoint or an explicit maintenance-tick opt-in.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `metadata/index/`, `checkpoints/`, and `wal/segments/`
+`metadata/tables/`, `metadata/indexes/`, `checkpoints/`, and `wal/segments/`
 collections. A live manifest roots every object key its `metadata_files`
 and `index_files` lists name, whatever their family.
 Because floor, root, and checkpoint publication no longer serialize through

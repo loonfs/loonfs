@@ -251,7 +251,7 @@ mod tests {
         );
         assert_eq!(
             index_segment("ns-1", "idx_00000000000000000000000000000001"),
-            "namespaces/ns-1/metadata/index/idx_00000000000000000000000000000001.idx.zst"
+            "namespaces/ns-1/metadata/indexes/idx_00000000000000000000000000000001.idx.zst"
         );
         assert_eq!(
             checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
