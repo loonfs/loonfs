@@ -554,6 +554,22 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
+    /// Runs at most one gram index fold unit: merges every gram segment
+    /// into a fresh base once delta segments pass the policy threshold,
+    /// publishing a manifest that swaps the family's references.
+    pub async fn fold_grams_index_step(
+        &self,
+        policy: crate::checkpoint::GramIndexBuildPolicy,
+    ) -> CoreResult<crate::checkpoint::GramIndexFoldReport> {
+        crate::checkpoint::fold_grams_index_step(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+            policy,
+        )
+        .await
+    }
+
     /// Runs at most one metadata reorganization unit: folds one family
     /// group's L0 delta rows into new base segments and publishes a manifest
     /// swapping that group's references. Checkpoints only append L0 runs, so

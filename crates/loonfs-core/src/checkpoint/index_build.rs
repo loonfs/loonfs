@@ -26,7 +26,7 @@ use super::flush::{
 };
 use super::load::{load_namespace_manifest_envelope_if_present, load_verified_manifest_tables};
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
-use super::runs::{CHECKPOINT_L0_RUN_LEVEL, MAX_MAINTENANCE_TABLE_IO};
+use super::runs::{CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, MAX_MAINTENANCE_TABLE_IO};
 use super::scan::string_prefix_upper_bound;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -39,8 +39,9 @@ use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use futures::future::try_join_all;
 use loonfs_api::wire::index_grams::{
-    extract_grams, Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS,
-    INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_FORMAT_VERSION, INDEX_GRAMS_MAX_FILE_BYTES,
+    extract_grams, Gram, GramIndexFoldState, GramPosting, IndexGramsFeature, IndexRow,
+    INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_FORMAT_VERSION,
+    INDEX_GRAMS_MAX_FILE_BYTES,
 };
 use loonfs_api::wire::manifest::{
     hex_encode_bytes, IndexFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
@@ -77,6 +78,12 @@ pub struct GramIndexBuildPolicy {
     pub max_content_bytes_per_step: u64,
     /// Rows per written index segment.
     pub max_rows_per_segment: usize,
+    /// Delta-level segments that trigger a fold into a fresh base, the
+    /// same threshold shape as metadata L0 runs.
+    pub max_l0_segments: usize,
+    /// Rows one fold step merges before publishing and yielding; the
+    /// cursor in the feature value makes the walk resumable.
+    pub max_fold_rows_per_step: usize,
 }
 
 impl GramIndexBuildPolicy {
@@ -88,6 +95,8 @@ impl GramIndexBuildPolicy {
             max_files_per_step: self.max_files_per_step.max(1),
             max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),
             max_rows_per_segment: self.max_rows_per_segment.max(1),
+            max_l0_segments: self.max_l0_segments.max(1),
+            max_fold_rows_per_step: self.max_fold_rows_per_step.max(1),
         }
     }
 }
@@ -98,6 +107,8 @@ impl Default for GramIndexBuildPolicy {
             max_files_per_step: 256,
             max_content_bytes_per_step: 64 * 1024 * 1024,
             max_rows_per_segment: 65_536,
+            max_l0_segments: 8,
+            max_fold_rows_per_step: 131_072,
         }
     }
 }
@@ -148,6 +159,34 @@ pub enum GramIndexDisableOutcome {
     /// the segments become garbage-collection candidates.
     Disabled,
     NotEnabled,
+    Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GramIndexFoldReport {
+    pub namespace_id: NamespaceId,
+    pub outcome: GramIndexFoldOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GramIndexFoldOutcome {
+    NotEnabled,
+    UnsupportedFeatureVersion {
+        found: u32,
+    },
+    /// Fewer delta segments than the fold threshold and no fold in flight;
+    /// nothing rewritten.
+    NotNeeded {
+        l0_segments: usize,
+    },
+    /// One bounded key range merged into fresh base segments and
+    /// published. `completed` when this step finished the walk and swapped
+    /// the snapshot out for the outputs.
+    StepPublished {
+        merged_rows: u64,
+        segments_written: u64,
+        completed: bool,
+    },
     Superseded,
 }
 
@@ -209,6 +248,7 @@ pub(crate) async fn enable_grams_index<S: ObjectStore + ?Sized>(
         version: INDEX_GRAMS_FORMAT_VERSION,
         built_through_seq,
         backfill_cursor: Some(String::new()),
+        fold: None,
     };
     let predecessor_object_id = previous.payload.manifest_object_id.clone();
     // Manifest publishers must gate the root swap behind the publication
@@ -406,6 +446,9 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
         version: INDEX_GRAMS_FORMAT_VERSION,
         built_through_seq: unit.built_through_seq,
         backfill_cursor: unit.backfill_cursor.clone(),
+        // A build step never touches an in-flight fold; the walk resumes
+        // against whatever segments its snapshot pinned.
+        fold: feature.fold.clone(),
     };
     let materialized = next_feature.is_materialized();
     let predecessor_object_id = previous.payload.manifest_object_id.clone();
@@ -781,6 +824,411 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         filter_inline,
         payload_checksum: sha256_digest(&built.bytes),
     })
+}
+
+/// Runs at most one gram index fold step. Folds are partitioned and
+/// resumable: the first step snapshots the segment set it will consume,
+/// and every step merges one bounded key range from the snapshot into
+/// fresh base segments, publishing a manifest that records the outputs
+/// and the resume cursor inside the feature value. Snapshot inputs and
+/// outputs are both referenced and both served until the completing step
+/// swaps the snapshot out — postings are add-only, so readers that union
+/// them see duplicates, never gaps — and segments that arrive during the
+/// fold stay out of the snapshot and survive it.
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "fold_grams_index", key_class = "manifest")
+)]
+pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: GramIndexBuildPolicy,
+) -> Result<GramIndexFoldReport> {
+    let policy = policy.normalized();
+    let timer = StdMonotonicTimer::default();
+    let root = read_metadata_root_object(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?
+        .envelope
+        .state;
+    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+        })?;
+    let previous = tables.manifest();
+
+    let Some(value) = previous.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
+        return Ok(GramIndexFoldReport {
+            namespace_id: namespace_id.clone(),
+            outcome: GramIndexFoldOutcome::NotEnabled,
+        });
+    };
+    let mut feature = match IndexGramsFeature::from_value(value) {
+        Ok(feature) => feature,
+        Err(loonfs_api::wire::index_grams::IndexGramsCodecError::UnsupportedFeatureVersion {
+            found,
+            ..
+        }) => {
+            return Ok(GramIndexFoldReport {
+                namespace_id: namespace_id.clone(),
+                outcome: GramIndexFoldOutcome::UnsupportedFeatureVersion { found },
+            });
+        }
+        // A value this build should understand but cannot decode is
+        // namespace corruption, exactly as the build path treats it;
+        // folding against corrupt state must not proceed or report
+        // NotNeeded.
+        Err(error) => {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "namespace `{}` carries an unreadable index.grams feature value: {error}",
+                namespace_id.as_str()
+            )));
+        }
+    };
+
+    let grams_segments: Vec<IndexFileRef> = previous
+        .payload
+        .index_files
+        .iter()
+        .filter(|descriptor| descriptor.family == INDEX_FAMILY_GRAMS)
+        .cloned()
+        .collect();
+    let fold_state = match feature.fold.clone() {
+        Some(state) => state,
+        None => {
+            let l0_segments = grams_segments
+                .iter()
+                .filter(|descriptor| descriptor.level == CHECKPOINT_L0_RUN_LEVEL)
+                .count();
+            if l0_segments < policy.max_l0_segments {
+                return Ok(GramIndexFoldReport {
+                    namespace_id: namespace_id.clone(),
+                    outcome: GramIndexFoldOutcome::NotNeeded { l0_segments },
+                });
+            }
+            GramIndexFoldState {
+                snapshot: grams_segments
+                    .iter()
+                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+                    .collect(),
+                outputs: Vec::new(),
+                cursor: String::new(),
+            }
+        }
+    };
+
+    let snapshot: Vec<&IndexFileRef> = fold_state
+        .snapshot
+        .iter()
+        .map(|segment_id| {
+            grams_segments
+                .iter()
+                .find(|descriptor| descriptor.segment_id.as_str() == segment_id)
+                .ok_or_else(|| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "fold snapshot references segment `{segment_id}` missing from the manifest"
+                    ))
+                })
+        })
+        .collect::<Result<_>>()?;
+    let merged = merge_snapshot_range(
+        store,
+        &snapshot,
+        &fold_state.cursor,
+        policy.max_fold_rows_per_step,
+    )
+    .await?;
+    let rows = gram_postings_rows(merged.postings)?;
+    let run_seq = snapshot
+        .iter()
+        .map(|descriptor| descriptor.run_seq)
+        .max()
+        .unwrap_or(previous.payload.head_seq);
+
+    // The publication budget starts at the first object write (format
+    // spec, "Garbage collection", rule 1); reading snapshot blocks writes
+    // nothing.
+    let publication_started_ms = timer.monotonic_now_ms();
+    let new_segments = write_index_base_segments(
+        store,
+        namespace_id,
+        run_seq,
+        rows,
+        policy.max_rows_per_segment,
+    )
+    .await?;
+    let segments_written = new_segments.len() as u64;
+
+    let mut index_files = previous.payload.index_files.clone();
+    index_files.extend(new_segments.iter().cloned());
+    let mut next_state = fold_state.clone();
+    next_state.outputs.extend(
+        new_segments
+            .iter()
+            .map(|descriptor| descriptor.segment_id.as_str().to_owned()),
+    );
+    let completed = merged.exhausted;
+    if completed {
+        let snapshot_ids: std::collections::BTreeSet<&str> =
+            next_state.snapshot.iter().map(String::as_str).collect();
+        index_files.retain(|descriptor| {
+            descriptor.family != INDEX_FAMILY_GRAMS
+                || !snapshot_ids.contains(descriptor.segment_id.as_str())
+        });
+        feature.fold = None;
+    } else {
+        next_state.cursor = merged.next_cursor;
+        feature.fold = Some(next_state);
+    }
+
+    let predecessor_object_id = previous.payload.manifest_object_id.clone();
+    let manifest = write_index_successor_manifest(
+        store,
+        namespace_id,
+        previous,
+        index_files,
+        feature,
+        &context.writer_version,
+    )
+    .await?;
+    ensure_metadata_publication_budget(&timer, publication_started_ms, namespace_id)?;
+    match publish_metadata_root(
+        store,
+        namespace_id,
+        &manifest,
+        &predecessor_object_id,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await?
+    {
+        ManifestPublicationOutcome::Published(_) => Ok(GramIndexFoldReport {
+            namespace_id: namespace_id.clone(),
+            outcome: GramIndexFoldOutcome::StepPublished {
+                merged_rows: merged.rows,
+                segments_written,
+                completed,
+            },
+        }),
+        ManifestPublicationOutcome::Superseded(_) | ManifestPublicationOutcome::RootCasRaceLost => {
+            Ok(GramIndexFoldReport {
+                namespace_id: namespace_id.clone(),
+                outcome: GramIndexFoldOutcome::Superseded,
+            })
+        }
+    }
+}
+
+/// One bounded range of merged snapshot rows.
+struct MergedRange {
+    postings: BTreeMap<Gram, Vec<GramPosting>>,
+    /// Row key the next step resumes from; meaningful only when not
+    /// exhausted.
+    next_cursor: String,
+    exhausted: bool,
+    rows: u64,
+}
+
+/// K-way merges snapshot rows with keys at or past `cursor`, reading one
+/// data block per segment at a time, until the row budget fills or every
+/// segment is exhausted.
+async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
+    store: &S,
+    snapshot: &[&IndexFileRef],
+    cursor: &str,
+    max_rows: usize,
+) -> Result<MergedRange> {
+    let mut readers = Vec::with_capacity(snapshot.len());
+    for descriptor in snapshot {
+        readers.push(SegmentRangeReader::open(store, descriptor, cursor).await?);
+    }
+    let mut merged = MergedRange {
+        postings: BTreeMap::new(),
+        next_cursor: String::new(),
+        exhausted: false,
+        rows: 0,
+    };
+    let mut last_key = String::new();
+    while merged.rows < max_rows as u64 {
+        for reader in readers.iter_mut() {
+            reader.refill(store).await?;
+        }
+        let mut lowest: Option<(usize, String)> = None;
+        for (position, reader) in readers.iter().enumerate() {
+            if let Some(key) = reader.peek_key() {
+                if lowest
+                    .as_ref()
+                    .is_none_or(|(_, current)| key < current.as_str())
+                {
+                    lowest = Some((position, key.to_owned()));
+                }
+            }
+        }
+        let Some((position, _)) = lowest else {
+            merged.exhausted = true;
+            return Ok(merged);
+        };
+        let (key, row) = readers[position].pop();
+        let IndexRow::GramPostings { gram, .. } = &row;
+        let gram = *gram;
+        let batch = row.postings().map_err(|error| {
+            CoreError::NamespaceCorrupt(format!(
+                "index segment `{}` carries an unreadable posting batch: {error}",
+                readers[position].object_key()
+            ))
+        })?;
+        merged.postings.entry(gram).or_default().extend(batch);
+        merged.rows += 1;
+        last_key = key;
+    }
+    // Budget filled: resume strictly after the last merged row. Peek once
+    // more so a walk that ended exactly at the keyspace end completes now
+    // instead of publishing an empty trailing step.
+    let mut any_left = false;
+    for reader in readers.iter_mut() {
+        reader.refill(store).await?;
+        if reader.peek_key().is_some() {
+            any_left = true;
+            break;
+        }
+    }
+    if any_left {
+        merged.next_cursor = format!("{last_key}\0");
+    } else {
+        merged.exhausted = true;
+    }
+    Ok(merged)
+}
+
+/// Streaming reader over one snapshot segment's rows from a start key:
+/// the segment index is fetched once, data blocks one at a time.
+struct SegmentRangeReader {
+    object_key: String,
+    entries: Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry>,
+    next_entry: usize,
+    pending: std::collections::VecDeque<(String, IndexRow)>,
+    start: String,
+}
+
+impl SegmentRangeReader {
+    async fn open<S: ObjectStore + ?Sized>(
+        store: &S,
+        descriptor: &IndexFileRef,
+        cursor: &str,
+    ) -> Result<Self> {
+        use loonfs_api::wire::sst_blocks::{decode_index_block, index_blocks_for_key_range};
+        let index_bytes =
+            fetch_index_section(store, &descriptor.object_key, &descriptor.index_block).await?;
+        let entries =
+            decode_index_block(&index_bytes, &descriptor.index_block).map_err(|error| {
+                CoreError::NamespaceCorrupt(format!(
+                    "index segment `{}` carries an unreadable index block: {error}",
+                    descriptor.object_key
+                ))
+            })?;
+        let start = if cursor.is_empty() { "gram-" } else { cursor };
+        let range = index_blocks_for_key_range(&entries, start, None);
+        Ok(Self {
+            object_key: descriptor.object_key.clone(),
+            next_entry: range.start,
+            entries,
+            pending: std::collections::VecDeque::new(),
+            start: start.to_owned(),
+        })
+    }
+
+    fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    fn peek_key(&self) -> Option<&str> {
+        self.pending.front().map(|(key, _)| key.as_str())
+    }
+
+    fn pop(&mut self) -> (String, IndexRow) {
+        self.pending
+            .pop_front()
+            .expect("pop is called only after peek_key returned a key")
+    }
+
+    async fn refill<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
+        use loonfs_api::wire::sst_blocks::decode_data_block_rows;
+        while self.pending.is_empty() && self.next_entry < self.entries.len() {
+            let entry = &self.entries[self.next_entry];
+            self.next_entry += 1;
+            let block_bytes = fetch_index_section(store, &self.object_key, &entry.block).await?;
+            let block = decode_data_block_rows::<IndexRow>(&block_bytes, &entry.block).map_err(
+                |error| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "index segment `{}` carries an unreadable data block: {error}",
+                        self.object_key
+                    ))
+                },
+            )?;
+            for (key, row) in block.row_keys.into_iter().zip(block.rows) {
+                if key.as_str() >= self.start.as_str() {
+                    self.pending.push_back((key, row));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Fetches one descriptor-named section by byte range, refusing handles
+/// whose bounds do not fit the address space.
+async fn fetch_index_section<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    handle: &loonfs_api::wire::sst_blocks::BlockHandle,
+) -> Result<Vec<u8>> {
+    let end_exclusive = handle
+        .offset
+        .checked_add(u64::from(handle.stored_len))
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "index segment `{object_key}` descriptor names bytes past the address space"
+            ))
+        })?;
+    let bytes = store
+        .get(
+            object_key,
+            Some(loonfs_objectstore::ByteRange {
+                start_inclusive: handle.offset,
+                end_exclusive,
+            }),
+        )
+        .await
+        .map_err(|error| CoreError::store(object_key, &error))?
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "manifest references missing index segment `{object_key}`"
+            ))
+        })?;
+    Ok(bytes.to_vec())
+}
+
+/// [`write_index_segments`] at the base level, for fold outputs.
+async fn write_index_base_segments<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    run_seq: ChangeSeq,
+    rows: Vec<IndexRow>,
+    max_rows_per_segment: usize,
+) -> Result<Vec<IndexFileRef>> {
+    let mut descriptors =
+        write_index_segments(store, namespace_id, run_seq, rows, max_rows_per_segment).await?;
+    for descriptor in &mut descriptors {
+        descriptor.level = CHECKPOINT_BASE_RUN_LEVEL;
+    }
+    Ok(descriptors)
 }
 
 fn decode_feature(

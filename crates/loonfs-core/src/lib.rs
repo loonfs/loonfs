@@ -108,7 +108,8 @@ pub mod publish {
 
 pub use checkpoint::{
     GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport, GramIndexDisableOutcome,
-    GramIndexEnableOutcome, MetadataReorganizeOutcome, MetadataReorganizeReport,
+    GramIndexEnableOutcome, GramIndexFoldOutcome, GramIndexFoldReport, MetadataReorganizeOutcome,
+    MetadataReorganizeReport,
 };
 pub use context::MutationContext;
 #[doc(hidden)]

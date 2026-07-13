@@ -11,8 +11,9 @@ use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::index_build::{
-    build_grams_index_step, disable_grams_index, enable_grams_index, GramIndexBuildOutcome,
-    GramIndexBuildPolicy, GramIndexDisableOutcome, GramIndexEnableOutcome,
+    build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
+    GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexDisableOutcome, GramIndexEnableOutcome,
+    GramIndexFoldOutcome,
 };
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
@@ -6013,6 +6014,10 @@ async fn stored_gram_postings(
         }
     }
     postings.sort_unstable();
+    // Readers union batches across segments; a mid-fold index serves its
+    // snapshot and outputs together, so duplicates are expected and
+    // deduplication is part of read semantics.
+    postings.dedup();
     postings
 }
 
@@ -6406,4 +6411,207 @@ async fn forking_a_lagging_index_restarts_backfill_instead_of_inheriting_a_gap()
     );
     let old_postings = stored_gram_postings(&store, &target, Gram(*b"one")).await;
     assert!(!old_postings.is_empty());
+}
+
+#[tokio::test]
+async fn grams_index_fold_merges_delta_segments_into_a_base() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Every file shares the word "shared" so the fold must merge one gram's
+    // batches across segments; a one-file page budget forces one delta
+    // segment per backfill step.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/bravo.txt",
+        b"bravo shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write bravo");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/charlie.txt",
+        b"charlie shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write charlie");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        max_l0_segments: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+
+    let delta_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        delta_segments.len() >= 3,
+        "expected one delta segment per backfill step, got {}",
+        delta_segments.len()
+    );
+    let shared_before = stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await;
+    assert_eq!(
+        shared_before,
+        vec![posting(2, 1), posting(3, 1), posting(4, 1)]
+    );
+
+    // A one-row step budget forces the fold across many resumable steps;
+    // between steps the index must keep answering exactly (snapshot and
+    // outputs are both served, so duplicates are possible, gaps are not).
+    let fold_policy = GramIndexBuildPolicy {
+        max_fold_rows_per_step: 1,
+        ..policy
+    };
+    let mut steps = 0u32;
+    loop {
+        steps += 1;
+        assert!(steps < 512, "the fold walk must terminate");
+        let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
+            .await
+            .expect("fold step");
+        let completed = match report.outcome {
+            GramIndexFoldOutcome::StepPublished { completed, .. } => completed,
+            other => panic!("expected a published fold step, got {other:?}"),
+        };
+        assert_eq!(
+            stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+            shared_before,
+            "a mid-fold index must not change what it answers"
+        );
+        if completed {
+            break;
+        }
+        let feature = grams_feature(&store, &namespace_id)
+            .await
+            .expect("feature mid-fold");
+        assert!(
+            feature.fold.is_some(),
+            "an unfinished fold records its cursor in the feature value"
+        );
+    }
+    assert!(steps > 1, "a one-row budget must take several steps");
+
+    let feature = grams_feature(&store, &namespace_id)
+        .await
+        .expect("feature after fold");
+    assert!(feature.fold.is_none(), "a completed fold clears its state");
+    let base_segments = live_index_files(&store, &namespace_id).await;
+    assert!(base_segments
+        .iter()
+        .all(|descriptor| descriptor.level == CHECKPOINT_BASE_RUN_LEVEL));
+    let delta_ids: BTreeSet<&str> = delta_segments
+        .iter()
+        .map(|descriptor| descriptor.segment_id.as_str())
+        .collect();
+    assert!(
+        base_segments
+            .iter()
+            .all(|descriptor| !delta_ids.contains(descriptor.segment_id.as_str())),
+        "the completing step swaps the snapshot out for the outputs"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        shared_before,
+        "folding must not change what the index answers"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"alp")).await,
+        vec![posting(2, 1)]
+    );
+
+    let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
+        .await
+        .expect("post-completion fold step");
+    assert!(
+        matches!(
+            report.outcome,
+            GramIndexFoldOutcome::NotNeeded { l0_segments: 0 }
+        ),
+        "a folded family has no delta segments left"
+    );
+}
+
+#[tokio::test]
+async fn fold_refuses_an_unreadable_feature_value() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold-corrupt").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(&store, &namespace_id, "/one.txt", b"one\n", &context, None)
+        .await
+        .expect("write one");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+
+    // Publish a manifest whose feature value should decode but cannot.
+    let root = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &root.manifest_object_id)
+        .await
+        .expect("load tables");
+    let mut payload = tables.manifest().payload.clone();
+    payload.manifest_id = ManifestId(payload.manifest_id.0 + 1);
+    payload.manifest_object_id = manifest_object_id(payload.manifest_id);
+    payload.features.insert(
+        INDEX_GRAMS_FEATURE_KEY.to_owned(),
+        serde_json::json!({ "version": "not a number" }),
+    );
+    let corrupt = NamespaceManifestEnvelope::from_payload(&context.writer_version, payload)
+        .expect("build corrupt manifest");
+    write_namespace_manifest(&store, &corrupt)
+        .await
+        .expect("write corrupt manifest");
+    publish_metadata_root(
+        &store,
+        &namespace_id,
+        &corrupt,
+        &root.manifest_object_id,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await
+    .expect("publish corrupt manifest");
+
+    let error = fold_grams_index_step(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await
+    .expect_err("folding corrupt feature state must refuse");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }

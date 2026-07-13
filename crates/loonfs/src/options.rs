@@ -61,6 +61,7 @@ pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> G
         namespace_id,
         deleted_wal_segments: report.deleted_wal_segments,
         deleted_metadata_tables: report.deleted_metadata_tables,
+        deleted_index_segments: report.deleted_index_segments,
         deleted_manifests: report.deleted_manifests,
         deleted_checkpoint_records: report.deleted_checkpoint_records,
         released_fork_checkpoints: report.released_fork_checkpoints,

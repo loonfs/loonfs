@@ -262,6 +262,11 @@ fn fork_target_manifest_payload(
                         version: feature.version,
                         built_through_seq: fork_seq,
                         backfill_cursor: Some(String::new()),
+                        // The restarted backfill re-covers everything a
+                        // half-finished fold would have; its inputs and
+                        // outputs all remain referenced, and the next fold
+                        // re-snapshots them.
+                        fold: None,
                     }
                     .to_value(),
                 );

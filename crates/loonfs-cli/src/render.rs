@@ -7,9 +7,10 @@ use std::io::{self, Write};
 
 fn gc_summary(report: &GcResponse) -> String {
     let mut summary = format!(
-        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained)",
+        "gc deleted {} wal segments, {} tables, {} index segments, {} manifests, {} checkpoint records ({} retained)",
         report.deleted_wal_segments,
         report.deleted_metadata_tables,
+        report.deleted_index_segments,
         report.deleted_manifests,
         report.deleted_checkpoint_records,
         report.retained_candidates

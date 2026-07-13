@@ -23,8 +23,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, namespace_config,
-    wal_segment_prefix,
+    checkpoint_prefix, index_segment_prefix, metadata_manifest_prefix, metadata_table_prefix,
+    namespace_config, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,10 @@ impl GcConfig {
 pub struct GcReport {
     pub deleted_wal_segments: u64,
     pub deleted_metadata_tables: u64,
+    /// Unreferenced derived-index segments deleted. Additive: reports
+    /// serialized before the field decode with zero.
+    #[serde(default)]
+    pub deleted_index_segments: u64,
     pub deleted_manifests: u64,
     pub deleted_checkpoint_records: u64,
     /// Fork-owned checkpoint records flipped to released because their
@@ -96,6 +100,9 @@ pub struct GcReport {
 struct LiveSet {
     manifests: BTreeSet<ManifestObjectId>,
     tables: BTreeSet<String>,
+    /// Derived-index segments named by any live manifest's `index_files`,
+    /// protected whatever their family (format spec, section 4.2.2).
+    index_segments: BTreeSet<String>,
     wal_segments: BTreeSet<String>,
     checkpoint_keys: BTreeSet<String>,
     /// Record resolution failed somewhere: manifest/table deletion must not
@@ -146,6 +153,8 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     let candidate_segments = list_prefix(store, &wal_segment_prefix(namespace_id.as_str())).await?;
     let candidate_tables =
         list_prefix(store, &metadata_table_prefix(namespace_id.as_str())).await?;
+    let candidate_index_segments =
+        list_prefix(store, &index_segment_prefix(namespace_id.as_str())).await?;
     let candidate_manifests =
         list_prefix(store, &metadata_manifest_prefix(namespace_id.as_str())).await?;
     let candidate_checkpoints =
@@ -158,6 +167,10 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     let table_candidates: Vec<String> = candidate_tables
         .into_iter()
         .filter(|key| !mark.tables.contains(key))
+        .collect();
+    let index_segment_candidates: Vec<String> = candidate_index_segments
+        .into_iter()
+        .filter(|key| !mark.index_segments.contains(key))
         .collect();
     let manifest_candidates: Vec<String> = candidate_manifests
         .into_iter()
@@ -208,6 +221,24 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         }
         if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
             report.deleted_metadata_tables += 1;
+        }
+    }
+    for key in index_segment_candidates {
+        sweep
+            .refresh_if_due(store, namespace_id, config, context)
+            .await?;
+        // Index segments follow the table rules: ambiguous roots suppress
+        // deletion, live manifests protect every listed key.
+        if sweep.degraded {
+            report.retained_candidates += 1;
+            continue;
+        }
+        if sweep.live.index_segments.contains(&key) {
+            report.retained_candidates += 1;
+            continue;
+        }
+        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
+            report.deleted_index_segments += 1;
         }
     }
     for key in manifest_candidates {
@@ -451,6 +482,7 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
     let mut live = LiveSet {
         manifests: BTreeSet::new(),
         tables: BTreeSet::new(),
+        index_segments: BTreeSet::new(),
         wal_segments: BTreeSet::new(),
         checkpoint_keys: BTreeSet::new(),
         degraded: false,
@@ -529,6 +561,9 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
             Ok(manifest) => {
                 for file in &manifest.payload.metadata_files {
                     live.tables.insert(file.object_key.clone());
+                }
+                for file in &manifest.payload.index_files {
+                    live.index_segments.insert(file.object_key.clone());
                 }
             }
             Err(_) => {
@@ -1917,5 +1952,116 @@ mod tests {
         assert!(report.degraded_retention);
         assert_eq!(report.deleted_manifests, 0);
         assert_eq!(report.deleted_metadata_tables, 0);
+    }
+
+    async fn drain_grams_index(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+    ) {
+        crate::checkpoint::enable_grams_index(store, namespace_id, context)
+            .await
+            .expect("enable grams index");
+        loop {
+            let report = crate::checkpoint::build_grams_index_step(
+                store,
+                namespace_id,
+                context,
+                crate::GramIndexBuildPolicy::default(),
+            )
+            .await
+            .expect("build grams index step");
+            if matches!(
+                report.outcome,
+                crate::GramIndexBuildOutcome::UpToDate { .. }
+            ) {
+                return;
+            }
+            assert!(
+                matches!(
+                    report.outcome,
+                    crate::GramIndexBuildOutcome::Published { .. }
+                ),
+                "unexpected build outcome: {:?}",
+                report.outcome
+            );
+        }
+    }
+
+    async fn index_segment_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> Vec<String> {
+        list_prefix(store, &index_segment_prefix(namespace_id.as_str()))
+            .await
+            .expect("list index segments")
+    }
+
+    #[tokio::test]
+    async fn gc_retains_live_index_segments() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "searchable", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("checkpoint");
+        drain_grams_index(&store, &namespace_id, &setup).await;
+        let segments = index_segment_keys(&store, &namespace_id).await;
+        assert!(!segments.is_empty());
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass");
+
+        assert_eq!(report.deleted_index_segments, 0);
+        assert_eq!(
+            index_segment_keys(&store, &namespace_id).await,
+            segments,
+            "live index segments must survive the sweep"
+        );
+        assert!(!report.degraded_retention);
+    }
+
+    #[tokio::test]
+    async fn gc_reclaims_index_segments_after_disable() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "searchable", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("checkpoint");
+        drain_grams_index(&store, &namespace_id, &setup).await;
+        let segments = index_segment_keys(&store, &namespace_id).await;
+        assert!(!segments.is_empty());
+
+        let disabled = crate::checkpoint::disable_grams_index(&store, &namespace_id, &setup)
+            .await
+            .expect("disable");
+        assert_eq!(disabled, crate::GramIndexDisableOutcome::Disabled);
+
+        // Superseded manifests still reference the segments until they age
+        // out; sweeping data and manifests in one aged pass clears both.
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let first = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("first gc pass");
+        let second = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("second gc pass");
+
+        assert_eq!(
+            first.deleted_index_segments + second.deleted_index_segments,
+            segments.len() as u64,
+            "disable makes every index segment collectable"
+        );
+        assert!(index_segment_keys(&store, &namespace_id).await.is_empty());
     }
 }

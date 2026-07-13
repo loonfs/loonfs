@@ -335,6 +335,27 @@ pub mod lookup {
     }
 }
 
+/// In-progress partitioned fold state inside the feature value.
+///
+/// A fold consumes a snapshot of segment ids, walks the gram keyspace in
+/// bounded steps, and records the outputs written so far plus the row-key
+/// cursor the next step resumes from. Snapshot inputs and outputs are both
+/// referenced and both served until the completing step swaps the snapshot
+/// out — postings are add-only, so the overlap yields duplicates, never
+/// gaps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GramIndexFoldState {
+    /// Segment ids the fold consumes; fixed when the fold starts, dropped
+    /// from the manifest by the completing step.
+    pub snapshot: Vec<String>,
+    /// Segment ids the fold has written so far, kept for the completing
+    /// swap.
+    pub outputs: Vec<String>,
+    /// Row key the next step resumes from (inclusive); empty at the start
+    /// of the keyspace.
+    pub cursor: String,
+}
+
 /// The `index.grams` value in the namespace features map: the format
 /// version, the watermark the index has consumed through, and the backfill
 /// cursor while initial materialization is still walking existing data.
@@ -350,6 +371,9 @@ pub struct IndexGramsFeature {
     /// refused; steady-state manifests omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backfill_cursor: Option<String>,
+    /// In-progress partitioned fold, when one is mid-walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fold: Option<GramIndexFoldState>,
 }
 
 impl IndexGramsFeature {
@@ -358,6 +382,7 @@ impl IndexGramsFeature {
             version: INDEX_GRAMS_FORMAT_VERSION,
             built_through_seq,
             backfill_cursor: None,
+            fold: None,
         }
     }
 
@@ -537,6 +562,7 @@ mod tests {
             version: INDEX_GRAMS_FORMAT_VERSION,
             built_through_seq: ChangeSeq(41290),
             backfill_cursor: Some("revision-00000000000000000007".to_owned()),
+            fold: None,
         };
         assert!(!feature.is_materialized());
         let decoded = IndexGramsFeature::from_value(&feature.to_value()).expect("decode");

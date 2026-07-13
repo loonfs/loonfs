@@ -3572,6 +3572,12 @@
             "description": "Released or expired checkpoint records deleted.",
             "minimum": 0
           },
+          "deleted_index_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreferenced derived-index segments deleted.",
+            "minimum": 0
+          },
           "deleted_manifests": {
             "type": "integer",
             "format": "int64",

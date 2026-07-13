@@ -51,7 +51,7 @@ pub use self::cache::{
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::index_build::{
     GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport, GramIndexDisableOutcome,
-    GramIndexEnableOutcome,
+    GramIndexEnableOutcome, GramIndexFoldOutcome, GramIndexFoldReport,
 };
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
@@ -59,7 +59,7 @@ pub(crate) use self::runs::MetadataLsmPolicy;
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::index_build::{
-    build_grams_index_step, disable_grams_index, enable_grams_index,
+    build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
 };
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,

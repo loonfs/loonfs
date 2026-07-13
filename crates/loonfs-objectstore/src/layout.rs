@@ -219,12 +219,12 @@ impl ObjectLayout {
     /// from the manifest's `index_files` list.
     pub fn index_segment(&self, namespace: &str, segment_id: &str) -> IndexSegmentKey {
         IndexSegmentKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/metadata/index/{segment_id}.idx.zst"
+            "namespaces/{namespace}/metadata/indexes/{segment_id}.idx.zst"
         )))
     }
 
     pub fn index_segment_prefix(&self, namespace: &str) -> String {
-        format!("namespaces/{namespace}/metadata/index/")
+        format!("namespaces/{namespace}/metadata/indexes/")
     }
 
     /// Durable stable-view pin to a metadata manifest.

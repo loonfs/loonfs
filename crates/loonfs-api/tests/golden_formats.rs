@@ -1024,7 +1024,7 @@ fn sample_manifest_with_index_envelope() -> NamespaceManifestEnvelope {
     payload.index_files = vec![IndexFileRef {
         owner_namespace_id: namespace_id(),
         segment_id: index_segment_id(),
-        object_key: "namespaces/demo/metadata/index/idx_0123456789abcdef0123456789abcdef.idx.zst"
+        object_key: "namespaces/demo/metadata/indexes/idx_0123456789abcdef0123456789abcdef.idx.zst"
             .to_owned(),
         family: INDEX_FAMILY_GRAMS.to_owned(),
         run_seq: ChangeSeq(2),
