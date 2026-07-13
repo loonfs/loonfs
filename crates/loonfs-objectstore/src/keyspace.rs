@@ -1,3 +1,5 @@
+//! Key validation and prefix scoping shared by the provider stores.
+
 use crate::ObjectStoreError;
 
 pub(crate) fn validate_segments(

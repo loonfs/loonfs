@@ -1,3 +1,6 @@
+//! [`PublishPlanningSession`]: plans a batch's candidates in admission
+//! order, each seeing the rows earlier candidates would persist.
+
 use super::intent::PathMutationIntent;
 use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
 use crate::commit::CommitPlan;

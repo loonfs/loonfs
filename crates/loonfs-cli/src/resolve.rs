@@ -1,3 +1,6 @@
+//! Resolves the active profile and namespace from flags, config defaults,
+//! and the environment.
+
 use crate::backend::ResolvedTarget;
 use crate::config::{default_config_path, load_config, CliConfig};
 use crate::error::CliError;

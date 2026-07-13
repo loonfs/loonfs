@@ -1,3 +1,5 @@
+//! The typed command results the renderer turns into text or JSON.
+
 use crate::args::CommandKind;
 use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;

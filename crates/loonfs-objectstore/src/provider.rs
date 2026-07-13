@@ -1,3 +1,6 @@
+//! Provider contract profiles: what each provider is expected to support
+//! and what stays aspirational.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,10 +1,12 @@
-//! First-class checkpoint records under `checkpoints/`.
+//! Checkpoint records stored under `checkpoints/`.
 //!
-//! A checkpoint is a durable stable-view pin to a metadata manifest,
-//! created write-then-verify: the record is written `active`, then the
-//! basis is re-verified against the live floor; a failed verification
-//! flips the record to `released`. Records never define latest visibility
-//! and never live inside manifests.
+//! A checkpoint record pins one metadata manifest (its "basis") so that
+//! garbage collection keeps everything the manifest references. Creation is
+//! write-then-verify: the record is written as `active`, then the basis is
+//! checked against the live retention floor, and the record flips to
+//! `released` if the check fails. Records never decide what readers see as
+//! latest, and they are stored as standalone objects, never inside
+//! manifests.
 
 use super::load::load_namespace_manifest_envelope;
 use crate::error::CoreError;
@@ -20,12 +22,14 @@ use loonfs_objectstore::keys::checkpoint_record;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use sha2::{Digest, Sha256};
 
-/// Repeated checkpoint creation for the same pinned manifest and owner must
-/// return the existing record instead of stacking duplicates, without
-/// listing the collection. Deriving the id from the basis identity plus the
-/// owner identity makes the record naturally idempotent under
-/// `put_if_absent`, while distinct owners of one basis hold distinct records
-/// with independent lifecycles.
+/// Derives a checkpoint id by hashing the basis identity together with the
+/// owner.
+///
+/// The same manifest and owner always produce the same id, so retrying
+/// checkpoint creation writes to the same key and `put_if_absent` hands back
+/// the existing record instead of creating a duplicate. Different owners
+/// pinning the same manifest get different ids, so each owner's record has
+/// its own independent lifecycle.
 pub(crate) fn deterministic_checkpoint_id(
     namespace_id: &NamespaceId,
     manifest_id: ManifestId,
@@ -136,8 +140,8 @@ pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
     }))
 }
 
-/// Flips a record's lifecycle by compare-and-swap; idempotent when the
-/// record already carries the target state.
+/// Sets a record's lifecycle state via compare-and-swap. Returns `Ok`
+/// without writing when the record already carries the target state.
 pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -190,16 +194,16 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     )))
 }
 
-/// Re-stamps a fork-owned record by compare-and-swap before its fork writes
-/// any target object.
+/// Rewrites a fork-owned record via compare-and-swap, marking it `active`,
+/// before the fork writes anything into its target namespace.
 ///
-/// The rewrite does two jobs at once. It refreshes the record's provider
-/// timestamp, so the abandoned-fork age rule ("Garbage collection", rule 9)
-/// cannot fire under a live retry. And it serializes the fork against a
-/// concurrent GC release on the record's etag: whichever compare-and-swap
-/// lands second fails, so the fork either owns a fresh active record or
-/// observes the release and revives it here — re-verifying the basis —
-/// before proceeding.
+/// The rewrite matters for two reasons. First, it gives the record a fresh
+/// provider timestamp, so a fork that is still retrying never looks
+/// abandoned to garbage collection (format spec, "Garbage collection"
+/// rule 9). Second, the compare-and-swap races any concurrent GC release of
+/// the record, and only one side can win the etag. If the fork wins, it
+/// holds a fresh active record. If GC won, the fork sees the released
+/// record, re-verifies the basis, and revives the record before proceeding.
 pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -250,8 +254,8 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
             .await
         {
             Ok(_) => {
-                // A revival raced a release; the record rooted its basis the
-                // whole time it existed, but re-verify before trusting it.
+                // We just revived a released record, so check that the
+                // basis still verifies before trusting it.
                 if revived && !verify_checkpoint_basis(store, &next).await? {
                     set_checkpoint_record_state(
                         store,
@@ -279,9 +283,13 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
     )))
 }
 
-/// The post-write verification that closes the create-vs-collect race:
-/// after the record is durable, the basis must still be at or above the
-/// live floor and the basis manifest must still load and validate.
+/// Checks that a record's basis is still intact: the retention floor has
+/// not passed it, and the basis manifest still loads with the expected
+/// checksum.
+///
+/// Creation calls this after the record is durable. Without the re-check, a
+/// record written just as garbage collection decides to trim the same
+/// manifest could pin state that is already gone.
 pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,

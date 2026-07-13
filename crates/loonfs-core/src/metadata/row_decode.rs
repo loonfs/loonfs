@@ -1,3 +1,5 @@
+//! Decodes durable manifest rows into the in-memory metadata record types.
+
 use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,

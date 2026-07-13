@@ -1,3 +1,6 @@
+//! [`MutationContext`]: the writer identity and request timestamp every
+//! mutation carries.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

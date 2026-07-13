@@ -1,3 +1,5 @@
+//! Presigned-URL issuing for direct_put uploads.
+
 use crate::ObjectStoreError;
 use loonfs_api::ContentRef;
 use std::collections::BTreeMap;

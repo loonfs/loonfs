@@ -1,3 +1,6 @@
+//! [`LoadedMetadataView`]: a verified, seq-pinned view of one namespace
+//! that answers every read — stat, list, revisions, content, grep.
+
 use super::grep::{
     derive_visible_path, indexed_candidates, line_matches, tail_revisions, GrepCandidates,
     DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,

@@ -1,3 +1,6 @@
+//! [`ConfiguredObjectStore`]: one enum over every provider, built from
+//! configuration.
+
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};

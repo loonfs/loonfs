@@ -1,3 +1,6 @@
+//! Typed loaders for the namespace's control objects: head, metadata root,
+//! WAL floor, and the descriptor pair.
+
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,

@@ -1,3 +1,6 @@
+//! Converts in-memory metadata state into manifest rows, per family and in
+//! row-key order.
+
 use crate::metadata::{record_name_key, MetadataState};
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::ChangeSeq;

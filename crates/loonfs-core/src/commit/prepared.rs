@@ -1,3 +1,6 @@
+//! [`PreparedCommit`]: a validated request paired with its plan and
+//! semantic identity, ready for publication.
+
 use super::{
     core_commit_fingerprint, CommitFingerprintError, CommitPlan, CommitRequest,
     PathIntentFingerprint, SemanticMutationIdentity,

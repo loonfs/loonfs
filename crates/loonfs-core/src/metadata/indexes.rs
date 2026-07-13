@@ -1,3 +1,6 @@
+//! At-head indexes over the in-memory metadata rows, maintained
+//! incrementally as deltas apply so head reads skip the row scans.
+
 use super::visibility::unbind_matches_binding;
 use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,

@@ -1,3 +1,6 @@
+//! [`CommitHeadPublishError`]: failures of the segment PUT and head
+//! compare-and-swap.
+
 use loonfs_api::{ChangeSeq, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

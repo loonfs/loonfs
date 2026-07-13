@@ -1,3 +1,7 @@
+//! Short-lived content tokens: a serving session mints one after
+//! validating direct-put content, and batch validation accepts it instead
+//! of re-probing object storage for the blob.
+
 use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
 use loonfs_api::{ContentRef, NamespaceId};

@@ -1,3 +1,6 @@
+//! Publishes a prepared WAL segment: the segment PUT and the head
+//! compare-and-swap that makes its commits visible.
+
 use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan};
 use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;

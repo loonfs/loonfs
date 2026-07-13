@@ -1,3 +1,5 @@
+//! Stages file bytes as durable content before a metadata publish.
+
 use crate::error::Result;
 use crate::path::helpers::validate_path_for_mutation;
 use crate::storage::content::store_bytes_as_content;

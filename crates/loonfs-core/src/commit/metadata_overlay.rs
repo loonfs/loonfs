@@ -1,3 +1,6 @@
+//! The accumulating in-batch overlay: rows earlier ops would persist,
+//! visible to the validation of later ops in the same batch.
+
 use super::materialize::materialize_validated_op;
 use super::ValidatedOp;
 use crate::metadata::MetadataState;

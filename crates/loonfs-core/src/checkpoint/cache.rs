@@ -1,3 +1,6 @@
+//! Shared caches for decoded manifest state: SST blocks keyed by content
+//! digest, validated manifests, and bounded WAL-tail projections.
+
 use super::runs::MetadataRunManifest;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
@@ -82,8 +85,8 @@ pub(super) enum DecodedMetadataTableBlock {
     Manifest {
         manifest: Arc<NamespaceManifestEnvelope>,
         /// The manifest's `metadata_files` regrouped into scan-order runs,
-        /// derived once when the envelope is validated. Scans walk this list
-        /// on every page; regrouping it per scan dominated warm-read CPU.
+        /// derived once when the envelope is validated. Scans walk this
+        /// list on every page, so it is far too hot to regroup per scan.
         scan_runs: Arc<Vec<MetadataRunManifest>>,
         decoded_byte_len: usize,
     },

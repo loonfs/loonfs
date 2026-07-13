@@ -1,3 +1,5 @@
+//! Tracing subscriber setup from environment variables.
+
 use std::env;
 
 use thiserror::Error;

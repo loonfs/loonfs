@@ -1,3 +1,5 @@
+//! [`Precondition`]: the core form of one commit precondition.
+
 use loonfs_api::{ChangeSeq, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 

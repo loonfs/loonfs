@@ -1,3 +1,6 @@
+//! The namespace catalog: the immutable descriptor pair (namespace config
+//! and content-store descriptor) loaded once and reused for a session.
+
 use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };

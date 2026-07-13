@@ -1,3 +1,5 @@
+//! Converts v0 wire commit shapes into their core forms.
+
 use super::{CommitExecutionContext, CommitOp, CommitRequest, Precondition};
 use loonfs_api::{v0 as api_v0, CommitIdValidationError};
 use thiserror::Error;

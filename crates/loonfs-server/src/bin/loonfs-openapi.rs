@@ -1,3 +1,5 @@
+//! Writes the generated OpenAPI document to `docs/specs/openapi.json`.
+
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

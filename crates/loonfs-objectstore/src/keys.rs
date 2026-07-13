@@ -1,3 +1,5 @@
+//! Key construction for every durable object family.
+
 use crate::layout::ObjectLayout;
 use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;

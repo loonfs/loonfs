@@ -1,3 +1,7 @@
+//! Durable control-object shapes: the head, metadata root, WAL floor,
+//! checkpoint records, upload sessions, and their envelopes (format spec,
+//! "Control objects").
+
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::v0::UploadMode;
@@ -108,11 +112,11 @@ pub struct WalFloorState {
 
 /// Cold pointer to the best known materialized metadata root.
 ///
-/// Replaces the head's `current_manifest_id`: manifest publication CASes
-/// this object, never the WAL head, so head watchers see only commits.
-/// Updates are monotonic in `manifest_head_seq`; a same-seq replacement may
-/// reference a different manifest (pure compaction), and a lower-seq
-/// replacement no-ops. This object never defines live visibility.
+/// Manifest publication compare-and-swaps this object, never the WAL head,
+/// so head watchers see only commits. Updates are monotonic in
+/// `manifest_head_seq`; a same-seq replacement may reference a different
+/// manifest (pure compaction), and a lower-seq replacement no-ops. This
+/// object never defines live visibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRootState {
     pub namespace_id: NamespaceId,
@@ -158,12 +162,14 @@ pub enum CheckpointOwner {
     Fork { target_namespace_id: NamespaceId },
 }
 
-/// Durable stable-view pin to a metadata manifest.
+/// A checkpoint record: pins one metadata manifest (its basis) so garbage
+/// collection keeps everything the manifest references.
 ///
-/// First-class file under `checkpoints/`; never part of a manifest and never
-/// an input to latest visibility. Created write-then-verify: the record is
-/// written `active`, then the basis manifest is re-verified against the
-/// floor; a failed verification flips the record to `released`.
+/// Stored as its own object under `checkpoints/`; never part of a manifest
+/// and never an input to latest visibility. Created write-then-verify: the
+/// record is written `active`, then the basis manifest is re-verified
+/// against the floor, and a failed verification flips the record to
+/// `released`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordState {
     pub checkpoint_id: CheckpointId,

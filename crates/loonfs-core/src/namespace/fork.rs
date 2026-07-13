@@ -1,3 +1,7 @@
+//! Namespace forking: bootstraps a target namespace from a fork-owned
+//! source checkpoint, sharing content bytes and copying metadata
+//! references.
+
 use super::bootstrap::BootstrapNamespaceError;
 use crate::checkpoint::{
     create_checkpoint, freshen_fork_checkpoint, load_verified_manifest_tables,

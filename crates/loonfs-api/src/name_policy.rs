@@ -1,3 +1,6 @@
+//! [`NamePolicy`]: how a display name folds into the name key directory
+//! lookups compare on. Immutable per namespace.
+
 use serde::{Deserialize, Serialize};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;

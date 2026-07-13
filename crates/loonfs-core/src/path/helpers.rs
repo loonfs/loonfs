@@ -1,3 +1,5 @@
+//! Path parsing helpers shared by the read and write paths.
+
 use crate::error::{CoreError, Result};
 use loonfs_api::{AbsolutePath, PathError};
 

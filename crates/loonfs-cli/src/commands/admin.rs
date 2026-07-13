@@ -1,3 +1,6 @@
+//! `loon admin` commands: status, checkpoints, retention, gc, indexes,
+//! and the change feed.
+
 use super::context::{fail, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{

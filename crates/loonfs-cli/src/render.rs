@@ -1,3 +1,5 @@
+//! Renders command outcomes as human-readable text or `--json`.
+
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;

@@ -1,3 +1,6 @@
+//! [`MetadataView`]: seq-scoped metadata lookups over manifest tables
+//! merged with the WAL tail, plus the caching session wide reads use.
+
 use super::manifest_index;
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataTables;
@@ -1210,16 +1213,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    /// Resolves `absolute_path` with the canonical visibility rules, after a
-    /// pipelined preload of the walk's storage lookups. The preload issues
-    /// each path node's independent probes (inode, tombstone, child-keyed
-    /// binding, previous binding's unbind fact) as one concurrent wave
-    /// alongside the next component's bound-child scan — the only lookup the
-    /// walk truly serializes on — and seeds the session's primitive caches
-    /// with exactly what those primitives would have fetched. The canonical
-    /// rules then decide over cache hits, so a cold resolution costs one
-    /// round-trip wave per path component instead of a strictly sequential
-    /// chain of five-plus lookups each.
+    /// Resolves `absolute_path` with the canonical visibility rules, after
+    /// a pipelined preload of the walk's storage lookups.
+    ///
+    /// For each path component, the preload issues the independent probes
+    /// (inode, tombstone, child-keyed binding, the previous binding's
+    /// unbind fact) as one concurrent wave alongside the next component's
+    /// bound-child scan — the only lookup the walk truly serializes on —
+    /// and seeds the session's caches with exactly what those lookups would
+    /// have fetched. The canonical rules then decide over cache hits, so a
+    /// cold resolution costs one round-trip wave per path component instead
+    /// of five-plus sequential lookups each.
     pub(crate) async fn resolve_visible_path(
         &mut self,
         absolute_path: &AbsolutePath,
@@ -1453,11 +1457,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 
     /// The head revision of an inode the caller has already established as
     /// visible at this session's seq — path resolution and child enumeration
-    /// both do. Skips the per-inode visibility re-derivation the checked
-    /// [`MetadataView::latest_revision_head`] performs: on a wide listing
-    /// that re-check was one full child-binds scan and tombstone probe per
-    /// file entry, and it can never disagree with the enumeration that just
-    /// admitted the entry at the same seq.
+    /// both have. Unlike [`MetadataView::latest_revision_head`], this skips
+    /// re-deriving the inode's visibility: the re-check costs a full
+    /// child-binds scan and tombstone probe per entry on a wide listing,
+    /// and it can never disagree with the enumeration that just admitted
+    /// the entry at the same seq.
     pub(crate) async fn latest_revision_head_of_visible(
         &mut self,
         inode_id: InodeId,

@@ -1,3 +1,5 @@
+//! The CLI config file: profiles, defaults, and strict TOML loading.
+
 use crate::error::CliError;
 use http::Uri;
 use loonfs_api::NamespaceId;

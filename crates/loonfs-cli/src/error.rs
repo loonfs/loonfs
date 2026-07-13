@@ -1,3 +1,5 @@
+//! [`CliError`]: the structured failure every command surfaces.
+
 use loonfs_api::ErrorCode;
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,6 @@
+//! Path-oriented reads over a loaded metadata view: resolution, listings,
+//! revision history, and content search.
+
 mod grep;
 mod listing;
 mod materialized_view;

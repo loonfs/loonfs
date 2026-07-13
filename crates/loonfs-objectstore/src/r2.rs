@@ -1,3 +1,5 @@
+//! Cloudflare R2 provider, over the S3-compatible transport.
+
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::secret::SecretString;

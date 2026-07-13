@@ -1,3 +1,5 @@
+//! Presigner for S3-compatible providers (AWS S3, Cloudflare R2).
+
 use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
 use crate::presign::aws_sigv4::{
     aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,

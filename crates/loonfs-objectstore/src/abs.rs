@@ -1,3 +1,5 @@
+//! Azure Blob Storage provider.
+
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;

@@ -610,7 +610,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .head;
 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(1));
-    // Floor advancement no longer touches the head at all.
+    // Floor advancement never touches the head.
     assert_eq!(after, before);
 }
 

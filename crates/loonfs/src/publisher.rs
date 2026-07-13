@@ -1431,10 +1431,10 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     async fn wait_past_cas_pacing() {
         // Deliberate wall-clock wait past the per-namespace CAS pacing
-        // interval: before the work loop was single-flight, a racing second
-        // task released a queued delete after exactly that interval, so
-        // outlasting it proves the delete is ordered behind the sealed
-        // batch, not merely paced behind it.
+        // interval. A work loop that were not single-flight would let a
+        // racing second task release a queued delete after exactly that
+        // interval, so outlasting it proves the delete is ordered behind
+        // the sealed batch, not merely paced behind it.
         tokio::time::sleep(MIN_NAMESPACE_CAS_INTERVAL + Duration::from_millis(300)).await;
     }
 
@@ -2203,8 +2203,8 @@ mod tests {
 
         // The admitted commit's publish task is still inside its coalescing
         // window when the delete arrives, and the batch's head CAS will
-        // block for longer than the pacing interval — the interleaving in
-        // which a second, racing task used to execute the delete first.
+        // block for longer than the pacing interval — the interleaving
+        // where a second, racing task could run the delete first.
         store.arm_next_head_cas();
         let before = {
             let registry = registry.clone();

@@ -1,3 +1,5 @@
+//! The `sha256:<64hex>` digest form durable formats use.
+
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 

@@ -1,3 +1,5 @@
+//! Google Cloud Storage provider.
+
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};

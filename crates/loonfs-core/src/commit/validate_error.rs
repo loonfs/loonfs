@@ -1,3 +1,6 @@
+//! [`CommitValidationError`]: every way a commit request can fail
+//! validation.
+
 use loonfs_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

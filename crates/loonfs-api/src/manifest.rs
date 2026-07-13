@@ -1,3 +1,7 @@
+//! The namespace manifest format: the durable document naming the
+//! metadata SST runs and index segments that materialize one namespace
+//! file-set version (format spec, "Namespace manifests").
+
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::sst_blocks::BlockHandle;

@@ -1,3 +1,5 @@
+//! Per-operation options structs for the engine surface.
+
 use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
 
 /// Options for namespace bootstrap.

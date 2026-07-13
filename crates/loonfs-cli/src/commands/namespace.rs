@@ -1,3 +1,5 @@
+//! `loon namespace` commands: create, fork, delete, use, and current.
+
 use super::context::{fail, validate_namespace_id};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{

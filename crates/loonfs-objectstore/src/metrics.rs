@@ -1,3 +1,6 @@
+//! A metrics-recording wrapper around any object store: per-operation
+//! samples classified by object family.
+
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;

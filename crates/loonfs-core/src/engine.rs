@@ -1,3 +1,6 @@
+//! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
+//! uploads, checkpoints, and maintenance.
+
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;

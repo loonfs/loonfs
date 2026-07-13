@@ -1,3 +1,5 @@
+//! Profile listing, inspection, and mutation over the loaded CLI config.
+
 use crate::config::{validate_profile_name, CliConfig, ProfileConfig};
 use crate::error::CliError;
 use serde::{Deserialize, Serialize};

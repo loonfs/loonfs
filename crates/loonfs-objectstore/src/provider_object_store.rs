@@ -1,3 +1,6 @@
+//! The shared provider transport: timeouts, per-operation deadlines, and
+//! the bounded retry loops for idempotent-safe writes.
+
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };

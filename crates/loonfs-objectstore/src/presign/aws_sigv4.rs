@@ -1,3 +1,5 @@
+//! AWS Signature Version 4 primitives used to presign S3-compatible URLs.
+
 use crate::ObjectStoreError;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

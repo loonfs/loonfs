@@ -11,10 +11,9 @@
 //!   revisions family in row-key order from the cursor, indexing revisions
 //!   committed at or below the enable-time watermark. The cursor is the
 //!   resume point; queries stay refused until the walk completes.
-//! - **Steady state**: replay the WAL after `built_through_seq` — the
-//!   change feed is the designed index-building extension point — and index
-//!   the file revisions that appeared, advancing the watermark to the last
-//!   fully consumed commit.
+//! - **Steady state**: replay the WAL change feed after `built_through_seq`
+//!   and index the file revisions that appeared, advancing the watermark to
+//!   the last fully consumed commit.
 //!
 //! Content is read server-side through the verified durable-content path.
 //! Eligibility (text sniffing, the size cap) is writer-side policy decided
@@ -608,10 +607,10 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
     if feature.built_through_seq < floor_seq {
-        // Retention advancement is clamped to the watermark while the
-        // feature is enabled, so this indicates operator surgery; the index
-        // must be rebuilt (disable, then enable) rather than silently skip
-        // history.
+        // While the feature is enabled, retention never advances past the
+        // watermark, so a watermark below the floor means someone moved the
+        // floor by hand. The index must be rebuilt (disable, then enable)
+        // rather than silently skip the missing history.
         return Err(CoreError::CheckpointUnavailable(format!(
             "index.grams watermark {} is below the retention floor {}; \
              disable and re-enable the index to rebuild it",
@@ -826,15 +825,17 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Runs at most one gram index fold step. Folds are partitioned and
-/// resumable: the first step snapshots the segment set it will consume,
-/// and every step merges one bounded key range from the snapshot into
-/// fresh base segments, publishing a manifest that records the outputs
-/// and the resume cursor inside the feature value. Snapshot inputs and
-/// outputs are both referenced and both served until the completing step
-/// swaps the snapshot out — postings are add-only, so readers that union
-/// them see duplicates, never gaps — and segments that arrive during the
-/// fold stay out of the snapshot and survive it.
+/// Runs at most one gram index fold step.
+///
+/// Folds are partitioned and resumable. The first step snapshots the
+/// segment set it will consume. Every step then merges one bounded key
+/// range from that snapshot into fresh base segments and publishes a
+/// manifest recording the outputs plus a resume cursor in the feature
+/// value. Until the final step swaps the snapshot out, both the snapshot
+/// inputs and the fold outputs stay referenced and served; postings are
+/// add-only, so readers that union them see duplicates, never gaps.
+/// Segments written while the fold runs stay out of the snapshot and
+/// survive it.
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",

@@ -1,3 +1,6 @@
+//! Namespace bootstrap: writes the initial durable tree, finishing with
+//! `namespace.json` as the completion marker.
+
 use crate::checkpoint::{build_initial_namespace_manifest, write_namespace_manifest};
 use crate::context::MutationContext;
 use crate::metadata::{InodeRecord, MetadataState};
