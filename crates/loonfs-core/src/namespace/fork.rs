@@ -18,6 +18,9 @@ use loonfs_api::wire::control::{
     NamespaceConfigState, NamespaceState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
     WriterBlock,
 };
+use loonfs_api::wire::index_grams::{
+    IndexGramsCodecError, IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY,
+};
 use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
@@ -139,7 +142,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             source_namespace_id,
             source_manifest,
             &source_record,
-        ),
+        )?,
     )
     .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
     // Freshen the record before the first target write: the compare-and-swap
@@ -241,9 +244,41 @@ fn fork_target_manifest_payload(
     source_namespace_id: &NamespaceId,
     source_manifest: &NamespaceManifestEnvelope,
     source_record: &CheckpointRecordState,
-) -> NamespaceManifestPayload {
+) -> Result<NamespaceManifestPayload> {
     let fork_seq = source_record.manifest_head_seq;
-    NamespaceManifestPayload {
+    // The target adopts the source's gram index, with one repair: the
+    // target does not inherit the source WAL, so a source index that
+    // trails the fork point could never replay the gap. Keeping the
+    // segments but restarting the backfill cursor rebuilds the gap from
+    // the copied metadata tables; duplicate postings from the re-walk are
+    // harmless because readers union batches and folds re-batch them.
+    let mut features = source_manifest.payload.features.clone();
+    if let Some(value) = features.get(INDEX_GRAMS_FEATURE_KEY) {
+        match IndexGramsFeature::from_value(value) {
+            Ok(feature) if feature.built_through_seq < fork_seq || !feature.is_materialized() => {
+                features.insert(
+                    INDEX_GRAMS_FEATURE_KEY.to_owned(),
+                    IndexGramsFeature {
+                        version: feature.version,
+                        built_through_seq: fork_seq,
+                        backfill_cursor: Some(String::new()),
+                    }
+                    .to_value(),
+                );
+            }
+            Ok(_) => {}
+            // A feature version this build does not implement is preserved
+            // verbatim; its own specification owns fork semantics.
+            Err(IndexGramsCodecError::UnsupportedFeatureVersion { .. }) => {}
+            Err(error) => {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "fork source `{}` carries an unreadable index.grams feature value: {error}",
+                    source_namespace_id.as_str()
+                )));
+            }
+        }
+    }
+    Ok(NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
         manifest_object_id: target_manifest_object_id,
@@ -263,10 +298,10 @@ fn fork_target_manifest_payload(
             source_manifest_object_id: source_record.manifest_object_id.clone(),
             source_head_seq: source_record.manifest_head_seq,
         }),
-        features: source_manifest.payload.features.clone(),
+        features,
         metadata_files: source_manifest.payload.metadata_files.clone(),
         index_files: source_manifest.payload.index_files.clone(),
-    }
+    })
 }
 
 async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
@@ -410,7 +445,8 @@ mod tests {
             &NamespaceId::parse("source").expect("source namespace"),
             &source,
             &source_checkpoint,
-        );
+        )
+        .expect("fork payload");
 
         assert_eq!(target.features, source.payload.features);
         assert_eq!(target.metadata_files, source.payload.metadata_files);

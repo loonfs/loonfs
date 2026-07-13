@@ -509,6 +509,51 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
+    /// Publishes the `index.grams` feature entry, scheduling gram index
+    /// backfill over the namespace's existing revisions (format spec,
+    /// sections 4.2.2 and 5). Idempotent for an already-enabled namespace.
+    pub async fn enable_grams_index(
+        &self,
+    ) -> CoreResult<crate::checkpoint::GramIndexEnableOutcome> {
+        crate::checkpoint::enable_grams_index(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+        )
+        .await
+    }
+
+    /// Removes the `index.grams` feature entry and every index segment
+    /// reference; the segments become garbage-collection candidates.
+    pub async fn disable_grams_index(
+        &self,
+    ) -> CoreResult<crate::checkpoint::GramIndexDisableOutcome> {
+        crate::checkpoint::disable_grams_index(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+        )
+        .await
+    }
+
+    /// Runs at most one gram index build unit: backfill while initial
+    /// materialization is walking existing revisions, WAL-replay catch-up
+    /// after, each unit ending in one manifest publication that advances
+    /// the `index.grams` watermark. Callers invoke this repeatedly, like
+    /// [`Self::reorganize_metadata`].
+    pub async fn build_grams_index_step(
+        &self,
+        policy: crate::checkpoint::GramIndexBuildPolicy,
+    ) -> CoreResult<crate::checkpoint::GramIndexBuildReport> {
+        crate::checkpoint::build_grams_index_step(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+            policy,
+        )
+        .await
+    }
+
     /// Runs at most one metadata reorganization unit: folds one family
     /// group's L0 delta rows into new base segments and publishes a manifest
     /// swapping that group's references. Checkpoints only append L0 runs, so

@@ -52,6 +52,12 @@ pub const INDEX_FAMILY_GRAMS: &str = "grams";
 /// Bytes per gram. Fixed for version 1; a variable-width tokenizer would
 /// be a new feature version.
 pub const GRAM_LEN: usize = 3;
+/// Largest content the version-1 eligibility rule admits, in bytes. Like
+/// the tokenizer, this is a format constant, not a tunable: queries decide
+/// the exhaustive-scan and verification cut with the same rule the builder
+/// used, and a divergence would silently drop matches once the watermark
+/// passes a file one side considers eligible and the other does not.
+pub const INDEX_GRAMS_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One tokenizer gram: three content bytes, ASCII-case-folded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

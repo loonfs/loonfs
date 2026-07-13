@@ -106,7 +106,10 @@ pub mod publish {
     pub use crate::protocol::PublishTailOptions;
 }
 
-pub use checkpoint::{MetadataReorganizeOutcome, MetadataReorganizeReport};
+pub use checkpoint::{
+    GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport, GramIndexDisableOutcome,
+    GramIndexEnableOutcome, MetadataReorganizeOutcome, MetadataReorganizeReport,
+};
 pub use context::MutationContext;
 #[doc(hidden)]
 pub use engine::RuntimeReadContext;

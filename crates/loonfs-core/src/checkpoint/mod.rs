@@ -11,6 +11,8 @@
 //! - [`create`] orchestrates checkpoint creation: flush, then pin
 //!   the resulting manifest under one durable record.
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
+//! - [`index_build`] builds the gram index in budgeted maintenance steps,
+//!   publishing manifests that advance the `index.grams` watermark.
 //! - [`publish`] writes manifest objects and advances `current_manifest_id`
 //!   on the head by compare-and-swap.
 //! - [`load`] and [`validate`] provide envelope-only loading and
@@ -26,6 +28,7 @@ mod cache;
 mod create;
 mod error;
 mod flush;
+mod index_build;
 mod load;
 mod publish;
 pub(crate) mod record;
@@ -46,11 +49,18 @@ pub use self::cache::{
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
+pub use self::index_build::{
+    GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport, GramIndexDisableOutcome,
+    GramIndexEnableOutcome,
+};
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::flush::flush_wal;
+pub(crate) use self::index_build::{
+    build_grams_index_step, disable_grams_index, enable_grams_index,
+};
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,
     load_verified_manifest_tables_with_cache,
