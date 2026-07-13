@@ -60,6 +60,7 @@ pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoin
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::index_build::{
     build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
+    is_indexable_text_content,
 };
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,

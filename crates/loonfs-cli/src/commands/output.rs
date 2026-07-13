@@ -5,8 +5,8 @@ use crate::profiles::ProfileSummary;
 use loonfs_api::v0::ChangesResponse;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, CreateCheckpointResponse,
-    DeleteNamespaceResponse, FileRevision, FlushWalResponse, GcResponse, MaintenanceTickResponse,
-    NamespaceSummary, ReleaseCheckpointResponse,
+    DeleteNamespaceResponse, FileRevision, FlushWalResponse, GcResponse, GrepMatch,
+    MaintenanceTickResponse, NamespaceSummary, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 
@@ -57,6 +57,11 @@ pub(crate) enum CommandData {
         entries: Vec<AuthoritativePathEntry>,
     },
     PathEntry(AuthoritativePathEntry),
+    GrepMatches {
+        pattern: String,
+        matches: Vec<GrepMatch>,
+        tail_scanned: bool,
+    },
     FileRevisions {
         target: String,
         revisions: Vec<FileRevision>,

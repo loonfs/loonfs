@@ -28,6 +28,7 @@ pub(crate) enum Command {
     Ls(FilesystemLsArgs),
     Stat(FilesystemPathArgs),
     Cat(FilesystemCatArgs),
+    Grep(FilesystemGrepArgs),
     Get(FilesystemGetArgs),
     Put(FilesystemPutArgs),
     Revisions(FilesystemRevisionsArgs),
@@ -272,6 +273,29 @@ pub(crate) struct FilesystemCatArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FilesystemGrepArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Pattern in the Rust regex dialect; `^`/`$` anchor lines.
+    pub pattern: String,
+    /// Restrict matches to files under this absolute path prefix.
+    #[arg(long)]
+    pub path_prefix: Option<String>,
+    #[arg(short = 'i', long)]
+    pub ignore_case: bool,
+    /// Matches per page; the command follows cursors to completion.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Permit a capped exhaustive scan for patterns with no literal bytes.
+    #[arg(long)]
+    pub allow_scan: bool,
+    /// Accept indexed-only results when the unindexed tail exceeds the
+    /// scan budget.
+    #[arg(long)]
+    pub allow_stale: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -429,6 +453,7 @@ pub(crate) enum CommandKind {
     FilesystemLs,
     FilesystemStat,
     FilesystemCat,
+    FilesystemGrep,
     FilesystemGet,
     FilesystemPut,
     FilesystemRevisions,
@@ -467,6 +492,7 @@ impl CommandKind {
             CommandKind::FilesystemLs => "filesystem_ls",
             CommandKind::FilesystemStat => "filesystem_stat",
             CommandKind::FilesystemCat => "filesystem_cat",
+            CommandKind::FilesystemGrep => "filesystem_grep",
             CommandKind::FilesystemGet => "filesystem_get",
             CommandKind::FilesystemPut => "filesystem_put",
             CommandKind::FilesystemRevisions => "filesystem_revisions",
@@ -515,6 +541,7 @@ impl Cli {
             Command::Ls(_) => CommandKind::FilesystemLs,
             Command::Stat(_) => CommandKind::FilesystemStat,
             Command::Cat(_) => CommandKind::FilesystemCat,
+            Command::Grep(_) => CommandKind::FilesystemGrep,
             Command::Get(_) => CommandKind::FilesystemGet,
             Command::Put(_) => CommandKind::FilesystemPut,
             Command::Revisions(_) => CommandKind::FilesystemRevisions,

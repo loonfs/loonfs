@@ -19,9 +19,10 @@ use loonfs::{
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
     CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit,
-    FlushWalResponse, GcRequest, GcResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
+    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -120,6 +121,18 @@ impl Backend for EmbeddedBackend {
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
         Ok(result.bytes)
+    }
+
+    async fn grep(
+        &self,
+        namespace_id: &str,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        self.reader
+            .grep(&parsed, request)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn read_file_revision_bytes(

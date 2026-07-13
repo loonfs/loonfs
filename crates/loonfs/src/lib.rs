@@ -52,12 +52,13 @@ pub use loonfs_api::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DirectoryPageCursor, DisplayName, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
-    FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse, InodeId, InodeKind,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MutationResult, NameKey,
-    NamePolicy, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
-    PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo, UploadId,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse, GrepMatch, GrepRequest,
+    GrepResponse, InodeId, InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse,
+    ManifestId, MutationResult, NameKey, NamePolicy, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, Page, PageRequest, PaginationPolicy, PutBehavior, ReleaseCheckpointResponse,
+    RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{

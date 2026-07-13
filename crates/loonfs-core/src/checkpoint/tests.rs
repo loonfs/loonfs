@@ -6615,3 +6615,425 @@ async fn fold_refuses_an_unreadable_feature_value() {
     .expect_err("folding corrupt feature state must refuse");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
+// ---------------------------------------------------------------------------
+// Grep (content search) over the gram index
+// ---------------------------------------------------------------------------
+
+async fn grep_now(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    request: &loonfs_api::GrepRequest,
+) -> crate::error::Result<loonfs_api::GrepResponse> {
+    let view = crate::path::read::load_metadata_view(
+        store,
+        namespace_id,
+        crate::path::read::ReadLoadContext::latest(),
+    )
+    .await?;
+    view.grep(store, request).await
+}
+
+fn grep_request(pattern: &str) -> loonfs_api::GrepRequest {
+    loonfs_api::GrepRequest {
+        pattern: pattern.to_owned(),
+        case_insensitive: false,
+        path_prefix: None,
+        cursor: None,
+        limit: None,
+        allow_stale: false,
+        allow_scan: false,
+    }
+}
+
+#[tokio::test]
+async fn grep_verifies_indexed_tail_and_visibility_semantics() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grep-e2e").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"a needle in alpha\nplain line\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/bravo.txt",
+        b"nothing here\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write bravo");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/charlie.txt",
+        b"another needle in charlie\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write charlie");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/blob.bin",
+        b"needle\0binary",
+        &context,
+        None,
+    )
+    .await
+    .expect("write binary");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+
+    // Before the feature is enabled the query names the missing data half.
+    let error = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect_err("grep without the feature must be refused");
+    assert_eq!(error.code(), ErrorCode::NotSupported);
+
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+
+    // Indexed matches: verified, path-derived, ordered by inode; the
+    // binary file and the non-matching file contribute nothing.
+    let response = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep");
+    assert!(response.tail_scanned);
+    let paths: Vec<&str> = response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["/alpha.txt", "/docs/charlie.txt"]);
+    assert_eq!(response.matches[0].line_number, 1);
+    assert_eq!(response.matches[0].line, "a needle in alpha");
+    assert!(response.next_cursor.is_none());
+
+    // Case-insensitive queries fold through the same index.
+    let mut request = grep_request("NEEDLE");
+    request.case_insensitive = true;
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("grep ci");
+    assert_eq!(response.matches.len(), 2);
+
+    // Scope filters on component boundaries.
+    let mut request = grep_request("needle");
+    request.path_prefix = Some("/docs".to_owned());
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("grep scoped");
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/docs/charlie.txt");
+
+    // Pagination: one match per page, resumed by cursor, same results.
+    let mut request = grep_request("needle");
+    request.limit = Some(1);
+    let first = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("page one");
+    assert_eq!(first.matches.len(), 1);
+    let cursor = first.next_cursor.clone().expect("second page follows");
+    request.cursor = Some(cursor);
+    let second = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("page two");
+    assert_eq!(second.matches.len(), 1);
+    assert_eq!(first.matches[0].absolute_path, "/alpha.txt");
+    assert_eq!(second.matches[0].absolute_path, "/docs/charlie.txt");
+    assert!(second.next_cursor.is_none());
+
+    // Commits after the watermark are served from the exhaustive tail.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/delta.txt",
+        b"fresh needle\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write delta");
+    let response = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep with tail");
+    assert!(response.tail_scanned);
+    assert!(response.head_seq > response.built_through_seq);
+    assert!(response
+        .matches
+        .iter()
+        .any(|found| found.absolute_path == "/delta.txt"));
+
+    // Overwriting a file supersedes its postings: the stale posting stays
+    // harmless because only the newest visible revision is verified.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"nothing to see\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("overwrite alpha");
+    // Deleting a file removes it from path visibility.
+    delete_path(&store, &namespace_id, "/docs/charlie.txt", &context, None)
+        .await
+        .expect("delete charlie");
+    let response = grep_now(&store, &namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep after churn");
+    let paths: Vec<&str> = response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["/delta.txt"]);
+
+    // A pattern with no required grams is refused, and allow_scan opts
+    // into the capped exhaustive scan instead.
+    let error = grep_now(&store, &namespace_id, &grep_request("n."))
+        .await
+        .expect_err("gram-free patterns are refused");
+    assert_eq!(error.code(), ErrorCode::QueryUnindexable);
+    let mut request = grep_request("n.edle");
+    request.allow_scan = true;
+    request.pattern = "needle$".to_owned();
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("anchored grep");
+    assert_eq!(response.matches.len(), 1);
+}
+
+#[tokio::test]
+async fn grep_budgets_verification_and_resumes_after_scanned_candidates() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grep-budget").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // 260 false positives (they carry the plan's `dle` gram but never
+    // match the pattern), then one real match with the highest inode so
+    // the budget stops before reaching it.
+    for index in 0..260 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/decoy-{index:03}.txt"),
+            format!("candle handle {index}\n").as_bytes(),
+            &context,
+            None,
+        )
+        .await
+        .expect("write decoy");
+        if index % 100 == 99 {
+            // Keep the WAL tail under the write backpressure threshold.
+            create_checkpoint(&store, &namespace_id, &context)
+                .await
+                .expect("interleaved checkpoint");
+        }
+    }
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/real.txt",
+        b"a needle at last\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write real");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+
+    // `ne{2}dle` plans only the `dle` gram, so every decoy is a candidate
+    // the real pattern rejects.
+    let mut request = grep_request("ne{2}dle");
+    let first = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("first page");
+    assert!(
+        first.matches.is_empty(),
+        "the verification budget stops before the matching inode"
+    );
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("a budget stop must carry a resume cursor");
+
+    request.cursor = Some(cursor);
+    let second = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("second page");
+    assert_eq!(second.matches.len(), 1);
+    assert_eq!(second.matches[0].absolute_path, "/real.txt");
+    assert!(second.next_cursor.is_none());
+
+    // A cursor replayed under different criteria is rejected instead of
+    // silently skipping results.
+    let mut mismatched = grep_request("ne{2}dle");
+    mismatched.case_insensitive = true;
+    mismatched.cursor = first.next_cursor.clone();
+    let error = grep_now(&store, &namespace_id, &mismatched)
+        .await
+        .expect_err("a foreign cursor must be rejected");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+    // Invalid limits are rejected, not clamped.
+    let mut zero = grep_request("needle");
+    zero.limit = Some(0);
+    let error = grep_now(&store, &namespace_id, &zero)
+        .await
+        .expect_err("a zero limit must be rejected");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+}
+
+#[tokio::test]
+async fn grep_scope_stale_cut_and_single_line_files() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grep-semantics").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/inside.txt",
+        b"needle inside\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write inside");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docsx/outside.txt",
+        b"needle outside\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write outside");
+    // A newline-free file with many matches exercises the single-pass
+    // line extractor: every match sits on line one, reported once.
+    let single_line = b"needle ".repeat(2000);
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/wall.txt",
+        &single_line,
+        &context,
+        None,
+    )
+    .await
+    .expect("write wall");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+
+    // Ancestor-inode scoping: `/docs` never matches `/docsx`, and a
+    // trailing slash normalizes like any other path read.
+    let mut request = grep_request("needle");
+    request.path_prefix = Some("/docs/".to_owned());
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("scoped grep");
+    let paths: Vec<&str> = response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["/docs/inside.txt"]);
+
+    // The newline-free wall reports one line-one match.
+    let mut request = grep_request("needle");
+    request.path_prefix = Some("/wall.txt".to_owned());
+    let response = grep_now(&store, &namespace_id, &request)
+        .await
+        .expect("wall grep");
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].line_number, 1);
+    assert!(response.matches[0].line_truncated);
+
+    // Stale mode serves a consistent cut at the watermark: a file whose
+    // newest revision postdates it is omitted entirely, not verified at
+    // an unindexed revision.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/inside.txt",
+        b"needle rewritten\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("overwrite inside");
+    let watermark = grams_feature(&store, &namespace_id)
+        .await
+        .expect("feature")
+        .built_through_seq;
+    let mut stale = grep_request("needle");
+    stale.path_prefix = Some("/docs".to_owned());
+    stale.allow_stale = true;
+    let response = grep_now(&store, &namespace_id, &stale)
+        .await
+        .expect("stale grep");
+    if response.tail_scanned {
+        // The tail fit the scan budget, so the fresh revision is served.
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].line, "needle rewritten");
+    } else {
+        assert!(response.built_through_seq >= watermark);
+        assert!(response.matches.is_empty());
+    }
+}

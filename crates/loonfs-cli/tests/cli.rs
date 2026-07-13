@@ -960,6 +960,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["changes"],
             ],
         ),
+        ("query/v0", &[&["grep"]]),
         (
             "admin/v0",
             &[
@@ -982,6 +983,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
         // Direct-put is a transfer mode negotiated inside the same upload
         // staging flow `put` drives; it needs no separate verb.
         ("core.uploads.direct_put", &["put"]),
+        ("query.grep", &["grep"]),
     ];
 
     let harness = Harness::new();

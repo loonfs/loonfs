@@ -67,6 +67,7 @@ pub mod namespace;
 mod options;
 pub mod path;
 mod protocol;
+mod query;
 mod storage;
 pub mod timing;
 mod wal;
@@ -123,3 +124,8 @@ pub use gc::{gc_namespace, GcConfig, GcReport};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};
+
+/// Grep page-limit defaults, advertised through the capability document.
+pub mod grep_limits {
+    pub use crate::path::read::{DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT};
+}

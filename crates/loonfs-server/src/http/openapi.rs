@@ -62,7 +62,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_namespace::flush_wal,
         crate::http::handlers_namespace::advance_retention,
         crate::http::handlers_namespace::maintenance_tick,
-        crate::http::handlers_namespace::gc_namespace
+        crate::http::handlers_namespace::gc_namespace,
+        crate::http::handlers_query::grep
     ),
     components(schemas(
         loonfs_api::CapabilityDocument,
@@ -122,7 +123,10 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::CommitPrecondition,
         loonfs_api::v0::CommitDelta,
         loonfs_api::v0::CommittedChange,
-        ChangesResponse
+        ChangesResponse,
+        loonfs_api::v0::GrepRequest,
+        loonfs_api::v0::GrepMatch,
+        loonfs_api::v0::GrepResponse
     )),
     tags(
         (name = "health", description = "Server health"),
@@ -132,7 +136,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         (name = "inodes", description = "Inode revision APIs"),
         (name = "uploads", description = "Upload session APIs"),
         (name = "commits", description = "Commit and change-feed APIs"),
-        (name = "admin", description = "Administrative maintenance APIs")
+        (name = "admin", description = "Administrative maintenance APIs"),
+        (name = "query", description = "Derived-index query APIs")
     )
 )]
 struct LoonfsOpenApi;

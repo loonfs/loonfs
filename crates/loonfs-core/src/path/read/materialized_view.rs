@@ -1,3 +1,8 @@
+use super::grep::{
+    derive_visible_path, indexed_candidates, line_matches, tail_revisions, GrepCandidates,
+    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
+    MAX_GREP_VERIFIED_FILES_PER_PAGE,
+};
 use super::listing::{invalid_cursor, page_head_seq, validate_directory_cursor};
 use crate::checkpoint::{
     head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
@@ -16,12 +21,15 @@ use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core}
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
+use loonfs_api::wire::index_grams::{IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY};
+use loonfs_api::wire::manifest::MetadataTableFamily;
 use loonfs_api::ManifestObjectId;
 use loonfs_api::{
-    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ContentStoreId,
-    DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
-    ListFileRevisionsResponse, ManifestId, NameKey, NamePolicy, NamespaceId, Page, PageRequest,
-    PaginationPolicy, RevisionNo,
+    decode_grep_cursor, encode_grep_cursor, AbsolutePath, AuthoritativeFileBytes,
+    AuthoritativePathEntry, ContentStoreId, DirectoryPageCursor, DisplayName, FileRevision,
+    FileRevisionsPageCursor, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId,
+    InodeKind, ListFileRevisionsResponse, ManifestId, NameKey, NamePolicy, NamespaceId, Page,
+    PageRequest, PaginationPolicy, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -284,6 +292,314 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             entry,
             bytes: read.bytes,
         })
+    }
+
+    /// Content search over the view: index-accelerated candidates through
+    /// the `index.grams` watermark, an exhaustive scan of the unindexed
+    /// tail, and real-pattern verification of every candidate. Matches
+    /// order by `(inode_id, byte_offset)`. Two budgets bound a page — the
+    /// match limit and a verified-candidate budget — and the cursor
+    /// resumes strictly after the last candidate the page finished
+    /// scanning, bound to the request that issued it. Each page is
+    /// evaluated against the view it runs on and reports that head in
+    /// `head_seq`.
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        err,
+        skip_all,
+        fields(phase = "grep")
+    )]
+    pub(crate) async fn grep(
+        &self,
+        store: &S,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse, CoreError> {
+        use crate::query::grep_plan::{plan_pattern, GramPlanOutcome};
+
+        let limit = match request.limit {
+            None => DEFAULT_GREP_PAGE_LIMIT,
+            Some(0) => {
+                return Err(CoreError::InvalidQuery(
+                    "limit must be greater than zero".to_owned(),
+                ));
+            }
+            Some(limit) if limit as usize > MAX_GREP_PAGE_LIMIT => {
+                return Err(CoreError::InvalidQuery(format!(
+                    "limit {limit} exceeds the maximum of {MAX_GREP_PAGE_LIMIT}"
+                )));
+            }
+            Some(limit) => limit as usize,
+        };
+        let fingerprint = request.fingerprint();
+        let resume = match &request.cursor {
+            Some(cursor) => {
+                let cursor = decode_grep_cursor(cursor)
+                    .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+                if cursor.fingerprint != fingerprint {
+                    return Err(CoreError::InvalidCursor(
+                        "the cursor was issued by a different request; replaying it \
+                         under new criteria would silently skip results"
+                            .to_owned(),
+                    ));
+                }
+                if cursor.head_seq > self.head.seq {
+                    return Err(MetadataViewError::SnapshotUnavailable {
+                        requested_seq: cursor.head_seq,
+                        head_seq: self.head.seq,
+                    }
+                    .into());
+                }
+                Some((cursor.last_inode_id, cursor.last_byte_offset))
+            }
+            None => None,
+        };
+
+        let manifest = self.tables.manifest();
+        let Some(value) = manifest.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
+            return Err(CoreError::FeatureNotMaterialized {
+                feature: INDEX_GRAMS_FEATURE_KEY.to_owned(),
+            });
+        };
+        let feature = IndexGramsFeature::from_value(value).map_err(|error| {
+            use loonfs_api::wire::index_grams::IndexGramsCodecError;
+            match error {
+                IndexGramsCodecError::UnsupportedFeatureVersion { .. } => {
+                    CoreError::FeatureNotMaterialized {
+                        feature: INDEX_GRAMS_FEATURE_KEY.to_owned(),
+                    }
+                }
+                error => CoreError::NamespaceCorrupt(format!(
+                    "namespace `{}` carries an unreadable index.grams feature value: {error}",
+                    self.namespace_id.as_str()
+                )),
+            }
+        })?;
+        if !feature.is_materialized() {
+            return Err(CoreError::FeatureNotMaterialized {
+                feature: INDEX_GRAMS_FEATURE_KEY.to_owned(),
+            });
+        }
+
+        // Line-anchored semantics: `^` and `$` match line boundaries, the
+        // grep-family contract. The planner parses with the same flags so
+        // its gram analysis sees the pattern the verifier runs.
+        let pattern = regex::bytes::RegexBuilder::new(&request.pattern)
+            .case_insensitive(request.case_insensitive)
+            .multi_line(true)
+            .build()
+            .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
+
+        let view = self.metadata_view();
+        // The scope filter tests durable identity: resolve the prefix to
+        // its inode once, then require it among each candidate's ancestors,
+        // so name-policy folding and path normalization apply exactly as
+        // they do to every other read. A prefix that resolves to nothing
+        // has no matches.
+        let scope_root = match &request.path_prefix {
+            Some(prefix) => {
+                let parsed = parse_absolute_path_for_core(prefix)?;
+                match view.resolve_visible_path(&parsed).await {
+                    Ok(resolved) => Some(resolved.inode_id),
+                    Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => {
+                        return Ok(GrepResponse {
+                            namespace_id: self.namespace_id.clone(),
+                            head_seq: self.head.seq,
+                            built_through_seq: feature.built_through_seq,
+                            tail_scanned: true,
+                            matches: Vec::new(),
+                            next_cursor: None,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            None => None,
+        };
+
+        let mut candidates = GrepCandidates::default();
+        match plan_pattern(&request.pattern, request.case_insensitive)
+            .map_err(CoreError::InvalidQuery)?
+        {
+            GramPlanOutcome::Indexable(plan) => {
+                candidates.indexed =
+                    indexed_candidates(store, &manifest.payload.index_files, &plan).await?;
+            }
+            GramPlanOutcome::Unindexable => {
+                if !request.allow_scan {
+                    return Err(CoreError::QueryUnindexable(
+                        "set allow_scan to search without the index".to_owned(),
+                    ));
+                }
+                candidates.unfiltered = self.scan_candidate_inodes().await?;
+            }
+        }
+
+        let tail = tail_revisions(
+            store,
+            &self.namespace_id,
+            &self.head,
+            manifest.payload.retention_floor_seq,
+            feature.built_through_seq,
+        )
+        .await?;
+        let mut tail_scanned = true;
+        if tail.len() > MAX_GREP_TAIL_FILES {
+            if request.allow_stale {
+                tail_scanned = false;
+            } else {
+                return Err(CoreError::IndexLagging {
+                    behind_commits: self.head.seq.0.saturating_sub(feature.built_through_seq.0),
+                });
+            }
+        } else {
+            candidates.unfiltered.extend(tail.keys().copied());
+        }
+
+        let mut matches: Vec<GrepMatch> = Vec::new();
+        let mut verified_files = 0usize;
+        let mut has_more = false;
+        // Where the next page resumes when this one stops early: the last
+        // candidate this page finished scanning (offset MAX), or the last
+        // emitted match when the page filled mid-file.
+        let mut resume_cursor: Option<(InodeId, u64)> = None;
+        'inodes: for inode_id in candidates.inodes().collect::<Vec<_>>() {
+            if let Some((last_inode, last_offset)) = resume {
+                if inode_id < last_inode || (inode_id == last_inode && last_offset == u64::MAX) {
+                    continue;
+                }
+            }
+            let Some(revision) = view.latest_revision_head(inode_id).await? else {
+                continue;
+            };
+            if !candidates.admits(inode_id, revision.revision_no) {
+                continue;
+            }
+            // With the tail skipped (`allow_stale`), serve the index's cut
+            // and nothing newer: a candidate whose newest revision is past
+            // the watermark would otherwise be verified at an unindexed
+            // revision while tail-only files stay invisible — a mix of two
+            // snapshots rather than a stale-but-consistent one.
+            if !tail_scanned && revision.committed_seq > feature.built_through_seq {
+                continue;
+            }
+            let Some(chain) = derive_visible_path(&view, inode_id).await? else {
+                continue;
+            };
+            if let Some(scope_root) = scope_root {
+                if !chain.ancestors.contains(&scope_root) {
+                    continue;
+                }
+            }
+            if verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
+                has_more = true;
+                break 'inodes;
+            }
+            verified_files += 1;
+            let content =
+                read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
+                    .await?;
+            if !crate::checkpoint::is_indexable_text_content(&content.bytes) {
+                resume_cursor = Some((inode_id, u64::MAX));
+                continue;
+            }
+            for found in line_matches(&content.bytes, &pattern) {
+                if let Some((last_inode, last_offset)) = resume {
+                    if inode_id == last_inode && found.byte_offset <= last_offset {
+                        continue;
+                    }
+                }
+                if matches.len() == limit {
+                    has_more = true;
+                    break 'inodes;
+                }
+                resume_cursor = Some((inode_id, found.byte_offset));
+                matches.push(GrepMatch {
+                    absolute_path: chain.path.clone(),
+                    inode_id,
+                    revision_no: revision.revision_no,
+                    line_number: found.line_number,
+                    byte_offset: found.byte_offset,
+                    line: found.line,
+                    line_truncated: found.line_truncated,
+                });
+            }
+            // The file was fully scanned; a later stop resumes past it.
+            resume_cursor = Some((inode_id, u64::MAX));
+        }
+
+        let next_cursor = if has_more {
+            let (last_inode_id, last_byte_offset) = resume_cursor.or(resume).ok_or_else(|| {
+                CoreError::Internal(
+                    "a truncated page must have scanned at least one candidate".to_owned(),
+                )
+            })?;
+            Some(
+                encode_grep_cursor(&GrepPageCursor {
+                    head_seq: self.head.seq,
+                    last_inode_id,
+                    last_byte_offset,
+                    fingerprint,
+                })
+                .map_err(|error| CoreError::Internal(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        Ok(GrepResponse {
+            namespace_id: self.namespace_id.clone(),
+            head_seq: self.head.seq,
+            built_through_seq: feature.built_through_seq,
+            tail_scanned,
+            matches,
+            next_cursor,
+        })
+    }
+
+    /// Every inode holding any revision in the manifest tables, for
+    /// plan-less scans; the WAL tail is collected separately. Refuses past
+    /// the scan budget.
+    async fn scan_candidate_inodes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<InodeId>, CoreError> {
+        let mut inodes = std::collections::BTreeSet::new();
+        let mut lower = "revision-".to_owned();
+        let upper = crate::checkpoint::string_prefix_upper_bound("revision-");
+        loop {
+            let page = self
+                .tables
+                .scan_range_page_with_keys(
+                    MetadataTableFamily::Revisions,
+                    &lower,
+                    upper.as_deref(),
+                    MAX_GREP_SCAN_FILES.saturating_add(1),
+                )
+                .await
+                .map_err(|error| {
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+                })?;
+            let Some((last_key, _)) = page.last() else {
+                break;
+            };
+            let last_key = last_key.clone();
+            let exhausted = page.len() <= MAX_GREP_SCAN_FILES;
+            for (_, row) in page {
+                if let loonfs_api::wire::manifest::MetadataRow::Revision { inode_id, .. } = row {
+                    inodes.insert(inode_id);
+                }
+            }
+            if inodes.len() > MAX_GREP_SCAN_FILES {
+                return Err(CoreError::QueryUnindexable(format!(
+                    "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
+                     use a pattern with literal bytes"
+                )));
+            }
+            if exhausted {
+                break;
+            }
+            lower = format!("{last_key}\0");
+        }
+        Ok(inodes)
     }
 
     pub(crate) async fn list_file_revisions(

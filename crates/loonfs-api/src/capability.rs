@@ -9,6 +9,8 @@ pub const PROTOCOL_VERSION: &str = "v0";
 pub const PROFILE_CORE_V0: &str = "core/v0";
 /// The optional maintenance plane.
 pub const PROFILE_ADMIN_V0: &str = "admin/v0";
+/// The optional derived-index query plane.
+pub const PROFILE_QUERY_V0: &str = "query/v0";
 
 /// Gates namespace creation.
 pub const FEATURE_NAMESPACES_CREATE: &str = "core.namespaces.create";
@@ -18,10 +20,18 @@ pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
+/// Gates gram-index content search: the serving half of the capability;
+/// the namespace's `index.grams` feature entry is the data half.
+pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
 /// Advisory limit: the largest request body accepted for service-proxied
 /// upload content requests.
 pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";
+/// Advisory limit: matches per grep page when the request omits `limit`.
+pub const LIMIT_QUERY_GREP_DEFAULT: &str = "query.grep.default_limit";
+/// Advisory limit: the largest accepted grep page limit. Distinct from the
+/// pagination keys — a grep item costs a verified file read, not a row.
+pub const LIMIT_QUERY_GREP_MAX: &str = "query.grep.max_limit";
 
 /// A deployment's self-description (API spec, "Capability discovery").
 ///

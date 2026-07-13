@@ -65,7 +65,14 @@ impl ApiResponseError {
 
     fn core(error: CoreError) -> Self {
         let status = status_for_core_error_code(error.code());
-        Self::new(status, error.code(), &error.to_string())
+        let mut response = Self::new(status, error.code(), &error.to_string());
+        // `not_supported` responses name the capability the caller lacks
+        // (API spec, "Standard error contract"); for a data-dependent
+        // capability that is the namespace feature key, not an endpoint.
+        if let CoreError::FeatureNotMaterialized { feature } = &error {
+            response.body.feature = Some(feature.clone());
+        }
+        response
     }
 
     pub(super) fn core_for_namespace(namespace_id: &NamespaceId, error: CoreError) -> Self {

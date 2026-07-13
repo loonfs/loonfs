@@ -139,6 +139,8 @@ error_codes! {
     UploadAlreadyCompleted => "upload_already_completed",
     UploadContentConflict => "upload_content_conflict",
     RebootstrapRequired => "rebootstrap_required",
+    QueryUnindexable => "query_unindexable",
+    IndexLagging => "index_lagging",
     NamespaceCorrupt => "namespace_corrupt",
     ServerError => "server_error",
 }
@@ -150,7 +152,10 @@ impl ErrorCode {
     /// for the code; the server derives the served status from it.
     pub fn kind(self) -> ErrorKind {
         match self {
-            ErrorCode::InvalidRequest => ErrorKind::InvalidRequest,
+            // A pattern with no required grams is a property of the request,
+            // not the namespace: the caller rewrites the pattern or opts
+            // into a capped scan.
+            ErrorCode::InvalidRequest | ErrorCode::QueryUnindexable => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
             ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
@@ -160,9 +165,12 @@ impl ErrorCode {
             | ErrorCode::UploadNotFound => ErrorKind::NotFound,
             ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
+            // `index_lagging` clears once maintenance catches the index up,
+            // so it is served as retryable unavailability.
             ErrorCode::CommitQueueFull
             | ErrorCode::ShuttingDown
             | ErrorCode::CheckpointUnavailable
+            | ErrorCode::IndexLagging
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,

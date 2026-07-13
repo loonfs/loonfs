@@ -43,6 +43,7 @@ pub(crate) async fn run(
         Command::Ls(args) => fs::run_filesystem_ls(kind, args).await,
         Command::Stat(args) => fs::run_filesystem_stat(kind, args).await,
         Command::Cat(args) => fs::run_filesystem_cat(kind, args).await,
+        Command::Grep(args) => fs::run_filesystem_grep(kind, args).await,
         Command::Get(args) => fs::run_filesystem_get(kind, args, runtime).await,
         Command::Put(args) => fs::run_filesystem_put(kind, args).await,
         Command::Revisions(args) => fs::run_filesystem_revisions(kind, args).await,

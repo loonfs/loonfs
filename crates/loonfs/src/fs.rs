@@ -29,9 +29,10 @@ use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_directory_cursor, encode_file_revisions_cursor, generated_id, AbsolutePath,
     CapabilityDocument, DirectoryPageCursor, EffectiveLimit, FileRevision, FileRevisionsPageCursor,
-    Page, PageRequest, PaginationPolicy, UploadId, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    GrepRequest, GrepResponse, Page, PageRequest, PaginationPolicy, UploadId,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
@@ -194,14 +195,30 @@ impl FsCore {
     pub(crate) fn capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
+            profiles: vec![
+                PROFILE_CORE_V0.to_owned(),
+                PROFILE_ADMIN_V0.to_owned(),
+                PROFILE_QUERY_V0.to_owned(),
+            ],
             features: BTreeMap::from([
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
                 (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
+                (FEATURE_QUERY_GREP.to_owned(), true),
             ]),
-            limits: PaginationPolicy::default().capability_limits(),
+            limits: {
+                let mut limits = PaginationPolicy::default().capability_limits();
+                limits.insert(
+                    LIMIT_QUERY_GREP_DEFAULT.to_owned(),
+                    loonfs_core::grep_limits::DEFAULT_GREP_PAGE_LIMIT as u64,
+                );
+                limits.insert(
+                    LIMIT_QUERY_GREP_MAX.to_owned(),
+                    loonfs_core::grep_limits::MAX_GREP_PAGE_LIMIT as u64,
+                );
+                limits
+            },
         }
     }
 
@@ -532,6 +549,20 @@ impl FsCore {
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)
+    }
+
+    /// Content search over the namespace's gram index.
+    pub(crate) async fn grep(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse> {
+        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let response = engine
+            .grep_with_runtime_context(request, &read_context)
+            .await?;
+        self.inner.cache_stats.record_latest_metadata_view_read();
+        Ok(response)
     }
 
     /// Lists the revision history of a file path.
