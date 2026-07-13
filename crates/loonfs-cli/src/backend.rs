@@ -18,8 +18,9 @@ use loonfs::{
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior, EffectiveLimit,
-    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
+    DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse, FlushWalResponse,
+    GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
     MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
     ReleaseCheckpointResponse, RevisionNo,
@@ -131,6 +132,28 @@ impl Backend for EmbeddedBackend {
         let parsed = parse_namespace_id(namespace_id)?;
         self.reader
             .grep(&parsed, request)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+    }
+
+    async fn enable_grams_index(
+        &self,
+        namespace_id: &str,
+    ) -> Result<EnableGramsIndexResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        self.admin
+            .enable_grams_index(&parsed)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+    }
+
+    async fn disable_grams_index(
+        &self,
+        namespace_id: &str,
+    ) -> Result<DisableGramsIndexResponse, BackendError> {
+        let parsed = parse_namespace_id(namespace_id)?;
+        self.admin
+            .disable_grams_index(&parsed)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }

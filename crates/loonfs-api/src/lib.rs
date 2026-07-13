@@ -81,13 +81,13 @@ pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
 pub use v0::{
     AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
     CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, FileRevision, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, MutationResult,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
-    RestoreFileRevisionRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DisableGramsIndexResponse,
+    EnableGramsIndexResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
+    GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceStatusResponse,
+    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

@@ -19,6 +19,8 @@ pub(crate) async fn run_admin_command(
         AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
         AdminCommand::Tick(args) => run_admin_tick(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
+        AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
+        AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, args).await,
     }
 }
 
@@ -221,5 +223,57 @@ pub(crate) async fn run_admin_changes(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::Changes(response),
+    })
+}
+
+async fn run_admin_index_enable(
+    kind: CommandKind,
+    args: AdminNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let response = context
+        .target
+        .backend()
+        .enable_grams_index(&context.namespace)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::GramsIndexEnabled(response),
+    })
+}
+
+async fn run_admin_index_disable(
+    kind: CommandKind,
+    args: AdminNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let response = context
+        .target
+        .backend()
+        .disable_grams_index(&context.namespace)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::GramsIndexDisabled(response),
     })
 }

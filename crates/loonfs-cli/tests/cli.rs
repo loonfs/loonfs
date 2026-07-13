@@ -970,6 +970,8 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "retention-advance"],
                 &["admin", "tick"],
                 &["admin", "gc"],
+                &["admin", "index-enable"],
+                &["admin", "index-disable"],
             ],
         ),
     ];

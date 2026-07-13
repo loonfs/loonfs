@@ -275,6 +275,132 @@
         }
       }
     },
+    "/v0/admin/namespaces/{namespace}/index/grams/disable": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Disable the gram index",
+        "description": "Removes the namespace's index.grams feature entry and its segment references; garbage collection reclaims the segments. Idempotent.",
+        "operationId": "disable_grams_index",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feature entry removed or already absent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisableGramsIndexResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Lost a manifest publication race; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/index/grams/enable": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Enable the gram index",
+        "description": "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next maintenance tick and the index stays current from then on. Idempotent.",
+        "operationId": "enable_grams_index",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Feature entry published or already present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnableGramsIndexResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Lost a manifest publication race; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/admin/namespaces/{namespace}/maintenance/tick": {
       "post": {
         "tags": [
@@ -3347,6 +3473,47 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef"
+          }
+        }
+      },
+      "DisableGramsIndexResponse": {
+        "type": "object",
+        "description": "Result of disabling the gram index on a namespace (admin plane).",
+        "required": [
+          "namespace_id",
+          "was_enabled"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the feature entry was removed from."
+          },
+          "was_enabled": {
+            "type": "boolean",
+            "description": "False when the namespace had no feature entry to remove."
+          }
+        }
+      },
+      "EnableGramsIndexResponse": {
+        "type": "object",
+        "description": "Result of enabling the gram index on a namespace (admin plane).",
+        "required": [
+          "namespace_id",
+          "built_through_seq",
+          "already_enabled"
+        ],
+        "properties": {
+          "already_enabled": {
+            "type": "boolean",
+            "description": "True when the namespace already carried the feature entry."
+          },
+          "built_through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Backfill covers commits at or below this sequence; later commits\narrive through WAL replay once backfill completes."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the feature entry was published for."
           }
         }
       },

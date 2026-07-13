@@ -33,7 +33,9 @@ pub use operations::{
     RestoreFileRevisionRequest,
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
-pub use search::{GrepMatch, GrepRequest, GrepResponse};
+pub use search::{
+    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepMatch, GrepRequest, GrepResponse,
+};
 pub use uploads::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
     DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,

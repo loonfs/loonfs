@@ -272,6 +272,26 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        CommandData::GramsIndexEnabled(response) => {
+            if response.already_enabled {
+                format!(
+                    "gram index already enabled on {} (built through seq {})",
+                    response.namespace_id, response.built_through_seq.0
+                )
+            } else {
+                format!(
+                    "gram index enabled on {}; backfill covers seq <= {} on upcoming ticks",
+                    response.namespace_id, response.built_through_seq.0
+                )
+            }
+        }
+        CommandData::GramsIndexDisabled(response) => {
+            if response.was_enabled {
+                format!("gram index disabled on {}", response.namespace_id)
+            } else {
+                format!("gram index was not enabled on {}", response.namespace_id)
+            }
+        }
         CommandData::GrepMatches {
             pattern,
             matches,

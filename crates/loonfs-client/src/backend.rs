@@ -20,10 +20,11 @@ use crate::{Client, ClientError, MutationOptions, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, ErrorCode,
-    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MutationResult, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FlushWalResponse, GcRequest,
+    GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, MutationResult, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -155,6 +156,16 @@ pub trait Backend {
         namespace_id: &str,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError>;
+    /// Enables the gram index on a namespace (admin plane).
+    async fn enable_grams_index(
+        &self,
+        namespace_id: &str,
+    ) -> Result<EnableGramsIndexResponse, BackendError>;
+    /// Disables the gram index on a namespace (admin plane).
+    async fn disable_grams_index(
+        &self,
+        namespace_id: &str,
+    ) -> Result<DisableGramsIndexResponse, BackendError>;
     /// Reads a retained file revision's content.
     async fn read_file_revision_bytes(
         &self,
@@ -346,6 +357,24 @@ impl Backend for RemoteBackend {
         let namespace_id = namespace_id.to_owned();
         let request = request.clone();
         self.wire(move |client| client.grep(&namespace_id, &request))
+            .await
+    }
+
+    async fn enable_grams_index(
+        &self,
+        namespace_id: &str,
+    ) -> Result<EnableGramsIndexResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.enable_grams_index(&namespace_id))
+            .await
+    }
+
+    async fn disable_grams_index(
+        &self,
+        namespace_id: &str,
+    ) -> Result<DisableGramsIndexResponse, BackendError> {
+        let namespace_id = namespace_id.to_owned();
+        self.wire(move |client| client.disable_grams_index(&namespace_id))
             .await
     }
 

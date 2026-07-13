@@ -322,6 +322,8 @@ A representative v0 binding is shown below.
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; flush races surface as outcomes, not errors) |
 | Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires the namespace's `index.grams` feature entry) |
+| Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (publishes the `index.grams` feature entry; backfill and upkeep run through maintenance ticks; idempotent) |
+| Disable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/disable` (removes the feature entry and segment references; garbage collection reclaims the segments; idempotent) |
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to

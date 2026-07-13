@@ -101,3 +101,26 @@ pub struct GrepResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
+
+/// Result of enabling the gram index on a namespace (admin plane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct EnableGramsIndexResponse {
+    /// Namespace the feature entry was published for.
+    pub namespace_id: NamespaceId,
+    /// Backfill covers commits at or below this sequence; later commits
+    /// arrive through WAL replay once backfill completes.
+    pub built_through_seq: ChangeSeq,
+    /// True when the namespace already carried the feature entry.
+    pub already_enabled: bool,
+}
+
+/// Result of disabling the gram index on a namespace (admin plane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DisableGramsIndexResponse {
+    /// Namespace the feature entry was removed from.
+    pub namespace_id: NamespaceId,
+    /// False when the namespace had no feature entry to remove.
+    pub was_enabled: bool,
+}

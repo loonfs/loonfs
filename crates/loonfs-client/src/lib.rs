@@ -20,8 +20,9 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
     CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, ErrorCode, ErrorKind,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorKind, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
     ForkNamespaceRequest, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickRequest,
     MaintenanceTickResponse, MutationResult, NamespaceId, NamespaceStatusResponse,
@@ -683,6 +684,34 @@ impl Client {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/namespaces/{namespace}/query/grep", self.base_url);
         self.request_json(self.agent.post(&url), Some(request))
+    }
+
+    /// Publishes the `index.grams` feature entry (admin plane); backfill
+    /// runs through maintenance ticks. Idempotent.
+    pub fn enable_grams_index(
+        &self,
+        namespace: &str,
+    ) -> Result<EnableGramsIndexResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/index/grams/enable",
+            self.base_url
+        );
+        self.request_json::<(), EnableGramsIndexResponse>(self.agent.post(&url), None)
+    }
+
+    /// Removes the `index.grams` feature entry (admin plane); garbage
+    /// collection reclaims the segments. Idempotent.
+    pub fn disable_grams_index(
+        &self,
+        namespace: &str,
+    ) -> Result<DisableGramsIndexResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace}/index/grams/disable",
+            self.base_url
+        );
+        self.request_json::<(), DisableGramsIndexResponse>(self.agent.post(&url), None)
     }
 
     fn apply_filesystem_operation(
