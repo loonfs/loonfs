@@ -257,6 +257,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         store,
         namespace_id,
         &manifest,
+        &root.manifest_object_id,
         context.now_ms,
         &context.writer_version,
     )
@@ -362,6 +363,9 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
                 fork: previous.payload.fork.clone(),
                 features: previous.payload.features.clone(),
                 metadata_files: metadata_files.clone(),
+                // Reorganization folds metadata family groups; derived-index
+                // segments carry forward verbatim until index folds exist.
+                index_files: previous.payload.index_files.clone(),
             },
         )
         .map_err(|err| {

@@ -487,6 +487,12 @@ string_id! {
 }
 
 string_id! {
+    /// Durable id for one derived-index segment file.
+    IndexSegmentId,
+    prefix = "idx"
+}
+
+string_id! {
     /// Durable object id for one namespace manifest candidate.
     ManifestObjectId,
     error = GeneratedIdValidationError,

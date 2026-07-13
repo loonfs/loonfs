@@ -18,6 +18,7 @@ mod digest;
 mod envelope;
 mod error;
 mod ids;
+mod index_grams;
 mod manifest;
 mod name_policy;
 mod pagination;
@@ -27,6 +28,10 @@ pub mod v0;
 mod wal;
 
 pub mod wire {
+    pub mod index_grams {
+        pub use crate::index_grams::*;
+    }
+
     pub mod manifest {
         pub use crate::manifest::*;
     }
@@ -55,7 +60,7 @@ pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, manifest_object_id_manifest_id, wal_segment_id_start_seq, ChangeSeq,
     CheckpointId, CommitId, CommitIdValidationError, ContentStoreId, GeneratedIdValidationError,
-    InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
+    IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
     NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId,
     WalSegmentId, WriterEpoch,
 };

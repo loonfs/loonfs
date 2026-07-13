@@ -3,7 +3,7 @@ use crate::envelope::EnvelopeProbe;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, IndexSegmentId, InodeId, InodeKind, ManifestId,
     ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,46 @@ pub struct MetadataFileRef {
     /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
     /// The ranged read path verifies per-block CRCs instead; this digest is
     /// the segment's identity in the decoded-block cache.
+    pub payload_checksum: String,
+}
+
+/// One derived-index segment referenced by the manifest.
+///
+/// Index segments are derived work (format spec, "Derived work"): the same
+/// block grammar as metadata segments with a feature-owned row payload,
+/// listed separately from `metadata_files` so index-unaware readers can
+/// ignore them. `family` is an open vocabulary string — not a closed enum
+/// like [`MetadataTableFamily`] — because an unknown derived index must
+/// never make a manifest unreadable; readers use the entries whose family
+/// they understand and preserve the rest verbatim. Garbage collection
+/// protects every listed `object_key` regardless of family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexFileRef {
+    pub owner_namespace_id: NamespaceId,
+    pub segment_id: IndexSegmentId,
+    pub object_key: String,
+    /// Which derived index owns this segment and how to read its rows,
+    /// e.g. `grams` (`index_grams::INDEX_FAMILY_GRAMS`). The feature's
+    /// entry in the manifest `features` map version-gates the bytes.
+    pub family: String,
+    pub run_seq: ChangeSeq,
+    pub level: u32,
+    pub segment_index: u32,
+    pub row_count: u64,
+    pub min_key: String,
+    pub max_key: String,
+    /// Where the segment's index block lives and how to verify it. The
+    /// descriptor is the only entry point into a segment object — there is
+    /// no footer — so a reader starts here.
+    pub index_block: BlockHandle,
+    /// Where the segment's bloom filter block lives and how to verify it.
+    pub filter_block: BlockHandle,
+    /// The filter block's stored bytes inlined as hex, present when the
+    /// filter is small, under the same byte-identical rule as
+    /// [`MetadataFileRef::filter_inline`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_inline: Option<String>,
+    /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
     pub payload_checksum: String,
 }
 
@@ -463,6 +503,12 @@ pub struct NamespaceManifestPayload {
     // TODO: split this flat list into structured run/table/index roots when
     // compaction and GC need richer reachability decisions.
     pub metadata_files: Vec<MetadataFileRef>,
+    /// Derived-index segments materialized on this file-set version, empty
+    /// (and omitted) when no derived index exists. Additive: readers that
+    /// predate derived indexes ignore the field, and the paired `features`
+    /// entry — not this list — says what the segments mean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub index_files: Vec<IndexFileRef>,
 }
 
 /// In-memory view of a namespace manifest envelope.
@@ -654,6 +700,7 @@ mod tests {
                     1,
                     "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
                 )],
+                index_files: Vec::new(),
             },
         )
         .expect("manifest");
@@ -718,6 +765,7 @@ mod tests {
                         "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000002.sst.zst",
                     ),
                 ],
+                index_files: Vec::new(),
             },
         )
         .expect("manifest");

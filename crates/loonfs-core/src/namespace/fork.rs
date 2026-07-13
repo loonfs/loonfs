@@ -265,6 +265,7 @@ fn fork_target_manifest_payload(
         }),
         features: source_manifest.payload.features.clone(),
         metadata_files: source_manifest.payload.metadata_files.clone(),
+        index_files: source_manifest.payload.index_files.clone(),
     }
 }
 
@@ -376,6 +377,7 @@ mod tests {
                 fork: None,
                 features: BTreeMap::new(),
                 metadata_files: Vec::new(),
+                index_files: Vec::new(),
             },
         )
         .expect("manifest")

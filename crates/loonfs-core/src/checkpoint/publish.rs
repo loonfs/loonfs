@@ -11,7 +11,7 @@ use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, MetadataRootEnvelope, MetadataRootState,
 };
 use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -103,6 +103,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest: &NamespaceManifestEnvelope,
+    expected_predecessor: &ManifestObjectId,
     updated_at_ms: u64,
     writer_version: &str,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
@@ -111,6 +112,16 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     // manifest_head_seq; a same-seq replacement may reference a different
     // manifest (pure compaction), and a lower-seq attempt no-ops in favor of
     // whatever newer root someone else already published.
+    //
+    // `expected_predecessor` is the root manifest the caller read when it
+    // built this successor. Head ordering alone is not enough to decide the
+    // winner: every manifest carries carried-forward state (features,
+    // derived-index references, the retention floor), so a candidate built
+    // from a superseded basis could win on a higher head while silently
+    // reverting a sibling's acknowledged publication. A root that no longer
+    // names the predecessor therefore supersedes the candidate, whatever
+    // the head ordering says; the caller rebases against the current root
+    // and retries.
     let manifest_id = manifest.payload.manifest_id;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let manifest_head_seq = manifest.payload.head_seq;
@@ -121,7 +132,19 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
                 CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
             })?;
         let current = &loaded.envelope.state;
+        if current.manifest_id == manifest_id
+            && current.manifest_object_id == manifest_object_id
+            && current.manifest_payload_checksum == manifest.payload_checksum
+        {
+            // Idempotent re-publication: the root already names this
+            // candidate (a retried call, or a racing writer of the same
+            // bytes).
+            return Ok(ManifestPublicationOutcome::Published(current.clone()));
+        }
         if root_supersedes_candidate(current, manifest_head_seq, manifest_id) {
+            return Ok(ManifestPublicationOutcome::Superseded(current.clone()));
+        }
+        if current.manifest_object_id != *expected_predecessor {
             return Ok(ManifestPublicationOutcome::Superseded(current.clone()));
         }
 

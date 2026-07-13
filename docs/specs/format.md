@@ -59,9 +59,10 @@ The required durable object families and standard key patterns are:
 | **Namespace config** | Immutable | Stable namespace identity and immutable configuration, including the content-store binding; written last at creation as the completion marker. | `namespaces/{namespace_id}/namespace.json` |
 | **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Metadata manifests** | Immutable | Record one namespace file-set version, including metadata table references, derived-index segment references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); written active, verified after the write, flipped released on verification failure or owner release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
+| **Index segments** | Immutable | Store derived-index rows referenced by manifests ("Derived work"): the metadata-table block grammar with a feature-owned row payload. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/index/{segment_id}.idx.zst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
@@ -97,8 +98,8 @@ recovery authority. `wal/head.json` and `wal/floor.json` live outside the
 `wal/segments/` listing prefix, so a reclamation listing of segments yields
 only segment keys.
 
-WAL and metadata table deletion is reachability-driven from the live
-manifest, checkpoint records, and the retention floor.
+WAL, metadata table, and index segment deletion is reachability-driven from
+the live manifest, checkpoint records, and the retention floor.
 
 ### 1.3 Durable naming conventions
 
@@ -1178,6 +1179,7 @@ Two rules make these envelopes evolvable:
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
+| Gram index segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the `index.grams` feature value) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, descriptors, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 
@@ -1216,6 +1218,45 @@ out-of-order index entries, and checksum failures as malformed. The segment
 format is versioned by the manifest that references it (`namespace_manifest`
 `format_version`), since a segment is unreachable except through a manifest.
 
+#### 4.2.2 Gram index segments
+
+A gram index segment stores the `index.grams` derived index (section 5). It
+uses the section 4.2.1 block grammar unchanged — prefix-compressed data
+blocks, one bloom filter block, one index block, handles and checksums in
+the referencing descriptor — with a feature-owned row payload instead of
+metadata rows. The tokenizer, the row shapes, and the posting encoding
+below are frozen for feature version 1; changing any of them is a new
+feature version and a rebuild, which is always legal for derived work
+(section 6.6).
+
+- The **tokenizer** is every overlapping three-byte window (gram) of an
+  eligible revision's content, after folding ASCII letters to lower case.
+  Grams are bytes, not characters.
+- A **row** is a kind-tagged CBOR document, kind `gram_postings`: one gram
+  (six lowercase hex characters), the batch's first inode id, and a packed
+  posting batch. Its row key is `gram-{gram hex}-{first inode id:020}`;
+  its filter key is the `gram-{gram hex}` prefix, so the segment's bloom
+  filter answers gram-presence probes.
+- A **posting batch** is a varint-packed run of `(inode_id, revision_no)`
+  pairs sorted strictly ascending: the posting count, the first posting's
+  inode id and revision number, then for each subsequent posting its inode
+  delta and absolute revision number, all as LEB128 varints. Postings name
+  durable inode identity, never paths. Readers reject empty, unordered, or
+  trailing-byte batches as malformed.
+- Several rows may carry the same gram (within a segment and across
+  segments); readers union their batches.
+
+Manifests reference index segments through the `index_files` list, one
+descriptor per segment mirroring the metadata descriptor fields plus an
+open-vocabulary `family` string (`grams` for this section). The list is an
+additive payload field with the section 5 contract: readers use the entries
+whose family they understand, preserve the rest verbatim when rewriting a
+manifest, and never let an unknown family affect how core state is read.
+Garbage collection protects every listed object key regardless of family.
+Maintenance that rewrites a manifest without folding the index — checkpoint
+flushes, metadata reorganization, forks — must carry `index_files` and the
+paired feature entry forward verbatim.
+
 ### 4.3 Evolution rules
 
 - **Additive within a version.** A writer may add new payload fields without
@@ -1250,7 +1291,7 @@ indexes exist for the manifest's file-set version.
 ```json
 {
   "features": {
-    "index.fulltext": { "version": 2 }
+    "index.grams": { "version": 1, "built_through_seq": 41290 }
   }
 }
 ```
@@ -1270,9 +1311,23 @@ Rules:
   document) **and** the namespace's `features` map must show the capability
   materialized for the data being served.
 
-No feature keys are registered in v0. The map exists so that derived indexes
-and similar per-namespace capabilities can arrive without a format version
-bump.
+One feature key is registered:
+
+- **`index.grams`** — the gram index for content search (section 4.2.2).
+  The value carries `version` (this spec defines version 1),
+  `built_through_seq` (commits at or below this sequence are reflected in
+  the manifest's `index_files` segments; later revisions are the query
+  path's exhaustive-scan tail), and, while initial materialization is still
+  walking existing revisions, a `backfill_cursor` resume key. While
+  `backfill_cursor` is present the index is not yet materialized and
+  data-dependent queries must be refused. Readers hard-reject an
+  unsupported `version` with a typed error and tolerate unknown fields
+  inside the value. While the key is present, the retention floor must not
+  advance past `built_through_seq` — the WAL from the watermark forward is
+  the index build's change feed.
+
+The map exists so that derived indexes and similar per-namespace
+capabilities can arrive without a format version bump.
 
 ## 6. Maintenance operations
 
@@ -1364,7 +1419,9 @@ the admin endpoint or an explicit maintenance-tick opt-in.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `checkpoints/`, and `wal/segments/` collections.
+`metadata/tables/`, `metadata/index/`, `checkpoints/`, and `wal/segments/`
+collections. A live manifest roots every object key its `metadata_files`
+and `index_files` lists name, whatever their family.
 Because floor, root, and checkpoint publication no longer serialize through
 one head CAS, two cross-object races must be closed explicitly —
 create-vs-collect (a record written while GC concludes its basis is
