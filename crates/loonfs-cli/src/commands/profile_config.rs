@@ -1,3 +1,6 @@
+//! Builds and updates profile configurations from provider flags, with a
+//! table-driven check that each flag applies to the chosen store kind.
+
 use crate::args::{InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior};
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;

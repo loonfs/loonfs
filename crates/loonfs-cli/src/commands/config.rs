@@ -1,3 +1,5 @@
+//! `loon config` commands: init and config-file inspection.
+
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::{build_profile_from_create_spec, create_profile_spec_from_init};

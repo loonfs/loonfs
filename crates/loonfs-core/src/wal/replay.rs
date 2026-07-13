@@ -1,3 +1,5 @@
+//! Replays a validated WAL chain onto metadata state, record by record.
+
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
 use crate::invariants::InvariantId;

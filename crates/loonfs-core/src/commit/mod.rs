@@ -1,3 +1,10 @@
+//! Explicit semantic commits, from request to durable WAL frame.
+//!
+//! A commit request is validated against a metadata view into a commit
+//! plan, the plan is materialized into WAL deltas, and the result is framed
+//! for publication. Submodules follow that pipeline; `identity` defines
+//! the fingerprints that make reused commit ids safe to compare.
+
 mod api_adapter;
 mod durable_adapter;
 mod frame;

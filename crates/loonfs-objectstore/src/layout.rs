@@ -1,3 +1,6 @@
+//! The durable key grammar: object families, their path shapes, and
+//! parsing keys back into classified families.
+
 use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
 

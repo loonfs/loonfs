@@ -235,7 +235,7 @@ fn test_commit_id(commit_id: Option<&str>) -> CommitId {
 }
 
 /// Pins the current head and manifest the way the runtime does before a
-/// read; the deleted convenience readers used to do this internally.
+/// read.
 fn read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

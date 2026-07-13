@@ -1,3 +1,6 @@
+//! Writer epoch acquisition: the last-writer-wins fencing that keeps two
+//! sessions from publishing interleaved commits.
+
 use crate::context::MutationContext;
 use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
 use crate::namespace::control::ControlObjectLoadError;

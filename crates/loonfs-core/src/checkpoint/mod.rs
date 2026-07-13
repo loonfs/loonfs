@@ -13,8 +13,8 @@
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`index_build`] builds the gram index in budgeted maintenance steps,
 //!   publishing manifests that advance the `index.grams` watermark.
-//! - [`publish`] writes manifest objects and advances `current_manifest_id`
-//!   on the head by compare-and-swap.
+//! - [`publish`] writes manifest objects and advances `metadata/root.json`
+//!   by compare-and-swap.
 //! - [`load`] and [`validate`] provide envelope-only loading and
 //!   descriptor-only table verification (full-row inspection
 //!   materialization is test-only).

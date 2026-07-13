@@ -1,3 +1,6 @@
+//! The `loon` CLI binary: parse arguments, run the command, render the
+//! result.
+
 use std::process::ExitCode;
 
 #[tokio::main]

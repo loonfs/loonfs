@@ -1,3 +1,6 @@
+//! Materializes a prepared commit into ordered WAL deltas plus per-op
+//! results.
+
 use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ContentRef, InodeId, InodeKind, RevisionNo};

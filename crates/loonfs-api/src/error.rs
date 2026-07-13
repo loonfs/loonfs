@@ -1,3 +1,6 @@
+//! The wire error registry: every stable machine-readable error code and
+//! its caller-action category.
+
 use std::fmt;
 
 /// Broad error category for caller or operator action.

@@ -1,3 +1,6 @@
+//! Pagination: page-size policy, typed page envelopes, and the opaque
+//! cursors each paginated endpoint round-trips.
+
 use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

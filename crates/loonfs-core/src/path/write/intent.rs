@@ -1,3 +1,5 @@
+//! [`PathMutationIntent`]: a user-facing path mutation before planning.
+
 use loonfs_api::{
     v0::MoveBehavior, CommitId, ContentRef, DeleteDirectoryBehavior, PutBehavior, RevisionNo,
 };

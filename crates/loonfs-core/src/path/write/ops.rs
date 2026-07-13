@@ -1,3 +1,6 @@
+//! Test-support wrappers that publish one path mutation at a time through
+//! the same pipeline production batches use.
+
 use super::content_write::store_file_bytes_before_metadata_publish;
 use super::intent::PathMutationIntent;
 use crate::commit_engine::NamespaceMutationCandidate;

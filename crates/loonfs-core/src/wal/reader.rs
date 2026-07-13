@@ -1,3 +1,6 @@
+//! Loads and validates the WAL segment chain from a base seq through the
+//! head.
+
 use super::replay::{
     extend_wal_replay_invariants, validate_wal_segment_for_replay, WalReplayError,
 };

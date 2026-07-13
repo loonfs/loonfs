@@ -1,3 +1,7 @@
+//! [`NamespaceCommitEngine`]: publishes batches of classified mutation
+//! candidates — one WAL segment, one head compare-and-swap, one result per
+//! candidate.
+
 use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;

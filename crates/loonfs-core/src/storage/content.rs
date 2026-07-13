@@ -1,3 +1,6 @@
+//! Content blob reads and writes: content-addressed storage, reference
+//! validation, and verified read-back.
+
 use crate::error::CoreError;
 use crate::invariants::InvariantId;
 use crate::namespace::catalog::load_namespace_content_store_id;

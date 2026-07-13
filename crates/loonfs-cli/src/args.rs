@@ -1,3 +1,5 @@
+//! The clap argument grammar for every `loon` command.
+
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
 

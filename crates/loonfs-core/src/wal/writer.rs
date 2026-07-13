@@ -1,3 +1,6 @@
+//! Assembles materialized commits into one encoded WAL segment ready to
+//! publish.
+
 use super::{PreparedWalSegment, WalBuildError};
 use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
 use crate::invariants::InvariantId;

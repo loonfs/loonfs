@@ -1,3 +1,6 @@
+//! The write-ahead log: segment framing, chain loading, replay onto
+//! metadata state, and segment preparation for publication.
+
 mod frame;
 mod reader;
 mod replay;

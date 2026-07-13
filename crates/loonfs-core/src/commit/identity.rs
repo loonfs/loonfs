@@ -1,3 +1,8 @@
+//! Commit identity fingerprints (format spec, "Commit identity
+//! fingerprints"): stable digests over a commit's semantic content, used to
+//! decide whether a reused commit id carries the same mutation or a
+//! conflicting one.
+
 use super::api_adapter::{commit_op_from_v0, commit_precondition_from_v0};
 use super::{CommitOp, CommitRequest, Precondition};
 use loonfs_api::v0 as api_v0;

@@ -1,3 +1,6 @@
+//! The WAL segment format: envelopes, commit payloads, and the delta
+//! records replay applies (format spec, "WAL segments").
+
 use crate::control::WalSegmentPointer;
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;

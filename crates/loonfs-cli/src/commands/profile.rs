@@ -1,3 +1,5 @@
+//! `loon profile` commands: list, show, create, update, and delete.
+
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{

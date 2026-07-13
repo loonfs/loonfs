@@ -1,3 +1,6 @@
+//! Plans one path mutation intent against namespace state, producing the
+//! commit plan and semantic fingerprint the publish path needs.
+
 use super::intent::PathMutationIntent;
 use crate::commit::{fingerprint_digest, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;

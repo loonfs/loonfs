@@ -1,3 +1,7 @@
+//! The capability document (API spec, "Capability discovery"): the
+//! profiles and feature keys a deployment advertises, which clients gate
+//! on instead of guessing from the backend kind.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;

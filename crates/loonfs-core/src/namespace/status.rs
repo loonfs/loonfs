@@ -1,3 +1,6 @@
+//! Read-only namespace status: summarizes the head, root manifest, WAL
+//! tail, and retention floor.
+
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};

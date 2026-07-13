@@ -1,3 +1,6 @@
+//! The shared S3-compatible store implementation behind the AWS S3 and
+//! Cloudflare R2 providers.
+
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{

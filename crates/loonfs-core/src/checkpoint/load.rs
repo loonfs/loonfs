@@ -531,9 +531,9 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
 
 /// The data blocks of one segment that can hold keys in
 /// `[lower_bound, upper_bound)`, shared straight from the decoded-block
-/// memo and caches. Row access borrows from the blocks: assembling an owned
-/// row set here re-cloned every row and key of every touched block on every
-/// scan, which dominated warm-read CPU.
+/// memo and caches. Row access borrows from the blocks rather than building
+/// an owned row set, which would clone every row and key of every touched
+/// block on every scan.
 pub(crate) struct SegmentKeyRangeBlocks {
     blocks: Vec<Arc<DecodedDataBlock>>,
 }

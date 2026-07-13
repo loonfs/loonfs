@@ -1,3 +1,6 @@
+//! The model's genesis state: the root inode a fresh namespace starts
+//! with, mirroring core's bootstrap.
+
 use crate::metadata::{InodeRecord, MetadataState};
 use loonfs_api::{ChangeSeq, InodeId, InodeKind};
 

@@ -1,3 +1,5 @@
+//! Command implementations, one submodule per command group.
+
 mod admin;
 mod config;
 mod context;

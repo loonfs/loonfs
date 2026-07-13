@@ -1,3 +1,6 @@
+//! The reference server binary: load config, open the runtime, serve HTTP
+//! until shutdown.
+
 use clap::Parser;
 
 #[derive(Debug, Parser)]

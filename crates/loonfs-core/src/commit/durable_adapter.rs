@@ -1,3 +1,5 @@
+//! Converts a materialized commit into the durable WAL payload shape.
+
 use super::MaterializedCommit;
 use crate::wal::WalBuildError;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload};

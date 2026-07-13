@@ -1,3 +1,6 @@
+//! Seq-scoped metadata lookups answered from manifest tables via verified
+//! scans.
+
 use super::row_decode::{
     commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
     direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,

@@ -1,3 +1,6 @@
+//! Filesystem commands: ls, stat, get, put, mkdir, rm, mv, cp, revisions,
+//! and grep.
+
 use super::context::{
     default_remote_put_path, destination_path_for_get, fail, namespace_path,
     normalize_absolute_path, render_target, resolve_command_context,

@@ -1,3 +1,5 @@
+//! The absolute-path grammar: parsing, components, and display names.
+
 use crate::ids::string_id;
 use std::fmt;
 use thiserror::Error;

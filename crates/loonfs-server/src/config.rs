@@ -1,3 +1,6 @@
+//! Server configuration: strict TOML decoding of the listen address,
+//! store, and runtime cache overrides.
+
 use loonfs::RuntimeCacheConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
 use serde::Deserialize;

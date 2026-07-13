@@ -1,3 +1,6 @@
+//! [`CommitRequest`]: one logical commit's ops, preconditions, and writer
+//! identity.
+
 use super::{CommitOp, Precondition};
 use loonfs_api::{CommitId, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};

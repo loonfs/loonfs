@@ -20,10 +20,10 @@
 //!   canonical rule bodies that both the provided trait methods and every
 //!   caching/gating override delegate to.
 //!
-//! The at-head indexes ([`super::MetadataState`]'s `indexes`) remain a
-//! materialization of these same rules maintained incrementally; their
-//! congruence with the scan implementations is pinned by the metadata unit
-//! tests and the mutation-guard suite.
+//! The at-head indexes ([`super::MetadataState`]'s `indexes`) are a
+//! materialization of these same rules, maintained incrementally. The
+//! metadata unit tests and the mutation-guard suite check that they always
+//! agree with the scan implementations.
 
 use super::queries::{ResolvedVisiblePath, VisiblePathError};
 use super::{
@@ -212,14 +212,9 @@ pub(crate) async fn current_parent_binding_for_child<R: MetadataVisibilityReads>
 /// current binding — a child renamed elsewhere leaves its old name bound in
 /// the rows but inactive.
 ///
-/// Equivalent formulation note: condition (2) is checked by comparing
-/// identities against [`current_parent_binding_for_child`] (which already
-/// folds the unbound check). Historical copies of this rule instead compared
-/// against the raw latest binding and re-checked `is_binding_unbound` on it;
-/// the two factorings decide identically because unbound-ness is a function
-/// of the binding identity alone — if the latest binding for the child IS
-/// this binding event, its unbound-ness equals the one already checked in
-/// condition (1).
+/// Condition (2) is checked by comparing identities against
+/// [`current_parent_binding_for_child`], which already folds in the unbound
+/// check.
 pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
     reads: &mut R,
     parent_inode_id: InodeId,
@@ -474,13 +469,14 @@ pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
         .expect("in-memory metadata visibility reads never await")
 }
 
-/// [`MetadataState`] reads scoped to `base_seq`, mirroring the historical
-/// row-scan arms of the seq-gated queries.
+/// [`MetadataState`] reads scoped to `base_seq`: each lookup scans rows at
+/// or below that seq.
 ///
-/// The composite overrides route back through the seq-gated [`MetadataState`]
-/// composites so that reads at or above the indexed seq keep their at-head
-/// index fast paths (this matters for [`resolve_visible_path`], which is not
-/// itself seq-gated and resolves most paths at head).
+/// The composite overrides route back through the seq-gated
+/// [`MetadataState`] composites so that reads at or above the indexed seq
+/// keep their at-head index fast paths. This matters for
+/// [`resolve_visible_path`], which is not itself seq-gated and resolves
+/// most paths at head.
 pub(super) struct MetadataStateAtSeqReads<'a> {
     state: &'a MetadataState,
     base_seq: ChangeSeq,

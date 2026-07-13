@@ -1,3 +1,5 @@
+//! Directory listing pagination: cursor validation and page framing.
+
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_api::{ChangeSeq, DirectoryPageCursor, InodeKind};

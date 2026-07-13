@@ -1,3 +1,6 @@
+//! Contract probes: live checks that a store honors the compare-and-swap
+//! and create-if-absent semantics LoonFS depends on.
+
 use crate::keys::{metadata_manifest_object, upload_session, wal_head};
 use crate::{ObjectStore, ObjectStoreError};
 use bytes::Bytes;

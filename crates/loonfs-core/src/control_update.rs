@@ -1,3 +1,6 @@
+//! Read-modify-write loops for control objects: load, edit, and
+//! compare-and-swap the head or an upload session on its etag.
+
 use crate::error::CoreError;
 use crate::namespace::control::{read_head_object, ControlObjectLoadError, LoadedHeadObject};
 use bytes::Bytes;

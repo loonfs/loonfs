@@ -1,3 +1,5 @@
+//! Frame-level checks a commit request must pass before per-op validation.
+
 use super::{CommitRequest, CommitValidationError};
 use loonfs_api::wire::control::HeadState;
 

@@ -1,3 +1,6 @@
+//! The [`ObjectStore`] contract every provider implements, plus its
+//! shared value and error types.
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};

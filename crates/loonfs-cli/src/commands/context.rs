@@ -1,3 +1,5 @@
+//! Shared per-command context: target resolution and common helpers.
+
 use super::output::CommandFailure;
 use crate::args::{CommandKind, TargetSelectorArgs};
 use crate::error::CliError;

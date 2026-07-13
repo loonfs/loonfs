@@ -1,3 +1,6 @@
+//! [`ContentRef`]: the durable, content-addressed reference a file
+//! revision points at.
+
 use crate::digest::sha256_digest;
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -1,3 +1,6 @@
+//! Interactive terminal prompts, failing cleanly when input is
+//! non-interactive.
+
 use crate::error::CliError;
 use dialoguer::{Confirm, FuzzySelect, Input, Password, Select};
 

@@ -1,3 +1,6 @@
+//! WAL segment and chain framing types, shared by the writer, reader, and
+//! replay paths.
+
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataApplyError;
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};

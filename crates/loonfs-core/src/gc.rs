@@ -1,12 +1,11 @@
-//! v1 listing mark-and-sweep garbage collection (format spec, "Garbage
-//! collection").
+//! Mark-and-sweep garbage collection (format spec, "Garbage collection").
 //!
-//! GC and floor advancement are the only consumers of listing. Nothing
-//! sweeps by default: callers opt in through the admin endpoint or an
-//! explicit maintenance-tick option. The safety rules close the two races
-//! the un-serialized layout admits — create-vs-collect and
-//! publish-in-flight — via the grace window, delete-time re-verification,
-//! and retention-wins defaults. When in doubt, this module retains.
+//! GC and floor advancement are the only code paths that list the store.
+//! Nothing sweeps by default: callers opt in through the admin endpoint or
+//! an explicit maintenance-tick option. Writers never coordinate with GC,
+//! so a sweep can race an in-flight publish or checkpoint creation. The
+//! grace window, delete-time re-verification, and retain-on-ambiguity
+//! defaults close those races. When in doubt, this module retains.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::context::MutationContext;
@@ -32,9 +31,9 @@ use std::collections::BTreeSet;
 
 /// Grace and reap windows for the sweep (format spec, "Garbage collection",
 /// rules 1 and 9). Both are wall-clock cleanup policy, never validity
-/// inputs. The defaults are deliberately conservative: one hour of
-/// unconditional protection for every object, seven days before an
-/// abandoned bootstrap tree may be reaped.
+/// inputs. The defaults are conservative: every object gets one hour of
+/// unconditional protection, and an abandoned bootstrap tree must sit
+/// untouched for seven days before it may be reaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
@@ -52,10 +51,10 @@ impl Default for GcConfig {
 
 impl GcConfig {
     fn validate(&self) -> Result<(), CoreError> {
-        // The grace window's floor is derived from the enforced publication
-        // budgets and provider deadlines (`limits`), never tuned per pass:
-        // below it, the publish-in-flight safety proof does not hold, so the
-        // configuration is rejected as an invalid request.
+        // The minimum grace window is derived from the publication budgets
+        // and provider deadlines in `limits`. Below it, a publish still in
+        // flight could have written objects that already look old enough to
+        // delete, so the configuration is rejected outright.
         if self.grace_window_ms < GC_MIN_GRACE_WINDOW_MS {
             return Err(CoreError::InvalidGcConfig(format!(
                 "grace_window_ms {} is below the derived safety minimum {}",
@@ -75,8 +74,7 @@ impl GcConfig {
 pub struct GcReport {
     pub deleted_wal_segments: u64,
     pub deleted_metadata_tables: u64,
-    /// Unreferenced derived-index segments deleted. Additive: reports
-    /// serialized before the field decode with zero.
+    /// Unreferenced derived-index segments deleted.
     #[serde(default)]
     pub deleted_index_segments: u64,
     pub deleted_manifests: u64,
@@ -120,11 +118,11 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// How many sweep candidates one delete-time live set may decide before the
-/// set must be re-collected (rule 3: candidate selection may be stale,
-/// deletion may not). The bound keeps "immediately before deleting" honest
-/// on large sweeps, where deciding the whole batch against one snapshot
-/// would leave the last deletions arbitrarily far behind it.
+/// How many sweep candidates may be decided against one live set before the
+/// set is re-collected (rule 3: candidate selection may be stale, deletion
+/// may not). On a large sweep, deciding every candidate against a single
+/// snapshot would leave the last deletions working from an arbitrarily old
+/// view; re-collecting every chunk bounds that staleness.
 const SWEEP_REVERIFY_CHUNK: usize = 1024;
 
 async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
@@ -145,8 +143,8 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         return reap_abandoned_bootstrap(store, namespace_id, config, context).await;
     }
 
-    // Mark: candidate selection may be arbitrarily stale (rule 3), so one
-    // live-set pass selects candidates...
+    // Mark: select sweep candidates against one live-set snapshot. The
+    // selection may be stale (rule 3); the delete-time checks below decide.
     let mark = collect_live_set(store, namespace_id, config, context).await?;
     let mut report = GcReport::default();
 
@@ -181,18 +179,18 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         .filter(|key| !mark.checkpoint_keys.contains(key))
         .collect();
 
-    // ...and fresh passes immediately before deletion decide (rule 3:
-    // candidate selection may be stale; deletion may not). The live set is
+    // Sweep: every deletion is decided against a fresh live set (rule 3:
+    // candidate selection may be stale, deletion may not). The set is
     // re-collected every `reverify_chunk` candidates so a large sweep never
     // runs far ahead of its verification snapshot.
     let mut sweep =
         SweepVerifier::collect(store, namespace_id, config, context, reverify_chunk).await?;
 
-    // Data first, records last: every readable checkpoint or pin record
-    // roots its basis in the live set, so data referenced by a surviving
-    // record is never deleted in the pass that could delete the record. A
-    // crash mid-sweep therefore leaves orphaned data for the next pass,
-    // never a record whose data vanished under it.
+    // Delete data before records. Every readable checkpoint record roots
+    // its basis in the live set, so the pass that deletes a record can
+    // never also delete the data that record was protecting. A crash
+    // mid-sweep leaves orphaned data for the next pass — never a record
+    // whose data vanished underneath it.
     for key in segment_candidates {
         sweep
             .refresh_if_due(store, namespace_id, config, context)
@@ -265,11 +263,11 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             report.retained_candidates += 1;
             continue;
         }
-        // An active fork-owned candidate is released by compare-and-swap —
-        // never deleted while active — so a racing fork retry's freshen
-        // observes the flip instead of a vanished record. Anything else
-        // (released records, expired user records) follows the age-gated
-        // delete.
+        // Active fork-owned records are released by compare-and-swap,
+        // never deleted outright, so a fork retrying at the same moment
+        // finds a released record it can revive instead of a vanished one.
+        // Everything else (released records, expired user records) goes
+        // through the normal age-gated delete.
         match maybe_release_fork_checkpoint(store, &key, config, context).await? {
             ForkCheckpointSweep::Released => {
                 report.released_fork_checkpoints += 1;
@@ -301,9 +299,10 @@ enum ForkCheckpointSweep {
 }
 
 /// Decides one active fork-owned sweep candidate immediately before acting
-/// (rule 3): re-reads the record, re-proves the target gone, and releases by
-/// compare-and-swap on the freshly observed etag so a concurrent fork
-/// freshen always wins or always observes the release.
+/// (rule 3): re-reads the record, re-proves the target namespace is gone,
+/// and releases the record by compare-and-swap on the just-observed etag.
+/// The etag check means a concurrent fork freshen either wins the swap
+/// outright or observes the release — the two can never both succeed.
 async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
@@ -334,8 +333,8 @@ async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     else {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     };
-    // Rule 1 uniformly: GC leaves objects younger than the grace window
-    // alone, state changes included.
+    // Rule 1 applies to state changes too: GC leaves objects younger than
+    // the grace window alone.
     let Some(last_modified_ms) = body.metadata.last_modified_ms else {
         return Ok(ForkCheckpointSweep::Retained);
     };
@@ -384,10 +383,12 @@ async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Proves a fork target gone (rule 9's fork arm): its head reads terminally
-/// deleted, or nothing exists under the target at all and the record has
-/// aged past the reap window — an abandoned bootstrap either never started
-/// or was already reaped, and a live retry would have freshened the record.
+/// Proves a fork target namespace is gone (rule 9's fork arm). Either its
+/// head object says the namespace is terminally deleted, or nothing exists
+/// under the target prefix at all and the record has aged past the reap
+/// window. The age matters because a live fork retry would have freshened
+/// the record; an old record over an empty tree means the fork was
+/// abandoned or its partial bootstrap was already reaped.
 async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     store: &S,
     target_namespace_id: &NamespaceId,
@@ -401,8 +402,8 @@ async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
             let target_prefix = format!("namespaces/{}/", target_namespace_id.as_str());
             let tree = list_prefix(store, &target_prefix).await?;
             if !tree.is_empty() {
-                // Bootstrap in progress or a partial tree rule 9 has not
-                // reaped yet; ambiguity retains.
+                // Either a bootstrap is in progress or rule 9 has not
+                // reaped the partial tree yet; ambiguity retains.
                 return Ok(false);
             }
             Ok(context.now_ms.saturating_sub(record_last_modified_ms) >= config.reap_window_ms)
@@ -489,16 +490,15 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
     };
     live.manifests.insert(root.manifest_object_id);
 
-    // Records last: every readable checkpoint record roots its basis while
-    // the record exists, regardless of lifecycle, expiry, or owner, so a
-    // record can never outlive its manifest. This covers the young released
-    // record whose deletion the grace window refuses, and the released-
-    // record revival in `create_checkpoint` and the fork freshen
-    // (deterministic ids), which must never flip a record Active after its
-    // basis was swept. Lifecycle, expiry, and — for fork owners — the
-    // target's fate decide only whether the record itself may be released
-    // or deleted; its basis becomes collectable on the pass after the
-    // record is gone.
+    // Every readable checkpoint record roots its basis, no matter its
+    // lifecycle, expiry, or owner: a record must never outlive its
+    // manifest. This matters because released records can come back — the
+    // grace window keeps young ones around, and both `create_checkpoint`
+    // (via deterministic ids) and the fork freshen can revive one — and a
+    // revival is only safe while the basis still exists. Lifecycle,
+    // expiry, and the fork target's fate decide only whether the record
+    // itself may be released or deleted; the basis becomes collectable on
+    // the pass after the record is gone.
     for key in list_prefix(store, &checkpoint_prefix(namespace_id.as_str())).await? {
         let Some(body) = store
             .get_with_metadata(&key)
@@ -572,8 +572,9 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         }
     }
 
-    // WAL needed to replay from the floor through the head stays (rule 7 is
-    // implied: floor <= root basis, so root-to-head replay is covered).
+    // Keep every WAL segment needed to replay from the floor through the
+    // head. The floor never passes the root's basis, so this also covers
+    // root-to-head replay (rule 7).
     if head.seq > floor_seq {
         let chain = load_validated_wal_chain(
             store,
@@ -1010,9 +1011,9 @@ mod tests {
             .expect("tail commit stays readable");
     }
 
-    /// The reviewer scenario for rule 1 and "records last": a dead record
-    /// referencing an aged basis loses the record first, and the basis only
-    /// on the following pass — never the other way around.
+    /// A released record whose basis has aged out loses the record first,
+    /// and the basis only on the following pass — never the other way
+    /// around.
     #[tokio::test]
     async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1099,9 +1100,9 @@ mod tests {
         stat_root(&store, &namespace_id).await;
     }
 
-    /// The maintenance-retention property: repeated record-less WAL
-    /// flushes leave superseded manifests unpinned, so GC reclaims
-    /// them once aged — retained metadata stays bounded under maintenance.
+    /// Repeated WAL flushes leave superseded manifests unpinned, so GC
+    /// reclaims them once aged. This is what keeps retained metadata
+    /// bounded when maintenance runs continuously.
     #[tokio::test]
     async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         let temp_dir = tempdir().expect("tempdir");

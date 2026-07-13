@@ -1,3 +1,6 @@
+//! [`CommitPlan`]: the output of validation — every op checked and
+//! resolved, ready to materialize into WAL deltas.
+
 use super::ResolvedBinding;
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
