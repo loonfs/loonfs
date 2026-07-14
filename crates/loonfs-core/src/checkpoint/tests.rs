@@ -6598,6 +6598,85 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
 }
 
 #[tokio::test]
+async fn grams_index_fold_steps_consume_equal_row_keys_atomically() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold-equal-keys").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Two revisions of one inode, indexed by two separate build units —
+    // backfill for the first, WAL replay for the second — with identical
+    // content, so each unit's batch for every gram starts at the same
+    // inode and the two delta segments carry byte-identical row keys.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/hot.txt",
+        b"alpha shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write revision one");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let policy = GramIndexBuildPolicy::default();
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/hot.txt",
+        b"alpha shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write revision two");
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+
+    let segments = live_index_files(&store, &namespace_id).await;
+    assert_eq!(segments.len(), 2, "one delta segment per build unit");
+    assert_eq!(
+        (&segments[0].min_key, &segments[0].max_key),
+        (&segments[1].min_key, &segments[1].max_key),
+        "identical revisions must yield segments covering identical keys"
+    );
+    let expected = vec![posting(2, 1), posting(2, 2)];
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected
+    );
+
+    // A one-row budget puts a step boundary inside every equal-key group.
+    // The group must ride one step: the resume cursor is `last key + \0`,
+    // so a boundary between two equal keys would skip the second segment's
+    // row forever and its postings would vanish at the completing swap.
+    let fold_policy = GramIndexBuildPolicy {
+        max_l0_segments: 2,
+        max_fold_rows_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, fold_policy).await;
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected,
+        "a fold must keep every batch of an equal-key group"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"alp")).await,
+        expected,
+        "every gram's group survives, not just the probe's"
+    );
+}
+
+#[tokio::test]
 async fn grams_index_delta_fold_leaves_the_base_untouched() {
     let temp_dir = tempdir().expect("temp dir");
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");

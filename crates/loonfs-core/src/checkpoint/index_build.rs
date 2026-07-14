@@ -112,7 +112,11 @@ pub struct GramIndexBuildPolicy {
     /// segments the per-segment row cap split them into.
     pub max_mid_runs: usize,
     /// Rows one fold step merges before publishing and yielding; the
-    /// cursor in the feature value makes the walk resumable.
+    /// cursor in the feature value makes the walk resumable. The budget
+    /// is soft: rows with equal keys are consumed as one atomic group,
+    /// so a step may overshoot by the size of one such group. The resume
+    /// cursor is `last key + "\0"`, and splitting a group across steps
+    /// would strand its tail behind the cursor and drop postings.
     pub max_fold_rows_per_step: usize,
 }
 
@@ -1176,16 +1180,29 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
             return Ok(merged);
         };
         let (key, row) = readers[position].pop();
-        let IndexRow::GramPostings { gram, .. } = &row;
-        let gram = *gram;
-        let batch = row.postings().map_err(|error| {
-            CoreError::NamespaceCorrupt(format!(
-                "index segment `{}` carries an unreadable posting batch: {error}",
-                readers[position].object_key()
-            ))
-        })?;
-        merged.postings.entry(gram).or_default().extend(batch);
-        merged.rows += 1;
+        fold_snapshot_row(&mut merged, row, readers[position].object_key())?;
+        // Exact duplicates of this key are legal, across segments and
+        // within one: the row key is `gram-{hex}-{first batch inode}`, and
+        // the same (gram, first-inode) pair arises whenever two runs — or
+        // two batches of one run — start a batch at the same posting. The
+        // resume cursor is `key\0`, which skips everything at or below
+        // `key`, so the whole equal-key group must be consumed before the
+        // budget is re-checked or an unconsumed twin would be stranded
+        // behind the cursor and its postings dropped at the completing
+        // swap. This is what makes the row budget soft (see
+        // `GramIndexBuildPolicy::max_fold_rows_per_step`).
+        for reader in readers.iter_mut() {
+            loop {
+                // Peek is only meaningful after a refill, mirroring the
+                // loop head: a drained block must not end the group early.
+                reader.refill(store).await?;
+                if reader.peek_key() != Some(key.as_str()) {
+                    break;
+                }
+                let (_, duplicate) = reader.pop();
+                fold_snapshot_row(&mut merged, duplicate, reader.object_key())?;
+            }
+        }
         last_key = key;
     }
     // Budget filled: resume strictly after the last merged row. Peek once
@@ -1205,6 +1222,21 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
         merged.exhausted = true;
     }
     Ok(merged)
+}
+
+/// Folds one snapshot row's posting batch into the merged range and
+/// charges it against the row budget.
+fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) -> Result<()> {
+    let IndexRow::GramPostings { gram, .. } = &row;
+    let gram = *gram;
+    let batch = row.postings().map_err(|error| {
+        CoreError::NamespaceCorrupt(format!(
+            "index segment `{object_key}` carries an unreadable posting batch: {error}"
+        ))
+    })?;
+    merged.postings.entry(gram).or_default().extend(batch);
+    merged.rows += 1;
+    Ok(())
 }
 
 /// Streaming reader over one snapshot segment's rows from a start key:
