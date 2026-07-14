@@ -15,6 +15,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -30,6 +31,18 @@ fn grep_request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
+}
+
+/// Content blob object keys currently in the store, for pinpointing the
+/// object behind one file's bytes by diffing around its write.
+async fn content_blob_keys(store: &loonfs::SharedObjectStore) -> BTreeSet<String> {
+    store
+        .list_prefix("content-stores/")
+        .await
+        .expect("list content blobs")
+        .into_iter()
+        .filter(|key| key.contains("/blobs/sha256/"))
+        .collect()
 }
 
 #[tokio::test]
@@ -383,6 +396,133 @@ async fn repeated_grep_serves_posting_blocks_from_the_table_cache() {
         "an identical grep through the same reader must serve every \
          posting block from the decoded-block cache"
     );
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Concurrent candidate content reads keep the serial loop's error
+/// positions: a failed read surfaces only when the in-order walk reaches
+/// that candidate, so a page that fills first still returns its full
+/// matches and a cursor, and the error waits for the next page.
+#[tokio::test]
+async fn a_failed_candidate_read_surfaces_in_traversal_order() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: loonfs::SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("grams-read-fault").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-fault-writer")
+        .commit_window_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-fault-admin")
+        .build()
+        .await
+        .expect("build admin");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    // Two matches in alpha, so a one-match page fills before the walk
+    // reaches bravo.
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/alpha.txt",
+            b"needle one\nneedle two\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write alpha");
+    let blobs_before_bravo = content_blob_keys(&store).await;
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/bravo.txt",
+            b"needle three\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write bravo");
+    let new_blobs: Vec<String> = content_blob_keys(&store)
+        .await
+        .difference(&blobs_before_bravo)
+        .cloned()
+        .collect();
+    let [bravo_content_key] = new_blobs.as_slice() else {
+        panic!("bravo must add exactly one content blob, got {new_blobs:?}");
+    };
+
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+    for _ in 0..2 {
+        admin
+            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+            .await
+            .expect("maintenance tick");
+    }
+    let healthy = reader
+        .grep(&namespace_id, &grep_request("needle"))
+        .await
+        .expect("grep before the fault");
+    assert_eq!(healthy.matches.len(), 3);
+
+    // Break bravo's content read out from under the query.
+    store
+        .delete(bravo_content_key)
+        .await
+        .expect("delete bravo's content object");
+
+    // An unlimited page walks past alpha into bravo, so the failed read
+    // fails that page, exactly as the serial scan did.
+    let error = reader
+        .grep(&namespace_id, &grep_request("needle"))
+        .await
+        .expect_err("a reached candidate's failed read must fail its page");
+    let loonfs::Error::Core(core) = &error else {
+        panic!("expected a core error, got {error:?}");
+    };
+    assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
+
+    // With a one-match limit, alpha's second match fills the page before
+    // the walk reaches bravo: the speculative failed read is discarded and
+    // the full page comes back with a cursor.
+    let mut first_page = grep_request("needle");
+    first_page.limit = Some(1);
+    let response = reader
+        .grep(&namespace_id, &first_page)
+        .await
+        .expect("a page that fills before the failed candidate must succeed");
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/alpha.txt");
+    assert_eq!(response.matches[0].line, "needle one");
+    let cursor = response
+        .next_cursor
+        .expect("a truncated page must carry a cursor");
+
+    // The next page's walk reaches bravo and surfaces the read error at
+    // the position the serial scan would have.
+    let mut second_page = grep_request("needle");
+    second_page.limit = Some(1);
+    second_page.cursor = Some(cursor);
+    let error = reader
+        .grep(&namespace_id, &second_page)
+        .await
+        .expect_err("the deferred read error must surface on the next page");
+    let loonfs::Error::Core(core) = &error else {
+        panic!("expected a core error, got {error:?}");
+    };
+    assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
 
     writer.shutdown_background().await.expect("writer shutdown");
 }

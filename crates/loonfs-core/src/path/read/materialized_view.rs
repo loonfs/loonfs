@@ -23,7 +23,7 @@ use crate::namespace::control::read_head_and_metadata_root;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
-use futures::future::try_join_all;
+use futures::future::join_all;
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::wire::index_grams::{IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY};
 use loonfs_api::wire::manifest::MetadataTableFamily;
@@ -536,20 +536,28 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 }
                 break 'page;
             }
-            let contents = try_join_all(batch.iter().map(|candidate| {
+            // The reads fan out, but their errors do not short-circuit:
+            // each result rides with its candidate into the ordered walk
+            // below, which surfaces a failure only when it reaches that
+            // candidate — the position the serial loop surfaced it. A
+            // failure the walk never reaches (the page filled first) is
+            // discarded with the rest of the speculative batch; the next
+            // page re-issues that read and reports it then.
+            let contents = join_all(batch.iter().map(|candidate| {
                 read_durable_content_bytes(
                     store,
                     &self.content_store_id,
                     &candidate.revision.content_ref,
                 )
             }))
-            .await?;
+            .await;
             // Emission stays strictly in candidate (inode) order: the batch
             // was selected in order and its results are consumed in order,
-            // so matches, limits, and the resume cursor advance exactly as
-            // the serial walk advanced them.
+            // so matches, limits, errors, and the resume cursor advance
+            // exactly as the serial walk advanced them.
             for (candidate, content) in batch.iter().zip(contents) {
                 let inode_id = candidate.inode_id;
+                let content = content?;
                 if !crate::checkpoint::is_indexable_text_content(&content.bytes) {
                     resume_cursor = Some((inode_id, u64::MAX));
                     continue;
