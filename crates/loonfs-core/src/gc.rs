@@ -1966,6 +1966,7 @@ mod tests {
         loop {
             let report = crate::checkpoint::build_grams_index_step(
                 store,
+                None,
                 namespace_id,
                 context,
                 crate::GramIndexBuildPolicy::default(),

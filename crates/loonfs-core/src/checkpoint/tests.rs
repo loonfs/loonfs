@@ -6031,7 +6031,7 @@ async fn drain_grams_index(
 ) -> u64 {
     let mut published = 0u64;
     loop {
-        let report = build_grams_index_step(store, namespace_id, context, policy)
+        let report = build_grams_index_step(store, None, namespace_id, context, policy)
             .await
             .expect("build step");
         match report.outcome {
@@ -6054,7 +6054,7 @@ async fn drain_grams_fold(
     loop {
         steps += 1;
         assert!(steps < 512, "the fold walk must terminate");
-        let report = fold_grams_index_step(store, namespace_id, context, policy)
+        let report = fold_grams_index_step(store, None, namespace_id, context, policy)
             .await
             .expect("fold step");
         match report.outcome {
@@ -6354,6 +6354,7 @@ async fn grams_index_disable_drops_the_feature_and_references() {
 
     let report = build_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy::default(),
@@ -6518,7 +6519,7 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
     loop {
         steps += 1;
         assert!(steps < 512, "the fold walk must terminate");
-        let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
+        let report = fold_grams_index_step(&store, None, &namespace_id, &context, fold_policy)
             .await
             .expect("fold step");
         let completed = match report.outcome {
@@ -6584,7 +6585,7 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
         mid_segments.len() > 1,
         "one-row steps must split the outputs across segments"
     );
-    let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, fold_policy)
         .await
         .expect("post-completion fold step");
     assert_eq!(
@@ -6806,7 +6807,7 @@ async fn grams_index_delta_fold_leaves_the_base_untouched() {
         "tiered folding must not change what the index answers"
     );
 
-    let report = fold_grams_index_step(&store, &namespace_id, &context, delta_fold_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, delta_fold_policy)
         .await
         .expect("post-fold step");
     assert_eq!(
@@ -6885,9 +6886,10 @@ async fn grams_index_mid_runs_are_counted_by_run_ordinal_not_by_segment() {
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
-    let report = fold_grams_index_step(&store, &namespace_id, &context, base_threshold_policy)
-        .await
-        .expect("fold step below the run threshold");
+    let report =
+        fold_grams_index_step(&store, None, &namespace_id, &context, base_threshold_policy)
+            .await
+            .expect("fold step below the run threshold");
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
@@ -6939,7 +6941,7 @@ async fn grams_index_mid_runs_are_counted_by_run_ordinal_not_by_segment() {
         "run counting must not change what the index answers"
     );
     assert_eq!(
-        fold_grams_index_step(&store, &namespace_id, &context, base_threshold_policy)
+        fold_grams_index_step(&store, None, &namespace_id, &context, base_threshold_policy)
             .await
             .expect("post-fold step")
             .outcome,
@@ -6997,9 +6999,10 @@ async fn grams_index_backfill_folds_accumulate_distinct_mid_runs() {
     // Two backfill units, then a delta fold, twice — all mid-backfill.
     for _ in 0..2 {
         for _ in 0..2 {
-            let report = build_grams_index_step(&store, &namespace_id, &context, build_policy)
-                .await
-                .expect("backfill step");
+            let report =
+                build_grams_index_step(&store, None, &namespace_id, &context, build_policy)
+                    .await
+                    .expect("backfill step");
             assert!(
                 matches!(
                     report.outcome,
@@ -7030,7 +7033,7 @@ async fn grams_index_backfill_folds_accumulate_distinct_mid_runs() {
         max_mid_runs: 99,
         ..GramIndexBuildPolicy::default()
     };
-    let report = fold_grams_index_step(&store, &namespace_id, &context, probe_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, probe_policy)
         .await
         .expect("probe fold step");
     assert_eq!(
@@ -7119,6 +7122,7 @@ async fn grams_index_one_build_run_split_across_segments_counts_once_in_both_tie
     // more than the mid one.
     let report = fold_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy {
@@ -7161,6 +7165,7 @@ async fn grams_index_one_build_run_split_across_segments_counts_once_in_both_tie
     );
     let report = fold_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy {
@@ -7256,9 +7261,15 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
         max_fold_rows_per_step: 1,
         ..GramIndexBuildPolicy::default()
     };
-    let first = fold_grams_index_step(&store, &namespace_id, &context, stepped_base_fold_policy)
-        .await
-        .expect("first base fold step");
+    let first = fold_grams_index_step(
+        &store,
+        None,
+        &namespace_id,
+        &context,
+        stepped_base_fold_policy,
+    )
+    .await
+    .expect("first base fold step");
     assert!(
         matches!(
             first.outcome,
@@ -7295,7 +7306,7 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
     )
     .await
     .expect("write echo");
-    let build = build_grams_index_step(&store, &namespace_id, &context, build_policy)
+    let build = build_grams_index_step(&store, None, &namespace_id, &context, build_policy)
         .await
         .expect("build step mid-fold");
     assert!(
@@ -7318,10 +7329,15 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
     loop {
         steps += 1;
         assert!(steps < 512, "the fold walk must terminate");
-        let report =
-            fold_grams_index_step(&store, &namespace_id, &context, stepped_base_fold_policy)
-                .await
-                .expect("base fold step");
+        let report = fold_grams_index_step(
+            &store,
+            None,
+            &namespace_id,
+            &context,
+            stepped_base_fold_policy,
+        )
+        .await
+        .expect("base fold step");
         let completed = match report.outcome {
             GramIndexFoldOutcome::StepPublished { completed, .. } => completed,
             other => panic!("expected a published fold step, got {other:?}"),
@@ -7372,7 +7388,7 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
         "the folded base answers exactly what the tiers answered"
     );
 
-    let report = fold_grams_index_step(&store, &namespace_id, &context, delta_fold_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, delta_fold_policy)
         .await
         .expect("post-fold step");
     assert_eq!(
@@ -7463,7 +7479,7 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
-    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, policy)
         .await
         .expect("fold step below thresholds");
     assert_eq!(
@@ -7513,7 +7529,7 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
         expected_postings,
         "self-healing must not change what the index answers"
     );
-    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, policy)
         .await
         .expect("post-fold step");
     assert_eq!(
@@ -7575,6 +7591,7 @@ async fn fold_refuses_an_unreadable_feature_value() {
 
     let error = fold_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy::default(),

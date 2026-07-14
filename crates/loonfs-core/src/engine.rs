@@ -556,12 +556,18 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// after, each unit ending in one manifest publication that advances
     /// the `index.grams` watermark. Callers invoke this repeatedly, like
     /// [`Self::reorganize_metadata`].
+    ///
+    /// `table_cache` is the runtime's shared decoded-block cache, passed
+    /// alongside the policy the way reads pass [`RuntimeReadContext`];
+    /// the step's segment reads resolve through it when attached.
     pub async fn build_grams_index_step(
         &self,
         policy: crate::checkpoint::GramIndexBuildPolicy,
+        table_cache: Option<&MetadataTableCache>,
     ) -> CoreResult<crate::checkpoint::GramIndexBuildReport> {
         crate::checkpoint::build_grams_index_step(
             &self.store,
+            table_cache,
             &self.namespace_id,
             &self.mutation_context(),
             policy,
@@ -574,12 +580,18 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// merge together with the base into a fresh base, each fold ending
     /// in manifest publications that swap the consumed references out
     /// for the outputs.
+    ///
+    /// `table_cache` is the runtime's shared decoded-block cache, passed
+    /// alongside the policy the way reads pass [`RuntimeReadContext`];
+    /// the fold's merge reads resolve through it when attached.
     pub async fn fold_grams_index_step(
         &self,
         policy: crate::checkpoint::GramIndexBuildPolicy,
+        table_cache: Option<&MetadataTableCache>,
     ) -> CoreResult<crate::checkpoint::GramIndexFoldReport> {
         crate::checkpoint::fold_grams_index_step(
             &self.store,
+            table_cache,
             &self.namespace_id,
             &self.mutation_context(),
             policy,
