@@ -200,6 +200,18 @@ impl FsAdminBuilder {
         self
     }
 
+    /// Shares `writer`'s decoded-block cache with this handle instead of
+    /// opening a separate one, so explicit maintenance reuses blocks that
+    /// writer-side reads already decoded — and warms them back. Sound
+    /// because entries are keyed by immutable identities; only for a
+    /// writer in the same runtime ownership domain. The cache keeps the
+    /// writer's byte budget: [`Self::runtime_cache`] still sizes this
+    /// handle's other caches, but its decoded-block budget goes unused.
+    pub fn shared_metadata_table_cache(mut self, writer: &super::FsWriter) -> Self {
+        self.core.shared_metadata_table_cache = Some(writer.core().metadata_table_cache());
+        self
+    }
+
     /// Sets the tracing mode label.
     pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
         self.core.trace_mode = trace_mode;

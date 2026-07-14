@@ -85,15 +85,25 @@ impl FsInner {
 }
 
 impl FsCore {
+    /// Opens a runtime core. `shared_metadata_table_cache` substitutes an
+    /// existing decoded-block cache for a freshly sized one, so handles
+    /// with distinct actor identities can still share warmed blocks —
+    /// sound across cores because entries are keyed by immutable
+    /// identities (payload checksums and manifest object keys); the
+    /// sharing caller owns the sizing decision, and
+    /// `config.runtime_cache.metadata_table_cache` goes unused.
     pub(crate) fn open_with_background(
         store: SharedObjectStore,
         config: FsConfig,
         background: BackgroundWork,
+        shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     ) -> Result<Self> {
         validate_config(&config)?;
-        let metadata_table_cache = Arc::new(MetadataTableCache::new(
-            config.runtime_cache.metadata_table_cache.clone(),
-        ));
+        let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
+            Arc::new(MetadataTableCache::new(
+                config.runtime_cache.metadata_table_cache.clone(),
+            ))
+        });
         let wal_tail_projection_cache =
             Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
                 max_entries: config.runtime_cache.max_cached_namespaces,
@@ -121,6 +131,12 @@ impl FsCore {
     /// Returns this runtime's config.
     pub(crate) fn config(&self) -> &FsConfig {
         &self.inner.config
+    }
+
+    /// This runtime's shared decoded-block cache handle, for builders
+    /// that open another core sharing it.
+    pub(crate) fn metadata_table_cache(&self) -> Arc<MetadataTableCache> {
+        Arc::clone(&self.inner.metadata_table_cache)
     }
 
     fn record_trace_context(&self, span: &tracing::Span) {

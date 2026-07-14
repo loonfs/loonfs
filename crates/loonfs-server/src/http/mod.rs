@@ -235,8 +235,9 @@ fn router(state: AppState) -> Router {
 /// The long-lived server writer opts into background maintenance; the
 /// reader shares its caches so read endpoints observe writes immediately;
 /// the admin handle drives the explicit maintenance endpoints under its own
-/// actor identity. All three deliberately share one provider client inside
-/// this one runtime ownership domain.
+/// actor identity, sharing the writer's decoded-block cache under the
+/// configured budget. All three deliberately share one provider client
+/// inside this one runtime ownership domain.
 async fn build_handles(
     config: &ServerConfig,
     store: SharedStore,
@@ -281,6 +282,12 @@ async fn build_handles_with_metrics_jsonl_path(
     let mut admin_builder = FsAdmin::builder_with_store(store)
         .actor_id(format!("{}-admin", config.writer_id))
         .actor_version(config.writer_version.clone())
+        // The admin honors the configured cache sizing and shares the
+        // writer's decoded-block cache instance, so explicit maintenance
+        // reuses blocks reader traffic already decoded instead of
+        // populating a second, default-sized cache.
+        .runtime_cache(config.runtime_cache_config())
+        .shared_metadata_table_cache(&writer)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
     if let Some(recorder) = metrics_recorder {
