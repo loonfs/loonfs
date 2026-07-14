@@ -6490,7 +6490,7 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
         .expect("enable");
     let policy = GramIndexBuildPolicy {
         max_files_per_step: 1,
-        max_l0_segments: 2,
+        max_l0_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
     drain_grams_index(&store, &namespace_id, &context, policy).await;
@@ -6578,8 +6578,8 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
     );
 
     // Every step wrote its own output segment, yet they all belong to one
-    // fold and share one run_seq: the mid-run count must say one run, or
-    // step sizing would set the base-fold cadence.
+    // fold and share one run ordinal: the mid-run count must say one run,
+    // or step sizing would set the base-fold cadence.
     assert!(
         mid_segments.len() > 1,
         "one-row steps must split the outputs across segments"
@@ -6590,7 +6590,7 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 0,
+            l0_runs: 0,
             mid_runs: 1,
         },
         "one completed delta fold is one mid run, whatever its segment count"
@@ -6659,7 +6659,7 @@ async fn grams_index_fold_steps_consume_equal_row_keys_atomically() {
     // so a boundary between two equal keys would skip the second segment's
     // row forever and its postings would vanish at the completing swap.
     let fold_policy = GramIndexBuildPolicy {
-        max_l0_segments: 2,
+        max_l0_runs: 2,
         max_fold_rows_per_step: 1,
         ..GramIndexBuildPolicy::default()
     };
@@ -6725,7 +6725,7 @@ async fn grams_index_delta_fold_leaves_the_base_untouched() {
     // Two folds seed a level-2 base: the deltas fold into a mid run, then
     // a mid-run threshold of one folds that mid straight into the base.
     let delta_fold_policy = GramIndexBuildPolicy {
-        max_l0_segments: 2,
+        max_l0_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
     drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
@@ -6812,14 +6812,14 @@ async fn grams_index_delta_fold_leaves_the_base_untouched() {
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 0,
+            l0_runs: 0,
             mid_runs: 1,
         }
     );
 }
 
 #[tokio::test]
-async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
+async fn grams_index_mid_runs_are_counted_by_run_ordinal_not_by_segment() {
     let temp_dir = tempdir().expect("temp dir");
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let namespace_id = NamespaceId::parse("grams-fold-runs").expect("namespace id");
@@ -6851,7 +6851,7 @@ async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
     // A one-row segment cap makes one delta fold emit many mid segments —
     // the 1M-file shape, where fold outputs split at the row cap.
     let splitting_fold_policy = GramIndexBuildPolicy {
-        max_l0_segments: 2,
+        max_l0_runs: 2,
         max_rows_per_segment: 1,
         ..GramIndexBuildPolicy::default()
     };
@@ -6871,6 +6871,13 @@ async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
             .all(|descriptor| descriptor.run_seq == first_run_seq),
         "one fold's outputs share one run_seq"
     );
+    let first_run_ordinal = mid_segments[0].run_ordinal;
+    assert!(
+        mid_segments
+            .iter()
+            .all(|descriptor| descriptor.run_ordinal == first_run_ordinal),
+        "one fold's outputs share one run ordinal — the identity the triggers count"
+    );
 
     // Many mid segments, one mid run: a threshold of two must not start a
     // base fold, or output sizing would set the base-fold cadence.
@@ -6884,7 +6891,7 @@ async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 0,
+            l0_runs: 0,
             mid_runs: 1,
         },
         "segment splitting must not count toward the mid-run threshold"
@@ -6911,7 +6918,7 @@ async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
         &namespace_id,
         &context,
         GramIndexBuildPolicy {
-            max_l0_segments: 2,
+            max_l0_runs: 2,
             ..GramIndexBuildPolicy::default()
         },
     )
@@ -6937,9 +6944,240 @@ async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
             .expect("post-fold step")
             .outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 0,
+            l0_runs: 0,
             mid_runs: 0,
         }
+    );
+}
+
+#[tokio::test]
+async fn grams_index_backfill_folds_accumulate_distinct_mid_runs() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-backfill-runs").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // The watermark does not advance during backfill, so every backfill
+    // unit — and every fold of them — shares one run_seq; only the
+    // allocated ordinals tell the runs apart. The mid-run count must
+    // follow the folds, or the base fold never becomes eligible on a
+    // namespace that goes idle after its initial backfill.
+    for (path, content) in [
+        ("/alpha.txt", b"alpha shared\n".as_slice()),
+        ("/bravo.txt", b"bravo shared\n"),
+        ("/charlie.txt", b"charlie shared\n"),
+        ("/delta.txt", b"delta shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let watermark = grams_feature(&store, &namespace_id)
+        .await
+        .expect("feature")
+        .built_through_seq;
+
+    let build_policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    let delta_fold_policy = GramIndexBuildPolicy {
+        max_l0_runs: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    // Two backfill units, then a delta fold, twice — all mid-backfill.
+    for _ in 0..2 {
+        for _ in 0..2 {
+            let report = build_grams_index_step(&store, &namespace_id, &context, build_policy)
+                .await
+                .expect("backfill step");
+            assert!(
+                matches!(
+                    report.outcome,
+                    GramIndexBuildOutcome::Published {
+                        materialized: false,
+                        ..
+                    }
+                ),
+                "the backfill must still be in progress, got {:?}",
+                report.outcome
+            );
+        }
+        drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
+    }
+    let feature = grams_feature(&store, &namespace_id).await.expect("feature");
+    assert!(
+        feature.backfill_cursor.is_some(),
+        "the walk must still be mid-backfill for this test to mean anything"
+    );
+    assert_eq!(
+        feature.built_through_seq, watermark,
+        "a pure backfill never advances the watermark"
+    );
+
+    // Two delta folds are two mid runs, told apart by ordinal alone.
+    let probe_policy = GramIndexBuildPolicy {
+        max_l0_runs: 99,
+        max_mid_runs: 99,
+        ..GramIndexBuildPolicy::default()
+    };
+    let report = fold_grams_index_step(&store, &namespace_id, &context, probe_policy)
+        .await
+        .expect("probe fold step");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_runs: 0,
+            mid_runs: 2,
+        },
+        "each backfill delta fold must count as its own mid run"
+    );
+
+    // Crossing max_mid_runs makes the base fold eligible with no further
+    // write, watermark movement, or backfill progress.
+    let base_fold_policy = GramIndexBuildPolicy {
+        max_mid_runs: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, base_fold_policy).await;
+    let segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        !segments.is_empty()
+            && segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL),
+        "two mid runs tip the threshold into a base fold mid-backfill"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        vec![posting(2, 1), posting(3, 1), posting(4, 1), posting(5, 1)],
+        "folding mid-backfill must not change what the index answers"
+    );
+}
+
+#[tokio::test]
+async fn grams_index_one_build_run_split_across_segments_counts_once_in_both_tiers() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-split-run").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+
+    // A one-row segment cap splits the single backfill unit's rows across
+    // many delta segments — one logical run, one ordinal.
+    let splitting_build_policy = GramIndexBuildPolicy {
+        max_rows_per_segment: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, splitting_build_policy).await;
+    let delta_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        delta_segments.len() > 1
+            && delta_segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_DELTA_LEVEL),
+        "the row cap must split one build unit across many delta segments"
+    );
+    let first_run_ordinal = delta_segments[0].run_ordinal;
+    assert!(
+        delta_segments
+            .iter()
+            .all(|descriptor| descriptor.run_ordinal == first_run_ordinal),
+        "one build unit's segments share one run ordinal"
+    );
+
+    // The delta trigger counts one run, not a threshold's worth of
+    // segments; segment splitting must not set the delta-fold cadence any
+    // more than the mid one.
+    let report = fold_grams_index_step(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy {
+            max_l0_runs: 2,
+            ..GramIndexBuildPolicy::default()
+        },
+    )
+    .await
+    .expect("fold step below the delta run threshold");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_runs: 1,
+            mid_runs: 0,
+        },
+        "one split build run must count once toward the delta trigger"
+    );
+
+    // Fold that run into a mid run, again split by the row cap: the mid
+    // trigger counts one run too.
+    drain_grams_fold(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy {
+            max_l0_runs: 1,
+            max_rows_per_segment: 1,
+            max_mid_runs: 99,
+            ..GramIndexBuildPolicy::default()
+        },
+    )
+    .await;
+    let mid_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        mid_segments.len() > 1
+            && mid_segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_MID_LEVEL),
+        "the row cap must split the fold's outputs across many mid segments"
+    );
+    let report = fold_grams_index_step(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy {
+            max_l0_runs: 2,
+            max_mid_runs: 2,
+            ..GramIndexBuildPolicy::default()
+        },
+    )
+    .await
+    .expect("fold step below the mid run threshold");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_runs: 0,
+            mid_runs: 1,
+        },
+        "one split fold run must count once toward the mid trigger"
     );
 }
 
@@ -6976,7 +7214,7 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
     // Seed a base, then a second round of churn folded into a mid run, so
     // the mid-threshold fold has both tiers to consume.
     let delta_fold_policy = GramIndexBuildPolicy {
-        max_l0_segments: 2,
+        max_l0_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
     drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
@@ -7140,7 +7378,7 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 1,
+            l0_runs: 1,
             mid_runs: 0,
         }
     );
@@ -7177,8 +7415,9 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
     drain_grams_index(&store, &namespace_id, &context, build_policy).await;
 
     // Rewrite the grams descriptors to the level the pre-tiering fold
-    // stamped on its whole-set outputs — the layout an already-deployed
-    // index carries after v1 folds.
+    // stamped on its whole-set outputs, at run ordinal zero — the exact
+    // decode of descriptors written before ordinals existed. This is the
+    // layout an already-deployed index carries after v1 folds.
     let root = read_metadata_root_object(&store, &namespace_id)
         .await
         .expect("read root")
@@ -7194,6 +7433,7 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
     for descriptor in payload.index_files.iter_mut() {
         if descriptor.family == INDEX_FAMILY_GRAMS {
             descriptor.level = CHECKPOINT_BASE_RUN_LEVEL;
+            descriptor.run_ordinal = 0;
             legacy_ids.insert(descriptor.segment_id.as_str().to_owned());
         }
     }
@@ -7215,11 +7455,11 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
     .expect("publish legacy manifest");
 
     // Legacy bases count toward the mid-run trigger, not the delta one —
-    // and as one run: both backfill segments carry the enable-time
-    // run_seq, exactly like a v1 whole-set base whose segments all share
-    // their fold's run_seq.
+    // and as one run: every pre-ordinal segment decodes to run ordinal
+    // zero, so however many segments a deployed v1 index carries, they
+    // are one legacy run swept up by the next base fold.
     let policy = GramIndexBuildPolicy {
-        max_l0_segments: 2,
+        max_l0_runs: 2,
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
@@ -7229,10 +7469,10 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 0,
+            l0_runs: 0,
             mid_runs: 1,
         },
-        "legacy segments sharing one run_seq are one mid run"
+        "legacy segments sharing run ordinal zero are one mid run"
     );
 
     // New churn folds into a second mid run; that tips the mid threshold
@@ -7279,7 +7519,7 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
-            l0_segments: 0,
+            l0_runs: 0,
             mid_runs: 0,
         }
     );

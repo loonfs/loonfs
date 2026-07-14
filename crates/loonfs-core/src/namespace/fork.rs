@@ -271,6 +271,11 @@ fn fork_target_manifest_payload(
                         // outputs all remain referenced, and the next fold
                         // re-snapshots them.
                         fold: None,
+                        // The fork inherits the source's segments verbatim,
+                        // run ordinals included; carrying the counter
+                        // forward keeps the target's future runs distinct
+                        // from the inherited ones.
+                        next_run_ordinal: feature.next_run_ordinal,
                     }
                     .to_value(),
                 );

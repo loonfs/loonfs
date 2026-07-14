@@ -1019,7 +1019,13 @@ fn sample_manifest_with_index_envelope() -> NamespaceManifestEnvelope {
     let mut payload = sample_manifest_envelope().payload;
     payload.features.insert(
         INDEX_GRAMS_FEATURE_KEY.to_owned(),
-        IndexGramsFeature::new(ChangeSeq(2)).to_value(),
+        IndexGramsFeature {
+            // Nonzero so the fixture pins the counter's encoding; zero is
+            // omitted from the wire form.
+            next_run_ordinal: 2,
+            ..IndexGramsFeature::new(ChangeSeq(2))
+        }
+        .to_value(),
     );
     payload.index_files = vec![IndexFileRef {
         owner_namespace_id: namespace_id(),
@@ -1028,6 +1034,8 @@ fn sample_manifest_with_index_envelope() -> NamespaceManifestEnvelope {
             .to_owned(),
         family: INDEX_FAMILY_GRAMS.to_owned(),
         run_seq: ChangeSeq(2),
+        // Nonzero so the fixture pins the descriptor field's encoding.
+        run_ordinal: 1,
         level: 0,
         segment_index: 0,
         row_count: 3,
@@ -1149,7 +1157,8 @@ fn namespace_manifest_with_index_golden_decodes_to_sample() {
 }
 
 /// A feature value with an in-flight fold at `output_level`, the durable
-/// state a tiered fold parks between steps.
+/// state a tiered fold parks between steps. The nonzero run ordinals pin
+/// their encoding; zero ordinals are omitted from the wire form.
 fn sample_feature_with_fold(output_level: u32) -> IndexGramsFeature {
     IndexGramsFeature {
         version: 1,
@@ -1163,7 +1172,9 @@ fn sample_feature_with_fold(output_level: u32) -> IndexGramsFeature {
             outputs: vec!["idx_ffeeddccbbaa99887766554433221100".to_owned()],
             cursor: "gram-666f78-00000000000000000002".to_owned(),
             output_level,
+            run_ordinal: 5,
         }),
+        next_run_ordinal: 6,
     }
 }
 
@@ -1182,26 +1193,36 @@ fn index_grams_feature_mid_fold_matches_golden_bytes() {
 
 #[test]
 fn index_grams_feature_base_fold_golden_omits_the_output_level() {
-    // A base fold serializes without `output_level`, byte-identical to
-    // what pre-tiering writers persisted for their whole-set folds, so
-    // this golden doubles as the legacy-decode pin: a state without the
-    // field must complete at the base level.
-    let feature = sample_feature_with_fold(2);
+    // A base fold at run ordinal zero serializes without `output_level`
+    // and without either ordinal field — byte-identical to what
+    // pre-tiering, pre-ordinal writers persisted for their whole-set
+    // folds — so this golden doubles as the legacy-decode pin: a state
+    // without the fields must complete at the base level as part of the
+    // ordinal-zero run.
+    let mut feature = sample_feature_with_fold(2);
+    feature.next_run_ordinal = 0;
+    feature.fold.as_mut().expect("fold state").run_ordinal = 0;
     let encoded = serde_json::to_vec(&feature.to_value()).expect("encode feature value");
     assert_matches_golden("index_grams_feature_fold_base.v1.json", &encoded);
     let golden = read_golden("index_grams_feature_fold_base.v1.json");
+    let golden_text = String::from_utf8(golden.clone()).expect("utf8 fixture");
     assert!(
-        !String::from_utf8(golden.clone())
-            .expect("utf8 fixture")
-            .contains("output_level"),
+        !golden_text.contains("output_level"),
         "the base output level is the omitted default"
+    );
+    assert!(
+        !golden_text.contains("run_ordinal"),
+        "zero run ordinals are the omitted default"
     );
     let decoded = IndexGramsFeature::from_value(
         &serde_json::from_slice(&golden).expect("parse golden feature value"),
     )
     .expect("decode golden feature value");
     assert_eq!(decoded, feature);
-    assert_eq!(decoded.fold.expect("fold state").output_level, 2);
+    assert_eq!(decoded.next_run_ordinal, 0);
+    let fold = decoded.fold.expect("fold state");
+    assert_eq!(fold.output_level, 2);
+    assert_eq!(fold.run_ordinal, 0);
 }
 
 #[test]

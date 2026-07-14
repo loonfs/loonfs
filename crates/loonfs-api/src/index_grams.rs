@@ -364,6 +364,14 @@ pub struct GramIndexFoldState {
         skip_serializing_if = "fold_output_level_is_base"
     )]
     pub output_level: u32,
+    /// Run ordinal stamped on every output segment of this fold, allocated
+    /// from [`IndexGramsFeature::next_run_ordinal`] when the fold starts and
+    /// carried here so a resumed fold keeps its identity: one fold's outputs
+    /// are one logical run, however many steps and segments they span.
+    /// Absent means zero, so in-flight states serialized before ordinals
+    /// existed complete as part of the legacy ordinal-zero run.
+    #[serde(default, skip_serializing_if = "run_ordinal_is_zero")]
+    pub run_ordinal: u64,
 }
 
 /// The base level tiered fold outputs are stamped with, and therefore the
@@ -377,6 +385,13 @@ fn default_fold_output_level() -> u32 {
 
 fn fold_output_level_is_base(output_level: &u32) -> bool {
     *output_level == default_fold_output_level()
+}
+
+/// Zero run ordinals are omitted from the wire form: absent means zero, so
+/// values written before ordinals existed keep decoding, and re-encoding
+/// them stays byte-identical.
+fn run_ordinal_is_zero(run_ordinal: &u64) -> bool {
+    *run_ordinal == 0
 }
 
 /// The `index.grams` value in the namespace features map: the format
@@ -397,6 +412,14 @@ pub struct IndexGramsFeature {
     /// In-progress partitioned fold, when one is mid-walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold: Option<GramIndexFoldState>,
+    /// Next run ordinal to allocate. Every publish that creates gram
+    /// segments — a build unit or a fold — stamps this value on the whole
+    /// batch (the descriptors' `run_ordinal`) and increments the counter in
+    /// the same manifest, so distinct ordinals at a level count logical
+    /// runs regardless of how many segments a batch was split into. Absent
+    /// means zero, the pre-ordinal wire form.
+    #[serde(default, skip_serializing_if = "run_ordinal_is_zero")]
+    pub next_run_ordinal: u64,
 }
 
 impl IndexGramsFeature {
@@ -406,6 +429,7 @@ impl IndexGramsFeature {
             built_through_seq,
             backfill_cursor: None,
             fold: None,
+            next_run_ordinal: 0,
         }
     }
 
@@ -586,6 +610,7 @@ mod tests {
             built_through_seq: ChangeSeq(41290),
             backfill_cursor: Some("revision-00000000000000000007".to_owned()),
             fold: None,
+            next_run_ordinal: 3,
         };
         assert!(!feature.is_materialized());
         let decoded = IndexGramsFeature::from_value(&feature.to_value()).expect("decode");
@@ -622,10 +647,14 @@ mod tests {
                 outputs: vec!["idx_c".to_owned()],
                 cursor: "gram-616263-00000000000000000002".to_owned(),
                 output_level: 1,
+                run_ordinal: 5,
             }),
+            next_run_ordinal: 6,
         };
         let value = mid_fold.to_value();
         assert_eq!(value["fold"]["output_level"], 1);
+        assert_eq!(value["fold"]["run_ordinal"], 5);
+        assert_eq!(value["next_run_ordinal"], 6);
         assert_eq!(
             IndexGramsFeature::from_value(&value).expect("decode mid fold"),
             mid_fold
@@ -659,8 +688,26 @@ mod tests {
             }
         });
         let decoded = IndexGramsFeature::from_value(&legacy).expect("decode legacy fold");
+        assert_eq!(decoded.next_run_ordinal, 0);
         let fold = decoded.fold.expect("fold state");
         assert_eq!(fold.output_level, 2);
         assert_eq!(fold.snapshot, vec!["idx_a".to_owned()]);
+        // Pre-ordinal states decode to the legacy ordinal-zero run.
+        assert_eq!(fold.run_ordinal, 0);
+    }
+
+    #[test]
+    fn run_ordinals_default_to_zero_and_zero_is_omitted_from_the_wire() {
+        // Absent-means-zero in both directions: a fresh feature serializes
+        // without either ordinal field (the pre-ordinal wire form), and
+        // pre-ordinal values keep decoding as ordinal zero.
+        let feature = IndexGramsFeature::new(ChangeSeq(1));
+        assert_eq!(feature.next_run_ordinal, 0);
+        let value = feature.to_value();
+        assert!(value.get("next_run_ordinal").is_none());
+        assert_eq!(
+            IndexGramsFeature::from_value(&value).expect("round trip"),
+            feature
+        );
     }
 }

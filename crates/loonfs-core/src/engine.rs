@@ -569,11 +569,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Runs at most one gram index fold unit: delta segments past the
-    /// policy threshold merge into a fresh mid run, and accumulated mid
-    /// runs merge together with the base into a fresh base, each fold
-    /// ending in manifest publications that swap the consumed references
-    /// out for the outputs.
+    /// Runs at most one gram index fold unit: delta runs past the policy
+    /// threshold merge into a fresh mid run, and accumulated mid runs
+    /// merge together with the base into a fresh base, each fold ending
+    /// in manifest publications that swap the consumed references out
+    /// for the outputs.
     pub async fn fold_grams_index_step(
         &self,
         policy: crate::checkpoint::GramIndexBuildPolicy,
