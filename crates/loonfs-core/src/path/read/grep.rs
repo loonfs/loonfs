@@ -195,8 +195,10 @@ impl GramLookup {
 /// One gram's postings from one segment: bloom filter first (the inline
 /// copy when the descriptor carries one — no fetch at all — otherwise the
 /// cached filter block), then only the data blocks the segment index
-/// names for the gram's key range. Every fetched section resolves through
-/// the shared decoded-block cache when one is attached.
+/// names for the gram's key range, loaded concurrently in chunks of
+/// [`MAX_GREP_READ_IO`] (the cap applies per probe). Every fetched
+/// section resolves through the shared decoded-block cache when one is
+/// attached.
 async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -243,29 +245,37 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     .await?;
     let range =
         index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
-    for entry in &entries[range] {
-        let block = load_index_segment_data_block(
-            store,
-            table_cache,
-            CacheAdmission::Admit,
-            &descriptor.object_key,
-            &descriptor.payload_checksum,
-            &entry.block,
-        )
+    // The range's blocks are independent ranged GETs, so they fan out
+    // instead of paying one round trip each; `try_join_all` returns them
+    // in entry order and rows fold in that order, so assembly stays
+    // deterministic even though the posting union is order-independent.
+    for chunk in entries[range].chunks(MAX_GREP_READ_IO) {
+        let blocks = try_join_all(chunk.iter().map(|entry| {
+            load_index_segment_data_block(
+                store,
+                table_cache,
+                CacheAdmission::Admit,
+                &descriptor.object_key,
+                &descriptor.payload_checksum,
+                &entry.block,
+            )
+        }))
         .await?;
-        for row in &block.rows {
-            let IndexRow::GramPostings { gram: row_gram, .. } = row;
-            if *row_gram != gram_lookup.gram {
-                continue;
+        for block in blocks {
+            for row in &block.rows {
+                let IndexRow::GramPostings { gram: row_gram, .. } = row;
+                if *row_gram != gram_lookup.gram {
+                    continue;
+                }
+                let batch = row.postings().map_err(|error| {
+                    index_segment_corrupt(&descriptor.object_key, "posting batch", &error)
+                })?;
+                postings.extend(
+                    batch
+                        .into_iter()
+                        .map(|posting| (posting.inode_id, posting.revision_no)),
+                );
             }
-            let batch = row.postings().map_err(|error| {
-                index_segment_corrupt(&descriptor.object_key, "posting batch", &error)
-            })?;
-            postings.extend(
-                batch
-                    .into_iter()
-                    .map(|posting| (posting.inode_id, posting.revision_no)),
-            );
         }
     }
     Ok(postings)
@@ -426,6 +436,16 @@ pub(super) struct VisiblePathChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
+    use loonfs_api::wire::index_grams::GramPosting;
+    use loonfs_api::wire::manifest::hex_encode_bytes;
+    use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+    use loonfs_api::{sha256_digest, IndexSegmentId};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn pattern(text: &str) -> regex::bytes::Regex {
         regex::bytes::Regex::new(text).expect("pattern")
@@ -459,5 +479,179 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line_number, 2);
         assert_eq!(matches[0].line, "two needle");
+    }
+
+    /// Tracks how many GETs are in flight against the store at once. The
+    /// yield before each forwarded read lets sibling fetches issued in
+    /// the same fan-out begin before this one completes, so the peak
+    /// observes overlap exactly when the caller issued the GETs
+    /// concurrently; serial callers can never raise it above one.
+    #[derive(Debug)]
+    struct InFlightGetProbeStore {
+        inner: LocalFsStore,
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl InFlightGetProbeStore {
+        fn new(root: &std::path::Path) -> Self {
+            Self {
+                inner: LocalFsStore::new(root).expect("create local-fs store"),
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            }
+        }
+
+        fn peak_in_flight(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+
+        async fn probed<T, F>(&self, read: F) -> T
+        where
+            F: std::future::Future<Output = T>,
+        {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            let result = read.await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for InFlightGetProbeStore {
+        async fn head(
+            &self,
+            key: &str,
+        ) -> std::result::Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> std::result::Result<Option<ObjectBody>, ObjectStoreError> {
+            self.probed(self.inner.get_with_metadata(key)).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> std::result::Result<Option<Bytes>, ObjectStoreError> {
+            self.probed(self.inner.get(key, range)).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> std::result::Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> std::result::Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, std::result::Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
+
+    /// One probe whose key range spans many data blocks must load those
+    /// blocks concurrently, within [`MAX_GREP_READ_IO`], and still
+    /// assemble the postings the serial walk produced.
+    ///
+    /// The segment is built directly with a one-byte block target so each
+    /// posting row closes its own data block: production blocks target 64
+    /// KiB, so a single gram's range only spans several blocks after tens
+    /// of thousands of postings — far past what a test corpus can write —
+    /// and the build policy's `max_rows_per_segment` splits segments,
+    /// never blocks. Block layout is a read-side contract the descriptor
+    /// fully describes, so a reader must serve any valid layout.
+    #[tokio::test]
+    async fn a_probes_data_block_loads_overlap_within_the_read_cap() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = InFlightGetProbeStore::new(temp_dir.path());
+        let namespace_id = NamespaceId::parse("probe-fan-out").expect("namespace id");
+        let gram = Gram(*b"nee");
+
+        // Sixty-four single-posting rows for one gram: with the one-byte
+        // block target every row lands in its own data block, so the
+        // gram's key range names sixty-four blocks — four full fan-out
+        // chunks at the current cap.
+        let expected: BTreeSet<(InodeId, RevisionNo)> =
+            (1..=64u64).map(|i| (InodeId(i), RevisionNo(1))).collect();
+        let mut builder = SegmentBlocksBuilder::new(1);
+        for (inode_id, revision_no) in &expected {
+            let row = IndexRow::gram_postings(
+                gram,
+                &[GramPosting {
+                    inode_id: *inode_id,
+                    revision_no: *revision_no,
+                }],
+            )
+            .expect("build posting row");
+            builder
+                .push(&row.row_key(), &row.filter_key(), &row)
+                .expect("push row");
+        }
+        let built = builder.finish().expect("finish segment");
+
+        let object_key = "namespaces/probe-fan-out/metadata/indexes/seg-probe.idx.zst";
+        store
+            .put(
+                object_key,
+                Bytes::from(built.bytes.clone()),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("write segment object");
+        let filter_start = built.filter.offset as usize;
+        let filter_inline = hex_encode_bytes(
+            &built.bytes[filter_start..filter_start + built.filter.stored_len as usize],
+        );
+        let descriptor = IndexFileRef {
+            owner_namespace_id: namespace_id,
+            segment_id: IndexSegmentId::generate(),
+            object_key: object_key.to_owned(),
+            family: INDEX_FAMILY_GRAMS.to_owned(),
+            run_seq: ChangeSeq(1),
+            run_ordinal: 0,
+            level: 0,
+            segment_index: 0,
+            row_count: built.row_count,
+            min_key: built.min_key.clone(),
+            max_key: built.max_key.clone(),
+            index_block: built.index,
+            filter_block: built.filter,
+            // Inline so the probe starts at the index block: the one GET
+            // issued before the data fan-out, which therefore can never
+            // raise the peak above one by itself.
+            filter_inline: Some(filter_inline),
+            payload_checksum: sha256_digest(&built.bytes),
+        };
+
+        let postings = segment_postings_for_gram(&store, None, &descriptor, &GramLookup::new(gram))
+            .await
+            .expect("probe postings");
+
+        assert_eq!(postings, expected, "every block's posting must arrive");
+        let peak = store.peak_in_flight();
+        assert!(
+            peak > 1,
+            "a multi-block probe's data-block loads must overlap, got a \
+             serial peak of {peak}"
+        );
+        assert!(
+            peak <= MAX_GREP_READ_IO,
+            "the probe's fan-out must respect the grep read cap, got {peak}"
+        );
     }
 }
