@@ -175,14 +175,20 @@ Two rules keep the cycle honest:
   operator action, so this is one refusal, not a scheduler.
 
 When delta index segments accumulate past the same threshold the
-metadata families use, reorganization folds them. A gram base can
-grow far past what any metadata family reaches, so index folds
-are partitioned rather than whole-family: a fold snapshots the
-segment set it will consume, then walks the gram keyspace in
-bounded row-count steps, each step merging one key range from the
-snapshot into fresh base segments and publishing a manifest that
-records the outputs and the resume cursor inside the feature
-value. Until the walk completes, snapshot inputs and outputs are
+metadata families use, a fold consumes them. A gram base can grow
+far past what any metadata family reaches, so index folds differ
+from reorganization in two ways. They are tiered: deltas fold
+into a mid run, and only accumulated mid runs fold — together
+with the base — into a fresh base, so the whole-index rewrite
+happens once per mid-run threshold of delta folds instead of on
+every delta threshold; that amortization is what keeps fold
+amplification logarithmic. And they are partitioned rather than
+whole-family: a fold snapshots the segment set it will consume,
+then walks the gram keyspace in bounded row-count steps, each
+step merging one key range from the snapshot into fresh segments
+at the fold's output tier and publishing a manifest that records
+the outputs and the resume cursor inside the feature value.
+Until the walk completes, snapshot inputs and outputs are
 both referenced and both served — postings are add-only, so
 readers that union them see duplicates, never gaps — and segments
 that arrive during the fold stay out of the snapshot and survive

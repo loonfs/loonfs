@@ -354,6 +354,29 @@ pub struct GramIndexFoldState {
     /// Row key the next step resumes from (inclusive); empty at the start
     /// of the keyspace.
     pub cursor: String,
+    /// Manifest level stamped on the fold's output segments: the mid tier
+    /// for a delta fold, the base tier for a mid-plus-base fold. Absent at
+    /// the base level, so states serialized before tiered folds existed —
+    /// which always snapshotted every live segment — complete as the
+    /// whole-set base rewrites their writer intended.
+    #[serde(
+        default = "default_fold_output_level",
+        skip_serializing_if = "fold_output_level_is_base"
+    )]
+    pub output_level: u32,
+}
+
+/// The base level tiered fold outputs are stamped with, and therefore the
+/// [`GramIndexFoldState::output_level`] a state that predates the field
+/// decodes to. The writer's full level scheme (delta, mid, base) lives
+/// with the fold trigger in `loonfs-core`; this codec only needs the value
+/// the wire form omits.
+fn default_fold_output_level() -> u32 {
+    2
+}
+
+fn fold_output_level_is_base(output_level: &u32) -> bool {
+    *output_level == default_fold_output_level()
 }
 
 /// The `index.grams` value in the namespace features map: the format
@@ -586,5 +609,58 @@ mod tests {
         });
         let decoded = IndexGramsFeature::from_value(&additive).expect("decode additive");
         assert_eq!(decoded.built_through_seq, ChangeSeq(3));
+    }
+
+    #[test]
+    fn fold_state_output_level_round_trips_and_is_omitted_at_the_base() {
+        let mid_fold = IndexGramsFeature {
+            version: INDEX_GRAMS_FORMAT_VERSION,
+            built_through_seq: ChangeSeq(7),
+            backfill_cursor: None,
+            fold: Some(GramIndexFoldState {
+                snapshot: vec!["idx_a".to_owned(), "idx_b".to_owned()],
+                outputs: vec!["idx_c".to_owned()],
+                cursor: "gram-616263-00000000000000000002".to_owned(),
+                output_level: 1,
+            }),
+        };
+        let value = mid_fold.to_value();
+        assert_eq!(value["fold"]["output_level"], 1);
+        assert_eq!(
+            IndexGramsFeature::from_value(&value).expect("decode mid fold"),
+            mid_fold
+        );
+
+        // A base fold serializes without the field, byte-identical to the
+        // pre-tiering wire form, so the omitted level must be the base.
+        let mut base_fold = mid_fold.clone();
+        base_fold.fold.as_mut().expect("fold state").output_level = 2;
+        let value = base_fold.to_value();
+        assert!(value["fold"].get("output_level").is_none());
+        assert_eq!(
+            IndexGramsFeature::from_value(&value).expect("decode base fold"),
+            base_fold
+        );
+    }
+
+    #[test]
+    fn fold_state_without_output_level_decodes_at_the_base() {
+        // The exact shape pre-tiering writers persisted: snapshot, outputs,
+        // cursor, and no output level. Those folds snapshot every live
+        // segment, so completing them at the base level is what their
+        // writer meant.
+        let legacy = serde_json::json!({
+            "version": 1,
+            "built_through_seq": 5,
+            "fold": {
+                "snapshot": ["idx_a"],
+                "outputs": [],
+                "cursor": ""
+            }
+        });
+        let decoded = IndexGramsFeature::from_value(&legacy).expect("decode legacy fold");
+        let fold = decoded.fold.expect("fold state");
+        assert_eq!(fold.output_level, 2);
+        assert_eq!(fold.snapshot, vec!["idx_a".to_owned()]);
     }
 }

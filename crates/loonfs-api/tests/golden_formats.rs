@@ -26,8 +26,8 @@ use loonfs_api::wire::control::{
     WriterBlock,
 };
 use loonfs_api::wire::index_grams::{
-    decode_gram_postings, encode_gram_postings, Gram, GramPosting, IndexGramsFeature, IndexRow,
-    INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
+    decode_gram_postings, encode_gram_postings, Gram, GramIndexFoldState, GramPosting,
+    IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, IndexFileRef, MetadataFileRef,
@@ -1146,6 +1146,62 @@ fn namespace_manifest_with_index_golden_decodes_to_sample() {
     assert_eq!(feature.built_through_seq, ChangeSeq(2));
     assert!(feature.is_materialized());
     assert_eq!(decoded.payload.index_files[0].family, INDEX_FAMILY_GRAMS);
+}
+
+/// A feature value with an in-flight fold at `output_level`, the durable
+/// state a tiered fold parks between steps.
+fn sample_feature_with_fold(output_level: u32) -> IndexGramsFeature {
+    IndexGramsFeature {
+        version: 1,
+        built_through_seq: ChangeSeq(9),
+        backfill_cursor: None,
+        fold: Some(GramIndexFoldState {
+            snapshot: vec![
+                "idx_0123456789abcdef0123456789abcdef".to_owned(),
+                "idx_00112233445566778899aabbccddeeff".to_owned(),
+            ],
+            outputs: vec!["idx_ffeeddccbbaa99887766554433221100".to_owned()],
+            cursor: "gram-666f78-00000000000000000002".to_owned(),
+            output_level,
+        }),
+    }
+}
+
+#[test]
+fn index_grams_feature_mid_fold_matches_golden_bytes() {
+    let feature = sample_feature_with_fold(1);
+    let encoded = serde_json::to_vec(&feature.to_value()).expect("encode feature value");
+    assert_matches_golden("index_grams_feature_fold_mid.v1.json", &encoded);
+    let decoded = IndexGramsFeature::from_value(
+        &serde_json::from_slice(&read_golden("index_grams_feature_fold_mid.v1.json"))
+            .expect("parse golden feature value"),
+    )
+    .expect("decode golden feature value");
+    assert_eq!(decoded, feature);
+}
+
+#[test]
+fn index_grams_feature_base_fold_golden_omits_the_output_level() {
+    // A base fold serializes without `output_level`, byte-identical to
+    // what pre-tiering writers persisted for their whole-set folds, so
+    // this golden doubles as the legacy-decode pin: a state without the
+    // field must complete at the base level.
+    let feature = sample_feature_with_fold(2);
+    let encoded = serde_json::to_vec(&feature.to_value()).expect("encode feature value");
+    assert_matches_golden("index_grams_feature_fold_base.v1.json", &encoded);
+    let golden = read_golden("index_grams_feature_fold_base.v1.json");
+    assert!(
+        !String::from_utf8(golden.clone())
+            .expect("utf8 fixture")
+            .contains("output_level"),
+        "the base output level is the omitted default"
+    );
+    let decoded = IndexGramsFeature::from_value(
+        &serde_json::from_slice(&golden).expect("parse golden feature value"),
+    )
+    .expect("decode golden feature value");
+    assert_eq!(decoded, feature);
+    assert_eq!(decoded.fold.expect("fold state").output_level, 2);
 }
 
 #[test]

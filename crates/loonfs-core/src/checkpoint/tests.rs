@@ -13,7 +13,7 @@ use super::error::ManifestLoadError;
 use super::index_build::{
     build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
     GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexDisableOutcome, GramIndexEnableOutcome,
-    GramIndexFoldOutcome,
+    GramIndexFoldOutcome, INDEX_GRAMS_BASE_LEVEL, INDEX_GRAMS_DELTA_LEVEL, INDEX_GRAMS_MID_LEVEL,
 };
 use super::load::{
     head_from_manifest, load_manifest_materialization_for_inspection,
@@ -45,7 +45,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::index_grams::{
-    Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_GRAMS_FEATURE_KEY,
+    Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataFileRef,
@@ -6042,6 +6042,32 @@ async fn drain_grams_index(
     }
 }
 
+/// Runs fold steps until one completes, panicking on any outcome that is
+/// not a published step; returns how many steps the walk took.
+async fn drain_grams_fold(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: GramIndexBuildPolicy,
+) -> u32 {
+    let mut steps = 0u32;
+    loop {
+        steps += 1;
+        assert!(steps < 512, "the fold walk must terminate");
+        let report = fold_grams_index_step(store, namespace_id, context, policy)
+            .await
+            .expect("fold step");
+        match report.outcome {
+            GramIndexFoldOutcome::StepPublished { completed, .. } => {
+                if completed {
+                    return steps;
+                }
+            }
+            other => panic!("expected a published fold step, got {other:?}"),
+        }
+    }
+}
+
 fn posting(inode: u64, revision: u64) -> GramPosting {
     GramPosting {
         inode_id: InodeId(inode),
@@ -6414,7 +6440,7 @@ async fn forking_a_lagging_index_restarts_backfill_instead_of_inheriting_a_gap()
 }
 
 #[tokio::test]
-async fn grams_index_fold_merges_delta_segments_into_a_base() {
+async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
     let temp_dir = tempdir().expect("temp dir");
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let namespace_id = NamespaceId::parse("grams-fold").expect("namespace id");
@@ -6510,9 +6536,12 @@ async fn grams_index_fold_merges_delta_segments_into_a_base() {
         let feature = grams_feature(&store, &namespace_id)
             .await
             .expect("feature mid-fold");
-        assert!(
-            feature.fold.is_some(),
-            "an unfinished fold records its cursor in the feature value"
+        let fold = feature
+            .fold
+            .expect("an unfinished fold records its cursor in the feature value");
+        assert_eq!(
+            fold.output_level, INDEX_GRAMS_MID_LEVEL,
+            "a delta fold's output level rides the durable state"
         );
     }
     assert!(steps > 1, "a one-row budget must take several steps");
@@ -6521,16 +6550,19 @@ async fn grams_index_fold_merges_delta_segments_into_a_base() {
         .await
         .expect("feature after fold");
     assert!(feature.fold.is_none(), "a completed fold clears its state");
-    let base_segments = live_index_files(&store, &namespace_id).await;
-    assert!(base_segments
-        .iter()
-        .all(|descriptor| descriptor.level == CHECKPOINT_BASE_RUN_LEVEL));
+    let mid_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        mid_segments
+            .iter()
+            .all(|descriptor| descriptor.level == INDEX_GRAMS_MID_LEVEL),
+        "a delta fold writes mid runs, never a base"
+    );
     let delta_ids: BTreeSet<&str> = delta_segments
         .iter()
         .map(|descriptor| descriptor.segment_id.as_str())
         .collect();
     assert!(
-        base_segments
+        mid_segments
             .iter()
             .all(|descriptor| !delta_ids.contains(descriptor.segment_id.as_str())),
         "the completing step swaps the snapshot out for the outputs"
@@ -6545,15 +6577,632 @@ async fn grams_index_fold_merges_delta_segments_into_a_base() {
         vec![posting(2, 1)]
     );
 
+    // Every step wrote its own output segment, yet they all belong to one
+    // fold and share one run_seq: the mid-run count must say one run, or
+    // step sizing would set the base-fold cadence.
+    assert!(
+        mid_segments.len() > 1,
+        "one-row steps must split the outputs across segments"
+    );
     let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
         .await
         .expect("post-completion fold step");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 0,
+            mid_runs: 1,
+        },
+        "one completed delta fold is one mid run, whatever its segment count"
+    );
+}
+
+#[tokio::test]
+async fn grams_index_delta_fold_leaves_the_base_untouched() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold-tiers").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/alpha.txt",
+        b"alpha shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write alpha");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/bravo.txt",
+        b"bravo shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write bravo");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let build_policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        vec![posting(2, 1), posting(3, 1)]
+    );
+
+    // Two folds seed a level-2 base: the deltas fold into a mid run, then
+    // a mid-run threshold of one folds that mid straight into the base.
+    let delta_fold_policy = GramIndexBuildPolicy {
+        max_l0_segments: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
+    let base_fold_policy = GramIndexBuildPolicy {
+        max_mid_runs: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, base_fold_policy).await;
+    let base_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        !base_segments.is_empty()
+            && base_segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL),
+        "the mid-threshold fold writes the base"
+    );
+    let base_ids: BTreeSet<String> = base_segments
+        .iter()
+        .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+        .collect();
+
+    // Fresh churn: one delta segment per file.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/charlie.txt",
+        b"charlie shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write charlie");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/delta.txt",
+        b"delta shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write delta");
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+    let shared_postings = stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await;
+    assert_eq!(
+        shared_postings,
+        vec![posting(2, 1), posting(3, 1), posting(4, 1), posting(5, 1)]
+    );
+
+    // The delta fold consumes the two deltas and must leave the base
+    // descriptors alone.
+    drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
+    let segments = live_index_files(&store, &namespace_id).await;
+    let surviving_base_ids: BTreeSet<String> = segments
+        .iter()
+        .filter(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL)
+        .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        surviving_base_ids, base_ids,
+        "a delta fold must not touch base segments"
+    );
+    assert!(
+        segments
+            .iter()
+            .any(|descriptor| descriptor.level == INDEX_GRAMS_MID_LEVEL),
+        "delta fold outputs land at the mid level"
+    );
+    assert!(
+        segments
+            .iter()
+            .all(|descriptor| descriptor.level != INDEX_GRAMS_DELTA_LEVEL),
+        "the completing step consumed the delta segments"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        shared_postings,
+        "tiered folding must not change what the index answers"
+    );
+
+    let report = fold_grams_index_step(&store, &namespace_id, &context, delta_fold_policy)
+        .await
+        .expect("post-fold step");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 0,
+            mid_runs: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn grams_index_mid_runs_are_counted_by_run_seq_not_by_segment() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold-runs").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    for (path, content) in [
+        ("/alpha.txt", b"alpha shared\n".as_slice()),
+        ("/bravo.txt", b"bravo shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let build_policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+
+    // A one-row segment cap makes one delta fold emit many mid segments —
+    // the 1M-file shape, where fold outputs split at the row cap.
+    let splitting_fold_policy = GramIndexBuildPolicy {
+        max_l0_segments: 2,
+        max_rows_per_segment: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, splitting_fold_policy).await;
+    let mid_segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        mid_segments.len() > 1
+            && mid_segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_MID_LEVEL),
+        "the row cap must split one fold's outputs across many mid segments"
+    );
+    let first_run_seq = mid_segments[0].run_seq;
+    assert!(
+        mid_segments
+            .iter()
+            .all(|descriptor| descriptor.run_seq == first_run_seq),
+        "one fold's outputs share one run_seq"
+    );
+
+    // Many mid segments, one mid run: a threshold of two must not start a
+    // base fold, or output sizing would set the base-fold cadence.
+    let base_threshold_policy = GramIndexBuildPolicy {
+        max_mid_runs: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    let report = fold_grams_index_step(&store, &namespace_id, &context, base_threshold_policy)
+        .await
+        .expect("fold step below the run threshold");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 0,
+            mid_runs: 1,
+        },
+        "segment splitting must not count toward the mid-run threshold"
+    );
+
+    // A second delta fold lands a second run_seq at the mid level; only
+    // now does the threshold of two start the base fold.
+    for (path, content) in [
+        ("/charlie.txt", b"charlie shared\n".as_slice()),
+        ("/delta.txt", b"delta shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+    let expected_postings = vec![posting(2, 1), posting(3, 1), posting(4, 1), posting(5, 1)];
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected_postings
+    );
+    drain_grams_fold(
+        &store,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy {
+            max_l0_segments: 2,
+            ..GramIndexBuildPolicy::default()
+        },
+    )
+    .await;
+    drain_grams_fold(&store, &namespace_id, &context, base_threshold_policy).await;
+
+    let segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        !segments.is_empty()
+            && segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL),
+        "two mid runs tip the threshold and fold into the base"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected_postings,
+        "run counting must not change what the index answers"
+    );
+    assert_eq!(
+        fold_grams_index_step(&store, &namespace_id, &context, base_threshold_policy)
+            .await
+            .expect("post-fold step")
+            .outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 0,
+            mid_runs: 0,
+        }
+    );
+}
+
+#[tokio::test]
+async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold-base").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    for (path, content) in [
+        ("/alpha.txt", b"alpha shared\n".as_slice()),
+        ("/bravo.txt", b"bravo shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let build_policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+
+    // Seed a base, then a second round of churn folded into a mid run, so
+    // the mid-threshold fold has both tiers to consume.
+    let delta_fold_policy = GramIndexBuildPolicy {
+        max_l0_segments: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
+    let base_fold_policy = GramIndexBuildPolicy {
+        max_mid_runs: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_fold(&store, &namespace_id, &context, base_fold_policy).await;
+    for (path, content) in [
+        ("/charlie.txt", b"charlie shared\n".as_slice()),
+        ("/delta.txt", b"delta shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+    drain_grams_fold(&store, &namespace_id, &context, delta_fold_policy).await;
+
+    let segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        segments
+            .iter()
+            .any(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL)
+            && segments
+                .iter()
+                .any(|descriptor| descriptor.level == INDEX_GRAMS_MID_LEVEL),
+        "the setup must leave both a base and a mid run"
+    );
+    let folded_ids: BTreeSet<String> = segments
+        .iter()
+        .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+        .collect();
+
+    // One row per step forces the base fold across many published steps;
+    // its output level must ride the durable state across every resume.
+    let stepped_base_fold_policy = GramIndexBuildPolicy {
+        max_mid_runs: 1,
+        max_fold_rows_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    let first = fold_grams_index_step(&store, &namespace_id, &context, stepped_base_fold_policy)
+        .await
+        .expect("first base fold step");
     assert!(
         matches!(
-            report.outcome,
-            GramIndexFoldOutcome::NotNeeded { l0_segments: 0 }
+            first.outcome,
+            GramIndexFoldOutcome::StepPublished {
+                completed: false,
+                ..
+            }
         ),
-        "a folded family has no delta segments left"
+        "a one-row budget cannot complete the base fold in one step"
+    );
+    let feature = grams_feature(&store, &namespace_id)
+        .await
+        .expect("feature mid-fold");
+    let fold = feature.fold.expect("fold state in flight");
+    assert_eq!(
+        fold.output_level, INDEX_GRAMS_BASE_LEVEL,
+        "a base fold records the base output level durably"
+    );
+    assert_eq!(
+        fold.snapshot.iter().cloned().collect::<BTreeSet<String>>(),
+        folded_ids,
+        "a base fold snapshots the mids and the base together"
+    );
+
+    // A delta that lands while the fold is mid-walk stays out of the
+    // snapshot and must survive the completing swap.
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/echo.txt",
+        b"echo shared\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write echo");
+    let build = build_grams_index_step(&store, &namespace_id, &context, build_policy)
+        .await
+        .expect("build step mid-fold");
+    assert!(
+        matches!(build.outcome, GramIndexBuildOutcome::Published { .. }),
+        "builds keep landing deltas while a fold is in flight"
+    );
+    let expected_postings = vec![
+        posting(2, 1),
+        posting(3, 1),
+        posting(4, 1),
+        posting(5, 1),
+        posting(6, 1),
+    ];
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected_postings
+    );
+
+    let mut steps = 1u32;
+    loop {
+        steps += 1;
+        assert!(steps < 512, "the fold walk must terminate");
+        let report =
+            fold_grams_index_step(&store, &namespace_id, &context, stepped_base_fold_policy)
+                .await
+                .expect("base fold step");
+        let completed = match report.outcome {
+            GramIndexFoldOutcome::StepPublished { completed, .. } => completed,
+            other => panic!("expected a published fold step, got {other:?}"),
+        };
+        assert_eq!(
+            stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+            expected_postings,
+            "a mid-fold index must not change what it answers"
+        );
+        if completed {
+            break;
+        }
+        let feature = grams_feature(&store, &namespace_id)
+            .await
+            .expect("feature between steps");
+        assert_eq!(
+            feature.fold.expect("fold state between steps").output_level,
+            INDEX_GRAMS_BASE_LEVEL,
+            "every resumed step re-reads the output level from the feature"
+        );
+    }
+
+    let segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        segments
+            .iter()
+            .all(|descriptor| !folded_ids.contains(descriptor.segment_id.as_str())),
+        "the completing step drops the consumed mids and base"
+    );
+    let delta_survivors = segments
+        .iter()
+        .filter(|descriptor| descriptor.level == INDEX_GRAMS_DELTA_LEVEL)
+        .count();
+    assert_eq!(
+        delta_survivors, 1,
+        "the delta that landed mid-fold survives the swap"
+    );
+    assert!(
+        segments
+            .iter()
+            .filter(|descriptor| descriptor.level != INDEX_GRAMS_DELTA_LEVEL)
+            .all(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL),
+        "base fold outputs land at the base level"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected_postings,
+        "the folded base answers exactly what the tiers answered"
+    );
+
+    let report = fold_grams_index_step(&store, &namespace_id, &context, delta_fold_policy)
+        .await
+        .expect("post-fold step");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 1,
+            mid_runs: 0,
+        }
+    );
+}
+
+#[tokio::test]
+async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-fold-legacy").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    for (path, content) in [
+        ("/alpha.txt", b"alpha shared\n".as_slice()),
+        ("/bravo.txt", b"bravo shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let build_policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+
+    // Rewrite the grams descriptors to the level the pre-tiering fold
+    // stamped on its whole-set outputs — the layout an already-deployed
+    // index carries after v1 folds.
+    let root = read_metadata_root_object(&store, &namespace_id)
+        .await
+        .expect("read root")
+        .envelope
+        .state;
+    let tables = load_verified_manifest_tables(&store, &namespace_id, &root.manifest_object_id)
+        .await
+        .expect("load tables");
+    let mut payload = tables.manifest().payload.clone();
+    payload.manifest_id = ManifestId(payload.manifest_id.0 + 1);
+    payload.manifest_object_id = manifest_object_id(payload.manifest_id);
+    let mut legacy_ids = BTreeSet::new();
+    for descriptor in payload.index_files.iter_mut() {
+        if descriptor.family == INDEX_FAMILY_GRAMS {
+            descriptor.level = CHECKPOINT_BASE_RUN_LEVEL;
+            legacy_ids.insert(descriptor.segment_id.as_str().to_owned());
+        }
+    }
+    assert_eq!(legacy_ids.len(), 2, "one delta landed per backfill step");
+    let legacy = NamespaceManifestEnvelope::from_payload(&context.writer_version, payload)
+        .expect("build legacy manifest");
+    write_namespace_manifest(&store, &legacy)
+        .await
+        .expect("write legacy manifest");
+    publish_metadata_root(
+        &store,
+        &namespace_id,
+        &legacy,
+        &root.manifest_object_id,
+        context.now_ms,
+        &context.writer_version,
+    )
+    .await
+    .expect("publish legacy manifest");
+
+    // Legacy bases count toward the mid-run trigger, not the delta one —
+    // and as one run: both backfill segments carry the enable-time
+    // run_seq, exactly like a v1 whole-set base whose segments all share
+    // their fold's run_seq.
+    let policy = GramIndexBuildPolicy {
+        max_l0_segments: 2,
+        max_mid_runs: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("fold step below thresholds");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 0,
+            mid_runs: 1,
+        },
+        "legacy segments sharing one run_seq are one mid run"
+    );
+
+    // New churn folds into a second mid run; that tips the mid threshold
+    // and the base fold consumes legacy bases and the new mid together.
+    for (path, content) in [
+        ("/charlie.txt", b"charlie shared\n".as_slice()),
+        ("/delta.txt", b"delta shared\n"),
+    ] {
+        write_file_bytes(&store, &namespace_id, path, content, &context, None)
+            .await
+            .expect("write file");
+    }
+    drain_grams_index(&store, &namespace_id, &context, build_policy).await;
+    let expected_postings = vec![posting(2, 1), posting(3, 1), posting(4, 1), posting(5, 1)];
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected_postings
+    );
+    drain_grams_fold(&store, &namespace_id, &context, policy).await;
+    drain_grams_fold(&store, &namespace_id, &context, policy).await;
+
+    let segments = live_index_files(&store, &namespace_id).await;
+    assert!(
+        !segments.is_empty()
+            && segments
+                .iter()
+                .all(|descriptor| descriptor.level == INDEX_GRAMS_BASE_LEVEL),
+        "the base fold rewrites legacy bases to the base level"
+    );
+    assert!(
+        segments
+            .iter()
+            .all(|descriptor| !legacy_ids.contains(descriptor.segment_id.as_str())),
+        "the legacy segments were consumed"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        expected_postings,
+        "self-healing must not change what the index answers"
+    );
+    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("post-fold step");
+    assert_eq!(
+        report.outcome,
+        GramIndexFoldOutcome::NotNeeded {
+            l0_segments: 0,
+            mid_runs: 0,
+        }
     );
 }
 

@@ -66,6 +66,30 @@ const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
 /// object fetch.
 const INLINE_INDEX_FILTER_MAX_BYTES: u32 = 1024;
 
+// Grams-family segment levels. The levels are writer-side fold bookkeeping
+// only: queries, garbage collection, and forks treat every referenced
+// grams segment alike, so tiering never changes what reads see. Folds run
+// in two tiers so base rewrites amortize — deltas fold into a fresh mid
+// run when they pass `max_l0_segments` (cost proportional to recent
+// churn), and mids fold together with the base into a fresh base when
+// they pass `max_mid_runs` (the rare whole-index rewrite).
+
+/// Level of the delta segments build steps write, the metadata L0 level.
+pub(super) const INDEX_GRAMS_DELTA_LEVEL: u32 = CHECKPOINT_L0_RUN_LEVEL;
+/// Level of a completed delta fold's outputs. Deliberately equal to
+/// [`CHECKPOINT_BASE_RUN_LEVEL`], the level pre-tiering folds stamped on
+/// their whole-set outputs: a legacy base counts as one mid run under
+/// this policy (its segments share one `run_seq`), keeps serving reads
+/// unchanged, and once real mid runs accumulate past the threshold the
+/// base fold rewrites it into the level-2 base — a self-healing
+/// migration with no `index.grams` version bump.
+pub(super) const INDEX_GRAMS_MID_LEVEL: u32 = CHECKPOINT_BASE_RUN_LEVEL;
+/// Level of a completed mid-plus-base fold's outputs. A serialized
+/// [`GramIndexFoldState`] without an `output_level` decodes to this level
+/// (the codec's `default_fold_output_level`), because pre-tiering states
+/// always described a whole-set fold.
+pub(super) const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
+
 /// Writer-side budgets for one build step. Work stops at a commit boundary
 /// once a budget is exceeded; the next step resumes from the published
 /// watermark or cursor.
@@ -77,9 +101,16 @@ pub struct GramIndexBuildPolicy {
     pub max_content_bytes_per_step: u64,
     /// Rows per written index segment.
     pub max_rows_per_segment: usize,
-    /// Delta-level segments that trigger a fold into a fresh base, the
-    /// same threshold shape as metadata L0 runs.
+    /// Delta-level segments that trigger a fold into a fresh mid run, the
+    /// same threshold shape as metadata L0 runs. A delta fold reads only
+    /// the deltas, so its cost tracks recent churn, not index size.
     pub max_l0_segments: usize,
+    /// Runs of mid segments that trigger folding the mids and the base
+    /// into a fresh base — the rare step that rewrites the whole index,
+    /// reached once per `max_mid_runs` delta folds. One delta fold's
+    /// outputs are one run (they share one `run_seq`), however many
+    /// segments the per-segment row cap split them into.
+    pub max_mid_runs: usize,
     /// Rows one fold step merges before publishing and yielding; the
     /// cursor in the feature value makes the walk resumable.
     pub max_fold_rows_per_step: usize,
@@ -95,6 +126,7 @@ impl GramIndexBuildPolicy {
             max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),
             max_rows_per_segment: self.max_rows_per_segment.max(1),
             max_l0_segments: self.max_l0_segments.max(1),
+            max_mid_runs: self.max_mid_runs.max(1),
             max_fold_rows_per_step: self.max_fold_rows_per_step.max(1),
         }
     }
@@ -107,6 +139,7 @@ impl Default for GramIndexBuildPolicy {
             max_content_bytes_per_step: 64 * 1024 * 1024,
             max_rows_per_segment: 65_536,
             max_l0_segments: 8,
+            max_mid_runs: 8,
             max_fold_rows_per_step: 131_072,
         }
     }
@@ -173,14 +206,15 @@ pub enum GramIndexFoldOutcome {
     UnsupportedFeatureVersion {
         found: u32,
     },
-    /// Fewer delta segments than the fold threshold and no fold in flight;
-    /// nothing rewritten.
+    /// Delta segments and mid runs both below their fold thresholds and no
+    /// fold in flight; nothing rewritten.
     NotNeeded {
         l0_segments: usize,
+        mid_runs: usize,
     },
-    /// One bounded key range merged into fresh base segments and
-    /// published. `completed` when this step finished the walk and swapped
-    /// the snapshot out for the outputs.
+    /// One bounded key range merged into fresh segments at the fold's
+    /// output level and published. `completed` when this step finished the
+    /// walk and swapped the snapshot out for the outputs.
     StepPublished {
         merged_rows: u64,
         segments_written: u64,
@@ -833,7 +867,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         object_key,
         family: INDEX_FAMILY_GRAMS.to_owned(),
         run_seq,
-        level: CHECKPOINT_L0_RUN_LEVEL,
+        level: INDEX_GRAMS_DELTA_LEVEL,
         segment_index,
         row_count: built.row_count,
         min_key: built.min_key,
@@ -847,15 +881,22 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 
 /// Runs at most one gram index fold step.
 ///
-/// Folds are partitioned and resumable. The first step snapshots the
-/// segment set it will consume. Every step then merges one bounded key
-/// range from that snapshot into fresh base segments and publishes a
-/// manifest recording the outputs plus a resume cursor in the feature
-/// value. Until the final step swaps the snapshot out, both the snapshot
-/// inputs and the fold outputs stay referenced and served; postings are
-/// add-only, so readers that union them see duplicates, never gaps.
-/// Segments written while the fold runs stay out of the snapshot and
-/// survive it.
+/// Folds are tiered, partitioned, and resumable. When no fold is in
+/// flight, delta segments past `max_l0_segments` start a delta fold —
+/// snapshot the deltas only, outputs at the mid level, base untouched —
+/// and otherwise mid runs past `max_mid_runs` start a base fold, which
+/// snapshots the mids and the base together and rewrites them at the base
+/// level. One fold runs at a time: segments that cross a threshold while
+/// another fold is mid-walk wait for the tick after it completes.
+///
+/// The first step snapshots the segment set the fold will consume. Every
+/// step then merges one bounded key range from that snapshot into fresh
+/// segments at the fold's output level and publishes a manifest recording
+/// the outputs plus a resume cursor in the feature value. Until the final
+/// step swaps the snapshot out, both the snapshot inputs and the fold
+/// outputs stay referenced and served; postings are add-only, so readers
+/// that union them see duplicates, never gaps. Segments written while the
+/// fold runs stay out of the snapshot and survive it.
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -926,21 +967,55 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
         None => {
             let l0_segments = grams_segments
                 .iter()
-                .filter(|descriptor| descriptor.level == CHECKPOINT_L0_RUN_LEVEL)
+                .filter(|descriptor| descriptor.level == INDEX_GRAMS_DELTA_LEVEL)
                 .count();
-            if l0_segments < policy.max_l0_segments {
+            // Runs, not segments: one fold's outputs all carry the
+            // snapshot's max run_seq, however many segments the row cap
+            // split them into, so distinct run_seqs at the mid level count
+            // completed delta folds — the same run counting as metadata's
+            // `l0_run_count`. Counting segments would tie the base-fold
+            // cadence to output sizing and collapse the amortization.
+            let mid_runs = grams_segments
+                .iter()
+                .filter(|descriptor| descriptor.level == INDEX_GRAMS_MID_LEVEL)
+                .map(|descriptor| descriptor.run_seq)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            let (snapshot, output_level) = if l0_segments >= policy.max_l0_segments {
+                // Delta fold: consume the deltas only and write one fresh
+                // mid run. Whatever the base has grown to, this fold's
+                // cost is the recent churn.
+                let deltas = grams_segments
+                    .iter()
+                    .filter(|descriptor| descriptor.level == INDEX_GRAMS_DELTA_LEVEL)
+                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+                    .collect();
+                (deltas, INDEX_GRAMS_MID_LEVEL)
+            } else if mid_runs >= policy.max_mid_runs {
+                // Base fold: consume everything already folded once — the
+                // mid runs, the base, and any legacy pre-tiering base
+                // (also at the mid level) — and rewrite it as a fresh
+                // base. The rare expensive step.
+                let folded = grams_segments
+                    .iter()
+                    .filter(|descriptor| descriptor.level != INDEX_GRAMS_DELTA_LEVEL)
+                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+                    .collect();
+                (folded, INDEX_GRAMS_BASE_LEVEL)
+            } else {
                 return Ok(GramIndexFoldReport {
                     namespace_id: namespace_id.clone(),
-                    outcome: GramIndexFoldOutcome::NotNeeded { l0_segments },
+                    outcome: GramIndexFoldOutcome::NotNeeded {
+                        l0_segments,
+                        mid_runs,
+                    },
                 });
-            }
+            };
             GramIndexFoldState {
-                snapshot: grams_segments
-                    .iter()
-                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
-                    .collect(),
+                snapshot,
                 outputs: Vec::new(),
                 cursor: String::new(),
+                output_level,
             }
         }
     };
@@ -977,12 +1052,16 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
     // spec, "Garbage collection", rule 1); reading snapshot blocks writes
     // nothing.
     let publication_started_ms = timer.monotonic_now_ms();
-    let new_segments = write_index_base_segments(
+    let new_segments = write_index_folded_segments(
         store,
         namespace_id,
         run_seq,
         rows,
         policy.max_rows_per_segment,
+        // The level rides the durable fold state, so a fold resumed after
+        // a restart — or by another writer — keeps stamping the level the
+        // trigger chose.
+        fold_state.output_level,
     )
     .await?;
     let segments_written = new_segments.len() as u64;
@@ -1236,18 +1315,20 @@ async fn fetch_index_section<S: ObjectStore + ?Sized>(
     Ok(bytes.to_vec())
 }
 
-/// [`write_index_segments`] at the base level, for fold outputs.
-async fn write_index_base_segments<S: ObjectStore + ?Sized>(
+/// [`write_index_segments`] restamped at a fold's output level: the mid
+/// level for a delta fold, the base level for a mid-plus-base fold.
+async fn write_index_folded_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
     rows: Vec<IndexRow>,
     max_rows_per_segment: usize,
+    output_level: u32,
 ) -> Result<Vec<IndexFileRef>> {
     let mut descriptors =
         write_index_segments(store, namespace_id, run_seq, rows, max_rows_per_segment).await?;
     for descriptor in &mut descriptors {
-        descriptor.level = CHECKPOINT_BASE_RUN_LEVEL;
+        descriptor.level = output_level;
     }
     Ok(descriptors)
 }
@@ -1333,6 +1414,23 @@ async fn write_successor_manifest_from_payload<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_state_codec_default_matches_the_base_level() {
+        // The decode default for a legacy fold state lives in `loonfs-api`
+        // while the level scheme lives here; this pin keeps the two from
+        // drifting apart. A state without an output level described a
+        // whole-set fold and must complete at the base.
+        let legacy: GramIndexFoldState = serde_json::from_value(serde_json::json!({
+            "snapshot": [],
+            "outputs": [],
+            "cursor": ""
+        }))
+        .expect("decode legacy fold state");
+        assert_eq!(legacy.output_level, INDEX_GRAMS_BASE_LEVEL);
+        assert_ne!(INDEX_GRAMS_DELTA_LEVEL, INDEX_GRAMS_MID_LEVEL);
+        assert_ne!(INDEX_GRAMS_MID_LEVEL, INDEX_GRAMS_BASE_LEVEL);
+    }
 
     #[test]
     fn eligibility_accepts_text_and_rejects_binary_and_oversize() {

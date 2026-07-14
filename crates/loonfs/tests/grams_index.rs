@@ -13,6 +13,8 @@ use loonfs::{
 };
 use loonfs_api::decode_grep_cursor;
 use loonfs_api::wire::index_grams::INDEX_GRAMS_MAX_FILE_BYTES;
+use loonfs_api::wire::manifest::decode_namespace_manifest_json;
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -243,6 +245,104 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
         .expect("stale grep after background catch-up");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/delta.txt");
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Ten one-file rounds cross the default delta-fold threshold, so the
+/// maintenance ticks tier the index (delta segments fold into a mid run)
+/// while the rounds run. Grep must answer identically before, across, and
+/// after the transition — levels are fold bookkeeping the read path never
+/// sees.
+#[tokio::test]
+async fn grep_answers_identically_across_tiered_folds() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: loonfs::SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("grams-tiered").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-tiered-writer")
+        .commit_window_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-tiered-admin")
+        .build()
+        .await
+        .expect("build admin");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+
+    let mut expected_paths = Vec::new();
+    for round in 0..10u32 {
+        let path = format!("/notes/needle-{round:02}.txt");
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &path,
+                format!("a needle numbered {round}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write file");
+        admin
+            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+            .await
+            .expect("maintenance tick");
+        expected_paths.push(path);
+
+        let response = reader
+            .grep(&namespace_id, &grep_request("needle"))
+            .await
+            .expect("grep");
+        let mut matched: Vec<String> = response
+            .matches
+            .iter()
+            .map(|found| found.absolute_path.clone())
+            .collect();
+        matched.sort();
+        assert_eq!(
+            matched, expected_paths,
+            "round {round} must return every file written so far"
+        );
+    }
+
+    // The premise of the test: the rounds really did tier the layout.
+    let root = loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+        .await
+        .expect("metadata root");
+    let manifest_key =
+        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+    let manifest_bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read namespace manifest")
+        .expect("namespace manifest exists");
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
+    let grams_levels: Vec<u32> = manifest
+        .payload
+        .index_files
+        .iter()
+        .filter(|descriptor| descriptor.family == "grams")
+        .map(|descriptor| descriptor.level)
+        .collect();
+    assert!(
+        grams_levels.contains(&1),
+        "ten one-delta rounds must fold at least once into a mid run, got levels {grams_levels:?}"
+    );
 
     writer.shutdown_background().await.expect("writer shutdown");
 }
