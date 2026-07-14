@@ -1340,13 +1340,32 @@ fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) 
 /// section resolves through the shared decoded-block cache when one is
 /// attached, so blocks a query or an earlier step already decoded are
 /// memory hits.
+///
+/// The reader holds each decoded block behind its shared [`Arc`] and
+/// serves rows borrowed in place — the [`SegmentKeyRangeBlocks`] shape
+/// metadata scans use — cloning one row per [`Self::pop`], never a
+/// block. That keeps the merge's footprint honest: data blocks resolve
+/// lookup-only, so the one block each reader holds is the merge's whole
+/// share of that segment's decoded bytes, owned here and not counted
+/// again by the cache budget.
+///
+/// [`Arc`]: std::sync::Arc
+/// [`SegmentKeyRangeBlocks`]: super::load::SegmentKeyRangeBlocks
 struct SegmentRangeReader {
     object_key: String,
     payload_checksum: String,
     entries: std::sync::Arc<Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry>>,
     next_entry: usize,
-    pending: std::collections::VecDeque<(String, IndexRow)>,
+    current: Option<CurrentDataBlock>,
     start: String,
+}
+
+/// The one decoded block a [`SegmentRangeReader`] is draining, with the
+/// offset of its next undelivered row — always in bounds while the block
+/// is held; a drained block is dropped, not kept at its end.
+struct CurrentDataBlock {
+    block: std::sync::Arc<loonfs_api::wire::sst_blocks::DecodedDataBlock<IndexRow>>,
+    next_row: usize,
 }
 
 impl SegmentRangeReader {
@@ -1372,7 +1391,7 @@ impl SegmentRangeReader {
             payload_checksum: descriptor.payload_checksum.clone(),
             next_entry: range.start,
             entries,
-            pending: std::collections::VecDeque::new(),
+            current: None,
             start: start.to_owned(),
         })
     }
@@ -1382,13 +1401,25 @@ impl SegmentRangeReader {
     }
 
     fn peek_key(&self) -> Option<&str> {
-        self.pending.front().map(|(key, _)| key.as_str())
+        self.current
+            .as_ref()
+            .map(|current| current.block.row_keys[current.next_row].as_str())
     }
 
+    /// Yields the next row, cloning exactly that row and its key out of
+    /// the shared block; the merge consumes rows by value.
     fn pop(&mut self) -> (String, IndexRow) {
-        self.pending
-            .pop_front()
-            .expect("pop is called only after peek_key returned a key")
+        let current = self
+            .current
+            .as_mut()
+            .expect("pop is called only after peek_key returned a key");
+        let key = current.block.row_keys[current.next_row].clone();
+        let row = current.block.rows[current.next_row].clone();
+        current.next_row += 1;
+        if current.next_row == current.block.row_keys.len() {
+            self.current = None;
+        }
+        (key, row)
     }
 
     async fn refill<S: ObjectStore + ?Sized>(
@@ -1396,7 +1427,7 @@ impl SegmentRangeReader {
         store: &S,
         table_cache: Option<&MetadataTableCache>,
     ) -> Result<()> {
-        while self.pending.is_empty() && self.next_entry < self.entries.len() {
+        while self.current.is_none() && self.next_entry < self.entries.len() {
             let entry = &self.entries[self.next_entry];
             self.next_entry += 1;
             let block = load_index_segment_data_block(
@@ -1408,10 +1439,14 @@ impl SegmentRangeReader {
                 &entry.block,
             )
             .await?;
-            for (key, row) in block.row_keys.iter().zip(&block.rows) {
-                if key.as_str() >= self.start.as_str() {
-                    self.pending.push_back((key.clone(), row.clone()));
-                }
+            // Only the first fetched block can hold rows below the start
+            // key; the binary search over the block's decode-validated
+            // key order is the same bound either way.
+            let next_row = block
+                .row_keys
+                .partition_point(|key| key.as_str() < self.start.as_str());
+            if next_row < block.row_keys.len() {
+                self.current = Some(CurrentDataBlock { block, next_row });
             }
         }
         Ok(())
