@@ -20,7 +20,7 @@
 //! here at index time, never on the write path; the query path applies the
 //! same rule to unindexed data so the search contract stays uniform.
 
-use super::cache::MetadataTableCache;
+use super::cache::{CacheAdmission, MetadataTableCache};
 use super::flush::{
     ensure_metadata_publication_budget, next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT,
 };
@@ -1232,11 +1232,14 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     // Opens are independent — one index-block read per snapshot segment —
     // so they fan out like segment writes do; the per-refill reads during
     // the merge stay serial because the heap order demands them one at a
-    // time. Sections read here insert into the shared cache under the
-    // same keys the query path uses: a base fold streams the whole
-    // snapshot through the byte-budgeted LRU once, which is accepted —
-    // entries are immutable and correctly keyed, and at current scales
-    // the index working set sits far under the cache budget.
+    // time. Sections resolve through the shared cache under the same keys
+    // the query path uses, with a split admission stance: index blocks
+    // admit (KB-scale directories, reused by every later fold step and by
+    // queries), while the data-block stream — the bulk of a snapshot's
+    // bytes, each block visited exactly once per fold walk — is
+    // lookup-only, so a base fold cannot flush the query-hot working set
+    // out of the byte-budgeted LRU. Blocks a query already admitted still
+    // serve the merge from memory.
     let mut readers = Vec::with_capacity(snapshot.len());
     for chunk in snapshot.chunks(MAX_MAINTENANCE_TABLE_IO) {
         readers.extend(
@@ -1399,6 +1402,7 @@ impl SegmentRangeReader {
             let block = load_index_segment_data_block(
                 store,
                 table_cache,
+                CacheAdmission::LookupOnly,
                 &self.object_key,
                 &self.payload_checksum,
                 &entry.block,
