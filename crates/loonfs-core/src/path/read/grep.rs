@@ -4,20 +4,21 @@
 //! (`materialized_view.rs`); this module holds the pieces that need no
 //! access to the view's internals.
 
-use crate::checkpoint::string_prefix_upper_bound;
+use crate::checkpoint::{
+    index_segment_corrupt, load_index_segment_data_block, load_index_segment_filter_block,
+    load_index_segment_index_block, string_prefix_upper_bound, MetadataTableCache,
+};
 use crate::error::{CoreError, Result};
 use crate::query::grep_plan::GramQueryPlan;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
+use futures::future::try_join_all;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::index_grams::{lookup, Gram, IndexRow, INDEX_FAMILY_GRAMS};
 use loonfs_api::wire::manifest::{hex_decode_bytes, IndexFileRef};
-use loonfs_api::wire::sst_blocks::{
-    decode_data_block_rows, decode_filter_block, decode_index_block, index_blocks_for_key_range,
-    BlockHandle,
-};
+use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{ChangeSeq, ContentRef, InodeId, NamespaceId, RevisionNo};
-use loonfs_objectstore::{ByteRange, ObjectStore};
+use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Matches returned per page when the request names no limit.
@@ -35,6 +36,13 @@ pub(super) const GREP_LINE_CAP_BYTES: usize = 512;
 /// resume cursor, so a page's cost is bounded by its own budget rather
 /// than by how many false-positive candidates the plan admits.
 pub(super) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
+/// Concurrent store reads one grep query issues at a time: gram posting
+/// probes fan out across (gram, segment) pairs and candidate content
+/// reads fan out across verified files, both in chunks of this size — the
+/// "small fixed fan-out" the design doc names for candidate reads
+/// (docs/design/content-search-index.md), the read-side sibling of the
+/// maintenance path's `MAX_MAINTENANCE_TABLE_IO` (`checkpoint/runs.rs`).
+pub(super) const MAX_GREP_READ_IO: usize = 8;
 
 /// The revisions a query must examine, keyed by durable inode identity.
 #[derive(Debug, Default)]
@@ -68,16 +76,48 @@ impl GrepCandidates {
 
 /// Evaluates the plan against every gram index segment: for each AND set,
 /// the union of its grams' postings; the candidates are the intersection.
+/// The probes of one AND set — one per surviving (gram, segment) pair —
+/// are independent, so they run concurrently in chunks of
+/// [`MAX_GREP_READ_IO`]; the sets union order-independently, so the
+/// result is identical to a serial evaluation, and an AND set whose
+/// running intersection empties still short-circuits the sets after it.
 pub(super) async fn indexed_candidates<S: ObjectStore + ?Sized>(
     store: &S,
+    table_cache: Option<&MetadataTableCache>,
     segments: &[IndexFileRef],
     plan: &GramQueryPlan,
 ) -> Result<BTreeMap<InodeId, BTreeSet<RevisionNo>>> {
     let mut intersection: Option<BTreeSet<(InodeId, RevisionNo)>> = None;
     for or_set in &plan.required {
+        // Lookup keys derive once per gram; the key-range prune is free
+        // (already in the descriptor), so only surviving probes fan out.
+        let lookups: Vec<GramLookup> = or_set.iter().map(|gram| GramLookup::new(*gram)).collect();
+        let mut probes: Vec<(&GramLookup, &IndexFileRef)> = Vec::new();
+        for gram_lookup in &lookups {
+            for descriptor in segments {
+                if descriptor.family != INDEX_FAMILY_GRAMS {
+                    continue;
+                }
+                if descriptor.max_key.as_str() < gram_lookup.probe.as_str()
+                    || gram_lookup
+                        .upper
+                        .as_deref()
+                        .is_some_and(|upper| descriptor.min_key.as_str() >= upper)
+                {
+                    continue;
+                }
+                probes.push((gram_lookup, descriptor));
+            }
+        }
         let mut set_postings = BTreeSet::new();
-        for gram in or_set {
-            set_postings.extend(postings_for_gram(store, segments, *gram).await?);
+        for chunk in probes.chunks(MAX_GREP_READ_IO) {
+            let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {
+                segment_postings_for_gram(store, table_cache, descriptor, gram_lookup)
+            }))
+            .await?;
+            for batch in batches {
+                set_postings.extend(batch);
+            }
         }
         intersection = Some(match intersection {
             None => set_postings,
@@ -94,97 +134,105 @@ pub(super) async fn indexed_candidates<S: ObjectStore + ?Sized>(
     Ok(candidates)
 }
 
-/// The union of one gram's postings across every segment, pruned per
-/// segment by key range and bloom filter, reading only the blocks the
-/// segment index names.
-async fn postings_for_gram<S: ObjectStore + ?Sized>(
-    store: &S,
-    segments: &[IndexFileRef],
+/// One gram's derived lookup keys: the exact filter probe, the row-key
+/// prefix its postings share, and that prefix's exclusive upper bound.
+struct GramLookup {
     gram: Gram,
+    probe: String,
+    prefix: String,
+    upper: Option<String>,
+}
+
+impl GramLookup {
+    fn new(gram: Gram) -> Self {
+        let probe = lookup::gram_probe(gram);
+        let prefix = lookup::gram_prefix(gram);
+        let upper = string_prefix_upper_bound(&prefix);
+        Self {
+            gram,
+            probe,
+            prefix,
+            upper,
+        }
+    }
+}
+
+/// One gram's postings from one segment: bloom filter first (the inline
+/// copy when the descriptor carries one — no fetch at all — otherwise the
+/// cached filter block), then only the data blocks the segment index
+/// names for the gram's key range. Every fetched section resolves through
+/// the shared decoded-block cache when one is attached.
+async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    descriptor: &IndexFileRef,
+    gram_lookup: &GramLookup,
 ) -> Result<BTreeSet<(InodeId, RevisionNo)>> {
-    let probe = lookup::gram_probe(gram);
-    let prefix = lookup::gram_prefix(gram);
-    let upper = string_prefix_upper_bound(&prefix);
     let mut postings = BTreeSet::new();
-    for descriptor in segments {
-        if descriptor.family != INDEX_FAMILY_GRAMS {
-            continue;
-        }
-        // Key-range pruning first (free, already in the descriptor).
-        if descriptor.max_key.as_str() < probe.as_str()
-            || upper
-                .as_deref()
-                .is_some_and(|upper| descriptor.min_key.as_str() >= upper)
-        {
-            continue;
-        }
-        let filter_bytes = match &descriptor.filter_inline {
-            Some(inline) => hex_decode_bytes(inline).map_err(|error| {
+    let admitted = match &descriptor.filter_inline {
+        Some(inline) => {
+            let filter_bytes = hex_decode_bytes(inline).map_err(|error| {
                 CoreError::NamespaceCorrupt(format!(
                     "index segment `{}` carries undecodable inline filter hex: {error}",
                     descriptor.object_key
                 ))
-            })?,
-            None => fetch_section(store, &descriptor.object_key, &descriptor.filter_block).await?,
-        };
-        let filter = decode_filter_block(&filter_bytes, &descriptor.filter_block)
-            .map_err(|error| segment_corrupt(&descriptor.object_key, "filter block", &error))?;
-        if !filter.may_contain(&probe) {
-            continue;
-        }
-        let index_bytes =
-            fetch_section(store, &descriptor.object_key, &descriptor.index_block).await?;
-        let entries = decode_index_block(&index_bytes, &descriptor.index_block)
-            .map_err(|error| segment_corrupt(&descriptor.object_key, "index block", &error))?;
-        let range = index_blocks_for_key_range(&entries, &prefix, upper.as_deref());
-        for entry in &entries[range] {
-            let block_bytes = fetch_section(store, &descriptor.object_key, &entry.block).await?;
-            let block = decode_data_block_rows::<IndexRow>(&block_bytes, &entry.block)
-                .map_err(|error| segment_corrupt(&descriptor.object_key, "data block", &error))?;
-            for row in &block.rows {
-                let IndexRow::GramPostings { gram: row_gram, .. } = row;
-                if *row_gram != gram {
-                    continue;
-                }
-                let batch = row.postings().map_err(|error| {
-                    segment_corrupt(&descriptor.object_key, "posting batch", &error)
+            })?;
+            let filter =
+                decode_filter_block(&filter_bytes, &descriptor.filter_block).map_err(|error| {
+                    index_segment_corrupt(&descriptor.object_key, "filter block", &error)
                 })?;
-                postings.extend(
-                    batch
-                        .into_iter()
-                        .map(|posting| (posting.inode_id, posting.revision_no)),
-                );
+            filter.may_contain(&gram_lookup.probe)
+        }
+        None => {
+            let filter = load_index_segment_filter_block(
+                store,
+                table_cache,
+                &descriptor.object_key,
+                &descriptor.payload_checksum,
+                &descriptor.filter_block,
+            )
+            .await?;
+            filter.may_contain(&gram_lookup.probe)
+        }
+    };
+    if !admitted {
+        return Ok(postings);
+    }
+    let entries = load_index_segment_index_block(
+        store,
+        table_cache,
+        &descriptor.object_key,
+        &descriptor.payload_checksum,
+        &descriptor.index_block,
+    )
+    .await?;
+    let range =
+        index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
+    for entry in &entries[range] {
+        let block = load_index_segment_data_block(
+            store,
+            table_cache,
+            &descriptor.object_key,
+            &descriptor.payload_checksum,
+            &entry.block,
+        )
+        .await?;
+        for row in &block.rows {
+            let IndexRow::GramPostings { gram: row_gram, .. } = row;
+            if *row_gram != gram_lookup.gram {
+                continue;
             }
+            let batch = row.postings().map_err(|error| {
+                index_segment_corrupt(&descriptor.object_key, "posting batch", &error)
+            })?;
+            postings.extend(
+                batch
+                    .into_iter()
+                    .map(|posting| (posting.inode_id, posting.revision_no)),
+            );
         }
     }
     Ok(postings)
-}
-
-fn segment_corrupt(object_key: &str, what: &str, error: &dyn std::fmt::Display) -> CoreError {
-    CoreError::NamespaceCorrupt(format!(
-        "index segment `{object_key}` carries an unreadable {what}: {error}"
-    ))
-}
-
-async fn fetch_section<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    handle: &BlockHandle,
-) -> Result<Vec<u8>> {
-    let range = ByteRange {
-        start_inclusive: handle.offset,
-        end_exclusive: handle.offset + u64::from(handle.stored_len),
-    };
-    let bytes = store
-        .get(object_key, Some(range))
-        .await
-        .map_err(|error| CoreError::store(object_key, &error))?
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "manifest references missing index segment `{object_key}`"
-            ))
-        })?;
-    Ok(bytes.to_vec())
 }
 
 /// The file revisions committed after the index watermark, newest revision

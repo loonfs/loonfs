@@ -12,7 +12,9 @@
 //!   the resulting manifest under one durable record.
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`index_build`] builds the gram index in budgeted maintenance steps,
-//!   publishing manifests that advance the `index.grams` watermark.
+//!   publishing manifests that advance the `index.grams` watermark, and
+//!   [`index_read`] serves its segments' sections through the shared
+//!   decoded-block cache.
 //! - [`publish`] writes manifest objects and advances `metadata/root.json`
 //!   by compare-and-swap.
 //! - [`load`] and [`validate`] provide envelope-only loading and
@@ -29,6 +31,7 @@ mod create;
 mod error;
 mod flush;
 mod index_build;
+mod index_read;
 mod load;
 mod publish;
 pub(crate) mod record;
@@ -61,6 +64,10 @@ pub(crate) use self::flush::flush_wal;
 pub(crate) use self::index_build::{
     build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
     is_indexable_text_content,
+};
+pub(crate) use self::index_read::{
+    index_segment_corrupt, load_index_segment_data_block, load_index_segment_filter_block,
+    load_index_segment_index_block,
 };
 pub(crate) use self::load::{
     head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,

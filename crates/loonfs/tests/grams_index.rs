@@ -4,11 +4,19 @@
 //! Handle-level lifecycle of the gram index: enable through `FsAdmin`,
 //! build through maintenance ticks, query through `FsReader`, disable.
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, GrepRequest,
     MaintenanceTickOptions, NamespaceId, PutFileOptions,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -220,6 +228,161 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
         .expect("stale grep after background catch-up");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/delta.txt");
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Counts store GETs against gram index segment objects, so tests can
+/// assert how many posting-block reads a query cost.
+#[derive(Debug)]
+struct IndexSegmentGetCountingStore {
+    inner: LocalFsStore,
+    index_segment_gets: AtomicUsize,
+}
+
+impl IndexSegmentGetCountingStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            index_segment_gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn index_segment_get_count(&self) -> usize {
+        self.index_segment_gets.load(Ordering::SeqCst)
+    }
+
+    fn record_if_index_segment(&self, key: &str) {
+        if key.contains("/metadata/indexes/") {
+            self.index_segment_gets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for IndexSegmentGetCountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_if_index_segment(key);
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.record_if_index_segment(key);
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// Index segment blocks are immutable and keyed by payload checksum, so a
+/// reader's decoded-block cache must serve a repeated query's posting
+/// probes without re-fetching the segments it already decoded.
+#[tokio::test]
+async fn repeated_grep_serves_posting_blocks_from_the_table_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
+    let store: loonfs::SharedObjectStore = raw_store.clone();
+    let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-cache-writer")
+        .commit_window_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-cache-admin")
+        .build()
+        .await
+        .expect("build admin");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/alpha.txt",
+            b"a needle in alpha\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write alpha");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/bravo.txt",
+            b"nothing here\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write bravo");
+
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+    for _ in 0..2 {
+        admin
+            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+            .await
+            .expect("maintenance tick");
+    }
+
+    let before_first = raw_store.index_segment_get_count();
+    let first = reader
+        .grep(&namespace_id, &grep_request("needle"))
+        .await
+        .expect("first grep");
+    assert_eq!(first.matches.len(), 1);
+    let after_first = raw_store.index_segment_get_count();
+    assert!(
+        after_first > before_first,
+        "the first grep must read posting blocks from the store"
+    );
+
+    let second = reader
+        .grep(&namespace_id, &grep_request("needle"))
+        .await
+        .expect("second grep");
+    assert_eq!(second.matches, first.matches);
+    let after_second = raw_store.index_segment_get_count();
+    assert_eq!(
+        after_second, after_first,
+        "an identical grep through the same reader must serve every \
+         posting block from the decoded-block cache"
+    );
 
     writer.shutdown_background().await.expect("writer shutdown");
 }
