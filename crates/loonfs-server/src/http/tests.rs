@@ -797,6 +797,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        gram_index_build: crate::config::GramIndexBuildPolicyOverrides::default(),
         background_maintenance: true,
         max_upload_bytes: 256 * 1024 * 1024,
         allow_unauthenticated_remote: false,

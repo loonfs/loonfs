@@ -271,6 +271,7 @@ async fn build_handles_with_metrics_jsonl_path(
             FsBackgroundWork::ManualOnly
         })
         .runtime_cache(config.runtime_cache_config())
+        .gram_index_build(config.gram_index_build_policy())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
     if let Some(recorder) = metrics_recorder.clone() {
@@ -287,6 +288,7 @@ async fn build_handles_with_metrics_jsonl_path(
         // reuses blocks reader traffic already decoded instead of
         // populating a second, default-sized cache.
         .runtime_cache(config.runtime_cache_config())
+        .gram_index_build(config.gram_index_build_policy())
         .shared_metadata_table_cache(&writer)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);

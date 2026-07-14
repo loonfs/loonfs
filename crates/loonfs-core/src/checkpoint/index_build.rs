@@ -98,7 +98,7 @@ pub(super) const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 /// Writer-side budgets for one build step. Work stops at a commit boundary
 /// once a budget is exceeded; the next step resumes from the published
 /// watermark or cursor.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GramIndexBuildPolicy {
     /// Revisions examined per step.
     pub max_files_per_step: usize,
@@ -131,8 +131,11 @@ pub struct GramIndexBuildPolicy {
 impl GramIndexBuildPolicy {
     /// Zero-valued budgets would report progress without doing work (a
     /// zero file budget consumes no commit yet returns up to date); every
-    /// step normalizes to at least one unit of each budget.
-    fn normalized(self) -> Self {
+    /// step normalizes to at least one unit of each budget. Build and fold
+    /// steps normalize their argument themselves; runtimes converting
+    /// external configuration into a policy should still normalize at that
+    /// boundary so the stored policy reads as the one that will run.
+    pub fn normalized(self) -> Self {
         Self {
             max_files_per_step: self.max_files_per_step.max(1),
             max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),

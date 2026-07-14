@@ -10,7 +10,7 @@ use crate::{
     CapabilityDocument, CommitRequest, CommitResponse, CompleteUploadRequest,
     CompleteUploadResponse, ContentRef, CopyOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    InodeId, MoveOptions, MutationResult, NamespaceId, NamespaceSummary,
+    GramIndexBuildPolicy, InodeId, MoveOptions, MutationResult, NamespaceId, NamespaceSummary,
     ObjectStoreMetricsRecorder, PutFileOptions, RestoreRevisionOptions, Result, RevisionNo,
     RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
     TraceStoreKind, UploadContentResponse, UploadId,
@@ -404,6 +404,16 @@ impl FsWriterBuilder {
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;
+        self
+    }
+
+    /// Sets the gram index build budgets this writer's maintenance runs —
+    /// the background catch-up ticks scheduled after writes — instead of
+    /// [`GramIndexBuildPolicy::default`]. Bulk backfills raise the
+    /// per-step budgets so a tick indexes more files per manifest publish.
+    /// Values are normalized to at least one unit per budget.
+    pub fn gram_index_build(mut self, policy: GramIndexBuildPolicy) -> Self {
+        self.core.gram_index_build = policy;
         self
     }
 

@@ -8,11 +8,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, GrepRequest,
-    MaintenanceTickOptions, NamespaceId, PutFileOptions,
+    ChangeSeq, CreateNamespaceOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter,
+    GramIndexBuildPolicy, GrepRequest, MaintenanceTickOptions, NamespaceId, PutFileOptions,
 };
 use loonfs_api::decode_grep_cursor;
-use loonfs_api::wire::index_grams::INDEX_GRAMS_MAX_FILE_BYTES;
+use loonfs_api::wire::index_grams::{
+    IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_MAX_FILE_BYTES,
+};
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -47,6 +49,32 @@ async fn content_blob_keys(store: &loonfs::SharedObjectStore) -> BTreeSet<String
         .into_iter()
         .filter(|key| key.contains("/blobs/sha256/"))
         .collect()
+}
+
+/// The `index.grams` watermark from the namespace's current manifest.
+async fn grams_built_through_seq(
+    store: &loonfs::SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> ChangeSeq {
+    let root = loonfs_core::control::load_namespace_metadata_root_control(&**store, namespace_id)
+        .await
+        .expect("metadata root");
+    let manifest_key =
+        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+    let manifest_bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read namespace manifest")
+        .expect("namespace manifest exists");
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
+    let value = manifest
+        .payload
+        .features
+        .get(INDEX_GRAMS_FEATURE_KEY)
+        .expect("index.grams feature present");
+    IndexGramsFeature::from_value(value)
+        .expect("decode feature value")
+        .built_through_seq
 }
 
 #[tokio::test]
@@ -245,6 +273,89 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
         .expect("stale grep after background catch-up");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/delta.txt");
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// A build policy set through the handle builder reaches the maintenance
+/// tick path: with `max_files_per_step: 3`, one tick's build step consumes
+/// exactly three of the five pending file commits — the watermark lands on
+/// the third put's committed seq — and the next tick consumes the rest.
+/// Under the default 256-file budget the first tick would have caught up
+/// to the head outright, so the intermediate watermark is exactly the
+/// configured budget observed in effect.
+#[tokio::test]
+async fn a_configured_build_policy_bounds_each_ticks_build_step() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: loonfs::SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-config-writer")
+        .commit_window_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-config-admin")
+        .gram_index_build(GramIndexBuildPolicy {
+            max_files_per_step: 3,
+            ..GramIndexBuildPolicy::default()
+        })
+        .build()
+        .await
+        .expect("build admin");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+    // Materialize the (empty) backfill so the ticks below run pure WAL
+    // catch-up, where the file budget maps one-to-one onto the puts.
+    admin
+        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+        .await
+        .expect("materializing tick");
+
+    let mut put_seqs = Vec::new();
+    for index in 0..5u32 {
+        let result = writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/notes/needle-{index}.txt"),
+                format!("a needle numbered {index}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write file");
+        put_seqs.push(result.committed_seq);
+    }
+
+    admin
+        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+        .await
+        .expect("first bounded tick");
+    let after_first = grams_built_through_seq(&store, &namespace_id).await;
+    assert_eq!(
+        after_first, put_seqs[2],
+        "a three-file budget must stop the build step exactly after the \
+         third put's commit"
+    );
+
+    admin
+        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+        .await
+        .expect("second bounded tick");
+    let after_second = grams_built_through_seq(&store, &namespace_id).await;
+    assert_eq!(
+        after_second, put_seqs[4],
+        "the next tick must consume the remaining two commits"
+    );
 
     writer.shutdown_background().await.expect("writer shutdown");
 }

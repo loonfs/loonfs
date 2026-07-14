@@ -65,6 +65,7 @@ pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
     BeginDirectPutUploadTargetResponse, BootstrapNamespaceError, DeleteNamespaceOptions,
     DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, GcConfig, GcReport,
+    GramIndexBuildPolicy,
 };
 
 /// Integration seam: the vocabulary for handing classified mutation work to
