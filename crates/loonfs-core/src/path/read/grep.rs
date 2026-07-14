@@ -93,6 +93,19 @@ impl GrepCandidates {
 /// [`MAX_GREP_READ_IO`]; the sets union order-independently, so the
 /// result is identical to a serial evaluation, and an AND set whose
 /// running intersection empties still short-circuits the sets after it.
+///
+/// Probing also stops once the running intersection fits the page's
+/// verification budget ([`MAX_GREP_VERIFIED_FILES_PER_PAGE`]): further AND
+/// sets could only shrink a candidate set the page can already afford to
+/// verify whole. The invariant that makes this sound: dropping AND
+/// constraints only WIDENS the candidate set, and verification runs the
+/// real pattern over every candidate, so grep results are byte-identical
+/// — the only effect is fewer cold posting reads (a rare literal's 16
+/// single-gram sets typically stop after the first few). The stop rule is
+/// deliberately this simple; a refinement that also stops when an AND set
+/// fails to shrink the intersection materially (common terms whose grams
+/// match nearly everything) is left out until evidence demands a
+/// heuristic.
 pub(super) async fn indexed_candidates<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
@@ -136,6 +149,16 @@ pub(super) async fn indexed_candidates<S: ObjectStore + ?Sized>(
             Some(current) => current.intersection(&set_postings).copied().collect(),
         });
         if intersection.as_ref().is_some_and(BTreeSet::is_empty) {
+            break;
+        }
+        // The budget stop: the intersection holds (inode, revision) pairs,
+        // an upper bound on the files a page could ever verify from it, so
+        // once it fits the per-page verification budget the remaining AND
+        // sets are constraints the page cannot use.
+        if intersection
+            .as_ref()
+            .is_some_and(|candidates| candidates.len() <= MAX_GREP_VERIFIED_FILES_PER_PAGE)
+        {
             break;
         }
     }

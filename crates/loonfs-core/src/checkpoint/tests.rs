@@ -8272,3 +8272,207 @@ async fn grep_scope_stale_cut_and_single_line_files() {
         assert!(response.matches.is_empty());
     }
 }
+
+/// Counts store GETs against gram index segment objects, so tests can
+/// assert how many posting-probe reads a query cost.
+#[derive(Debug)]
+struct IndexSegmentGetCountingStore {
+    inner: LocalFsStore,
+    index_segment_gets: Mutex<usize>,
+}
+
+impl IndexSegmentGetCountingStore {
+    fn new(inner: LocalFsStore) -> Self {
+        Self {
+            inner,
+            index_segment_gets: Mutex::new(0),
+        }
+    }
+
+    fn index_segment_gets(&self) -> usize {
+        *self
+            .index_segment_gets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record_if_index_segment(&self, key: &str) {
+        if key.contains("/metadata/indexes/") {
+            *self
+                .index_segment_gets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for IndexSegmentGetCountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.record_if_index_segment(key);
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_if_index_segment(key);
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// Probing stops once the running intersection fits the page's
+/// verification budget (256 verified files): a rare 18-byte literal plans
+/// sixteen single-gram AND sets, but its first set already narrows the
+/// candidates far below the budget, so the other fifteen sets' posting
+/// probes are never issued. Results stay byte-identical to exhaustive
+/// verification — the stop only widens the candidate set, and the real
+/// pattern still runs over every candidate, including the decoy that
+/// shares the first probed gram.
+#[tokio::test]
+async fn grep_stops_probing_once_the_intersection_fits_the_page_budget() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store =
+        IndexSegmentGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("grep-probe-budget").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Three true matches carrying the full literal, and one decoy that
+    // carries only the first probed gram (`-bu`, the smallest gram of the
+    // literal, probed first because the plan's sets are sorted): the decoy
+    // rides the widened candidate set into verification and is rejected
+    // there, exactly where a full probe's later sets would have pruned it.
+    let pattern_literal = "loon-gram-budget-x";
+    let matching = [
+        ("/alpha.txt", "alpha keeps loon-gram-budget-x notes\n"),
+        ("/bravo.txt", "bravo tracks loon-gram-budget-x drift\n"),
+        ("/charlie.txt", "charlie files loon-gram-budget-x wins\n"),
+    ];
+    for (path, content) in matching {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            path,
+            content.as_bytes(),
+            &context,
+            None,
+        )
+        .await
+        .expect("write matching file");
+    }
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/decoy.txt",
+        b"carbon-buffer ledger\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write decoy");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    drain_grams_index(
+        &store.inner,
+        &namespace_id,
+        &context,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+
+    // The premises that make the GET arithmetic below meaningful: the
+    // pattern plans sixteen single-gram AND sets, and one segment holds
+    // every posting, so a full probe would touch all sixteen (gram,
+    // segment) pairs — at least one segment GET each with no decoded-block
+    // cache attached.
+    let crate::query::grep_plan::GramPlanOutcome::Indexable(plan) =
+        crate::query::grep_plan::plan_pattern(pattern_literal, false).expect("plan")
+    else {
+        panic!("an 18-byte literal must be indexable");
+    };
+    assert_eq!(plan.required.len(), 16, "sixteen single-gram AND sets");
+    assert!(
+        plan.required.iter().all(|set| set.len() == 1),
+        "a literal plans singleton sets"
+    );
+    let grams_segments = live_index_files(&store.inner, &namespace_id)
+        .await
+        .into_iter()
+        .filter(|descriptor| descriptor.family == INDEX_FAMILY_GRAMS)
+        .count();
+    assert_eq!(grams_segments, 1, "one delta run holds every posting");
+
+    let gets_before = store.index_segment_gets();
+    let view = crate::path::read::load_metadata_view(
+        &store,
+        &namespace_id,
+        crate::path::read::ReadLoadContext::latest(),
+    )
+    .await
+    .expect("load view");
+    let response = view
+        .grep(&store, &grep_request(pattern_literal))
+        .await
+        .expect("grep");
+    let probe_gets = store.index_segment_gets() - gets_before;
+
+    // (a) Results are byte-identical to exhaustive verification of the
+    // known corpus: every literal-carrying file's line, nothing from the
+    // decoy the stopped plan admitted as a candidate.
+    assert!(response.tail_scanned);
+    assert!(response.next_cursor.is_none());
+    let found: Vec<(&str, &str)> = response
+        .matches
+        .iter()
+        .map(|found| (found.absolute_path.as_str(), found.line.as_str()))
+        .collect();
+    let expected: Vec<(&str, &str)> = matching
+        .iter()
+        .map(|(path, content)| (*path, content.trim_end_matches('\n')))
+        .collect();
+    assert_eq!(found, expected);
+
+    // (b) Fewer index-segment GETs than a full sixteen-gram probe would
+    // need: sixteen surviving probes cost at least one GET each uncached,
+    // so strictly under sixteen proves sets were skipped (the stopped run
+    // reads one index block and one posting block).
+    assert!(probe_gets > 0, "the probe must read the cold index segment");
+    assert!(
+        probe_gets < 16,
+        "stopping after the first AND set must probe fewer than the plan's \
+         sixteen sets, got {probe_gets} GETs"
+    );
+}
