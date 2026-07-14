@@ -36,13 +36,25 @@ pub(super) const GREP_LINE_CAP_BYTES: usize = 512;
 /// resume cursor, so a page's cost is bounded by its own budget rather
 /// than by how many false-positive candidates the plan admits.
 pub(super) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
-/// Concurrent store reads one grep query issues at a time: gram posting
-/// probes fan out across (gram, segment) pairs and candidate content
-/// reads fan out across verified files, both in chunks of this size — the
-/// "small fixed fan-out" the design doc names for candidate reads
-/// (docs/design/content-search-index.md), the read-side sibling of the
-/// maintenance path's `MAX_MAINTENANCE_TABLE_IO` (`checkpoint/runs.rs`).
-pub(super) const MAX_GREP_READ_IO: usize = 8;
+/// Concurrent gram posting probes one grep query issues at a time: the
+/// (gram, segment) probes of an OR-set fan out in chunks of this size,
+/// each probe a handful of small ranged GETs (filter, index, and posting
+/// blocks). Deliberately below [`MAX_GREP_CONTENT_IO`]: probes multiply
+/// into many small requests per chunk, where a content read is one whole
+/// object. The read-side sibling of the maintenance path's
+/// `MAX_MAINTENANCE_TABLE_IO` (`checkpoint/runs.rs`), which stays at its
+/// own value.
+pub(super) const MAX_GREP_READ_IO: usize = 16;
+/// Concurrent candidate content reads one grep query issues at a time.
+/// Content verification is a whole-object GET of a small file (index
+/// eligibility caps candidates at `INDEX_GRAMS_MAX_FILE_BYTES`), so it
+/// tolerates a wider fan-out than the posting probes: 32 matches the
+/// content-object concurrency the ecosystem already runs against these
+/// stores (bulk content uploads fan out 32 wide). Each batch is
+/// additionally bounded by the remaining
+/// [`MAX_GREP_VERIFIED_FILES_PER_PAGE`] budget, so a page issues at most
+/// that many content reads however wide the batches are.
+pub(super) const MAX_GREP_CONTENT_IO: usize = 32;
 
 /// The revisions a query must examine, keyed by durable inode identity.
 #[derive(Debug, Default)]
