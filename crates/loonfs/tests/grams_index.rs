@@ -11,6 +11,8 @@ use loonfs::{
     CreateNamespaceOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, GrepRequest,
     MaintenanceTickOptions, NamespaceId, PutFileOptions,
 };
+use loonfs_api::decode_grep_cursor;
+use loonfs_api::wire::index_grams::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -18,7 +20,7 @@ use loonfs_objectstore::{
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 fn grep_request(pattern: &str) -> GrepRequest {
@@ -523,6 +525,220 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         panic!("expected a core error, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Records the key of every store GET against a content blob object, so
+/// tests can assert exactly which file contents a query fetched.
+#[derive(Debug)]
+struct ContentBlobGetRecordingStore {
+    inner: LocalFsStore,
+    content_blob_gets: Mutex<Vec<String>>,
+}
+
+impl ContentBlobGetRecordingStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            content_blob_gets: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn content_blob_get_keys(&self) -> Vec<String> {
+        self.content_blob_gets
+            .lock()
+            .expect("content GET log lock")
+            .clone()
+    }
+
+    fn record_if_content_blob(&self, key: &str) {
+        if key.contains("/blobs/sha256/") {
+            self.content_blob_gets
+                .lock()
+                .expect("content GET log lock")
+                .push(key.to_owned());
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ContentBlobGetRecordingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_if_content_blob(key);
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.record_if_content_blob(key);
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// An unindexed-tail candidate larger than the index eligibility cap can
+/// never pass verification, so grep must skip it on its declared size
+/// alone: no content GET for it, unchanged page budgets, and a cursor
+/// that resumes past it.
+#[tokio::test]
+async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(ContentBlobGetRecordingStore::new(temp_dir.path()));
+    let store: loonfs::SharedObjectStore = raw_store.clone();
+    let namespace_id = NamespaceId::parse("grams-oversized-tail").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-oversized-writer")
+        .commit_window_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-oversized-admin")
+        .build()
+        .await
+        .expect("build admin");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/alpha.txt",
+            b"a needle in alpha\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write alpha");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+    for _ in 0..2 {
+        admin
+            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+            .await
+            .expect("maintenance tick");
+    }
+
+    // Oversized and full of matches: were it ever fetched and scanned, it
+    // would flood the results instead of being skipped.
+    let oversized_bytes = b"needle\n".repeat(INDEX_GRAMS_MAX_FILE_BYTES as usize / 7 + 1);
+    assert!(oversized_bytes.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES);
+    let blobs_before_bravo = content_blob_keys(&store).await;
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/bravo.big",
+            &oversized_bytes,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write bravo");
+    let new_blobs: Vec<String> = content_blob_keys(&store)
+        .await
+        .difference(&blobs_before_bravo)
+        .cloned()
+        .collect();
+    let [oversized_content_key] = new_blobs.as_slice() else {
+        panic!("the oversized write must add exactly one content blob, got {new_blobs:?}");
+    };
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/charlie.txt",
+            b"a needle in charlie\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write charlie");
+    // No tick after these writes: bravo and charlie stay in the unindexed
+    // tail, where no gram filter screens candidates before verification.
+
+    let gets_before_greps = raw_store.content_blob_get_keys().len();
+
+    let mut first_page = grep_request("needle");
+    first_page.limit = Some(1);
+    let page_one = reader
+        .grep(&namespace_id, &first_page)
+        .await
+        .expect("first page");
+    assert_eq!(page_one.matches.len(), 1);
+    assert_eq!(page_one.matches[0].absolute_path, "/alpha.txt");
+    let cursor_token = page_one
+        .next_cursor
+        .clone()
+        .expect("a truncated page must carry a cursor");
+
+    // The cursor already stands past the oversized file: fully scanned,
+    // never to be re-verified by a later page.
+    let cursor = decode_grep_cursor(&cursor_token).expect("decode grep cursor");
+    assert!(
+        cursor.last_inode_id > page_one.matches[0].inode_id,
+        "the cursor must have advanced past the oversized candidate"
+    );
+    assert_eq!(cursor.last_byte_offset, u64::MAX);
+
+    let mut second_page = grep_request("needle");
+    second_page.limit = Some(1);
+    second_page.cursor = Some(cursor_token);
+    let page_two = reader
+        .grep(&namespace_id, &second_page)
+        .await
+        .expect("second page");
+    assert_eq!(page_two.matches.len(), 1);
+    assert_eq!(page_two.matches[0].absolute_path, "/charlie.txt");
+    assert!(page_two.next_cursor.is_none());
+    assert!(
+        cursor.last_inode_id < page_two.matches[0].inode_id,
+        "the first page's cursor must sit between alpha and charlie"
+    );
+
+    let content_gets = raw_store.content_blob_get_keys();
+    let fetched_during_greps = &content_gets[gets_before_greps..];
+    assert!(
+        !fetched_during_greps.is_empty(),
+        "the greps must fetch the small candidates' contents"
+    );
+    assert!(
+        fetched_during_greps
+            .iter()
+            .all(|key| key != oversized_content_key),
+        "no content GET may touch the oversized object: {fetched_during_greps:?}"
+    );
 
     writer.shutdown_background().await.expect("writer shutdown");
 }

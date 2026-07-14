@@ -25,7 +25,9 @@ use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use futures::future::join_all;
 use loonfs_api::wire::control::{HeadState, NamespaceState};
-use loonfs_api::wire::index_grams::{IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY};
+use loonfs_api::wire::index_grams::{
+    IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_MAX_FILE_BYTES,
+};
 use loonfs_api::wire::manifest::MetadataTableFamily;
 use loonfs_api::ManifestObjectId;
 use loonfs_api::{
@@ -521,10 +523,21 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     break;
                 }
                 verified_files += 1;
+                // Content past the index eligibility cap can never be
+                // indexable text, so tail and scan candidates skip their
+                // doomed reads on the declared size alone — the same
+                // pre-fetch check the index builder applies
+                // (`checkpoint/index_build.rs`); index-supplied candidates
+                // are under the cap by construction. The candidate still
+                // rides the batch in inode order, so the budget and the
+                // resume cursor advance exactly as if its bytes had been
+                // fetched and refused.
+                let oversized = revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES;
                 batch.push(GrepContentCandidate {
                     inode_id,
                     revision,
                     path: chain.path,
+                    oversized,
                 });
                 if batch.len() == MAX_GREP_READ_IO {
                     break;
@@ -542,12 +555,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             // candidate — the position the serial loop surfaced it. A
             // failure the walk never reaches (the page filled first) is
             // discarded with the rest of the speculative batch; the next
-            // page re-issues that read and reports it then.
-            let contents = join_all(batch.iter().map(|candidate| {
-                read_durable_content_bytes(
-                    store,
-                    &self.content_store_id,
-                    &candidate.revision.content_ref,
+            // page re-issues that read and reports it then. An oversized
+            // candidate carries no read at all (`None`).
+            let contents = join_all(batch.iter().map(|candidate| async move {
+                if candidate.oversized {
+                    return None;
+                }
+                Some(
+                    read_durable_content_bytes(
+                        store,
+                        &self.content_store_id,
+                        &candidate.revision.content_ref,
+                    )
+                    .await,
                 )
             }))
             .await;
@@ -557,6 +577,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             // exactly as the serial walk advanced them.
             for (candidate, content) in batch.iter().zip(contents) {
                 let inode_id = candidate.inode_id;
+                let Some(content) = content else {
+                    // Skipped as oversized: scanned-and-refused without the
+                    // fetch, so the cursor moves past it like any other
+                    // ineligible file.
+                    resume_cursor = Some((inode_id, u64::MAX));
+                    continue;
+                };
                 let content = content?;
                 if !crate::checkpoint::is_indexable_text_content(&content.bytes) {
                     resume_cursor = Some((inode_id, u64::MAX));
@@ -1087,6 +1114,10 @@ struct GrepContentCandidate {
     inode_id: InodeId,
     revision: RevisionRecord,
     path: String,
+    /// The declared content size exceeds the index eligibility cap, so no
+    /// read is scheduled: the file could never pass the post-read text
+    /// check, and the walk skips it as fully scanned.
+    oversized: bool,
 }
 
 fn validate_file_revisions_cursor(
