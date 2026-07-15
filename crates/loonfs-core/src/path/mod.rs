@@ -5,4 +5,4 @@ pub(crate) mod query;
 pub(crate) mod read;
 pub(crate) mod write;
 
-pub use helpers::validate_path_for_mutation;
+pub use helpers::{parse_mutation_path, validate_path_for_mutation};

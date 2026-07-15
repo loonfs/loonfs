@@ -16,7 +16,7 @@
 //! this crate with caching and batching.
 //!
 //! ```no_run
-//! use loonfs_api::{CommitId, NamespaceId};
+//! use loonfs_api::{AbsolutePath, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
 //!     NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent,
 //! };
@@ -45,7 +45,7 @@
 //!     &publish_store,
 //!     vec![NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
 //!         commit_id: CommitId::generate(),
-//!         absolute_path: "/plans".to_owned(),
+//!         absolute_path: AbsolutePath::parse("/plans").expect("path"),
 //!     })],
 //!     &context,
 //! );

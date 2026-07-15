@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::v0::BeginUploadRequest;
+use loonfs_api::AbsolutePath;
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
@@ -43,7 +44,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
             vec![NamespaceMutationCandidate::Path(
                 PathMutationIntent::PutFile {
                     commit_id: loonfs_api::CommitId::generate(),
-                    absolute_path: absolute_path.to_owned(),
+                    absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                     content_ref: content.content_ref,
                     behavior: loonfs_api::PutBehavior::NoReplace,
                 },

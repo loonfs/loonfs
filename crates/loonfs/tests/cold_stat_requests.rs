@@ -15,6 +15,7 @@ use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
+use loonfs_api::AbsolutePath;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -146,7 +147,10 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             candidates.push(loonfs::publish::NamespaceMutationCandidate::Path(
                 loonfs::publish::PathMutationIntent::PutFile {
                     commit_id: loonfs::CommitId::generate(),
-                    absolute_path: format!("/tree/dir-000000/file-{index:09}.txt"),
+                    absolute_path: AbsolutePath::parse(format!(
+                        "/tree/dir-000000/file-{index:09}.txt"
+                    ))
+                    .expect("path"),
                     content_ref,
                     behavior: loonfs::PutBehavior::NoReplace,
                 },

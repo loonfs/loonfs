@@ -23,7 +23,7 @@ use loonfs_api::{
         NamespaceManifestEnvelope,
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
-    AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
     NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, UploadId, WriterEpoch,
 };
@@ -301,7 +301,7 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::PutFile {
             commit_id: test_commit_id(commit_id),
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             content_ref: content.content_ref,
             behavior,
         },
@@ -340,7 +340,7 @@ fn create_directory_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::CreateDir {
             commit_id: test_commit_id(commit_id),
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
         },
         context,
     )
@@ -358,7 +358,7 @@ fn delete_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: test_commit_id(commit_id),
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::Recursive,
         },
         context,
@@ -377,7 +377,7 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: test_commit_id(commit_id),
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
         },
         context,
@@ -397,8 +397,8 @@ fn move_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::MovePath {
             commit_id: test_commit_id(commit_id),
-            from_path: from_path.to_owned(),
-            to_path: to_path.to_owned(),
+            from_path: AbsolutePath::parse(from_path).expect("path"),
+            to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: MoveBehavior::NoReplace,
         },
         context,
@@ -418,8 +418,8 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::CopyFilePath {
             commit_id: test_commit_id(commit_id),
-            from_path: from_path.to_owned(),
-            to_path: to_path.to_owned(),
+            from_path: AbsolutePath::parse(from_path).expect("path"),
+            to_path: AbsolutePath::parse(to_path).expect("path"),
         },
         context,
     )
@@ -438,7 +438,7 @@ fn restore_file_revision<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::RestoreRevision {
             commit_id: test_commit_id(commit_id),
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             source_revision_no,
         },
         context,
@@ -1559,7 +1559,7 @@ async fn path_put_file_uses_checksum_metadata_for_content_validation() {
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
-                absolute_path: "/docs/hello.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/hello.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: PutBehavior::NoReplace,
             },
@@ -1590,13 +1590,13 @@ async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
         vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
-                absolute_path: "/docs/b.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: PutBehavior::NoReplace,
             }),
@@ -1644,7 +1644,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         vec![NamespaceMutationCandidate::PathWithContentAdmission {
             intent: PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
-                absolute_path: "/docs/admitted.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/admitted.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: PutBehavior::NoReplace,
             },
@@ -1696,7 +1696,7 @@ async fn expired_content_admission_falls_back_to_durable_validation() {
         vec![NamespaceMutationCandidate::PathWithContentAdmission {
             intent: PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-expired-admission").expect("valid commit id"),
-                absolute_path: "/docs/expired.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/expired.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: PutBehavior::NoReplace,
             },
@@ -1964,12 +1964,12 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch(vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
-                absolute_path: "/docs/cycled.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
-                absolute_path: "/docs/cycled.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                 content_ref: staged.content_ref,
                 behavior: PutBehavior::NoReplace,
             }),
@@ -2692,7 +2692,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         &namespace_id,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("before-delete").expect("valid commit id"),
-            absolute_path: "/keep.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/keep.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: PutBehavior::NoReplace,
         },
@@ -2726,7 +2726,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         &namespace_id,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("after-delete").expect("valid commit id"),
-            absolute_path: "/late.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/late.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: PutBehavior::NoReplace,
         },
@@ -2769,7 +2769,7 @@ async fn fork_clone_survives_source_delete() {
         &source,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
-            absolute_path: "/shared.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/shared.txt").expect("path"),
             content_ref: content.content_ref,
             behavior: PutBehavior::NoReplace,
         },
@@ -2804,7 +2804,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         .expect("stage content");
     let intent = || PathMutationIntent::PutFile {
         commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
-        absolute_path: "/ack.txt".to_owned(),
+        absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: PutBehavior::NoReplace,
     };
@@ -2840,7 +2840,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         .expect("stage content");
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
-        absolute_path: "/retry.txt".to_owned(),
+        absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
         content_ref: content.content_ref,
         behavior: PutBehavior::NoReplace,
     };
@@ -2929,13 +2929,13 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             // Rejected against the durable materialization: nothing was accepted yet.
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
-                absolute_path: "/missing.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
             // Accepted into the batch.
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             }),
@@ -2943,14 +2943,14 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             // in-batch create.
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             }),
             // Alias of the materialization-decided rejection.
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
-                absolute_path: "/missing.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
         ]
@@ -3017,18 +3017,18 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
         vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
-                absolute_path: "/missing.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             }),
@@ -3386,7 +3386,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("put-path").expect("valid commit id"),
-            absolute_path: "/docs/a.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: PutBehavior::NoReplace,
         },
@@ -3401,8 +3401,8 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::MovePath {
             commit_id: CommitId::parse("move-path").expect("valid commit id"),
-            from_path: "/docs/a.txt".to_owned(),
-            to_path: "/docs/b.txt".to_owned(),
+            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: loonfs_api::v0::MoveBehavior::NoReplace,
         },
         &context,
@@ -3416,8 +3416,8 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::CopyFilePath {
             commit_id: CommitId::parse("copy-path").expect("valid commit id"),
-            from_path: "/docs/b.txt".to_owned(),
-            to_path: "/docs/c.txt".to_owned(),
+            from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
         },
         &context,
     )
@@ -3430,7 +3430,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: CommitId::parse("delete-path").expect("valid commit id"),
-            absolute_path: "/docs/b.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
         },
         &context,
@@ -3457,7 +3457,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
 
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-        absolute_path: "/same//path.txt".to_owned(),
+        absolute_path: AbsolutePath::parse("/same//path.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: PutBehavior::NoReplace,
     };
@@ -3469,7 +3469,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         &namespace_id,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-            absolute_path: "/same/path.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: PutBehavior::NoReplace,
         },
@@ -3484,7 +3484,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         &namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-            absolute_path: "/same/path.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
         },
         &context,
@@ -3520,14 +3520,14 @@ async fn path_intents_in_one_batch_see_tentative_state() {
         vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
-                absolute_path: "/docs/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: PutBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
-                from_path: "/docs/a.txt".to_owned(),
-                to_path: "/docs/b.txt".to_owned(),
+                from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }),
         ],
@@ -4514,7 +4514,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
                 commit_id: commit_id.clone(),
-                absolute_path: "/docs/idempotent.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             },
@@ -4536,7 +4536,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
                 commit_id,
-                absolute_path: "/docs/idempotent.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: PutBehavior::NoReplace,
             },

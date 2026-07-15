@@ -1055,7 +1055,7 @@ mod tests {
     use futures::stream::BoxStream;
     use loonfs_api::v0::{CommitOp, CommitRequest};
     use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
-    use loonfs_api::{ChangeSeq, InodeId, PutBehavior};
+    use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, PutBehavior};
     use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
@@ -1532,7 +1532,7 @@ mod tests {
         ));
         let path = NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("path-trace").expect("valid commit id"),
-            absolute_path: "/private/path".to_owned(),
+            absolute_path: AbsolutePath::parse("/private/path").expect("path"),
         });
 
         assert_eq!(operation_class(&commit), "explicit_commit");
@@ -2075,7 +2075,7 @@ mod tests {
         };
         let path_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),
-            absolute_path: "/file.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
             content_ref: staged.content_ref,
             behavior: PutBehavior::NoReplace,
         };

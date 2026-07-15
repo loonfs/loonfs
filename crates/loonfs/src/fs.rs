@@ -996,10 +996,10 @@ impl FsCore {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        // Pre-flight the mutation-path invariant before staging content so an
-        // invalid or root path cannot orphan an already-written content blob;
-        // core re-checks the same invariant when the intent is planned.
-        loonfs_core::path::validate_path_for_mutation(absolute_path)?;
+        // Parse the mutation path before staging content so an invalid or
+        // root path cannot orphan an already-written content blob; the
+        // intent carries the parsed path from here on.
+        let absolute_path = loonfs_core::path::parse_mutation_path(absolute_path)?;
         // The bytes become durable content before the publish is submitted,
         // so the publication queue never waits on a content upload and an
         // upload failure surfaces here with nothing published. A publish
@@ -1035,7 +1035,7 @@ impl FsCore {
             NamespaceMutationCandidate::PathWithContentAdmission {
                 intent: PathMutationIntent::PutFile {
                     commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                    absolute_path: absolute_path.to_owned(),
+                    absolute_path,
                     content_ref: stored.content_ref,
                     behavior: options.behavior,
                 },
@@ -1081,7 +1081,7 @@ impl FsCore {
             namespace_id,
             PathMutationIntent::PutFile {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                absolute_path: absolute_path.to_owned(),
+                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 content_ref,
                 behavior: options.behavior,
             },
@@ -1100,7 +1100,7 @@ impl FsCore {
             namespace_id,
             PathMutationIntent::CreateDir {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                absolute_path: absolute_path.to_owned(),
+                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
             },
         )
         .await
@@ -1120,7 +1120,7 @@ impl FsCore {
             namespace_id,
             PathMutationIntent::DeletePath {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                absolute_path: absolute_path.to_owned(),
+                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 behavior: options.behavior,
             },
         )
@@ -1139,8 +1139,8 @@ impl FsCore {
             namespace_id,
             PathMutationIntent::MovePath {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                from_path: from_path.to_owned(),
-                to_path: to_path.to_owned(),
+                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
+                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
                 behavior: options.behavior,
             },
         )
@@ -1160,8 +1160,8 @@ impl FsCore {
             namespace_id,
             PathMutationIntent::CopyFilePath {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                from_path: from_path.to_owned(),
-                to_path: to_path.to_owned(),
+                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
+                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
             },
         )
         .await
@@ -1179,7 +1179,7 @@ impl FsCore {
             namespace_id,
             PathMutationIntent::RestoreRevision {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                absolute_path: absolute_path.to_owned(),
+                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 source_revision_no,
             },
         )
