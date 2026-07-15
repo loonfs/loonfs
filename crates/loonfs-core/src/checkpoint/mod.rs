@@ -59,6 +59,7 @@ pub use self::index_build::{
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 
+pub(crate) use self::cache::CacheAdmission;
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::index_build::{

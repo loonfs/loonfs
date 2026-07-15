@@ -6,7 +6,7 @@
 
 use crate::checkpoint::{
     index_segment_corrupt, load_index_segment_data_block, load_index_segment_filter_block,
-    load_index_segment_index_block, string_prefix_upper_bound, MetadataTableCache,
+    load_index_segment_index_block, string_prefix_upper_bound, CacheAdmission, MetadataTableCache,
 };
 use crate::error::{CoreError, Result};
 use crate::query::grep_plan::GramQueryPlan;
@@ -212,6 +212,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
         let block = load_index_segment_data_block(
             store,
             table_cache,
+            CacheAdmission::Admit,
             &descriptor.object_key,
             &descriptor.payload_checksum,
             &entry.block,

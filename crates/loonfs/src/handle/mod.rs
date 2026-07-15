@@ -33,6 +33,7 @@ use crate::{
     ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
     StoreConfig, TraceMode, TraceStoreKind,
 };
+use loonfs_core::cache::MetadataTableCache;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::sync::Arc;
 
@@ -50,6 +51,9 @@ struct HandleBuilderCore {
     source: StoreSource,
     commit_window_ms: u64,
     runtime_cache: RuntimeCacheConfig,
+    /// An existing decoded-block cache to share instead of sizing a fresh
+    /// one from `runtime_cache`; see [`FsCore::open_with_background`].
+    shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     trace_mode: TraceMode,
     trace_store_kind: Option<TraceStoreKind>,
     metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
@@ -69,6 +73,7 @@ impl HandleBuilderCore {
             source,
             commit_window_ms: crate::config::DEFAULT_COMMIT_WINDOW_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            shared_metadata_table_cache: None,
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
             metrics_recorder: None,
@@ -109,6 +114,7 @@ impl HandleBuilderCore {
                 trace_store_kind,
             },
             background,
+            self.shared_metadata_table_cache,
         )
     }
 }

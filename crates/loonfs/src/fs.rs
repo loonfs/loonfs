@@ -85,15 +85,25 @@ impl FsInner {
 }
 
 impl FsCore {
+    /// Opens a runtime core. `shared_metadata_table_cache` substitutes an
+    /// existing decoded-block cache for a freshly sized one, so handles
+    /// with distinct actor identities can still share warmed blocks —
+    /// sound across cores because entries are keyed by immutable
+    /// identities (payload checksums and manifest object keys); the
+    /// sharing caller owns the sizing decision, and
+    /// `config.runtime_cache.metadata_table_cache` goes unused.
     pub(crate) fn open_with_background(
         store: SharedObjectStore,
         config: FsConfig,
         background: BackgroundWork,
+        shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     ) -> Result<Self> {
         validate_config(&config)?;
-        let metadata_table_cache = Arc::new(MetadataTableCache::new(
-            config.runtime_cache.metadata_table_cache.clone(),
-        ));
+        let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
+            Arc::new(MetadataTableCache::new(
+                config.runtime_cache.metadata_table_cache.clone(),
+            ))
+        });
         let wal_tail_projection_cache =
             Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
                 max_entries: config.runtime_cache.max_cached_namespaces,
@@ -121,6 +131,12 @@ impl FsCore {
     /// Returns this runtime's config.
     pub(crate) fn config(&self) -> &FsConfig {
         &self.inner.config
+    }
+
+    /// This runtime's shared decoded-block cache handle, for builders
+    /// that open another core sharing it.
+    pub(crate) fn metadata_table_cache(&self) -> Arc<MetadataTableCache> {
+        Arc::clone(&self.inner.metadata_table_cache)
     }
 
     fn record_trace_context(&self, span: &tracing::Span) {
@@ -498,8 +514,12 @@ impl FsCore {
         policy: loonfs_core::GramIndexBuildPolicy,
     ) -> Result<bool> {
         let engine = self.namespace_engine(namespace_id);
+        // The same shared decoded-block cache reads use: index segments
+        // are immutable and keyed by payload checksum, so blocks queries
+        // already decoded serve the maintenance merge from memory.
+        let table_cache = Some(self.inner.metadata_table_cache.as_ref());
         let build = engine
-            .build_grams_index_step(policy)
+            .build_grams_index_step(policy, table_cache)
             .await
             .map_err(RuntimeError::Core)?;
         let mut published = false;
@@ -543,7 +563,7 @@ impl FsCore {
             ),
         );
         let fold = engine
-            .fold_grams_index_step(policy)
+            .fold_grams_index_step(policy, table_cache)
             .await
             .map_err(RuntimeError::Core)?;
         if let loonfs_core::GramIndexFoldOutcome::StepPublished {
@@ -1736,7 +1756,7 @@ mod tests {
     async fn drain_grams_builds(engine: &loonfs_core::NamespaceEngine<crate::SharedObjectStore>) {
         for _ in 0..8 {
             let report = engine
-                .build_grams_index_step(loonfs_core::GramIndexBuildPolicy::default())
+                .build_grams_index_step(loonfs_core::GramIndexBuildPolicy::default(), None)
                 .await
                 .expect("build step");
             match report.outcome {
@@ -1754,7 +1774,7 @@ mod tests {
     ) {
         for _ in 0..64 {
             let report = engine
-                .fold_grams_index_step(policy)
+                .fold_grams_index_step(policy, None)
                 .await
                 .expect("fold step");
             match report.outcome {
@@ -1870,11 +1890,14 @@ mod tests {
             drain_grams_builds(&engine).await;
         }
         let parked = engine
-            .fold_grams_index_step(loonfs_core::GramIndexBuildPolicy {
-                max_l0_runs: 2,
-                max_fold_rows_per_step: 1,
-                ..loonfs_core::GramIndexBuildPolicy::default()
-            })
+            .fold_grams_index_step(
+                loonfs_core::GramIndexBuildPolicy {
+                    max_l0_runs: 2,
+                    max_fold_rows_per_step: 1,
+                    ..loonfs_core::GramIndexBuildPolicy::default()
+                },
+                None,
+            )
             .await
             .expect("first fold step");
         assert!(

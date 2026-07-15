@@ -7,7 +7,10 @@
 use super::build::{
     build_manifest_tables, build_manifest_tables_from_rows, MetadataTableSegmentation,
 };
-use super::cache::{MetadataTableCache, MetadataTableCacheConfig};
+use super::cache::{
+    DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
+    MetadataTableCacheConfig, MetadataTableCacheKey,
+};
 use super::create::load_checkpoint_projection_metadata_state;
 use super::error::ManifestLoadError;
 use super::index_build::{
@@ -45,7 +48,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::index_grams::{
-    Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
+    extract_grams, Gram, GramPosting, IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS,
+    INDEX_GRAMS_FEATURE_KEY,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, lookup_keys, MetadataFileRef,
@@ -53,7 +57,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loonfs_api::wire::sst_blocks::{
-    decode_data_block_rows, decode_index_block, BlockHandle, SegmentBlocksBuilder,
+    decode_data_block_rows, decode_index_block, BlockHandle, DecodedDataBlock, SegmentBlocksBuilder,
 };
 use loonfs_api::{
     ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId, ManifestObjectId,
@@ -6031,7 +6035,7 @@ async fn drain_grams_index(
 ) -> u64 {
     let mut published = 0u64;
     loop {
-        let report = build_grams_index_step(store, namespace_id, context, policy)
+        let report = build_grams_index_step(store, None, namespace_id, context, policy)
             .await
             .expect("build step");
         match report.outcome {
@@ -6054,7 +6058,7 @@ async fn drain_grams_fold(
     loop {
         steps += 1;
         assert!(steps < 512, "the fold walk must terminate");
-        let report = fold_grams_index_step(store, namespace_id, context, policy)
+        let report = fold_grams_index_step(store, None, namespace_id, context, policy)
             .await
             .expect("fold step");
         match report.outcome {
@@ -6073,6 +6077,23 @@ fn posting(inode: u64, revision: u64) -> GramPosting {
         inode_id: InodeId(inode),
         revision_no: RevisionNo(revision),
     }
+}
+
+/// Deterministic lowercase noise whose sliding trigrams are almost all
+/// distinct, so a small file contributes hundreds of index rows; the
+/// trailing marker line gives every generated file one shared gram to
+/// probe.
+fn varied_gram_content(seed: u32, noise_bytes: usize) -> Vec<u8> {
+    let mut content = Vec::with_capacity(noise_bytes + 16);
+    let mut state = seed.wrapping_mul(2654435761).max(1);
+    while content.len() < noise_bytes {
+        // A full-period LCG keeps the letter stream aperiodic at this
+        // scale, so nearby windows rarely repeat a trigram.
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        content.push(b'a' + ((state >> 16) % 26) as u8);
+    }
+    content.extend_from_slice(b"\nshared marker\n");
+    content
 }
 
 #[tokio::test]
@@ -6354,6 +6375,7 @@ async fn grams_index_disable_drops_the_feature_and_references() {
 
     let report = build_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy::default(),
@@ -6518,7 +6540,7 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
     loop {
         steps += 1;
         assert!(steps < 512, "the fold walk must terminate");
-        let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
+        let report = fold_grams_index_step(&store, None, &namespace_id, &context, fold_policy)
             .await
             .expect("fold step");
         let completed = match report.outcome {
@@ -6584,7 +6606,7 @@ async fn grams_index_fold_merges_delta_segments_into_a_mid_run() {
         mid_segments.len() > 1,
         "one-row steps must split the outputs across segments"
     );
-    let report = fold_grams_index_step(&store, &namespace_id, &context, fold_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, fold_policy)
         .await
         .expect("post-completion fold step");
     assert_eq!(
@@ -6674,6 +6696,235 @@ async fn grams_index_fold_steps_consume_equal_row_keys_atomically() {
         expected,
         "every gram's group survives, not just the probe's"
     );
+}
+
+/// Review regression: fold reads used to admit every streamed data block
+/// into the shared LRU, so one fold larger than the byte budget flushed
+/// the query-hot working set. Data blocks now resolve lookup-only: a
+/// pre-warmed block survives a fold whose stream dwarfs the budget, the
+/// fold admits nothing it should not (no evictions at all), and its
+/// outputs are unchanged.
+#[tokio::test]
+async fn a_fold_bigger_than_the_cache_budget_leaves_the_hot_working_set_resident() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = NamespaceId::parse("grams-scan-resistance").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+
+    // Two files of trigram noise: thousands of distinct grams, hence
+    // thousands of merged rows, so the fold's data-block stream exceeds
+    // the budget below many times over (asserted after the fold).
+    for (path, seed) in [("/left.txt", 1u32), ("/right.txt", 2u32)] {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            path,
+            &varied_gram_content(seed, 2048),
+            &context,
+            None,
+        )
+        .await
+        .expect("write varied file");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
+    enable_grams_index(&store, &namespace_id, &context)
+        .await
+        .expect("enable");
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: 1,
+        max_l0_runs: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    drain_grams_index(&store, &namespace_id, &context, policy).await;
+    let shared_before = stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await;
+    assert_eq!(
+        shared_before,
+        vec![posting(2, 1), posting(3, 1)],
+        "the marker line must index both files"
+    );
+
+    // A budget the fold's stream exceeds, pre-warmed with a stand-in for
+    // the query path's hot block. The stand-in's key can collide with
+    // nothing the fold touches, so only eviction could remove it.
+    let budget = 64 * 1024usize;
+    let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+        max_decoded_bytes: budget,
+    });
+    let hot_key = MetadataTableCacheKey {
+        identity: "query-hot-working-set".to_owned(),
+        block_kind: MetadataTableBlockKind::Data,
+        block_offset: 0,
+    };
+    cache.insert(
+        hot_key.clone(),
+        DecodedMetadataTableBlock::Data {
+            block: Arc::new(DecodedDataBlock {
+                row_keys: Vec::new(),
+                rows: Vec::new(),
+            }),
+            decoded_byte_len: 1024,
+        },
+    );
+
+    let mut merged_rows_total = 0u64;
+    let mut steps = 0u32;
+    loop {
+        steps += 1;
+        assert!(steps < 512, "the fold walk must terminate");
+        let report = fold_grams_index_step(&store, Some(&cache), &namespace_id, &context, policy)
+            .await
+            .expect("fold step");
+        match report.outcome {
+            GramIndexFoldOutcome::StepPublished {
+                merged_rows,
+                completed,
+                ..
+            } => {
+                merged_rows_total += merged_rows;
+                if completed {
+                    break;
+                }
+            }
+            other => panic!("expected a published fold step, got {other:?}"),
+        }
+    }
+
+    // The premise: at the cache weight heuristic's 64-byte-per-row floor
+    // alone, the merged rows outweigh the whole budget, so the old
+    // always-admit behavior was guaranteed to evict the hot block.
+    assert!(
+        merged_rows_total * 64 > budget as u64,
+        "the fold must stream more decoded bytes than the budget holds: \
+         {merged_rows_total} rows against {budget} budget bytes"
+    );
+    assert!(
+        cache.get(&hot_key).is_some(),
+        "a maintenance fold must not evict the query-hot working set"
+    );
+    assert_eq!(
+        cache.stats().evictions,
+        0,
+        "the fold's admitted sections (manifest and index blocks) must \
+         fit the budget without displacing anything"
+    );
+    assert_eq!(
+        stored_gram_postings(&store, &namespace_id, Gram(*b"sha")).await,
+        shared_before,
+        "lookup-only reads must not change what the fold writes"
+    );
+}
+
+/// The cache is an accelerator, never a correctness input: one identical
+/// build-and-fold cycle driven with the cache disabled (a zero byte
+/// budget) and one with a live cache must leave indexes that answer
+/// every gram of every written file identically.
+#[tokio::test]
+async fn grams_maintenance_answers_identically_with_and_without_a_cache() {
+    let temp_dir = tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let context = test_context();
+    let zero_cache = MetadataTableCache::new(MetadataTableCacheConfig {
+        max_decoded_bytes: 0,
+    });
+    let live_cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
+    let contents: Vec<Vec<u8>> = (0..3u32)
+        .map(|index| varied_gram_content(index + 7, 512))
+        .collect();
+
+    let zero_ns = NamespaceId::parse("grams-parity-zero").expect("namespace id");
+    let live_ns = NamespaceId::parse("grams-parity-live").expect("namespace id");
+    for (namespace_id, cache) in [(&zero_ns, &zero_cache), (&live_ns, &live_cache)] {
+        bootstrap_namespace(&store, namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        for (index, content) in contents.iter().enumerate() {
+            write_file_bytes(
+                &store,
+                namespace_id,
+                &format!("/file-{index}.txt"),
+                content,
+                &context,
+                None,
+            )
+            .await
+            .expect("write file");
+        }
+        create_checkpoint(&store, namespace_id, &context)
+            .await
+            .expect("checkpoint");
+        enable_grams_index(&store, namespace_id, &context)
+            .await
+            .expect("enable");
+        let policy = GramIndexBuildPolicy {
+            max_files_per_step: 1,
+            max_l0_runs: 2,
+            // A small row budget forces the fold across resumable steps,
+            // so cursor re-opens run through the cached path too.
+            max_fold_rows_per_step: 512,
+            ..GramIndexBuildPolicy::default()
+        };
+        loop {
+            let report =
+                build_grams_index_step(&store, Some(cache), namespace_id, &context, policy)
+                    .await
+                    .expect("build step");
+            match report.outcome {
+                GramIndexBuildOutcome::Published { .. } => {}
+                GramIndexBuildOutcome::UpToDate { .. } => break,
+                other => panic!("unexpected build outcome: {other:?}"),
+            }
+        }
+        let mut steps = 0u32;
+        loop {
+            steps += 1;
+            assert!(steps < 512, "the fold walk must terminate");
+            let report = fold_grams_index_step(&store, Some(cache), namespace_id, &context, policy)
+                .await
+                .expect("fold step");
+            match report.outcome {
+                GramIndexFoldOutcome::StepPublished { completed, .. } => {
+                    if completed {
+                        break;
+                    }
+                }
+                other => panic!("expected a published fold step, got {other:?}"),
+            }
+        }
+        assert!(steps > 1, "the row budget must split the fold into steps");
+    }
+
+    let zero_levels: Vec<u32> = live_index_files(&store, &zero_ns)
+        .await
+        .iter()
+        .map(|descriptor| descriptor.level)
+        .collect();
+    let live_levels: Vec<u32> = live_index_files(&store, &live_ns)
+        .await
+        .iter()
+        .map(|descriptor| descriptor.level)
+        .collect();
+    assert_eq!(
+        zero_levels, live_levels,
+        "both cycles must leave the same segment shape"
+    );
+    let mut grams = BTreeSet::new();
+    for content in &contents {
+        grams.extend(extract_grams(content));
+    }
+    assert!(grams.len() > 500, "the noise must spread across many grams");
+    for gram in grams {
+        assert_eq!(
+            stored_gram_postings(&store, &zero_ns, gram).await,
+            stored_gram_postings(&store, &live_ns, gram).await,
+            "gram {} must answer identically with and without a cache",
+            gram.as_hex()
+        );
+    }
 }
 
 #[tokio::test]
@@ -6806,7 +7057,7 @@ async fn grams_index_delta_fold_leaves_the_base_untouched() {
         "tiered folding must not change what the index answers"
     );
 
-    let report = fold_grams_index_step(&store, &namespace_id, &context, delta_fold_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, delta_fold_policy)
         .await
         .expect("post-fold step");
     assert_eq!(
@@ -6885,9 +7136,10 @@ async fn grams_index_mid_runs_are_counted_by_run_ordinal_not_by_segment() {
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
-    let report = fold_grams_index_step(&store, &namespace_id, &context, base_threshold_policy)
-        .await
-        .expect("fold step below the run threshold");
+    let report =
+        fold_grams_index_step(&store, None, &namespace_id, &context, base_threshold_policy)
+            .await
+            .expect("fold step below the run threshold");
     assert_eq!(
         report.outcome,
         GramIndexFoldOutcome::NotNeeded {
@@ -6939,7 +7191,7 @@ async fn grams_index_mid_runs_are_counted_by_run_ordinal_not_by_segment() {
         "run counting must not change what the index answers"
     );
     assert_eq!(
-        fold_grams_index_step(&store, &namespace_id, &context, base_threshold_policy)
+        fold_grams_index_step(&store, None, &namespace_id, &context, base_threshold_policy)
             .await
             .expect("post-fold step")
             .outcome,
@@ -6997,9 +7249,10 @@ async fn grams_index_backfill_folds_accumulate_distinct_mid_runs() {
     // Two backfill units, then a delta fold, twice — all mid-backfill.
     for _ in 0..2 {
         for _ in 0..2 {
-            let report = build_grams_index_step(&store, &namespace_id, &context, build_policy)
-                .await
-                .expect("backfill step");
+            let report =
+                build_grams_index_step(&store, None, &namespace_id, &context, build_policy)
+                    .await
+                    .expect("backfill step");
             assert!(
                 matches!(
                     report.outcome,
@@ -7030,7 +7283,7 @@ async fn grams_index_backfill_folds_accumulate_distinct_mid_runs() {
         max_mid_runs: 99,
         ..GramIndexBuildPolicy::default()
     };
-    let report = fold_grams_index_step(&store, &namespace_id, &context, probe_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, probe_policy)
         .await
         .expect("probe fold step");
     assert_eq!(
@@ -7119,6 +7372,7 @@ async fn grams_index_one_build_run_split_across_segments_counts_once_in_both_tie
     // more than the mid one.
     let report = fold_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy {
@@ -7161,6 +7415,7 @@ async fn grams_index_one_build_run_split_across_segments_counts_once_in_both_tie
     );
     let report = fold_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy {
@@ -7256,9 +7511,15 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
         max_fold_rows_per_step: 1,
         ..GramIndexBuildPolicy::default()
     };
-    let first = fold_grams_index_step(&store, &namespace_id, &context, stepped_base_fold_policy)
-        .await
-        .expect("first base fold step");
+    let first = fold_grams_index_step(
+        &store,
+        None,
+        &namespace_id,
+        &context,
+        stepped_base_fold_policy,
+    )
+    .await
+    .expect("first base fold step");
     assert!(
         matches!(
             first.outcome,
@@ -7295,7 +7556,7 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
     )
     .await
     .expect("write echo");
-    let build = build_grams_index_step(&store, &namespace_id, &context, build_policy)
+    let build = build_grams_index_step(&store, None, &namespace_id, &context, build_policy)
         .await
         .expect("build step mid-fold");
     assert!(
@@ -7318,10 +7579,15 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
     loop {
         steps += 1;
         assert!(steps < 512, "the fold walk must terminate");
-        let report =
-            fold_grams_index_step(&store, &namespace_id, &context, stepped_base_fold_policy)
-                .await
-                .expect("base fold step");
+        let report = fold_grams_index_step(
+            &store,
+            None,
+            &namespace_id,
+            &context,
+            stepped_base_fold_policy,
+        )
+        .await
+        .expect("base fold step");
         let completed = match report.outcome {
             GramIndexFoldOutcome::StepPublished { completed, .. } => completed,
             other => panic!("expected a published fold step, got {other:?}"),
@@ -7372,7 +7638,7 @@ async fn grams_index_mid_threshold_folds_mids_and_base_into_a_fresh_base() {
         "the folded base answers exactly what the tiers answered"
     );
 
-    let report = fold_grams_index_step(&store, &namespace_id, &context, delta_fold_policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, delta_fold_policy)
         .await
         .expect("post-fold step");
     assert_eq!(
@@ -7463,7 +7729,7 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
-    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, policy)
         .await
         .expect("fold step below thresholds");
     assert_eq!(
@@ -7513,7 +7779,7 @@ async fn grams_index_legacy_bases_count_as_mid_runs_and_fold_into_the_base() {
         expected_postings,
         "self-healing must not change what the index answers"
     );
-    let report = fold_grams_index_step(&store, &namespace_id, &context, policy)
+    let report = fold_grams_index_step(&store, None, &namespace_id, &context, policy)
         .await
         .expect("post-fold step");
     assert_eq!(
@@ -7575,6 +7841,7 @@ async fn fold_refuses_an_unreadable_feature_value() {
 
     let error = fold_grams_index_step(
         &store,
+        None,
         &namespace_id,
         &context,
         GramIndexBuildPolicy::default(),

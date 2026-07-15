@@ -10,7 +10,8 @@
 //! unit-test shape), decoding and CRC-verifying identically either way.
 
 use super::cache::{
-    DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache, MetadataTableCacheKey,
+    CacheAdmission, DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache,
+    MetadataTableCacheKey,
 };
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::index_grams::IndexRow;
@@ -158,9 +159,17 @@ pub(crate) async fn load_index_segment_index_block<S: ObjectStore + ?Sized>(
 
 /// Loads one of an index segment's data blocks, rows decoded as the gram
 /// family's [`IndexRow`].
+///
+/// Data blocks are the one section kind whose caller states a
+/// [`CacheAdmission`]: they are the bulk of a segment's bytes, so a
+/// query admits them for the next query while a maintenance stream
+/// looks them up without displacing that working set. Filter and index
+/// blocks always admit — KB-scale directory sections every reader of a
+/// segment consults first.
 pub(crate) async fn load_index_segment_data_block<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
+    admission: CacheAdmission,
     object_key: &str,
     payload_checksum: &str,
     handle: &BlockHandle,
@@ -176,7 +185,11 @@ pub(crate) async fn load_index_segment_data_block<S: ObjectStore + ?Sized>(
         })
     };
     let block = match table_cache {
-        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
+        Some(cache) => {
+            cache
+                .get_or_fetch_with_admission(&cache_key, fetch, admission)
+                .await?
+        }
         None => fetch().await?,
     };
     match block {

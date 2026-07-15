@@ -842,3 +842,325 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     writer.shutdown_background().await.expect("writer shutdown");
 }
+
+/// Fold steps resolve their merge reads through the same decoded-block
+/// cache queries fill: a reader derived from the writer shares its
+/// runtime core, so a grep that decoded the delta segments must spare the
+/// next fold those segments' store reads.
+///
+/// Two identically shaped delta folds run through one runtime — eight
+/// one-file rounds each, background ticks folding on the eighth. The
+/// first fold runs cold (nothing read those segments before) and is the
+/// in-test control; before the second, a grep warms seven of its eight
+/// inputs. Only the tick that triggers a fold can write its eighth delta,
+/// so that segment is always cold and a zero-read fold is unreachable
+/// through the runtime; strictly fewer reads than the identically shaped
+/// cold fold is the deterministic form of "already-warm blocks are not
+/// re-fetched", and it stays true if segment block layout changes.
+#[tokio::test]
+async fn a_fold_reuses_the_index_blocks_a_grep_already_decoded() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
+    let store: loonfs::SharedObjectStore = raw_store.clone();
+    let namespace_id = NamespaceId::parse("grams-fold-cache").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-fold-writer")
+        .commit_window_ms(0)
+        .background_work(FsBackgroundWork::Enabled)
+        .build()
+        .await
+        .expect("build writer");
+    // The derived reader shares the writer's runtime core, so its greps
+    // fill the cache the writer's background fold steps read through.
+    let reader = writer.reader();
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-fold-admin")
+        .build()
+        .await
+        .expect("build admin");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+
+    // One delta segment per round: every put schedules a background drain
+    // that builds exactly the new revision, and the drain's fold step
+    // tiers the deltas into a mid run on the eighth round.
+    let put_round = |round: u32| {
+        let writer = writer.clone();
+        let namespace_id = namespace_id.clone();
+        async move {
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    &format!("/notes/needle-{round:02}.txt"),
+                    format!("a needle numbered {round}\n").as_bytes(),
+                    PutFileOptions::default(),
+                )
+                .await
+                .expect("write file");
+            writer
+                .wait_for_background_work()
+                .await
+                .expect("background work quiesces");
+        }
+    };
+
+    for round in 1..8u32 {
+        put_round(round).await;
+    }
+    let before_cold_fold = raw_store.index_segment_get_count();
+    put_round(8).await;
+    let cold_fold_gets = raw_store.index_segment_get_count() - before_cold_fold;
+    assert!(
+        cold_fold_gets > 0,
+        "the eighth round's fold must read its snapshot segments from the store"
+    );
+
+    for round in 9..16u32 {
+        put_round(round).await;
+    }
+    // The warm-up: one grep that matches every file decodes the pending
+    // delta segments' index and posting blocks into the shared cache.
+    let warm = reader
+        .grep(&namespace_id, &grep_request("needle"))
+        .await
+        .expect("warming grep");
+    assert_eq!(warm.matches.len(), 15);
+
+    let before_warm_fold = raw_store.index_segment_get_count();
+    put_round(16).await;
+    let warm_fold_gets = raw_store.index_segment_get_count() - before_warm_fold;
+    assert!(
+        warm_fold_gets > 0,
+        "the sixteenth round's fold must still read the delta its own tick wrote"
+    );
+    assert!(
+        warm_fold_gets < cold_fold_gets,
+        "a fold whose snapshot a grep already decoded must serve those \
+         blocks from the table cache: cold fold read {cold_fold_gets} \
+         sections, query-warmed fold read {warm_fold_gets}"
+    );
+
+    // The premise of the comparison: both rounds really did fold, leaving
+    // two mid runs and no deltas.
+    let root = loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+        .await
+        .expect("metadata root");
+    let manifest_key =
+        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+    let manifest_bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read namespace manifest")
+        .expect("namespace manifest exists");
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
+    let grams: Vec<(u32, u64)> = manifest
+        .payload
+        .index_files
+        .iter()
+        .filter(|descriptor| descriptor.family == "grams")
+        .map(|descriptor| (descriptor.level, descriptor.run_seq.0))
+        .collect();
+    assert!(
+        grams.iter().all(|(level, _)| *level == 1),
+        "sixteen one-delta rounds must leave only mid-level segments, got {grams:?}"
+    );
+    let mid_runs: std::collections::BTreeSet<u64> =
+        grams.iter().map(|(_, run_seq)| *run_seq).collect();
+    assert_eq!(
+        mid_runs.len(),
+        2,
+        "each eight-round batch must have folded into its own mid run, got {grams:?}"
+    );
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Tracks how many GETs against gram index segment objects are in flight
+/// at once. The yield before each forwarded read lets sibling fetches
+/// issued in the same fan-out begin before this one completes, so the
+/// peak observes overlap exactly when the caller issued the GETs
+/// concurrently; serial callers can never raise it above one.
+#[derive(Debug)]
+struct InFlightIndexGetProbeStore {
+    inner: LocalFsStore,
+    in_flight: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl InFlightIndexGetProbeStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            in_flight: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+
+    fn peak_in_flight(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    async fn probed<T, F>(&self, key: &str, read: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        if !key.contains("/metadata/indexes/") {
+            return read.await;
+        }
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+        let result = read.await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+}
+
+#[async_trait]
+impl ObjectStore for InFlightIndexGetProbeStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.probed(key, self.inner.get_with_metadata(key)).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.probed(key, self.inner.get(key, range)).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+/// A cold fold — nothing decoded its snapshot before — must fan out its
+/// per-segment cursor opens instead of paying one round trip per
+/// segment, and the fan-out must stay within the maintenance IO cap.
+///
+/// Put-and-tick rounds accumulate delta runs until the threshold folds
+/// them; single-step ticks lag the puts and may batch two puts into one
+/// run, so the rounds run until the fold's reads appear rather than to a
+/// fixed count. No query ever touches the namespace and build steps only
+/// write gram segments, so the fold's reads are the only gram-segment
+/// GETs the probe can see: the peak measures exactly the fold's opens.
+#[tokio::test]
+async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(InFlightIndexGetProbeStore::new(temp_dir.path()));
+    let store: loonfs::SharedObjectStore = raw_store.clone();
+    let namespace_id = NamespaceId::parse("grams-fold-fan-out").expect("namespace id");
+
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-fan-out-writer")
+        .commit_window_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-fan-out-admin")
+        .build()
+        .await
+        .expect("build admin");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+
+    // Each round writes one file and runs one bounded build step plus
+    // one bounded fold step; the first gram-segment GET is, by
+    // construction, the triggered fold reading its snapshot of every
+    // accumulated delta run.
+    let mut rounds = 0u32;
+    while raw_store.peak_in_flight() == 0 {
+        rounds += 1;
+        assert!(
+            rounds <= 24,
+            "the delta threshold must fold within a bounded number of rounds"
+        );
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/notes/needle-{rounds:02}.txt"),
+                format!("a needle numbered {rounds}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write file");
+        admin
+            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+            .await
+            .expect("maintenance tick");
+    }
+
+    let peak = raw_store.peak_in_flight();
+    assert!(
+        peak > 1,
+        "a cold fold's segment opens must overlap, got a serial peak of {peak}"
+    );
+    assert!(
+        peak <= 8,
+        "the fold's fan-out must respect the maintenance IO cap, got {peak}"
+    );
+
+    // The premise of the probe: the reads the peak observed were a real
+    // delta fold, which leaves a mid run behind.
+    let root = loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+        .await
+        .expect("metadata root");
+    let manifest_key =
+        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
+    let manifest_bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read namespace manifest")
+        .expect("namespace manifest exists");
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
+    let grams: Vec<u32> = manifest
+        .payload
+        .index_files
+        .iter()
+        .filter(|descriptor| descriptor.family == "grams")
+        .map(|descriptor| descriptor.level)
+        .collect();
+    assert!(
+        grams.contains(&1),
+        "the observed fold must have left a mid run behind, got {grams:?}"
+    );
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}

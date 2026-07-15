@@ -20,10 +20,15 @@
 //! here at index time, never on the write path; the query path applies the
 //! same rule to unindexed data so the search contract stays uniform.
 
+use super::cache::{CacheAdmission, MetadataTableCache};
 use super::flush::{
     ensure_metadata_publication_budget, next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT,
 };
-use super::load::{load_namespace_manifest_envelope_if_present, load_verified_manifest_tables};
+use super::index_read::{load_index_segment_data_block, load_index_segment_index_block};
+use super::load::{
+    load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
+    load_verified_manifest_tables_with_cache,
+};
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::runs::{CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, MAX_MAINTENANCE_TABLE_IO};
 use super::scan::string_prefix_upper_bound;
@@ -393,6 +398,11 @@ pub(crate) async fn disable_grams_index<S: ObjectStore + ?Sized>(
 /// backfill while the feature value carries a cursor, WAL-replay catch-up
 /// after. Callers invoke this repeatedly; every call re-reads durable
 /// state, so any two calls compose — including across process restarts.
+///
+/// `table_cache` is the runtime's shared decoded-block cache; the step's
+/// manifest and metadata-segment reads resolve through it when attached
+/// and fall back to direct fetches when not (the embedded unit-test
+/// shape).
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -402,6 +412,7 @@ pub(crate) async fn disable_grams_index<S: ObjectStore + ?Sized>(
 )]
 pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
     store: &S,
+    table_cache: Option<&MetadataTableCache>,
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: GramIndexBuildPolicy,
@@ -415,11 +426,16 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
         })?
         .envelope
         .state;
-    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let tables = load_verified_manifest_tables_with_cache(
+        store,
+        table_cache,
+        namespace_id,
+        &root.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     let previous = tables.manifest();
 
     let Some(value) = previous.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
@@ -929,6 +945,11 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 /// outputs stay referenced and served; postings are add-only, so readers
 /// that union them see duplicates, never gaps. Segments written while the
 /// fold runs stay out of the snapshot and survive it.
+///
+/// `table_cache` is the runtime's shared decoded-block cache; the merge's
+/// section reads resolve through it when attached — snapshot segments are
+/// immutable and share their keys with the query path's entries — and
+/// fall back to direct fetches when not (the embedded unit-test shape).
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -938,6 +959,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 )]
 pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
     store: &S,
+    table_cache: Option<&MetadataTableCache>,
     namespace_id: &NamespaceId,
     context: &MutationContext,
     policy: GramIndexBuildPolicy,
@@ -951,11 +973,16 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
         })?
         .envelope
         .state;
-    let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+    let tables = load_verified_manifest_tables_with_cache(
+        store,
+        table_cache,
+        namespace_id,
+        &root.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
     let previous = tables.manifest();
 
     let Some(value) = previous.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
@@ -1078,6 +1105,7 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
         .collect::<Result<_>>()?;
     let merged = merge_snapshot_range(
         store,
+        table_cache,
         &snapshot,
         &fold_state.cursor,
         policy.max_fold_rows_per_step,
@@ -1196,13 +1224,30 @@ struct MergedRange {
 /// segment is exhausted.
 async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     store: &S,
+    table_cache: Option<&MetadataTableCache>,
     snapshot: &[&IndexFileRef],
     cursor: &str,
     max_rows: usize,
 ) -> Result<MergedRange> {
+    // Opens are independent — one index-block read per snapshot segment —
+    // so they fan out like segment writes do; the per-refill reads during
+    // the merge stay serial because the heap order demands them one at a
+    // time. Sections resolve through the shared cache under the same keys
+    // the query path uses, with a split admission stance: index blocks
+    // admit (KB-scale directories, reused by every later fold step and by
+    // queries), while the data-block stream — the bulk of a snapshot's
+    // bytes, each block visited exactly once per fold walk — is
+    // lookup-only, so a base fold cannot flush the query-hot working set
+    // out of the byte-budgeted LRU. Blocks a query already admitted still
+    // serve the merge from memory.
     let mut readers = Vec::with_capacity(snapshot.len());
-    for descriptor in snapshot {
-        readers.push(SegmentRangeReader::open(store, descriptor, cursor).await?);
+    for chunk in snapshot.chunks(MAX_MAINTENANCE_TABLE_IO) {
+        readers.extend(
+            try_join_all(chunk.iter().map(|descriptor| {
+                SegmentRangeReader::open(store, table_cache, descriptor, cursor)
+            }))
+            .await?,
+        );
     }
     let mut merged = MergedRange {
         postings: BTreeMap::new(),
@@ -1213,7 +1258,7 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     let mut last_key = String::new();
     while merged.rows < max_rows as u64 {
         for reader in readers.iter_mut() {
-            reader.refill(store).await?;
+            reader.refill(store, table_cache).await?;
         }
         let mut lowest: Option<(usize, String)> = None;
         for (position, reader) in readers.iter().enumerate() {
@@ -1246,7 +1291,7 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
             loop {
                 // Peek is only meaningful after a refill, mirroring the
                 // loop head: a drained block must not end the group early.
-                reader.refill(store).await?;
+                reader.refill(store, table_cache).await?;
                 if reader.peek_key() != Some(key.as_str()) {
                     break;
                 }
@@ -1261,7 +1306,7 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     // instead of publishing an empty trailing step.
     let mut any_left = false;
     for reader in readers.iter_mut() {
-        reader.refill(store).await?;
+        reader.refill(store, table_cache).await?;
         if reader.peek_key().is_some() {
             any_left = true;
             break;
@@ -1291,38 +1336,62 @@ fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) 
 }
 
 /// Streaming reader over one snapshot segment's rows from a start key:
-/// the segment index is fetched once, data blocks one at a time.
+/// the segment index is fetched once, data blocks one at a time. Every
+/// section resolves through the shared decoded-block cache when one is
+/// attached, so blocks a query or an earlier step already decoded are
+/// memory hits.
+///
+/// The reader holds each decoded block behind its shared [`Arc`] and
+/// serves rows borrowed in place — the [`SegmentKeyRangeBlocks`] shape
+/// metadata scans use — cloning one row per [`Self::pop`], never a
+/// block. That keeps the merge's footprint honest: data blocks resolve
+/// lookup-only, so the one block each reader holds is the merge's whole
+/// share of that segment's decoded bytes, owned here and not counted
+/// again by the cache budget.
+///
+/// [`Arc`]: std::sync::Arc
+/// [`SegmentKeyRangeBlocks`]: super::load::SegmentKeyRangeBlocks
 struct SegmentRangeReader {
     object_key: String,
-    entries: Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry>,
+    payload_checksum: String,
+    entries: std::sync::Arc<Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry>>,
     next_entry: usize,
-    pending: std::collections::VecDeque<(String, IndexRow)>,
+    current: Option<CurrentDataBlock>,
     start: String,
+}
+
+/// The one decoded block a [`SegmentRangeReader`] is draining, with the
+/// offset of its next undelivered row — always in bounds while the block
+/// is held; a drained block is dropped, not kept at its end.
+struct CurrentDataBlock {
+    block: std::sync::Arc<loonfs_api::wire::sst_blocks::DecodedDataBlock<IndexRow>>,
+    next_row: usize,
 }
 
 impl SegmentRangeReader {
     async fn open<S: ObjectStore + ?Sized>(
         store: &S,
+        table_cache: Option<&MetadataTableCache>,
         descriptor: &IndexFileRef,
         cursor: &str,
     ) -> Result<Self> {
-        use loonfs_api::wire::sst_blocks::{decode_index_block, index_blocks_for_key_range};
-        let index_bytes =
-            fetch_index_section(store, &descriptor.object_key, &descriptor.index_block).await?;
-        let entries =
-            decode_index_block(&index_bytes, &descriptor.index_block).map_err(|error| {
-                CoreError::NamespaceCorrupt(format!(
-                    "index segment `{}` carries an unreadable index block: {error}",
-                    descriptor.object_key
-                ))
-            })?;
+        use loonfs_api::wire::sst_blocks::index_blocks_for_key_range;
+        let entries = load_index_segment_index_block(
+            store,
+            table_cache,
+            &descriptor.object_key,
+            &descriptor.payload_checksum,
+            &descriptor.index_block,
+        )
+        .await?;
         let start = if cursor.is_empty() { "gram-" } else { cursor };
         let range = index_blocks_for_key_range(&entries, start, None);
         Ok(Self {
             object_key: descriptor.object_key.clone(),
+            payload_checksum: descriptor.payload_checksum.clone(),
             next_entry: range.start,
             entries,
-            pending: std::collections::VecDeque::new(),
+            current: None,
             start: start.to_owned(),
         })
     }
@@ -1332,70 +1401,56 @@ impl SegmentRangeReader {
     }
 
     fn peek_key(&self) -> Option<&str> {
-        self.pending.front().map(|(key, _)| key.as_str())
+        self.current
+            .as_ref()
+            .map(|current| current.block.row_keys[current.next_row].as_str())
     }
 
+    /// Yields the next row, cloning exactly that row and its key out of
+    /// the shared block; the merge consumes rows by value.
     fn pop(&mut self) -> (String, IndexRow) {
-        self.pending
-            .pop_front()
-            .expect("pop is called only after peek_key returned a key")
+        let current = self
+            .current
+            .as_mut()
+            .expect("pop is called only after peek_key returned a key");
+        let key = current.block.row_keys[current.next_row].clone();
+        let row = current.block.rows[current.next_row].clone();
+        current.next_row += 1;
+        if current.next_row == current.block.row_keys.len() {
+            self.current = None;
+        }
+        (key, row)
     }
 
-    async fn refill<S: ObjectStore + ?Sized>(&mut self, store: &S) -> Result<()> {
-        use loonfs_api::wire::sst_blocks::decode_data_block_rows;
-        while self.pending.is_empty() && self.next_entry < self.entries.len() {
+    async fn refill<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        table_cache: Option<&MetadataTableCache>,
+    ) -> Result<()> {
+        while self.current.is_none() && self.next_entry < self.entries.len() {
             let entry = &self.entries[self.next_entry];
             self.next_entry += 1;
-            let block_bytes = fetch_index_section(store, &self.object_key, &entry.block).await?;
-            let block = decode_data_block_rows::<IndexRow>(&block_bytes, &entry.block).map_err(
-                |error| {
-                    CoreError::NamespaceCorrupt(format!(
-                        "index segment `{}` carries an unreadable data block: {error}",
-                        self.object_key
-                    ))
-                },
-            )?;
-            for (key, row) in block.row_keys.into_iter().zip(block.rows) {
-                if key.as_str() >= self.start.as_str() {
-                    self.pending.push_back((key, row));
-                }
+            let block = load_index_segment_data_block(
+                store,
+                table_cache,
+                CacheAdmission::LookupOnly,
+                &self.object_key,
+                &self.payload_checksum,
+                &entry.block,
+            )
+            .await?;
+            // Only the first fetched block can hold rows below the start
+            // key; the binary search over the block's decode-validated
+            // key order is the same bound either way.
+            let next_row = block
+                .row_keys
+                .partition_point(|key| key.as_str() < self.start.as_str());
+            if next_row < block.row_keys.len() {
+                self.current = Some(CurrentDataBlock { block, next_row });
             }
         }
         Ok(())
     }
-}
-
-/// Fetches one descriptor-named section by byte range, refusing handles
-/// whose bounds do not fit the address space.
-async fn fetch_index_section<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    handle: &loonfs_api::wire::sst_blocks::BlockHandle,
-) -> Result<Vec<u8>> {
-    let end_exclusive = handle
-        .offset
-        .checked_add(u64::from(handle.stored_len))
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "index segment `{object_key}` descriptor names bytes past the address space"
-            ))
-        })?;
-    let bytes = store
-        .get(
-            object_key,
-            Some(loonfs_objectstore::ByteRange {
-                start_inclusive: handle.offset,
-                end_exclusive,
-            }),
-        )
-        .await
-        .map_err(|error| CoreError::store(object_key, &error))?
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "manifest references missing index segment `{object_key}`"
-            ))
-        })?;
-    Ok(bytes.to_vec())
 }
 
 /// [`write_index_segments`] restamped at a fold's output level: the mid

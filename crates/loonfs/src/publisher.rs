@@ -1401,6 +1401,7 @@ mod tests {
                 trace_store_kind: TraceStoreKind::LocalFs,
             },
             BackgroundWork::new(FsBackgroundWork::ManualOnly, None),
+            None,
         )
         .expect("open runtime")
     }

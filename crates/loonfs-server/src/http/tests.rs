@@ -69,7 +69,8 @@ use axum::body::Bytes;
 use futures::stream::BoxStream;
 use loonfs::ErrorCode;
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, DeleteOptions, FsAdmin, FsWriter, MaintenanceTickOptions,
+    PutFileOptions, TraceMode, TraceStoreKind,
 };
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
@@ -640,6 +641,120 @@ async fn capability_document_advertises_the_upload_limit() {
     .expect("join blocking task");
 
     harness.server.abort();
+}
+
+/// Seeds a namespace with enough durable state that an explicit
+/// maintenance tick has metadata to load: files to flush and the gram
+/// index feature to build.
+async fn seed_namespace_for_maintenance(writer: &FsWriter, admin: &FsAdmin) -> NamespaceId {
+    let namespace = namespace_id("cache-config");
+    writer
+        .create_namespace(&namespace, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for (index, path) in ["/left.txt", "/right.txt"].iter().enumerate() {
+        write_file_bytes(
+            writer,
+            &namespace,
+            path,
+            b"a needle for maintenance\n",
+            &format!("cache-config-seed-{index:02}"),
+        )
+        .await;
+    }
+    admin
+        .enable_grams_index(&namespace)
+        .await
+        .expect("enable grams index");
+    namespace
+}
+
+/// The tick shape `/maintenance/tick` serves with a one-segment
+/// threshold override: the WAL flushes, a manifest publishes, and the
+/// gram build step loads it through the runtime cache.
+fn flush_everything_tick() -> MaintenanceTickOptions {
+    MaintenanceTickOptions {
+        max_wal_tail_segments: 1,
+        ..MaintenanceTickOptions::default()
+    }
+}
+
+/// Review regression: the admin handle behind `/maintenance/tick` was
+/// built without the configured runtime cache, so explicit maintenance
+/// ran a default 256 MiB cache no matter what the operator configured.
+/// With a zero decoded-byte budget the whole runtime cache is disabled,
+/// and maintenance driven through the admin must neither insert into
+/// nor hit any cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_maintenance_honors_a_zero_configured_cache_budget() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.background_maintenance = false;
+    config.runtime_cache.metadata_table_cache_max_decoded_bytes = Some(0);
+    let (writer, _reader, admin) = build_handles_with_metrics_jsonl_path(&config, store, None)
+        .await
+        .expect("build handles");
+
+    let namespace = seed_namespace_for_maintenance(&writer, &admin).await;
+    for _ in 0..2 {
+        admin
+            .maintenance_tick_namespace(&namespace, flush_everything_tick())
+            .await
+            .expect("maintenance tick");
+    }
+
+    let stats = admin.runtime_cache_stats();
+    assert_eq!(
+        stats.metadata_table_cache_inserts, 0,
+        "a zero-budget cache must admit nothing during explicit maintenance"
+    );
+    assert_eq!(
+        stats.metadata_table_cache_hits, 0,
+        "a zero-budget cache must serve nothing during explicit maintenance"
+    );
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// The companion premise and the sharing half: with a real budget the
+/// identical flow does populate the cache, and the blocks maintenance
+/// admits land in the writer's own cache instance — one cache, one
+/// budget — rather than in a second admin-only cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_maintenance_populates_the_writer_visible_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.background_maintenance = false;
+    let (writer, _reader, admin) = build_handles_with_metrics_jsonl_path(&config, store, None)
+        .await
+        .expect("build handles");
+
+    let namespace = seed_namespace_for_maintenance(&writer, &admin).await;
+    // Everything after this snapshot flows through the admin handle, so
+    // any movement in the writer-visible counters is admin work landing
+    // in the shared instance.
+    let before = writer.runtime_cache_stats().metadata_table_cache_inserts;
+    for _ in 0..2 {
+        admin
+            .maintenance_tick_namespace(&namespace, flush_everything_tick())
+            .await
+            .expect("maintenance tick");
+    }
+
+    let writer_stats = writer.runtime_cache_stats();
+    assert!(
+        writer_stats.metadata_table_cache_inserts > before,
+        "explicit maintenance must populate the cache the writer observes, \
+         inserts before {before}, after {}",
+        writer_stats.metadata_table_cache_inserts
+    );
+    let admin_stats = admin.runtime_cache_stats();
+    assert_eq!(
+        admin_stats.metadata_table_cache_inserts, writer_stats.metadata_table_cache_inserts,
+        "admin and writer must observe one shared cache, not two"
+    );
+    writer.shutdown_background().await.expect("writer shutdown");
 }
 
 async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestHarness {
