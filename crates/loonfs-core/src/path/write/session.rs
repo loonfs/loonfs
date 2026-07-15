@@ -8,6 +8,8 @@ use crate::error::CoreError;
 use crate::metadata::{DurableVisibilityCache, MetadataApplyError, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
+#[cfg(test)]
+use loonfs_api::AbsolutePath;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
 
@@ -118,7 +120,7 @@ mod tests {
     ) -> NamespaceMutationCandidate {
         NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             content_ref,
             behavior: PutBehavior::NoReplace,
         })
@@ -163,7 +165,7 @@ mod tests {
 
         let first_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("plan-a").expect("valid commit id"),
-            absolute_path: "/docs/a.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
             behavior: PutBehavior::NoReplace,
         };
@@ -175,7 +177,7 @@ mod tests {
 
         let second_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("plan-b").expect("valid commit id"),
-            absolute_path: "/docs/b.txt".to_owned(),
+            absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
             behavior: PutBehavior::NoReplace,
         };
@@ -276,7 +278,7 @@ mod tests {
                 ),
                 NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                     commit_id: CommitId::parse("delete-doomed").expect("valid commit id"),
-                    absolute_path: "/docs/doomed.txt".to_owned(),
+                    absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                 }),
             ],

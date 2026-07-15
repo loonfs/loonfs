@@ -742,7 +742,7 @@ mod tests {
     use crate::storage::content::store_bytes_as_content;
     use bytes::Bytes;
     use futures::stream::BoxStream;
-    use loonfs_api::{CommitId, PutBehavior};
+    use loonfs_api::{AbsolutePath, CommitId, PutBehavior};
     use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
     use tempfile::tempdir;
@@ -806,7 +806,7 @@ mod tests {
                 vec![NamespaceMutationCandidate::Path(
                     PathMutationIntent::PutFile {
                         commit_id: CommitId::parse(commit_id).expect("commit id"),
-                        absolute_path: path.to_owned(),
+                        absolute_path: AbsolutePath::parse(path).expect("path"),
                         content_ref,
                         behavior: PutBehavior::NoReplace,
                     },

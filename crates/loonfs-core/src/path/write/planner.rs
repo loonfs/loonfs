@@ -7,7 +7,7 @@ use crate::error::CoreError;
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
-use crate::path::helpers::{final_component, parse_absolute_path_for_core, parse_mutation_path};
+use crate::path::helpers::{ensure_mutation_path, final_component};
 use loonfs_api::wire::control::HeadState;
 #[cfg(test)]
 use loonfs_api::ChangeSeq;
@@ -95,7 +95,7 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
     let identity = match intent {
         PathMutationIntent::CreateDir { absolute_path, .. } => PathFingerprintInput::CreateDir {
             namespace_id: namespace_id.clone(),
-            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
+            absolute_path: absolute_path.as_str().to_owned(),
         },
         PathMutationIntent::PutFile {
             absolute_path,
@@ -104,7 +104,7 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::PutFile {
             namespace_id: namespace_id.clone(),
-            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
+            absolute_path: absolute_path.as_str().to_owned(),
             behavior: *behavior,
             content_ref: content_ref.clone(),
         },
@@ -114,7 +114,7 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::DeletePath {
             namespace_id: namespace_id.clone(),
-            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
+            absolute_path: absolute_path.as_str().to_owned(),
             behavior: *behavior,
         },
         PathMutationIntent::MovePath {
@@ -124,16 +124,16 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
-            from_path: normalized_path_for_fingerprint(from_path)?,
-            to_path: normalized_path_for_fingerprint(to_path)?,
+            from_path: from_path.as_str().to_owned(),
+            to_path: to_path.as_str().to_owned(),
             behavior: *behavior,
         },
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
         } => PathFingerprintInput::CopyFilePath {
             namespace_id: namespace_id.clone(),
-            from_path: normalized_path_for_fingerprint(from_path)?,
-            to_path: normalized_path_for_fingerprint(to_path)?,
+            from_path: from_path.as_str().to_owned(),
+            to_path: to_path.as_str().to_owned(),
         },
         PathMutationIntent::RestoreRevision {
             absolute_path,
@@ -141,17 +141,11 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::RestoreRevision {
             namespace_id: namespace_id.clone(),
-            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
+            absolute_path: absolute_path.as_str().to_owned(),
             source_revision_no: *source_revision_no,
         },
     };
     path_intent_fingerprint(&identity)
-}
-
-fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreError> {
-    Ok(parse_absolute_path_for_core(absolute_path)?
-        .as_str()
-        .to_owned())
 }
 
 fn is_missing_visible_path(error: &CoreError) -> bool {
@@ -318,15 +312,15 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    publish_reject_tombstoned_path_ancestor(view, &absolute_path).await?;
+    ensure_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     match view
         .metadata_state
-        .resolve_visible_path(&absolute_path)
+        .resolve_visible_path(absolute_path)
         .await
     {
         Ok(_) => {
@@ -337,8 +331,8 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
     }
-    let parent_inode_id = publish_resolve_parent_directory(view, &absolute_path).await?;
-    let display_name = final_component(&absolute_path)?;
+    let parent_inode_id = publish_resolve_parent_directory(view, absolute_path).await?;
+    let display_name = final_component(absolute_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateDirectory {
@@ -356,25 +350,25 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
     content_ref: ContentRef,
     behavior: PutBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    publish_reject_tombstoned_path_ancestor(view, &absolute_path).await?;
+    ensure_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
         .metadata_state
-        .resolve_visible_path(&absolute_path)
+        .resolve_visible_path(absolute_path)
         .await;
 
     let mut ops = Vec::new();
     let mut next_inode_id = view.head.next_inode_id;
     let final_parent_inode =
-        publish_ensure_parent_directories(&absolute_path, view, &mut ops, &mut next_inode_id)
+        publish_ensure_parent_directories(absolute_path, view, &mut ops, &mut next_inode_id)
             .await?;
-    let final_name = final_component(&absolute_path)?;
+    let final_name = final_component(absolute_path)?;
     let mut preconditions = Vec::new();
 
     match target {
@@ -443,15 +437,15 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
     behavior: DeleteDirectoryBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
+    ensure_mutation_path(absolute_path)?;
     let resolved = view
         .metadata_state
-        .resolve_visible_path(&absolute_path)
+        .resolve_visible_path(absolute_path)
         .await?;
     let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let op = match resolved.inode_kind {
@@ -491,20 +485,20 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
-    from_path: &str,
-    to_path: &str,
+    from_path: &AbsolutePath,
+    to_path: &AbsolutePath,
     behavior: MoveBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    let from_path = parse_mutation_path(from_path)?;
-    let to_path = parse_mutation_path(to_path)?;
-    publish_reject_tombstoned_path_ancestor(view, &from_path).await?;
-    publish_reject_tombstoned_path_ancestor(view, &to_path).await?;
-    let source = view.metadata_state.resolve_visible_path(&from_path).await?;
-    let target_parent = publish_resolve_parent_directory(view, &to_path).await?;
-    let target_name = final_component(&to_path)?;
-    match view.metadata_state.resolve_visible_path(&to_path).await {
+    ensure_mutation_path(from_path)?;
+    ensure_mutation_path(to_path)?;
+    publish_reject_tombstoned_path_ancestor(view, from_path).await?;
+    publish_reject_tombstoned_path_ancestor(view, to_path).await?;
+    let source = view.metadata_state.resolve_visible_path(from_path).await?;
+    let target_parent = publish_resolve_parent_directory(view, to_path).await?;
+    let target_name = final_component(to_path)?;
+    match view.metadata_state.resolve_visible_path(to_path).await {
         Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
@@ -532,17 +526,17 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
-    from_path: &str,
-    to_path: &str,
+    from_path: &AbsolutePath,
+    to_path: &AbsolutePath,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    let from_path = parse_mutation_path(from_path)?;
-    let to_path = parse_mutation_path(to_path)?;
-    publish_reject_tombstoned_path_ancestor(view, &from_path).await?;
-    publish_reject_tombstoned_path_ancestor(view, &to_path).await?;
+    ensure_mutation_path(from_path)?;
+    ensure_mutation_path(to_path)?;
+    publish_reject_tombstoned_path_ancestor(view, from_path).await?;
+    publish_reject_tombstoned_path_ancestor(view, to_path).await?;
 
-    let source = view.metadata_state.resolve_visible_path(&from_path).await?;
+    let source = view.metadata_state.resolve_visible_path(from_path).await?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: from_path.as_str().to_owned(),
@@ -550,7 +544,7 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
         });
     }
 
-    match view.metadata_state.resolve_visible_path(&to_path).await {
+    match view.metadata_state.resolve_visible_path(to_path).await {
         Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
@@ -562,8 +556,8 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(from_path.as_str().to_owned()))?;
 
-    let target_parent = publish_resolve_parent_directory(view, &to_path).await?;
-    let target_name = final_component(&to_path)?;
+    let target_parent = publish_resolve_parent_directory(view, to_path).await?;
+    let target_name = final_component(to_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateFile {
@@ -590,16 +584,16 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
 }
 
 async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
     source_revision_no: RevisionNo,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    let absolute_path = parse_mutation_path(absolute_path)?;
-    publish_reject_tombstoned_path_ancestor(view, &absolute_path).await?;
+    ensure_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
         .metadata_state
-        .resolve_visible_path(&absolute_path)
+        .resolve_visible_path(absolute_path)
         .await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
@@ -769,7 +763,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let intent = PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("c_00000000000000000000000000000042").expect("commit id"),
-            absolute_path: "/docs".to_owned(),
+            absolute_path: AbsolutePath::parse("/docs").expect("path"),
         };
 
         let fingerprint =
@@ -837,7 +831,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
-                absolute_path: "/docs//a/".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs//a/").expect("path"),
             },
         )
         .expect("left fingerprint");
@@ -845,7 +839,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-b").expect("valid commit id"),
-                absolute_path: "/docs/a".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
             },
         )
         .expect("right fingerprint");
@@ -860,7 +854,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                absolute_path: "/docs".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs").expect("path"),
             },
         )
         .expect("baseline fingerprint");
@@ -868,7 +862,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-drafts").expect("valid commit id"),
-                absolute_path: "/drafts".to_owned(),
+                absolute_path: AbsolutePath::parse("/drafts").expect("path"),
             },
         )
         .expect("changed fingerprint");
@@ -883,7 +877,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                absolute_path: "/docs".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs").expect("path"),
             },
         )
         .expect("path fingerprint");
@@ -912,7 +906,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                absolute_path: "/docs".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs").expect("path"),
             },
         )
         .await;
@@ -948,7 +942,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-nested").expect("valid commit id"),
-                absolute_path: "/docs/nested/a.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: PutBehavior::NoReplace,
             },
@@ -998,8 +992,8 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-file").expect("valid commit id"),
-                from_path: "/docs/a.txt".to_owned(),
-                to_path: "/docs/b.txt".to_owned(),
+                from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 behavior: MoveBehavior::NoReplace,
             },
         )
@@ -1098,8 +1092,8 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CopyFilePath {
                 commit_id: CommitId::parse("copy-file").expect("valid commit id"),
-                from_path: "/docs/a.txt".to_owned(),
-                to_path: "/docs/copy.txt".to_owned(),
+                from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
             },
         )
         .await;
@@ -1204,7 +1198,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
-                absolute_path: "/dead/new.txt".to_owned(),
+                absolute_path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.content_ref,
                 behavior: PutBehavior::NoReplace,
             },

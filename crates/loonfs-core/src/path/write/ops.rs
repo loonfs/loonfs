@@ -6,6 +6,7 @@ use super::intent::PathMutationIntent;
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::CoreError;
+use crate::path::helpers::parse_mutation_path;
 use loonfs_api::{
     v0::MoveBehavior, CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, NamespaceId,
     PutBehavior, RevisionNo,
@@ -92,7 +93,7 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::PutFile {
             commit_id,
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: parse_mutation_path(absolute_path)?,
             content_ref,
             behavior,
         },
@@ -133,7 +134,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id,
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: parse_mutation_path(absolute_path)?,
             behavior,
         },
         context,
@@ -155,8 +156,8 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::MovePath {
             commit_id,
-            from_path: from_path.to_owned(),
-            to_path: to_path.to_owned(),
+            from_path: parse_mutation_path(from_path)?,
+            to_path: parse_mutation_path(to_path)?,
             behavior: MoveBehavior::NoReplace,
         },
         context,
@@ -178,7 +179,7 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::RestoreRevision {
             commit_id,
-            absolute_path: absolute_path.to_owned(),
+            absolute_path: parse_mutation_path(absolute_path)?,
             source_revision_no,
         },
         context,

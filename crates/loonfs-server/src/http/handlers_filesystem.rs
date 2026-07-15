@@ -9,7 +9,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs::publish::PathMutationIntent;
+use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -456,10 +456,18 @@ pub(super) async fn filesystem_operation(
         ),
         _ => Vec::new(),
     };
+    // Wire paths are raw strings; the intent carries validated paths, so
+    // this is the convert-once point for the whole remote mutation path.
+    let parse_path = |path: &str| {
+        parse_mutation_path(path).map_err(|error| {
+            ApiResponseError::core_for_namespace(&namespace_id, error)
+                .with_commit_id(&commit_id_for_errors)
+        })
+    };
     let intent = match operation {
         FilesystemOperation::CreateDirectory { path } => PathMutationIntent::CreateDir {
             commit_id,
-            absolute_path: path,
+            absolute_path: parse_path(&path)?,
         },
         FilesystemOperation::PutFile {
             path,
@@ -467,13 +475,13 @@ pub(super) async fn filesystem_operation(
             behavior,
         } => PathMutationIntent::PutFile {
             commit_id,
-            absolute_path: path,
+            absolute_path: parse_path(&path)?,
             content_ref,
             behavior,
         },
         FilesystemOperation::DeletePath { path, behavior } => PathMutationIntent::DeletePath {
             commit_id,
-            absolute_path: path,
+            absolute_path: parse_path(&path)?,
             behavior,
         },
         FilesystemOperation::MovePath {
@@ -482,21 +490,21 @@ pub(super) async fn filesystem_operation(
             behavior,
         } => PathMutationIntent::MovePath {
             commit_id,
-            from_path,
-            to_path,
+            from_path: parse_path(&from_path)?,
+            to_path: parse_path(&to_path)?,
             behavior,
         },
         FilesystemOperation::CopyPath { from_path, to_path } => PathMutationIntent::CopyFilePath {
             commit_id,
-            from_path,
-            to_path,
+            from_path: parse_path(&from_path)?,
+            to_path: parse_path(&to_path)?,
         },
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
         } => PathMutationIntent::RestoreRevision {
             commit_id,
-            absolute_path: path,
+            absolute_path: parse_path(&path)?,
             source_revision_no,
         },
     };
