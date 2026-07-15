@@ -9,8 +9,8 @@
 //! connector onto its store's own runtime, so caller runtime topology can
 //! never affect provider IO.
 
+use crate::transfer_timeouts::TransferTimeoutConnector;
 use crate::ObjectStoreError;
-use object_store::client::SpawnedReqwestConnector;
 use std::fmt;
 use std::sync::Arc;
 
@@ -53,8 +53,10 @@ impl StoreIoRuntime {
         })
     }
 
-    /// Connector that routes a provider client's requests onto this runtime.
-    pub(crate) fn connector(&self) -> SpawnedReqwestConnector {
+    /// Connector that routes a provider client's requests onto this runtime
+    /// and applies the transfer-aware timeout scheme
+    /// ([`crate::transfer_timeouts`]).
+    pub(crate) fn connector(&self) -> TransferTimeoutConnector {
         let handle = self
             .inner
             .runtime
@@ -62,7 +64,7 @@ impl StoreIoRuntime {
             .expect("store io runtime should live until the last store clone drops")
             .handle()
             .clone();
-        SpawnedReqwestConnector::new(handle)
+        TransferTimeoutConnector::new(handle)
     }
 }
 

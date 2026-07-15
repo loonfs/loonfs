@@ -52,11 +52,14 @@ impl GcpGcsStore {
             .with_bucket_name(config.bucket)
             .with_service_account_path(config.service_account_key_path);
 
-        let provider = builder
-            .build()
-            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+        let provider = Arc::new(
+            builder
+                .build()
+                .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
+        );
         let inner = ProviderObjectStore::new(
-            Arc::new(provider),
+            Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
+            Some(provider),
             ProviderObjectStoreConfig {
                 key_prefix: config.key_prefix,
                 sha256_checksum_metadata: false,

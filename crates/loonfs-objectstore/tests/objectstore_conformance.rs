@@ -167,19 +167,19 @@ fn provider_profiles_exist() {
         Expectation::ExpectedYes
     );
     assert_eq!(
-        LOCAL_FS.future_capabilities.multipart_upload,
+        LOCAL_FS.active_contract.multipart_upload,
         Expectation::ExpectedNo
     );
     assert_eq!(
-        AWS_S3.future_capabilities.multipart_upload,
+        AWS_S3.active_contract.multipart_upload,
         Expectation::ExpectedYes
     );
     assert_eq!(
-        CLOUDFLARE_R2.future_capabilities.multipart_upload,
+        CLOUDFLARE_R2.active_contract.multipart_upload,
         Expectation::ExpectedYes
     );
     assert_eq!(
-        GCP_GCS.future_capabilities.multipart_upload,
+        GCP_GCS.active_contract.multipart_upload,
         Expectation::ExpectedYes
     );
     assert_eq!(
@@ -191,7 +191,7 @@ fn provider_profiles_exist() {
         Expectation::VerifyByConformance
     );
     assert_eq!(
-        AZURE_ABS.future_capabilities.multipart_upload,
+        AZURE_ABS.active_contract.multipart_upload,
         Expectation::ExpectedYes
     );
 }

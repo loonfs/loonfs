@@ -1,5 +1,4 @@
-//! Provider contract profiles: what each provider is expected to support
-//! and what stays aspirational.
+//! Provider contract profiles: what each provider is expected to support.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,10 +24,6 @@ pub struct ActiveContractProfile {
     pub scoped_key_prefixing: Expectation,
     pub traversal_rejection: Expectation,
     pub sorted_list_prefix: Expectation,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FutureCapabilityProfile {
     pub multipart_upload: Expectation,
 }
 
@@ -36,7 +31,6 @@ pub struct FutureCapabilityProfile {
 pub struct ProviderProfile {
     pub name: &'static str,
     pub active_contract: ActiveContractProfile,
-    pub future_capabilities: FutureCapabilityProfile,
 }
 
 pub const LOCAL_FS: ProviderProfile = ProviderProfile {
@@ -55,8 +49,6 @@ pub const LOCAL_FS: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedNo,
         traversal_rejection: Expectation::VerifyByConformance,
         sorted_list_prefix: Expectation::VerifyByConformance,
-    },
-    future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedNo,
     },
 };
@@ -77,8 +69,6 @@ pub const AWS_S3: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedYes,
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
-    },
-    future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedYes,
     },
 };
@@ -99,8 +89,6 @@ pub const CLOUDFLARE_R2: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedYes,
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
-    },
-    future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedYes,
     },
 };
@@ -121,8 +109,6 @@ pub const GCP_GCS: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedYes,
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
-    },
-    future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedYes,
     },
 };
@@ -143,8 +129,6 @@ pub const AZURE_ABS: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedYes,
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
-    },
-    future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedYes,
     },
 };

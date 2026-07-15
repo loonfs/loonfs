@@ -28,6 +28,7 @@ mod secret;
 mod store_config;
 mod store_io_runtime;
 pub mod timing;
+mod transfer_timeouts;
 
 /// Compatibility alias for [`local_fs_store`], kept so existing imports of
 /// `loonfs_objectstore::fs::LocalFsStore` keep resolving.
@@ -40,7 +41,9 @@ pub use object_store::{
 };
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
-    PROVIDER_CONNECT_TIMEOUT, PROVIDER_OP_DEADLINE,
+    PROVIDER_CONNECT_TIMEOUT, PROVIDER_MIN_TRANSFER_RATE_BYTES_PER_SEC,
+    PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PART_WINDOW,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OP_DEADLINE,
 };
 pub use secret::SecretString;
 pub use store_config::{StoreConfig, StoreConfigError};
