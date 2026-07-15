@@ -15,8 +15,13 @@
 //! Submissions buffer metadata only — content a submission references is
 //! already durable before it enters the window — so members share the
 //! flush's publication fate (a failed WAL write or head CAS rejects the
-//! batch) but never each other's uploads. An opener cancelled before
-//! flushing closes the window and fails the members that joined it.
+//! batch) but never each other's uploads. Opener cancellation has two
+//! distinct outcomes for the members: cancelled while the window is still
+//! buffering, the window closes and rejects them explicitly (nothing was
+//! published; a retry is safe); cancelled after draining the window, the
+//! flush disappears mid-publish and each member surfaces
+//! `commit_outcome_unknown` — the batch may have durably committed, so this
+//! must never be reported as a definite failure.
 
 use crate::publish::NamespaceMutationCandidate;
 use crate::{CommitResponse, CoreError, NamespaceId, Result, RuntimeError};
@@ -99,9 +104,10 @@ impl CommitWindows {
 }
 
 /// Closes the opener's window exactly once: normally by draining it for the
-/// flush, or on drop when the opener was cancelled first — dropping the
-/// buffered entries then cancels the joiners' receivers, so an abandoned
-/// window fails its members instead of wedging the namespace.
+/// flush, or on drop when the opener was cancelled first. The drop path
+/// rejects the buffered members explicitly — nothing was published, so an
+/// abandoned window is a definite, retryable failure, distinguishable from
+/// a flush that disappeared mid-publish.
 pub(crate) struct OpenerGuard<'a> {
     windows: &'a CommitWindows,
     namespace_id: NamespaceId,
@@ -122,10 +128,35 @@ impl OpenerGuard<'_> {
 
 impl Drop for OpenerGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            self.windows.lock_open().remove(&self.namespace_id);
+        if !self.armed {
+            return;
+        }
+        let entries = self
+            .windows
+            .lock_open()
+            .remove(&self.namespace_id)
+            .unwrap_or_default();
+        // The opener was cancelled while the window was still buffering:
+        // nothing was drained, so nothing was published. Reject each member
+        // with a definite failure instead of dropping its result channel,
+        // which is reserved for a flush that disappeared in flight.
+        for entry in entries {
+            let results = window_closed_results(entry.candidates.len());
+            let _ = entry.result_sender.send(results);
         }
     }
+}
+
+fn window_closed_results(count: usize) -> WindowResults {
+    (0..count)
+        .map(|_| {
+            Err(RuntimeError::Core(CoreError::Internal(
+                "commit window closed before its flush was attempted; nothing was published and \
+                 the submission can be retried"
+                    .to_owned(),
+            )))
+        })
+        .collect()
 }
 
 /// Pads a distributed result slice when the publish returned fewer results

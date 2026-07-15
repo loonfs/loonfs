@@ -40,6 +40,7 @@ use loonfs_core::cache::{
     load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
     WalTailProjectionCacheConfig,
 };
+use loonfs_core::commit::CommitHeadPublishError;
 use loonfs_core::{MutationContext, NamespaceEngine};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1355,13 +1356,20 @@ impl FsCore {
         };
         match result_receiver.await {
             Ok(results) => results,
-            // The opener was cancelled before distributing results; the
-            // window closed behind it, so the submission failed rather than
-            // committed and the caller may retry.
+            // A dropped result channel means the opener's future was
+            // cancelled after it drained the window: the flush was in
+            // flight and its durable outcome was never observed. (An opener
+            // cancelled before draining rejects members explicitly instead.)
+            // The mutation may have committed, so this must surface as an
+            // unknown outcome, never as a definite failure; retrying with
+            // the same commit id replays the durable receipt if it landed.
             Err(_) => (0..candidate_count)
                 .map(|_| {
-                    Err(RuntimeError::Core(CoreError::Internal(
-                        "commit window abandoned before its flush completed".to_owned(),
+                    Err(RuntimeError::Core(CoreError::HeadPublish(
+                        CommitHeadPublishError::OutcomeUnknown(
+                            "commit window opener was cancelled while its flush was in flight"
+                                .to_owned(),
+                        ),
                     )))
                 })
                 .collect(),
