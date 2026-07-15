@@ -19,7 +19,7 @@ use crate::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     ErrorCode, FlushWalOutcome, FlushWalResponse, InodeId, ListChangesOptions,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, MutationResult, NamespaceId,
+    MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, ObjectStore, PutFileOptions,
     ReleaseCheckpointResponse, RestoreRevisionOptions, RevisionNo, RuntimeCacheStats,
     UploadContentResponse,
@@ -992,7 +992,7 @@ impl FsCore {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
@@ -1068,7 +1068,7 @@ impl FsCore {
         absolute_path: &str,
         content_ref: ContentRef,
         options: PutFileOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record(
@@ -1095,7 +1095,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.publish_path_intent(
             namespace_id,
             PathMutationIntent::CreateDir {
@@ -1115,7 +1115,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.publish_path_intent(
             namespace_id,
             PathMutationIntent::DeletePath {
@@ -1134,7 +1134,7 @@ impl FsCore {
         from_path: &str,
         to_path: &str,
         options: MoveOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.publish_path_intent(
             namespace_id,
             PathMutationIntent::MovePath {
@@ -1155,7 +1155,7 @@ impl FsCore {
         from_path: &str,
         to_path: &str,
         options: CopyOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.publish_path_intent(
             namespace_id,
             PathMutationIntent::CopyFilePath {
@@ -1174,7 +1174,7 @@ impl FsCore {
         absolute_path: &str,
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.publish_path_intent(
             namespace_id,
             PathMutationIntent::RestoreRevision {
@@ -1276,18 +1276,8 @@ impl FsCore {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_through_publisher(
-            namespace_id,
-            vec![NamespaceMutationCandidate::Commit(request)],
-        )
-        .await
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| {
-            Err(RuntimeError::Core(CoreError::Internal(
-                "empty commit batch".to_owned(),
-            )))
-        })
+        self.publish_candidate(namespace_id, NamespaceMutationCandidate::Commit(request))
+            .await
     }
 
     /// Submits explicit semantic commit requests, returning one result per
@@ -1312,7 +1302,7 @@ impl FsCore {
         &self,
         namespace_id: &NamespaceId,
         intent: PathMutationIntent,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.publish_candidate(namespace_id, NamespaceMutationCandidate::Path(intent))
             .await
     }
@@ -1321,19 +1311,16 @@ impl FsCore {
         &self,
         namespace_id: &NamespaceId,
         candidate: NamespaceMutationCandidate,
-    ) -> Result<MutationResult> {
-        let mut results = self
-            .publish_through_publisher(namespace_id, vec![candidate])
-            .await;
-        let response = results.pop().unwrap_or_else(|| {
-            Err(RuntimeError::Core(CoreError::Internal(
-                "empty path mutation batch".to_owned(),
-            )))
-        })?;
-        Ok(MutationResult {
-            namespace_id: response.namespace_id,
-            committed_seq: response.committed_seq,
-        })
+    ) -> Result<CommitResponse> {
+        self.publish_through_publisher(namespace_id, vec![candidate])
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Err(RuntimeError::Core(CoreError::Internal(
+                    "empty publication batch".to_owned(),
+                )))
+            })
     }
 
     /// Publishes direct submissions through the core's publication service

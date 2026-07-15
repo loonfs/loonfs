@@ -80,11 +80,13 @@ pub(crate) enum CommandData {
     FileMutation {
         target: String,
         committed_seq: u64,
+        commit_id: String,
     },
     PathMove {
         from: String,
         to: String,
         committed_seq: u64,
+        commit_id: String,
     },
     ConfigPath {
         path: String,

@@ -37,12 +37,21 @@ pub struct CommitRequest {
     pub message: Option<String>,
 }
 
-/// Response for a committed explicit request.
+/// Result of one committed mutation.
+///
+/// Every mutation resolves to this envelope — path-oriented operations and
+/// explicit commits, embedded or remote. The commit id is the caller's
+/// reconciliation handle: resubmitting the same request with the same id
+/// replays this result instead of committing twice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommitResponse {
+    /// Namespace that changed.
     pub namespace_id: NamespaceId,
+    /// Idempotency key the mutation committed under: caller-supplied, or
+    /// generated on the caller's behalf when the request carried none.
     pub commit_id: CommitId,
+    /// Sequence number where the mutation became visible.
     pub committed_seq: ChangeSeq,
 }
 

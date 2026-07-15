@@ -11,10 +11,10 @@ use loonfs::{
     CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
     FsWriter, FsWriterBuilder, InodeId, InodeKind, ListChangesOptions, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, MutationResult,
-    NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy, PutBehavior,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind,
-    UploadContentResponse, UploadId,
+    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, NamespaceId,
+    NamespaceStatusResponse, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind, UploadContentResponse,
+    UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_head};
@@ -102,7 +102,7 @@ impl TestRuntime {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         self.writer
             .put_file_bytes(namespace_id, absolute_path, bytes, options)
             .await
@@ -114,7 +114,7 @@ impl TestRuntime {
         absolute_path: &str,
         content_ref: ContentRef,
         options: PutFileOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         self.writer
             .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
             .await
@@ -297,33 +297,33 @@ trait FsTestExt {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> loonfs::Result<MutationResult>;
+    ) -> loonfs::Result<CommitResponse>;
     fn create_directory_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> loonfs::Result<MutationResult>;
+    ) -> loonfs::Result<CommitResponse>;
     fn delete_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> loonfs::Result<MutationResult>;
+    ) -> loonfs::Result<CommitResponse>;
     fn move_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
         to_path: &str,
         options: MoveOptions,
-    ) -> loonfs::Result<MutationResult>;
+    ) -> loonfs::Result<CommitResponse>;
     fn copy_path_blocking(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
         to_path: &str,
         options: CopyOptions,
-    ) -> loonfs::Result<MutationResult>;
+    ) -> loonfs::Result<CommitResponse>;
     fn begin_upload_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -427,7 +427,7 @@ impl FsTestExt for TestRuntime {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
                 .put_file_bytes(namespace_id, absolute_path, bytes, options),
@@ -439,7 +439,7 @@ impl FsTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
                 .create_directory(namespace_id, absolute_path, options),
@@ -451,7 +451,7 @@ impl FsTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
                 .delete_path(namespace_id, absolute_path, options),
@@ -464,7 +464,7 @@ impl FsTestExt for TestRuntime {
         from_path: &str,
         to_path: &str,
         options: MoveOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
                 .move_path(namespace_id, from_path, to_path, options),
@@ -477,7 +477,7 @@ impl FsTestExt for TestRuntime {
         from_path: &str,
         to_path: &str,
         options: CopyOptions,
-    ) -> loonfs::Result<MutationResult> {
+    ) -> loonfs::Result<CommitResponse> {
         block_on(
             self.writer
                 .copy_path(namespace_id, from_path, to_path, options),
@@ -1754,6 +1754,67 @@ fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands
         .read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
         .expect("read retried file");
     assert_eq!(read.bytes, b"overlap survives");
+}
+
+#[test]
+fn path_mutations_return_the_commit_id_they_committed_under() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let object_store = store(temp_dir.path());
+    block_on(async {
+        let fs = open_runtime_async(object_store, "commit-id-echo-test").await;
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+
+        let commit_id = CommitId::parse("retry-key-1").expect("valid commit id");
+        let first = fs
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"alpha",
+                PutFileOptions {
+                    commit_id: Some(commit_id.clone()),
+                    ..PutFileOptions::default()
+                },
+            )
+            .await
+            .expect("first put");
+        assert_eq!(first.namespace_id, namespace_id);
+        assert_eq!(first.commit_id, commit_id);
+
+        // Resubmitting the identical mutation with the same commit id
+        // replays the original commit instead of committing again.
+        let replay = fs
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"alpha",
+                PutFileOptions {
+                    commit_id: Some(commit_id.clone()),
+                    ..PutFileOptions::default()
+                },
+            )
+            .await
+            .expect("identical resubmission replays the original commit");
+        assert_eq!(replay.commit_id, first.commit_id);
+        assert_eq!(replay.committed_seq, first.committed_seq);
+
+        // Without a caller-supplied id, the generated one is still returned,
+        // so every caller holds a reconciliation handle.
+        let generated = fs
+            .writer
+            .create_directory(
+                &namespace_id,
+                "/docs/sub",
+                CreateDirectoryOptions::default(),
+            )
+            .await
+            .expect("mkdir");
+        assert!(!generated.commit_id.as_str().is_empty());
+        assert_ne!(generated.commit_id, first.commit_id);
+        assert!(generated.committed_seq > first.committed_seq);
+    });
 }
 
 #[test]

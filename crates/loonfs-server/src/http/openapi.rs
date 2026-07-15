@@ -16,10 +16,9 @@ use loonfs_api::{
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, InodeId, ListFileRevisionsResponse,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MaintenanceTickResponse,
-    ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo,
+    FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse, ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo,
 };
 
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
@@ -80,7 +79,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::MoveBehavior,
         FilesystemOperation,
         FilesystemOperationRequest,
-        FilesystemOperationResponse,
         loonfs_api::FileRevision,
         ListFileRevisionsResponse,
         RestoreFileRevisionRequest,

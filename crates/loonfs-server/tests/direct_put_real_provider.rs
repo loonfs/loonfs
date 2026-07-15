@@ -3,8 +3,8 @@
 
 use loonfs_api::{
     v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
-    ChangeSeq, CommitId, ContentRef, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, PutBehavior,
+    ChangeSeq, CommitId, CommitResponse, ContentRef, FilesystemOperation,
+    FilesystemOperationRequest, PutBehavior,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_server::{
@@ -302,7 +302,7 @@ fn post_filesystem_operation(
     server_url: &str,
     namespace: &str,
     request: &FilesystemOperationRequest,
-) -> FilesystemOperationResponse {
+) -> CommitResponse {
     let response = ureq::post(&format!(
         "{server_url}/v0/namespaces/{namespace}/filesystem/operations"
     ))

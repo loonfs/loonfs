@@ -17,8 +17,8 @@ use loonfs_api::{
     decode_directory_cursor, decode_file_revisions_cursor,
     v0::{ChangesResponse, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse},
     DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, InodeId, LimitError, ListFileRevisionsResponse, PageCursorError,
-    PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
+    InodeId, LimitError, ListFileRevisionsResponse, PageCursorError, PageRequest, PaginationPolicy,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use tracing::Instrument;
 
@@ -411,7 +411,7 @@ pub(super) async fn restore_inode_revision(
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = FilesystemOperationRequest,
         responses(
-            (status = 200, description = "Filesystem operation committed", body = FilesystemOperationResponse),
+            (status = 200, description = "Filesystem operation committed", body = ApiCommitResponse),
             (status = 400, description = "Invalid operation", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
@@ -426,7 +426,7 @@ pub(super) async fn filesystem_operation(
     namespace: NamespaceIdPath,
     headers: HeaderMap,
     AppJson(request): AppJson<FilesystemOperationRequest>,
-) -> Result<Json<FilesystemOperationResponse>, ApiResponseError> {
+) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let FilesystemOperationRequest {
@@ -529,11 +529,7 @@ pub(super) async fn filesystem_operation(
     };
     let response = response_result
         .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
-    let result = FilesystemOperationResponse {
-        namespace_id: response.namespace_id,
-        committed_seq: response.committed_seq,
-    };
-    Ok(Json(result))
+    Ok(Json(response))
 }
 
 #[cfg_attr(

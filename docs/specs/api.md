@@ -265,8 +265,7 @@ orphaned, and the request is not committed.
 
 If the head update's outcome was never observed — a transport failure after
 the update was sent — the server reports `commit_outcome_unknown`: the commit
-may already be visible. A retry must reuse the same `commit_id`, which replays
-the committed response instead of double-committing.
+may already be visible. Section 5.2 defines how the caller resolves it.
 
 The server may publish multiple committed logical commits in one WAL segment
 and one head update, but it must preserve per-commit idempotency, ordering,
@@ -282,6 +281,36 @@ Callers may bound a response with `limit`; a truncated page returns
 the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
+
+### 5.2 Mutation responses and safe retry
+
+Every committed mutation — an explicit commit or a path-oriented operation —
+returns the same response envelope: the `namespace_id` that changed, the
+`commit_id` the mutation committed under, and the `committed_seq` where it
+became visible. When the caller did not supply a commit id, the surface that
+accepted the request generates one and returns it, so every caller holds the
+identity it needs to reconcile an uncertain outcome.
+
+The retry rule has three cases:
+
+- Resubmitting the semantically identical mutation with the same `commit_id`
+  is safe: if the original committed, the response replays the original
+  `committed_seq` without committing again; if it never committed, the
+  resubmission completes it.
+- Reusing a `commit_id` for a different mutation fails with
+  `commit_id_reuse_conflict`.
+- Retrying with a new `commit_id` is a new logical mutation.
+
+Identical resubmission is the reconciliation mechanism. There is no separate
+commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
+a process restart, resubmit the same request with the same `commit_id` and
+read the definitive answer from the response.
+
+Committed mutations record a durable receipt binding the `commit_id` to its
+`committed_seq`; replay reads that receipt. Receipts are currently retained
+for the life of the namespace. When receipt retention becomes bounded, this
+contract will state the replay window explicitly, and resubmission after the
+window must fail loudly rather than silently committing again.
 
 The standard lower-level mutation set is defined in `format.md` ("Standard
 mutation operations"). The path-oriented filesystem surface may compile
@@ -601,13 +630,15 @@ Representative request:
 ```
 
 A successful response is returned only after the underlying change is actually
-committed: the WAL segment is durable and the head has advanced.
+committed: the WAL segment is durable and the head has advanced. Path
+operations return the same envelope as explicit commits (section 5.2).
 
 Representative response:
 
 ```json
 {
   "namespace_id": "demo",
+  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "committed_seq": 419
 }
 ```

@@ -367,19 +367,29 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::FileMutation {
             target,
             committed_seq,
+            commit_id,
         } => match output.kind {
-            CommandKind::FilesystemPut => format!("stored {target} @ seq {committed_seq}"),
-            CommandKind::FilesystemRm => format!("removed {target} @ seq {committed_seq}"),
-            _ => format!("{target} @ seq {committed_seq}"),
+            CommandKind::FilesystemPut => {
+                format!("stored {target} @ seq {committed_seq} (commit {commit_id})")
+            }
+            CommandKind::FilesystemRm => {
+                format!("removed {target} @ seq {committed_seq} (commit {commit_id})")
+            }
+            _ => format!("{target} @ seq {committed_seq} (commit {commit_id})"),
         },
         CommandData::PathMove {
             from,
             to,
             committed_seq,
+            commit_id,
         } => match output.kind {
-            CommandKind::FilesystemMv => format!("moved {from} -> {to} @ seq {committed_seq}"),
-            CommandKind::FilesystemCp => format!("copied {from} -> {to} @ seq {committed_seq}"),
-            _ => format!("{from} -> {to} @ seq {committed_seq}"),
+            CommandKind::FilesystemMv => {
+                format!("moved {from} -> {to} @ seq {committed_seq} (commit {commit_id})")
+            }
+            CommandKind::FilesystemCp => {
+                format!("copied {from} -> {to} @ seq {committed_seq} (commit {commit_id})")
+            }
+            _ => format!("{from} -> {to} @ seq {committed_seq} (commit {commit_id})"),
         },
         CommandData::ConfigPath { path } => path.clone(),
         CommandData::ConfigShow { config } => {
