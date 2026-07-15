@@ -127,8 +127,8 @@ struct ParkedPuts {
     store: Arc<BlockingHeadCasStore>,
     writer: Arc<FsWriter>,
     namespace_id: NamespaceId,
-    first: tokio::task::JoinHandle<loonfs::Result<loonfs::MutationResult>>,
-    second: tokio::task::JoinHandle<loonfs::Result<loonfs::MutationResult>>,
+    first: tokio::task::JoinHandle<loonfs::Result<loonfs::CommitResponse>>,
+    second: tokio::task::JoinHandle<loonfs::Result<loonfs::CommitResponse>>,
 }
 
 /// Parks one publication at the blocked head CAS with a second put queued

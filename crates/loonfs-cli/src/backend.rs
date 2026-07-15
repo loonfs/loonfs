@@ -18,10 +18,10 @@ use loonfs::{
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
+    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
     DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse, FlushWalResponse,
     GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, MutationResult, NamespaceId,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
     ReleaseCheckpointResponse, RevisionNo,
 };
@@ -199,14 +199,14 @@ impl Backend for EmbeddedBackend {
         spec: &NamespacePath,
         bytes: &[u8],
         force: bool,
-    ) -> Result<MutationResult, BackendError> {
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
         let behavior = if force {
             PutBehavior::Replace
         } else {
             PutBehavior::NoReplace
         };
-        let commit_id = generated_commit_id();
         self.writer
             .put_file_bytes(
                 &namespace_id,
@@ -214,39 +214,43 @@ impl Backend for EmbeddedBackend {
                 bytes,
                 PutFileOptions {
                     behavior,
-                    commit_id: Some(commit_id),
+                    commit_id,
                 },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    async fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+    async fn delete_path(
+        &self,
+        spec: &NamespacePath,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        let commit_id = generated_commit_id();
         self.writer
             .delete_path(
                 &namespace_id,
                 &spec.absolute_path,
                 DeleteOptions {
                     behavior: DeleteDirectoryBehavior::NonRecursive,
-                    commit_id: Some(commit_id),
+                    commit_id,
                 },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
-    async fn create_directory(&self, spec: &NamespacePath) -> Result<MutationResult, BackendError> {
+    async fn create_directory(
+        &self,
+        spec: &NamespacePath,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        let commit_id = generated_commit_id();
         self.writer
             .create_directory(
                 &namespace_id,
                 &spec.absolute_path,
-                CreateDirectoryOptions {
-                    commit_id: Some(commit_id),
-                },
+                CreateDirectoryOptions { commit_id },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
@@ -256,9 +260,9 @@ impl Backend for EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-    ) -> Result<MutationResult, BackendError> {
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
-        let commit_id = generated_commit_id();
         self.writer
             .move_path(
                 &namespace_id,
@@ -266,7 +270,7 @@ impl Backend for EmbeddedBackend {
                 &to.absolute_path,
                 MoveOptions {
                     behavior: MoveBehavior::NoReplace,
-                    commit_id: Some(commit_id),
+                    commit_id,
                 },
             )
             .await
@@ -277,17 +281,15 @@ impl Backend for EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-    ) -> Result<MutationResult, BackendError> {
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
-        let commit_id = generated_commit_id();
         self.writer
             .copy_path(
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
-                CopyOptions {
-                    commit_id: Some(commit_id),
-                },
+                CopyOptions { commit_id },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
@@ -297,17 +299,15 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-    ) -> Result<MutationResult, BackendError> {
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        let commit_id = generated_commit_id();
         self.writer
             .restore_file_revision(
                 &namespace_id,
                 &spec.absolute_path,
                 source_revision_no,
-                RestoreRevisionOptions {
-                    commit_id: Some(commit_id),
-                },
+                RestoreRevisionOptions { commit_id },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
@@ -419,10 +419,6 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
     PaginationPolicy::default()
         .resolve_limit(limit)
         .map_err(|error| BackendError::invalid_input(error.to_string()))
-}
-
-fn generated_commit_id() -> CommitId {
-    CommitId::generate()
 }
 
 fn map_runtime_error(error: RuntimeError) -> BackendError {
@@ -636,7 +632,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_backend_generates_non_empty_commit_id_for_embedded_put() {
+    async fn embedded_backend_put_returns_the_commit_id_it_committed_under() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
@@ -651,7 +647,7 @@ mod tests {
             .await
             .expect("create namespace");
 
-        target
+        let response = target
             .backend
             .put_file_bytes(
                 &NamespacePath {
@@ -660,9 +656,11 @@ mod tests {
                 },
                 b"hello",
                 false,
+                None,
             )
             .await
             .expect("put file");
+        assert!(!response.commit_id.as_str().trim().is_empty());
 
         let changes = target
             .backend
@@ -670,7 +668,7 @@ mod tests {
             .await
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
-        assert!(!changes.changes[0].commit_id.as_str().trim().is_empty());
+        assert_eq!(changes.changes[0].commit_id, response.commit_id);
     }
 
     #[tokio::test]

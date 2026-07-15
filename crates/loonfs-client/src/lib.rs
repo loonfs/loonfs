@@ -22,10 +22,9 @@ use loonfs_api::{
     CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorKind, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, MutationResult, NamespaceId, NamespaceStatusResponse,
+    FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
+    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse,
     NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
     RevisionNo,
 };
@@ -718,13 +717,13 @@ impl Client {
         &self,
         namespace: &str,
         request: &FilesystemOperationRequest,
-    ) -> Result<FilesystemOperationResponse, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!(
             "{}/v0/namespaces/{namespace}/filesystem/operations",
             self.base_url
         );
-        self.request_json::<_, FilesystemOperationResponse>(self.agent.post(&url), Some(request))
+        self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
     }
 
     fn stage_bytes_as_content_ref(
@@ -760,7 +759,7 @@ impl Client {
         bytes: &[u8],
         force: bool,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
         let staged = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
@@ -779,7 +778,7 @@ impl Client {
                 },
             },
         )?;
-        Ok(response.into())
+        Ok(response)
     }
 
     pub fn write_file_bytes(
@@ -787,7 +786,7 @@ impl Client {
         spec: &NamespacePath,
         bytes: &[u8],
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         self.put_file_bytes(spec, bytes, true, options)
     }
 
@@ -795,7 +794,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
@@ -807,14 +806,14 @@ impl Client {
                 },
             },
         )?;
-        Ok(response.into())
+        Ok(response)
     }
 
     pub fn delete_path(
         &self,
         spec: &NamespacePath,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::NonRecursive, options)
     }
 
@@ -822,7 +821,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::Recursive, options)
     }
 
@@ -831,7 +830,7 @@ impl Client {
         spec: &NamespacePath,
         behavior: DeleteDirectoryBehavior,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
@@ -844,7 +843,7 @@ impl Client {
                 },
             },
         )?;
-        Ok(response.into())
+        Ok(response)
     }
 
     pub fn move_path(
@@ -852,7 +851,7 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot move across namespaces: {} -> {}",
@@ -872,7 +871,7 @@ impl Client {
                 },
             },
         )?;
-        Ok(response.into())
+        Ok(response)
     }
 
     pub fn copy_path(
@@ -880,7 +879,7 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot copy across namespaces: {} -> {}",
@@ -899,7 +898,7 @@ impl Client {
                 },
             },
         )?;
-        Ok(response.into())
+        Ok(response)
     }
 
     pub fn restore_file_revision(
@@ -907,7 +906,7 @@ impl Client {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &MutationOptions,
-    ) -> Result<MutationResult, ClientError> {
+    ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
@@ -920,7 +919,7 @@ impl Client {
                 },
             },
         )?;
-        Ok(response.into())
+        Ok(response)
     }
 
     pub fn restore_file_revision_for_inode(

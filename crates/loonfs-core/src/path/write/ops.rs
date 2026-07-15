@@ -7,7 +7,7 @@ use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use loonfs_api::{
-    v0::MoveBehavior, CommitId, ContentRef, DeleteDirectoryBehavior, MutationResult, NamespaceId,
+    v0::MoveBehavior, CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, NamespaceId,
     PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
@@ -21,7 +21,7 @@ async fn submit_path_intent<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     let mut results = crate::commit_engine::publish_namespace_mutations_batch(
         store,
         namespace_id,
@@ -29,13 +29,9 @@ async fn submit_path_intent<S: ObjectStore + ?Sized>(
         context,
     )
     .await;
-    let response = results
+    results
         .pop()
-        .unwrap_or_else(|| Err(CoreError::Internal("empty path mutation batch".to_owned())))?;
-    Ok(MutationResult {
-        namespace_id: response.namespace_id,
-        committed_seq: response.committed_seq,
-    })
+        .unwrap_or_else(|| Err(CoreError::Internal("empty path mutation batch".to_owned())))
 }
 
 pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -46,7 +42,7 @@ pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     behavior: PutBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     let content_ref =
         store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes).await?;
     put_file_content_ref(
@@ -68,7 +64,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     put_file_bytes(
         store,
         namespace_id,
@@ -89,7 +85,7 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
     behavior: PutBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
@@ -111,7 +107,7 @@ pub(crate) async fn delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     delete_path_with_behavior(
         store,
         namespace_id,
@@ -130,7 +126,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
     behavior: DeleteDirectoryBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
@@ -152,7 +148,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     to_path: &str,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,
@@ -175,7 +171,7 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
     source_revision_no: RevisionNo,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
-) -> Result<MutationResult, CoreError> {
+) -> Result<CommitResponse, CoreError> {
     let commit_id = normalized_commit_id(commit_id);
     submit_path_intent(
         store,

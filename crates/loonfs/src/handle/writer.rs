@@ -10,7 +10,7 @@ use crate::{
     CapabilityDocument, CommitRequest, CommitResponse, CompleteUploadRequest,
     CompleteUploadResponse, ContentRef, CopyOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    GramIndexBuildPolicy, InodeId, MoveOptions, MutationResult, NamespaceId, NamespaceSummary,
+    GramIndexBuildPolicy, InodeId, MoveOptions, NamespaceId, NamespaceSummary,
     ObjectStoreMetricsRecorder, PutFileOptions, RestoreRevisionOptions, Result, RevisionNo,
     RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
     TraceStoreKind, UploadContentResponse, UploadId,
@@ -135,7 +135,7 @@ impl FsWriter {
         absolute_path: &str,
         bytes: &[u8],
         options: PutFileOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .put_file_bytes(namespace_id, absolute_path, bytes, options)
             .await
@@ -152,7 +152,7 @@ impl FsWriter {
         absolute_path: &str,
         content_ref: ContentRef,
         options: PutFileOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
             .await
@@ -164,7 +164,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: CreateDirectoryOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .create_directory(namespace_id, absolute_path, options)
             .await
@@ -179,7 +179,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         absolute_path: &str,
         options: DeleteOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .delete_path(namespace_id, absolute_path, options)
             .await
@@ -192,7 +192,7 @@ impl FsWriter {
         from_path: &str,
         to_path: &str,
         options: MoveOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .move_path(namespace_id, from_path, to_path, options)
             .await
@@ -206,7 +206,7 @@ impl FsWriter {
         from_path: &str,
         to_path: &str,
         options: CopyOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .copy_path(namespace_id, from_path, to_path, options)
             .await
@@ -219,7 +219,7 @@ impl FsWriter {
         absolute_path: &str,
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
-    ) -> Result<MutationResult> {
+    ) -> Result<CommitResponse> {
         self.core
             .restore_file_revision(namespace_id, absolute_path, source_revision_no, options)
             .await

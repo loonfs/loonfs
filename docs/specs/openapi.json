@@ -1337,7 +1337,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FilesystemOperationResponse"
+                  "$ref": "#/components/schemas/CommitResponse"
                 }
               }
             }
@@ -3234,7 +3234,7 @@
       },
       "CommitResponse": {
         "type": "object",
-        "description": "Response for a committed explicit request.",
+        "description": "Result of one committed mutation.\n\nEvery mutation resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.",
         "required": [
           "namespace_id",
           "commit_id",
@@ -3242,13 +3242,16 @@
         ],
         "properties": {
           "commit_id": {
-            "$ref": "#/components/schemas/CommitId"
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Idempotency key the mutation committed under: caller-supplied, or\ngenerated on the caller's behalf when the request carried none."
           },
           "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq"
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence number where the mutation became visible."
           },
           "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId"
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that changed."
           }
         }
       },
@@ -3717,24 +3720,6 @@
           "operation": {
             "$ref": "#/components/schemas/FilesystemOperation",
             "description": "Operation to apply."
-          }
-        }
-      },
-      "FilesystemOperationResponse": {
-        "type": "object",
-        "description": "Response for one path-oriented operation.",
-        "required": [
-          "namespace_id",
-          "committed_seq"
-        ],
-        "properties": {
-          "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence where the operation became visible."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace that changed."
           }
         }
       },

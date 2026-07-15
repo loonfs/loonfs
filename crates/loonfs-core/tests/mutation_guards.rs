@@ -258,14 +258,14 @@ fn read_context<S: ObjectStore + ?Sized>(
 }
 
 /// Publishes one path intent through the commit engine — the single publish
-/// pipeline — and maps the response like the old convenience writers did.
+/// pipeline.
 async fn submit_intent_async<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
-) -> Result<loonfs_api::MutationResult, CoreError> {
-    let response = NamespaceCommitEngine::new(namespace_id.clone())
+) -> Result<loonfs_api::CommitResponse, CoreError> {
+    NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
             vec![NamespaceMutationCandidate::Path(intent)],
@@ -274,11 +274,7 @@ async fn submit_intent_async<S: ObjectStore + ?Sized>(
         .await
         .results
         .pop()
-        .expect("one publish result")?;
-    Ok(loonfs_api::MutationResult {
-        namespace_id: response.namespace_id,
-        committed_seq: response.committed_seq,
-    })
+        .expect("one publish result")
 }
 
 fn submit_intent<S: ObjectStore + ?Sized>(
@@ -286,7 +282,7 @@ fn submit_intent<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     block_on(submit_intent_async(store, namespace_id, intent, context))
 }
 
@@ -298,7 +294,7 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
     behavior: PutBehavior,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     let content = block_on(store_bytes_as_content(store, namespace_id, bytes))?;
     submit_intent(
         store,
@@ -320,7 +316,7 @@ fn write_file_bytes<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     put_file_bytes(
         store,
         namespace_id,
@@ -338,7 +334,7 @@ fn create_directory_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_intent(
         store,
         namespace_id,
@@ -356,7 +352,7 @@ fn delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_intent(
         store,
         namespace_id,
@@ -375,7 +371,7 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_intent(
         store,
         namespace_id,
@@ -395,7 +391,7 @@ fn move_path<S: ObjectStore + ?Sized>(
     to_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_intent(
         store,
         namespace_id,
@@ -416,7 +412,7 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
     to_path: &str,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_intent(
         store,
         namespace_id,
@@ -436,7 +432,7 @@ fn restore_file_revision<S: ObjectStore + ?Sized>(
     source_revision_no: RevisionNo,
     context: &MutationContext,
     commit_id: Option<&str>,
-) -> Result<loonfs_api::MutationResult, CoreError> {
+) -> Result<loonfs_api::CommitResponse, CoreError> {
     submit_intent(
         store,
         namespace_id,

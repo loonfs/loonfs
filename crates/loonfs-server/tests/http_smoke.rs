@@ -7,11 +7,10 @@ use loonfs_api::{
         BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
         CompleteUploadRequest, ValidatedContentToken,
     },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, ContentRef,
-    CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
-    NamespaceId, PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
-    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, CommitResponse,
+    ContentRef, CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest, InodeId,
+    InodeKind, ListPathEntriesResponse, ManifestId, NamespaceId, PutBehavior, RevisionNo,
+    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -320,10 +319,17 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         assert_eq!(directory_entry.inode_kind, InodeKind::Directory);
 
         let target = NamespacePath::parse("demo:/notes/hello.txt").expect("parse namespace path");
-        harness
+        let written = harness
             .client
-            .write_file_bytes(&target, b"hello over http\n", &MutationOptions::default())
+            .write_file_bytes(
+                &target,
+                b"hello over http\n",
+                &MutationOptions::with_commit_id("smoke-write-1"),
+            )
             .expect("write bytes");
+        // Path operations echo the commit id they committed under.
+        assert_eq!(written.commit_id.as_str(), "smoke-write-1");
+        assert_eq!(written.committed_seq, ChangeSeq(2));
 
         let entry = harness.client.stat_path(&target).expect("stat path");
         assert_eq!(entry.size_bytes, Some(16));
@@ -816,7 +822,7 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
         .set("authorization", "Bearer test-token")
         .send_json(request)
         .expect("bad token should fall back to content validation");
-        let response: FilesystemOperationResponse =
+        let response: CommitResponse =
             serde_json::from_reader(response.into_reader()).expect("decode operation response");
         assert_eq!(response.committed_seq, ChangeSeq(1));
 

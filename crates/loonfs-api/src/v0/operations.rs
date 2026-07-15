@@ -84,16 +84,6 @@ pub struct DeleteNamespaceResponse {
     pub head_seq: ChangeSeq,
 }
 
-/// Result of a namespace-visible mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MutationResult {
-    /// Namespace that changed.
-    pub namespace_id: NamespaceId,
-    /// Sequence number where the mutation became visible.
-    pub committed_seq: ChangeSeq,
-}
-
 /// Put behavior for path-oriented file writes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -171,16 +161,6 @@ pub struct FilesystemOperationRequest {
     pub content_tokens: Vec<ValidatedContentToken>,
     /// Operation to apply.
     pub operation: FilesystemOperation,
-}
-
-/// Response for one path-oriented operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct FilesystemOperationResponse {
-    /// Namespace that changed.
-    pub namespace_id: NamespaceId,
-    /// Sequence where the operation became visible.
-    pub committed_seq: ChangeSeq,
 }
 
 /// One immutable file revision.
@@ -410,24 +390,6 @@ pub struct MaintenanceTickResponse {
     /// Garbage-collection report when the tick opted into sweeping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcResponse>,
-}
-
-impl From<MutationResult> for FilesystemOperationResponse {
-    fn from(value: MutationResult) -> Self {
-        Self {
-            namespace_id: value.namespace_id,
-            committed_seq: value.committed_seq,
-        }
-    }
-}
-
-impl From<FilesystemOperationResponse> for MutationResult {
-    fn from(value: FilesystemOperationResponse) -> Self {
-        Self {
-            namespace_id: value.namespace_id,
-            committed_seq: value.committed_seq,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -35,8 +35,8 @@ pub(crate) enum Command {
     Put(FilesystemPutArgs),
     Revisions(FilesystemRevisionsArgs),
     Restore(FilesystemRestoreArgs),
-    Mkdir(FilesystemPathArgs),
-    Rm(FilesystemPathArgs),
+    Mkdir(FilesystemPathMutationArgs),
+    Rm(FilesystemPathMutationArgs),
     Mv(FilesystemTransferArgs),
     Cp(FilesystemTransferArgs),
     Changes(ChangesArgs),
@@ -255,6 +255,17 @@ pub(crate) struct FilesystemPathArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FilesystemPathMutationArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemRevisionsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -315,6 +326,10 @@ pub(crate) struct FilesystemPutArgs {
     pub remote_path: Option<String>,
     #[arg(long)]
     pub force: bool,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -323,6 +338,10 @@ pub(crate) struct FilesystemTransferArgs {
     pub target: TargetSelectorArgs,
     pub source_path: String,
     pub dest_path: String,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -332,6 +351,10 @@ pub(crate) struct FilesystemRestoreArgs {
     pub path: String,
     #[arg(long)]
     pub revision: u64,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
