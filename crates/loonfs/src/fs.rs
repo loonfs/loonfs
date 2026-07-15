@@ -4,12 +4,10 @@
 
 use crate::background::BackgroundWork;
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
-use crate::commit_window::{
-    commit_window_delay, pad_missing_results, CommitWindows, WindowEntry, WindowRole,
-};
 use crate::config::{validate_config, FsConfig};
 use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use crate::publisher::PublisherRegistry;
 use crate::time::current_time_ms;
 use crate::writer_session::WriterSessionRegistry;
 use crate::{
@@ -40,7 +38,6 @@ use loonfs_core::cache::{
     load_namespace_head_summary, MetadataTableCache, WalTailProjectionCache,
     WalTailProjectionCacheConfig,
 };
-use loonfs_core::commit::CommitHeadPublishError;
 use loonfs_core::{MutationContext, NamespaceEngine};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -64,7 +61,10 @@ pub(crate) struct FsInner {
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     pub(crate) background: BackgroundWork,
-    pub(crate) commit_windows: CommitWindows,
+    /// The core's publication service: every mutation — direct handle
+    /// calls and server submissions alike — publishes through it. It holds
+    /// this core weakly, so the ownership does not cycle.
+    pub(crate) publisher: PublisherRegistry,
     /// Session-owned writer state (acquired epochs, fencing), deliberately
     /// outside every rebuildable cache; see [`crate::writer_session`].
     pub(crate) writer_sessions: WriterSessionRegistry,
@@ -124,8 +124,13 @@ impl FsCore {
                     .runtime_cache
                     .max_cached_wal_tail_projection_decoded_bytes,
             }));
+        let min_publish_interval = std::time::Duration::from_millis(config.min_publish_interval_ms);
+        let trace_mode = config.trace_mode.as_str();
+        let trace_store_kind = config.trace_store_kind.as_str();
+        // Cyclic by design: the core owns its publication service, and the
+        // service reaches back into the core through a weak reference.
         Ok(Self {
-            inner: Arc::new(FsInner {
+            inner: Arc::new_cyclic(|weak| FsInner {
                 store,
                 config,
                 writer_session_id: generated_id("wrs"),
@@ -134,16 +139,21 @@ impl FsCore {
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::default(),
                 background,
-                commit_windows: CommitWindows::default(),
+                publisher: PublisherRegistry::from_core(
+                    weak.clone(),
+                    min_publish_interval,
+                    trace_mode,
+                    trace_store_kind,
+                ),
                 writer_sessions: WriterSessionRegistry::default(),
                 grams_enabled_hints: Mutex::new(BTreeMap::new()),
             }),
         })
     }
 
-    /// Returns this runtime's config.
-    pub(crate) fn config(&self) -> &FsConfig {
-        &self.inner.config
+    /// The core's publication service; see [`crate::publisher`].
+    pub(crate) fn publisher(&self) -> &PublisherRegistry {
+        &self.inner.publisher
     }
 
     /// This runtime's shared decoded-block cache handle, for builders
@@ -203,13 +213,32 @@ impl FsCore {
     /// swap stay committed; reads, writes, forks, and re-creation of the id
     /// fail with `namespace_deleted` afterward. Deletion does not reclaim
     /// storage; reclamation is future maintenance work.
+    ///
+    /// Sequenced as a barrier through the publication service: mutations
+    /// admitted before the delete publish first, and mutations admitted
+    /// after it fail once it succeeds.
     pub(crate) async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        // Serialize with this process's publishers so the delete takes its
-        // turn behind any in-flight publication for the namespace.
+        self.inner
+            .publisher
+            .submit_delete(namespace_id.clone(), options)
+            .await
+            .map_err(RuntimeError::Core)
+    }
+
+    /// The delete itself, run by the publication service once the barrier
+    /// admits it. Only the service calls this; everything else must go
+    /// through [`Self::delete_namespace`] so the barrier holds.
+    pub(crate) async fn delete_namespace_unqueued(
+        &self,
+        namespace_id: &NamespaceId,
+        options: DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        // Serialize with any engine holder so the delete takes its turn
+        // behind an in-flight publication for the namespace.
         let engine = self.commit_engine(namespace_id);
         let result = {
             let _engine = engine.lock().await;
@@ -972,9 +1001,10 @@ impl FsCore {
         // core re-checks the same invariant when the intent is planned.
         loonfs_core::path::validate_path_for_mutation(absolute_path)?;
         // The bytes become durable content before the publish is submitted,
-        // so the commit window never waits on a content upload and an upload
-        // failure surfaces here with nothing published. A publish that fails
-        // afterward leaves only a GC-covered orphan behind an unmoved head.
+        // so the publication queue never waits on a content upload and an
+        // upload failure surfaces here with nothing published. A publish
+        // that fails afterward leaves only a GC-covered orphan behind an
+        // unmoved head.
         let cached_content_store_id = self
             .load_namespace_catalog_cached(namespace_id)
             .await?
@@ -1246,7 +1276,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_through_commit_window(
+        self.publish_through_publisher(
             namespace_id,
             vec![NamespaceMutationCandidate::Commit(request)],
         )
@@ -1260,14 +1290,15 @@ impl FsCore {
         })
     }
 
-    /// Submits explicit semantic commit requests as one publication attempt,
-    /// returning one result per request in order.
+    /// Submits explicit semantic commit requests, returning one result per
+    /// request in order. Requests admitted together usually publish
+    /// together, batched by the publication service.
     pub(crate) async fn commit_operations_batch(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<Result<CommitResponse>> {
-        self.publish_through_commit_window(
+        self.publish_through_publisher(
             namespace_id,
             requests
                 .into_iter()
@@ -1292,7 +1323,7 @@ impl FsCore {
         candidate: NamespaceMutationCandidate,
     ) -> Result<MutationResult> {
         let mut results = self
-            .publish_through_commit_window(namespace_id, vec![candidate])
+            .publish_through_publisher(namespace_id, vec![candidate])
             .await;
         let response = results.pop().unwrap_or_else(|| {
             Err(RuntimeError::Core(CoreError::Internal(
@@ -1305,82 +1336,35 @@ impl FsCore {
         })
     }
 
-    /// Publishes a direct submission through the namespace's commit window
-    /// (see [`crate::commit_window`]): concurrent submissions within the
-    /// window flush as one batch — one WAL segment, one head CAS — and every
-    /// submitter receives its own results. A zero-length window bypasses
-    /// coalescing entirely. The server's batching publisher submits through
-    /// [`Self::publish_namespace_mutations_batch`] instead, which stays
-    /// window-free because it already coalesces.
-    async fn publish_through_commit_window(
+    /// Publishes direct submissions through the core's publication service
+    /// (see [`crate::publisher`]): batching is adaptive, every submitter
+    /// receives its own durable result, and admitted work is owned by the
+    /// service's tasks — a cancelled caller abandons only its result
+    /// delivery, never the publication. Candidates are admitted in order,
+    /// so one call's requests usually publish as one batch.
+    async fn publish_through_publisher(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
-        let window_ms = self.inner.config.commit_window_ms;
-        if window_ms == 0 {
-            return self
-                .publish_namespace_mutations_batch(namespace_id, candidates)
-                .await;
-        }
-        let candidate_count = candidates.len();
-        let role = self.inner.commit_windows.enter(namespace_id, candidates);
-        let result_receiver = match role {
-            WindowRole::Opener {
-                guard,
-                result_receiver,
-            } => {
-                commit_window_delay(std::time::Duration::from_millis(window_ms)).await;
-                let entries = guard.take_entries();
-                let mut combined = Vec::new();
-                let mut routes = Vec::new();
-                for entry in entries {
-                    let WindowEntry {
-                        candidates,
-                        result_sender,
-                    } = entry;
-                    routes.push((candidates.len(), result_sender));
-                    combined.extend(candidates);
-                }
-                let mut results = self
-                    .publish_namespace_mutations_batch(namespace_id, combined)
-                    .await
-                    .into_iter();
-                for (expected, sender) in routes {
-                    let slice: Vec<_> = results.by_ref().take(expected).collect();
-                    let _ = sender.send(pad_missing_results(slice, expected));
-                }
-                result_receiver
-            }
-            WindowRole::Joiner(result_receiver) => result_receiver,
-        };
-        match result_receiver.await {
-            Ok(results) => results,
-            // A dropped result channel means the opener's future was
-            // cancelled after it drained the window: the flush was in
-            // flight and its durable outcome was never observed. (An opener
-            // cancelled before draining rejects members explicitly instead.)
-            // The mutation may have committed, so this must surface as an
-            // unknown outcome, never as a definite failure; retrying with
-            // the same commit id replays the durable receipt if it landed.
-            Err(_) => (0..candidate_count)
-                .map(|_| {
-                    Err(RuntimeError::Core(CoreError::HeadPublish(
-                        CommitHeadPublishError::OutcomeUnknown(
-                            "commit window opener was cancelled while its flush was in flight"
-                                .to_owned(),
-                        ),
-                    )))
-                })
-                .collect(),
-        }
+        let submissions = candidates.into_iter().map(|candidate| {
+            self.inner
+                .publisher
+                .submit_candidate(namespace_id.clone(), candidate)
+        });
+        futures::future::join_all(submissions)
+            .await
+            .into_iter()
+            .map(|result| result.map_err(RuntimeError::Core))
+            .collect()
     }
 
     /// Publishes already-classified namespace mutation candidates as one
-    /// batch.
+    /// batch: one WAL segment, one head compare-and-swap.
     ///
-    /// Server code uses this to push path intents and explicit commits
-    /// through one namespace publisher; results match candidates in order.
+    /// This is the engine-level publish the publication service's tasks
+    /// drive; results match candidates in order. Everything else submits
+    /// through [`Self::publish_through_publisher`].
     pub(crate) async fn publish_namespace_mutations_batch(
         &self,
         namespace_id: &NamespaceId,
@@ -1866,7 +1850,7 @@ mod tests {
         let namespace_id = crate::NamespaceId::parse("grams-drain-tiers").expect("namespace id");
         let writer = crate::FsWriter::builder_with_store(store.clone())
             .writer_id("grams-drain-writer")
-            .commit_window_ms(0)
+            .min_publish_interval_ms(0)
             .build()
             .await
             .expect("build writer");

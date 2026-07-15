@@ -111,7 +111,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("coldstat-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");

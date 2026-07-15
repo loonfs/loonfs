@@ -34,7 +34,7 @@ impl ContentAdmission {
         Self {
             namespace_id,
             content_ref,
-            // Generous on purpose: it must outlive buffered commit windows
+            // Generous on purpose: it must outlive batched publications
             // and stale-head retries. An expired admission only downgrades
             // to a durable-validation probe, never to a weaker check.
             expires_at_ms: now_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),

@@ -62,10 +62,19 @@ impl FsWriter {
         FsReader::from_core(self.core.clone())
     }
 
-    /// Shared runtime core, for in-crate front-ends like the batching
-    /// publisher.
+    /// Shared runtime core, for in-crate front-ends.
     pub(crate) fn core(&self) -> &FsCore {
         &self.core
+    }
+
+    /// This writer's publication service (see [`crate::publisher`]).
+    ///
+    /// The direct mutation methods on this handle submit through the same
+    /// service; hosts that classify their own mutation candidates — the
+    /// reference server, for example — submit here directly. Clones share
+    /// the writer's per-namespace publishers.
+    pub fn publisher(&self) -> crate::publisher::PublisherRegistry {
+        self.core.publisher().clone()
     }
 
     /// Returns the capability document for this embedded build (API spec,
@@ -333,17 +342,28 @@ impl FsWriter {
         self.core.wait_for_background_maintenance().await
     }
 
-    /// Shuts down writer-scheduled background work: rejects new scheduling
-    /// and waits for in-flight maintenance tasks to settle, surfacing
-    /// panics. Work that claimed its maintenance slot but has not started
-    /// when the shutdown lands is refused, never left running unobserved.
+    /// Shuts down writer-scheduled background work: settles admitted
+    /// publications whose callers are gone, then rejects new maintenance
+    /// scheduling and waits for in-flight maintenance tasks to settle,
+    /// surfacing panics. Work that claimed its maintenance slot but has not
+    /// started when the shutdown lands is refused, never left running
+    /// unobserved.
     ///
     /// Foreground calls remain usable afterward; this settles only
     /// handle-owned background work, and with
-    /// [`FsBackgroundWork::ManualOnly`] it is nearly trivial. Dropping the
-    /// handle without calling this is best-effort cleanup, not the
-    /// documented graceful shutdown path.
+    /// [`FsBackgroundWork::ManualOnly`] it is nearly trivial. For a
+    /// terminal shutdown that also refuses later submissions with
+    /// `shutting_down`, call
+    /// [`PublisherRegistry::close_admission`](crate::publisher::PublisherRegistry::close_admission)
+    /// via [`Self::publisher`] first, as the reference server does.
+    /// Dropping the handle without calling this is best-effort cleanup,
+    /// not the documented graceful shutdown path.
     pub async fn shutdown_background(&self) -> Result<()> {
+        // Publications first — they can schedule the maintenance the second
+        // step settles. Draining without closing admission keeps the
+        // handle usable; a caller that keeps submitting concurrently just
+        // keeps the drain waiting.
+        self.core.publisher().drain().await?;
         self.core.shut_down_background();
         self.core.wait_for_background_maintenance().await
     }
@@ -389,15 +409,17 @@ impl FsWriterBuilder {
         self
     }
 
-    /// Sets the commit window for direct publishes, in milliseconds.
+    /// Sets the minimum interval between publication starts per namespace,
+    /// in milliseconds (see [`crate::publisher`]).
     ///
-    /// A direct publish holds its namespace's window open this long so
-    /// concurrent publishes join the same flush — one WAL segment, one head
-    /// CAS — with each caller still awaiting its own durable, visible
-    /// result. Defaults to [`crate::DEFAULT_COMMIT_WINDOW_MS`]; zero
-    /// disables coalescing and publishes each submission immediately.
-    pub fn commit_window_ms(mut self, commit_window_ms: u64) -> Self {
-        self.core.commit_window_ms = commit_window_ms;
+    /// A cold namespace publishes immediately; the interval only paces
+    /// follow-up batches, so concurrent publishes amortize into fewer,
+    /// larger WAL segments — with each caller still awaiting its own
+    /// durable, visible result. Defaults to
+    /// [`crate::DEFAULT_MIN_PUBLISH_INTERVAL_MS`]; zero keeps only the
+    /// batching that in-flight publications force.
+    pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
+        self.core.min_publish_interval_ms = min_publish_interval_ms;
         self
     }
 

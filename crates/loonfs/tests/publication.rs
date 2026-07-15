@@ -1,0 +1,248 @@
+//! Cancellation semantics of the unified publication path: admitted work
+//! is owned by the publication service's tasks, so cancelling callers —
+//! one, or all of them — abandons only result delivery, never the
+//! publication itself.
+
+#![allow(clippy::panic, clippy::disallowed_methods)]
+// Cancellation tests park a real publication at a blocked head
+// compare-and-swap and poll for that state with short sleeps.
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
+use loonfs::{CreateNamespaceOptions, FsWriter, NamespaceId, PutFileOptions, SharedObjectStore};
+use loonfs_objectstore::keys::wal_head;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tempfile::tempdir;
+use tokio::sync::Notify;
+use tokio::time::{sleep, timeout, Duration};
+
+/// Blocks head compare-and-swap writes while armed, so a test can park a
+/// publication mid-flight, cancel its callers, and then let it finish.
+#[derive(Debug)]
+struct BlockingHeadCasStore {
+    inner: LocalFsStore,
+    head_key: String,
+    armed: AtomicBool,
+    blocked: AtomicBool,
+    blocked_notify: Notify,
+    release: Notify,
+}
+
+impl BlockingHeadCasStore {
+    fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            head_key: wal_head(namespace_id.as_str()),
+            armed: AtomicBool::new(false),
+            blocked: AtomicBool::new(false),
+            blocked_notify: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_blocked_head_cas(&self) {
+        timeout(Duration::from_secs(10), async {
+            while !self.blocked.load(Ordering::SeqCst) {
+                let notified = self.blocked_notify.notified();
+                if self.blocked.load(Ordering::SeqCst) {
+                    break;
+                }
+                let _ = timeout(Duration::from_millis(50), notified).await;
+            }
+        })
+        .await
+        .expect("a head CAS must reach the block");
+    }
+
+    fn release(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl ObjectStore for BlockingHeadCasStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let is_head_cas = key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. });
+        if is_head_cas && self.armed.load(Ordering::SeqCst) {
+            self.blocked.store(true, Ordering::SeqCst);
+            self.blocked_notify.notify_waiters();
+            while self.armed.load(Ordering::SeqCst) {
+                let released = self.release.notified();
+                if !self.armed.load(Ordering::SeqCst) {
+                    break;
+                }
+                let _ = timeout(Duration::from_millis(50), released).await;
+            }
+            self.blocked.store(false, Ordering::SeqCst);
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+struct ParkedPuts {
+    store: Arc<BlockingHeadCasStore>,
+    writer: Arc<FsWriter>,
+    namespace_id: NamespaceId,
+    first: tokio::task::JoinHandle<loonfs::Result<loonfs::MutationResult>>,
+    second: tokio::task::JoinHandle<loonfs::Result<loonfs::MutationResult>>,
+}
+
+/// Parks one publication at the blocked head CAS with a second put queued
+/// behind it, so tests can cancel callers at both positions.
+async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
+    let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
+    let store_impl = Arc::new(BlockingHeadCasStore::new(temp_dir, &namespace_id));
+    let store: SharedObjectStore = store_impl.clone();
+    let writer = Arc::new(
+        FsWriter::builder_with_store(store.clone())
+            .writer_id("parked-writer")
+            .min_publish_interval_ms(0)
+            .build()
+            .await
+            .expect("build writer"),
+    );
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+
+    store_impl.arm();
+    let first = {
+        let writer = Arc::clone(&writer);
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            writer
+                .put_file_bytes(&namespace_id, "/a.txt", b"a", PutFileOptions::default())
+                .await
+        })
+    };
+    store_impl.wait_for_blocked_head_cas().await;
+
+    // The publish task is parked, so this put deterministically batches
+    // behind it.
+    let second = {
+        let writer = Arc::clone(&writer);
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            writer
+                .put_file_bytes(&namespace_id, "/b.txt", b"b", PutFileOptions::default())
+                .await
+        })
+    };
+    // The second put's content upload and admission settle quickly; give
+    // it a beat before any cancellation.
+    sleep(Duration::from_millis(100)).await;
+
+    ParkedPuts {
+        store: store_impl,
+        writer,
+        namespace_id,
+        first,
+        second,
+    }
+}
+
+/// Cancelling the caller whose publication is mid-flight abandons only its
+/// result: the publication lands, and the caller queued behind it gets its
+/// own durable result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_caller_does_not_cancel_admitted_publication() {
+    let temp_dir = tempdir().expect("tempdir");
+    let parked = park_two_puts(temp_dir.path()).await;
+
+    parked.first.abort();
+    let _ = parked.first.await;
+    parked.store.release();
+
+    let second = timeout(Duration::from_secs(15), parked.second)
+        .await
+        .expect("queued put must settle")
+        .expect("queued put task")
+        .expect("queued put publishes normally");
+    assert_eq!(second.namespace_id, parked.namespace_id);
+
+    let reader = parked.writer.reader();
+    reader
+        .read_file_bytes(&parked.namespace_id, "/a.txt")
+        .await
+        .expect("the cancelled caller's admitted publication landed");
+    reader
+        .read_file_bytes(&parked.namespace_id, "/b.txt")
+        .await
+        .expect("the queued publication landed");
+}
+
+/// Even with every caller gone, admitted publications land and a drain
+/// settles their tasks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn all_callers_cancelled_publication_still_lands() {
+    let temp_dir = tempdir().expect("tempdir");
+    let parked = park_two_puts(temp_dir.path()).await;
+
+    parked.first.abort();
+    parked.second.abort();
+    let _ = parked.first.await;
+    let _ = parked.second.await;
+    parked.store.release();
+
+    // The writer-owned drain settles the publish tasks the callers left
+    // behind.
+    timeout(Duration::from_secs(15), parked.writer.shutdown_background())
+        .await
+        .expect("drain must settle")
+        .expect("drain surfaces no panics");
+
+    let reader = parked.writer.reader();
+    reader
+        .read_file_bytes(&parked.namespace_id, "/a.txt")
+        .await
+        .expect("the first admitted publication landed");
+    reader
+        .read_file_bytes(&parked.namespace_id, "/b.txt")
+        .await
+        .expect("the second admitted publication landed");
+}
