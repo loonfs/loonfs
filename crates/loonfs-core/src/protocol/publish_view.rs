@@ -214,15 +214,11 @@ fn ensure_publish_head_matches_acquired_writer(
     acquired_writer: &AcquiredWriter,
 ) -> Result<()> {
     if head.writer_epoch != acquired_writer.writer_epoch {
-        let winner = head
-            .writer
-            .as_ref()
-            .map(|writer| writer.writer_id.as_str())
-            .unwrap_or("unknown");
-        return Err(CoreError::WriterFenced(format!(
-            "writer epoch {} was fenced by epoch {} (writer `{winner}`)",
-            acquired_writer.writer_epoch.0, head.writer_epoch.0
-        )));
+        return Err(CoreError::WriterFenced(crate::error::WriterFence {
+            fenced_epoch: acquired_writer.writer_epoch,
+            active_epoch: head.writer_epoch,
+            active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
+        }));
     }
     Ok(())
 }

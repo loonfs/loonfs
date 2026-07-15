@@ -7,6 +7,7 @@
 use super::{MoveBehavior, ValidatedContentToken};
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
+    WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +28,56 @@ pub struct ApiError {
     pub feature: Option<String>,
     /// Human-readable error message.
     pub message: String,
+    /// Correlation id the server assigned to the failed request; the same
+    /// value is sent as the `x-request-id` response header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Structured context for the code, present when the failure carries
+    /// machine-usable identity (API spec, "Standard error contract"). Boxed
+    /// so the rare detailed error does not widen every error-carrying result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<ErrorDetails>>,
+}
+
+/// Structured, machine-readable context accompanying an [`ApiError`].
+///
+/// Every field is optional: a code populates the fields that apply to it
+/// (API spec, "Standard error contract"), and clients must tolerate absent
+/// fields exactly as they tolerate unknown codes. Retry decisions still key
+/// off the code; these fields carry the identity a caller needs to act —
+/// which commit to resubmit, which epoch displaced it, which revision the
+/// precondition saw.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ErrorDetails {
+    /// Idempotency key of the mutation the error concerns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<CommitId>,
+    /// Epoch the failing writer session held when it was displaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fenced_epoch: Option<WriterEpoch>,
+    /// Epoch that currently owns the namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_writer_epoch: Option<WriterEpoch>,
+    /// Writer id recorded by the current epoch's acquirer, when the head
+    /// recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_writer: Option<String>,
+    /// Inode the failed precondition or operation targeted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inode_id: Option<InodeId>,
+    /// Revision the request expected to be current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<RevisionNo>,
+    /// Revision that is actually current; absent when the inode has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_revision: Option<RevisionNo>,
+    /// Change-feed cursor the request asked to resume after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_seq: Option<ChangeSeq>,
+    /// Oldest sequence still promised for incremental replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_floor_seq: Option<ChangeSeq>,
 }
 
 /// Request to create a namespace.

@@ -574,6 +574,8 @@ mod tests {
             code: "namespace_not_found".to_owned(),
             feature: None,
             message: "namespace `demo` does not exist".to_owned(),
+            request_id: None,
+            details: None,
         });
 
         assert_eq!(error.code, "namespace_not_found");

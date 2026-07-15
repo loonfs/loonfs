@@ -152,9 +152,14 @@ Every error response is a JSON body:
 
 ```json
 {
-  "code": "not_supported",
-  "feature": "core.namespaces.delete",
-  "message": "this deployment does not support namespace deletion"
+  "code": "writer_fenced",
+  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`)",
+  "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
+  "details": {
+    "fenced_epoch": 3,
+    "active_writer_epoch": 4,
+    "active_writer": "server-b"
+  }
 }
 ```
 
@@ -163,6 +168,23 @@ change between releases; `feature` is present only on `not_supported` errors
 and names the capability-document key the client should reconcile against.
 Clients must branch on `code`, must tolerate codes they do not recognize, and
 must not parse `message`.
+
+`request_id` is the correlation id the server assigned to the request; every
+response — success or error — also carries it as the `x-request-id` header,
+so a caller's log line and the server's trace can be joined.
+
+`details` is present when the failure carries machine-usable identity, so a
+caller never has to parse `message` to act. Every field is optional and
+clients must tolerate absent fields exactly as they tolerate unknown codes.
+The codes that populate it:
+
+| Code | Detail fields |
+| --- | --- |
+| `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, `active_writer` (when the head recorded the winner's writer id) |
+| `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
+| `commit_id_reuse_conflict` | `commit_id` |
+| `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
+| any failed mutation | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 
 One code exists specifically so capability handling is uniform from day one:
 
@@ -311,6 +333,21 @@ Committed mutations record a durable receipt binding the `commit_id` to its
 for the life of the namespace. When receipt retention becomes bounded, this
 contract will state the replay window explicitly, and resubmission after the
 window must fail loudly rather than silently committing again.
+
+### 5.3 Writer topology and fencing
+
+Each namespace has one active writer session. Many concurrent clients may
+submit mutations through that session — the reference server is exactly this
+shape: one service-level writer session coordinating every client request —
+and independent readers scale separately.
+
+Replacing the active writer is not an approval flow. Opening a writer and
+publishing acquires the next writer epoch, and epoch fencing — not liveness,
+not a lease — is what keeps the displaced session from corrupting anything:
+its next publish fails with `writer_fenced`, terminally for that session.
+The error's `details` name the epoch and writer that displaced it, so an
+operator can tell a planned failover from two writers misconfigured against
+one namespace.
 
 The standard lower-level mutation set is defined in `format.md` ("Standard
 mutation operations"). The path-oriented filesystem surface may compile
