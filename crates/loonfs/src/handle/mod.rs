@@ -30,8 +30,8 @@ use crate::background::BackgroundWork;
 use crate::config::FsConfig;
 use crate::fs::FsCore;
 use crate::{
-    ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    StoreConfig, TraceMode, TraceStoreKind,
+    GramIndexBuildPolicy, ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::MetadataTableCache;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
@@ -51,6 +51,7 @@ struct HandleBuilderCore {
     source: StoreSource,
     commit_window_ms: u64,
     runtime_cache: RuntimeCacheConfig,
+    gram_index_build: GramIndexBuildPolicy,
     /// An existing decoded-block cache to share instead of sizing a fresh
     /// one from `runtime_cache`; see [`FsCore::open_with_background`].
     shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
@@ -73,6 +74,7 @@ impl HandleBuilderCore {
             source,
             commit_window_ms: crate::config::DEFAULT_COMMIT_WINDOW_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            gram_index_build: GramIndexBuildPolicy::default(),
             shared_metadata_table_cache: None,
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
@@ -110,6 +112,7 @@ impl HandleBuilderCore {
                 writer_version,
                 commit_window_ms: self.commit_window_ms,
                 runtime_cache: self.runtime_cache,
+                gram_index_build: self.gram_index_build,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },

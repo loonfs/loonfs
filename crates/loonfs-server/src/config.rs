@@ -1,7 +1,7 @@
 //! Server configuration: strict TOML decoding of the listen address,
 //! store, and runtime cache overrides.
 
-use loonfs::RuntimeCacheConfig;
+use loonfs::{GramIndexBuildPolicy, RuntimeCacheConfig};
 use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
 use serde::Deserialize;
 use std::env;
@@ -39,6 +39,14 @@ pub struct ServerConfig {
     pub writer_version: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
+    /// Budgets for the gram index build and fold steps run by this
+    /// server's maintenance (background catch-up after writes and explicit
+    /// ticks). Omitted fields keep the runtime defaults; bulk backfills
+    /// typically raise the per-step budgets so each tick indexes more
+    /// files per manifest publish. Zero values are normalized up to one
+    /// unit by the runtime.
+    #[serde(default)]
+    pub gram_index_build: GramIndexBuildPolicyOverrides,
     /// Whether the server writer schedules maintenance (checkpoints and
     /// reorganization folds) after writes that cross the WAL-tail
     /// threshold. On by default; set `false` on write-serving nodes when a
@@ -76,6 +84,19 @@ pub struct RuntimeCacheConfigOverrides {
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
+}
+
+/// Optional `[gram_index_build]` overrides, field-for-field the budgets of
+/// [`GramIndexBuildPolicy`]; omitted fields keep that policy's defaults.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GramIndexBuildPolicyOverrides {
+    pub max_files_per_step: Option<usize>,
+    pub max_content_bytes_per_step: Option<u64>,
+    pub max_rows_per_segment: Option<usize>,
+    pub max_l0_runs: Option<usize>,
+    pub max_mid_runs: Option<usize>,
+    pub max_fold_rows_per_step: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -133,6 +154,31 @@ impl ServerConfig {
             config.metadata_table_cache.max_decoded_bytes = value;
         }
         config
+    }
+
+    pub fn gram_index_build_policy(&self) -> GramIndexBuildPolicy {
+        let mut policy = GramIndexBuildPolicy::default();
+        if let Some(value) = self.gram_index_build.max_files_per_step {
+            policy.max_files_per_step = value;
+        }
+        if let Some(value) = self.gram_index_build.max_content_bytes_per_step {
+            policy.max_content_bytes_per_step = value;
+        }
+        if let Some(value) = self.gram_index_build.max_rows_per_segment {
+            policy.max_rows_per_segment = value;
+        }
+        if let Some(value) = self.gram_index_build.max_l0_runs {
+            policy.max_l0_runs = value;
+        }
+        if let Some(value) = self.gram_index_build.max_mid_runs {
+            policy.max_mid_runs = value;
+        }
+        if let Some(value) = self.gram_index_build.max_fold_rows_per_step {
+            policy.max_fold_rows_per_step = value;
+        }
+        // Every budget runs normalized (at least one unit), so the policy
+        // handed to the runtime is the one maintenance will execute.
+        policy.normalized()
     }
 
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
@@ -742,11 +788,27 @@ kind = "local-fs"
 root = "/tmp/loonfs-server"
 "#,
         );
+        let gram_index_build_level = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[gram_index_build]
+max_files_per_stepp = 3
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
 
         for (path, typo) in [
             (top_level, "lease_duration"),
             (store_level, "key_prefiks"),
             (runtime_cache_level, "max_cached_namespacs"),
+            (gram_index_build_level, "max_files_per_stepp"),
         ] {
             let error = load_server_config(&path).expect_err("typo'd key must be rejected");
             match error {
@@ -868,6 +930,96 @@ root = "/tmp/loonfs-server"
             .expect("load config")
             .runtime_cache_config();
         assert_eq!(config, loonfs::RuntimeCacheConfig::disabled());
+    }
+
+    #[test]
+    fn load_uses_default_gram_index_build_policy_when_omitted() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let config = load_server_config(&path).expect("load config");
+        assert_eq!(
+            config.gram_index_build_policy(),
+            loonfs::GramIndexBuildPolicy::default()
+        );
+    }
+
+    #[test]
+    fn load_applies_gram_index_build_overrides() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[gram_index_build]
+max_files_per_step = 4096
+max_content_bytes_per_step = 536870912
+max_rows_per_segment = 131072
+max_l0_runs = 4
+max_mid_runs = 6
+max_fold_rows_per_step = 262144
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let policy = load_server_config(&path)
+            .expect("load config")
+            .gram_index_build_policy();
+        assert_eq!(policy.max_files_per_step, 4096);
+        assert_eq!(policy.max_content_bytes_per_step, 536_870_912);
+        assert_eq!(policy.max_rows_per_segment, 131_072);
+        assert_eq!(policy.max_l0_runs, 4);
+        assert_eq!(policy.max_mid_runs, 6);
+        assert_eq!(policy.max_fold_rows_per_step, 262_144);
+    }
+
+    #[test]
+    fn gram_index_build_overrides_normalize_zero_budgets() {
+        // Zero budgets would let a step report progress without doing
+        // work; the conversion hands the runtime the normalized policy it
+        // will actually run.
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[gram_index_build]
+max_files_per_step = 0
+max_l0_runs = 0
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let policy = load_server_config(&path)
+            .expect("load config")
+            .gram_index_build_policy();
+        assert_eq!(policy.max_files_per_step, 1);
+        assert_eq!(policy.max_l0_runs, 1);
+        assert_eq!(
+            policy.max_mid_runs,
+            loonfs::GramIndexBuildPolicy::default().max_mid_runs,
+            "untouched budgets keep their defaults"
+        );
     }
 
     #[test]

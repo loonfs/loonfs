@@ -2,7 +2,7 @@
 //! sizing, with the defaults the rest of the crate advertises.
 
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::{MetadataTableCacheConfig, Result, RuntimeError};
+use crate::{GramIndexBuildPolicy, MetadataTableCacheConfig, Result, RuntimeError};
 
 /// Default lease duration for write operations, in milliseconds.
 /// Default visible WAL-tail length, in segments, at which a maintenance tick
@@ -33,6 +33,10 @@ pub(crate) struct FsConfig {
     pub commit_window_ms: u64,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
+    /// Budgets for the gram index build and fold steps this runtime's
+    /// maintenance ticks run. Stored normalized (every budget at least one
+    /// unit), so the config reads as the policy that will run.
+    pub gram_index_build: GramIndexBuildPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing.

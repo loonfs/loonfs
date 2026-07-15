@@ -1397,6 +1397,7 @@ mod tests {
                 // windows would only add latency to these tests.
                 commit_window_ms: 0,
                 runtime_cache: RuntimeCacheConfig::default(),
+                gram_index_build: crate::GramIndexBuildPolicy::default(),
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,
             },

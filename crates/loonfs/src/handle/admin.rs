@@ -7,9 +7,10 @@ use crate::fs::FsCore;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, FlushWalResponse, GcConfig, GcReport,
-    MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
-    ObjectStoreMetricsRecorder, ReleaseCheckpointResponse, Result, RuntimeCacheConfig,
-    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    GramIndexBuildPolicy, MaintenanceTickOptions, MaintenanceTickResult, NamespaceId,
+    NamespaceStatusResponse, ObjectStoreMetricsRecorder, ReleaseCheckpointResponse, Result,
+    RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
+    TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -197,6 +198,16 @@ impl FsAdminBuilder {
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;
+        self
+    }
+
+    /// Sets the gram index build budgets this handle's explicit
+    /// maintenance ticks run instead of [`GramIndexBuildPolicy::default`].
+    /// Bulk backfills raise the per-step budgets so a tick indexes more
+    /// files per manifest publish. Values are normalized to at least one
+    /// unit per budget.
+    pub fn gram_index_build(mut self, policy: GramIndexBuildPolicy) -> Self {
+        self.core.gram_index_build = policy;
         self
     }
 

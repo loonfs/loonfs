@@ -3,7 +3,7 @@
 
 use super::grep::{
     derive_visible_path, indexed_candidates, line_matches, tail_revisions, GrepCandidates,
-    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_READ_IO, MAX_GREP_SCAN_FILES,
+    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_CONTENT_IO, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES,
     MAX_GREP_TAIL_FILES, MAX_GREP_VERIFIED_FILES_PER_PAGE,
 };
 use super::listing::{invalid_cursor, page_head_seq, validate_directory_cursor};
@@ -539,7 +539,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     path: chain.path,
                     oversized,
                 });
-                if batch.len() == MAX_GREP_READ_IO {
+                if batch.len() == MAX_GREP_CONTENT_IO {
                     break;
                 }
             }

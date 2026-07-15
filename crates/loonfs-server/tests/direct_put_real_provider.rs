@@ -7,7 +7,9 @@ use loonfs_api::{
     FilesystemOperationResponse, PutBehavior,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
+use loonfs_server::{
+    app, GramIndexBuildPolicyOverrides, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
+};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,6 +28,7 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
         writer_id: "direct-put-aws-s3".to_owned(),
         writer_version: "direct-put-aws-s3/0.1.0".to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        gram_index_build: GramIndexBuildPolicyOverrides::default(),
         background_maintenance: true,
         max_upload_bytes: 256 * 1024 * 1024,
         allow_unauthenticated_remote: false,
@@ -55,6 +58,7 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
         writer_id: "direct-put-r2".to_owned(),
         writer_version: "direct-put-r2/0.1.0".to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
+        gram_index_build: GramIndexBuildPolicyOverrides::default(),
         background_maintenance: true,
         max_upload_bytes: 256 * 1024 * 1024,
         allow_unauthenticated_remote: false,

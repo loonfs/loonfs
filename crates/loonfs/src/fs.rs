@@ -99,6 +99,13 @@ impl FsCore {
         shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     ) -> Result<Self> {
         validate_config(&config)?;
+        // Store the policy normalized so the config always reads as the
+        // budgets maintenance will actually run (the core normalizes again
+        // at each step; this keeps the two views identical).
+        let config = FsConfig {
+            gram_index_build: config.gram_index_build.normalized(),
+            ..config
+        };
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
             Arc::new(MetadataTableCache::new(
                 config.runtime_cache.metadata_table_cache.clone(),
@@ -494,20 +501,18 @@ impl FsCore {
             .copied()
     }
 
-    /// One bounded gram index build step, then one bounded fold step. A
-    /// namespace without the feature entry reports and costs nothing.
+    /// One bounded gram index build step, then one bounded fold step,
+    /// under the configured [`crate::GramIndexBuildPolicy`]. A namespace
+    /// without the feature entry reports and costs nothing.
     async fn run_tick_grams_index(&self, namespace_id: &NamespaceId) -> Result<bool> {
-        self.run_tick_grams_index_with_policy(
-            namespace_id,
-            loonfs_core::GramIndexBuildPolicy::default(),
-        )
-        .await
+        self.run_tick_grams_index_with_policy(namespace_id, self.inner.config.gram_index_build)
+            .await
     }
 
     /// [`Self::run_tick_grams_index`] with explicit budgets. Production
-    /// paths run the defaults; tests inject small budgets to shape states
-    /// — like a multi-step fold — the defaults never produce at test
-    /// scale.
+    /// paths run the handle's configured policy; tests inject small
+    /// budgets to shape states — like a multi-step fold — that neither
+    /// the defaults nor any sane configuration produce at test scale.
     async fn run_tick_grams_index_with_policy(
         &self,
         namespace_id: &NamespaceId,
@@ -591,15 +596,13 @@ impl FsCore {
         Ok(published)
     }
 
-    /// Builds gram index steps until the watermark reaches the head. Only
-    /// writer-scheduled background ticks drain like this, mirroring
+    /// Builds gram index steps until the watermark reaches the head,
+    /// each step under the configured [`crate::GramIndexBuildPolicy`].
+    /// Only writer-scheduled background ticks drain like this, mirroring
     /// [`Self::drain_reorganization_backlog`].
     async fn drain_grams_index_backlog(&self, namespace_id: &NamespaceId) -> Result<()> {
-        self.drain_grams_index_backlog_with_policy(
-            namespace_id,
-            loonfs_core::GramIndexBuildPolicy::default(),
-        )
-        .await
+        self.drain_grams_index_backlog_with_policy(namespace_id, self.inner.config.gram_index_build)
+            .await
     }
 
     /// [`Self::drain_grams_index_backlog`] with explicit budgets, for the
