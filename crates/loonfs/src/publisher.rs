@@ -766,7 +766,7 @@ impl NamespacePublisher {
                 true
             }
             Err(error) => {
-                // The namespace was not deleted (stale precondition, lease
+                // The namespace was not deleted (stale precondition, fencing
                 // conflict, ...). Report it and let queued work publish.
                 for waiter in pending.waiters {
                     let _ = waiter.send(Err(error.clone()));

@@ -1,10 +1,9 @@
-//! Runtime configuration: writer identity, lease duration, and cache
+//! Runtime configuration: writer identity, publication pacing, and cache
 //! sizing, with the defaults the rest of the crate advertises.
 
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{GramIndexBuildPolicy, MetadataTableCacheConfig, Result, RuntimeError};
 
-/// Default lease duration for write operations, in milliseconds.
 /// Default visible WAL-tail length, in segments, at which a maintenance tick
 /// publishes a checkpoint.
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
