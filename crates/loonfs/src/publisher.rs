@@ -19,14 +19,19 @@
 //! Use it when one process hosts many concurrent writers to the same
 //! namespaces: the reference server constructs a registry over its
 //! [`FsWriter`](crate::FsWriter), and an embedded host with many in-process
-//! writer agents can do exactly the same. A solo writer does not need it —
-//! the direct [`FsWriter`](crate::FsWriter) mutation methods publish
-//! immediately, while this front-end deliberately
-//! trades latency for batching: every submission waits out a 100ms
-//! coalescing window (`COALESCING_DELAY`) so concurrent requests share one
-//! publication, and publications for one namespace are paced at least 1s
-//! apart (`MIN_NAMESPACE_CAS_INTERVAL`) so hot namespaces amortize work
-//! into larger batches instead of thrashing head compare-and-swaps.
+//! writer agents can do exactly the same.
+//!
+//! Batching is adaptive, driven by one knob
+//! ([`PublisherRegistry::with_min_publish_interval`]): a submission to a
+//! cold namespace publishes immediately, and while a publish is in flight
+//! or the namespace is within the pacing interval of its last publication
+//! start, later submissions coalesce into the next batch. A solo writer
+//! submitting sequentially therefore pays no added latency, while sustained
+//! concurrent load amortizes into batches at most one publication per
+//! interval — larger batches and fewer WAL segments instead of head
+//! compare-and-swap thrash. The trade sits on a cold burst: its first
+//! submission publishes alone and the rest coalesce into the next paced
+//! batch, so one extra segment buys the immediate first flush.
 //!
 //! The registry owns every publish task its publishers spawn. At shutdown,
 //! [`PublisherRegistry::close_admission`] refuses new submissions with
@@ -44,7 +49,7 @@ use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tracing::Instrument;
@@ -53,15 +58,12 @@ type CommitResult = Result<ApiCommitResponse, CoreError>;
 type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 
 const MAX_BATCH_CANDIDATES: usize = 1024;
-const COALESCING_DELAY: Duration = Duration::from_millis(100);
-const MIN_NAMESPACE_CAS_INTERVAL: Duration = Duration::from_secs(1);
+/// Default minimum interval between publication starts for one namespace.
+/// A cold namespace always publishes immediately; the interval only paces
+/// follow-up batches, so hot namespaces amortize into fewer, larger WAL
+/// segments.
+pub const DEFAULT_MIN_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const HEAD_CAS_RETRY_LIMIT: usize = 8;
-
-#[allow(clippy::disallowed_methods)]
-async fn coalescing_delay() {
-    // Publisher batching intentionally uses a short async timer to coalesce requests.
-    tokio::time::sleep(COALESCING_DELAY).await;
-}
 
 /// Shared front door to the per-namespace publishers of one
 /// [`FsWriter`](crate::FsWriter).
@@ -77,6 +79,7 @@ async fn coalescing_delay() {
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,
     fs: FsCore,
+    min_publish_interval: Duration,
 }
 
 /// Registry state every publisher reaches back into: admission gating, the
@@ -134,7 +137,17 @@ impl PublisherRegistry {
                 }),
             }),
             fs: writer.core().clone(),
+            min_publish_interval: DEFAULT_MIN_PUBLISH_INTERVAL,
         }
+    }
+
+    /// Sets the minimum interval between publication starts for one
+    /// namespace. A cold namespace still publishes immediately; the
+    /// interval only paces follow-up batches. Smaller intervals favor
+    /// latency, larger ones favor batch size and WAL-segment economy.
+    pub fn with_min_publish_interval(mut self, min_publish_interval: Duration) -> Self {
+        self.min_publish_interval = min_publish_interval;
+        self
     }
 
     /// Submits one explicit semantic commit request through the
@@ -210,6 +223,7 @@ impl PublisherRegistry {
                     namespace_id.clone(),
                     self.fs.clone(),
                     Arc::downgrade(&self.shared),
+                    self.min_publish_interval,
                 )
             })
             .clone())
@@ -271,6 +285,7 @@ struct NamespacePublisher {
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with unowned tasks.
     shared: Weak<RegistryShared>,
+    min_publish_interval: Duration,
 }
 
 struct NamespacePublisherState {
@@ -311,7 +326,6 @@ enum WorkUnit {
 
 struct OpenBatch {
     candidates: Vec<BatchCandidate>,
-    notify: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -328,7 +342,12 @@ struct InFlightRequest {
 }
 
 impl NamespacePublisher {
-    fn new(namespace_id: NamespaceId, fs: FsCore, shared: Weak<RegistryShared>) -> Self {
+    fn new(
+        namespace_id: NamespaceId,
+        fs: FsCore,
+        shared: Weak<RegistryShared>,
+        min_publish_interval: Duration,
+    ) -> Self {
         Self {
             namespace_id,
             fs,
@@ -339,9 +358,11 @@ impl NamespacePublisher {
                 closed: false,
                 in_flight: HashMap::new(),
                 publishing: false,
+                // In the past, so a cold namespace publishes immediately.
                 next_allowed_cas_at: Instant::now(),
             })),
             shared,
+            min_publish_interval,
         }
     }
 
@@ -384,78 +405,66 @@ impl NamespacePublisher {
         operation_class: &'static str,
         enqueued_at: Instant,
     ) -> Result<(), CoreError> {
-        let mut notify_full = None;
-        {
-            let mut state = self
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            if state.deleted {
-                return Err(CoreError::NamespaceDeleted {
-                    namespace_id: self.namespace_id.clone(),
-                });
+        let mut state = self
+            .state
+            .lock()
+            .expect("namespace publisher mutex poisoned");
+        if state.deleted {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: self.namespace_id.clone(),
+            });
+        }
+        if state.closed {
+            return Err(CoreError::ShuttingDown);
+        }
+        if let Some(existing) = state.in_flight.get_mut(&commit_id) {
+            if existing.semantic_identity != semantic_identity {
+                return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
             }
-            if state.closed {
-                return Err(CoreError::ShuttingDown);
-            }
-            if let Some(existing) = state.in_flight.get_mut(&commit_id) {
-                if existing.semantic_identity != semantic_identity {
-                    return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
-                }
-                existing.waiters.push(waiter);
-                self.trace_enqueue(operation_class, pending_queue_depth(&state), "duplicate");
-                return Ok(());
-            }
+            existing.waiters.push(waiter);
+            self.trace_enqueue(operation_class, pending_queue_depth(&state), "duplicate");
+            return Ok(());
+        }
 
-            if state.batch.is_none() {
-                let should_spawn = !state.publishing;
-                state.batch = Some(OpenBatch {
-                    candidates: Vec::new(),
-                    notify: Arc::new(Notify::new()),
-                });
-                if should_spawn {
-                    // Ownership is taken here, under the admission lock, so
-                    // no other caller spawns a second task while this one
-                    // is still coalescing. Registered while this lock is
-                    // held, so a shutdown drain that finds no tasks cannot
-                    // miss the work this admission is about to queue; the
-                    // task blocks on this same lock until the batch below
-                    // is populated.
-                    state.publishing = true;
-                    self.spawn_publish_task();
-                }
-            }
-
-            let (batch_len, batch_notify) = {
-                let batch = state.batch.as_mut().expect("open batch should exist");
-                if batch.candidates.len() >= MAX_BATCH_CANDIDATES {
-                    self.trace_enqueue(operation_class, batch.candidates.len(), "full");
-                    return Err(CoreError::CommitQueueFull);
-                }
-                batch.candidates.push(BatchCandidate {
-                    commit_id: commit_id.clone(),
-                    candidate: candidate.clone(),
-                    operation_class,
-                    enqueued_at,
-                });
-                (batch.candidates.len(), batch.notify.clone())
-            };
-            self.trace_enqueue(operation_class, batch_len, "new");
-            state.in_flight.insert(
-                commit_id,
-                InFlightRequest {
-                    semantic_identity,
-                    waiters: vec![waiter],
-                },
-            );
-            if batch_len >= MAX_BATCH_CANDIDATES {
-                notify_full = Some(batch_notify);
+        if state.batch.is_none() {
+            let should_spawn = !state.publishing;
+            state.batch = Some(OpenBatch {
+                candidates: Vec::new(),
+            });
+            if should_spawn {
+                // Ownership is taken here, under the admission lock, so no
+                // other caller spawns a second task for the same work.
+                // Registered while this lock is held, so a shutdown drain
+                // that finds no tasks cannot miss the work this admission
+                // is about to queue; the task blocks on this same lock
+                // until the batch below is populated.
+                state.publishing = true;
+                self.spawn_publish_task();
             }
         }
 
-        if let Some(notify) = notify_full {
-            notify.notify_one();
-        }
+        let batch_len = {
+            let batch = state.batch.as_mut().expect("open batch should exist");
+            if batch.candidates.len() >= MAX_BATCH_CANDIDATES {
+                self.trace_enqueue(operation_class, batch.candidates.len(), "full");
+                return Err(CoreError::CommitQueueFull);
+            }
+            batch.candidates.push(BatchCandidate {
+                commit_id: commit_id.clone(),
+                candidate: candidate.clone(),
+                operation_class,
+                enqueued_at,
+            });
+            batch.candidates.len()
+        };
+        self.trace_enqueue(operation_class, batch_len, "new");
+        state.in_flight.insert(
+            commit_id,
+            InFlightRequest {
+                semantic_identity,
+                waiters: vec![waiter],
+            },
+        );
         Ok(())
     }
 
@@ -482,13 +491,8 @@ impl NamespacePublisher {
             if let Some(pending) = state.pending_delete.as_mut() {
                 pending.waiters.push(sender);
             } else {
-                let sealed_batch = state.batch.take();
-                if let Some(batch) = &sealed_batch {
-                    // Stop coalescing: the sealed batch publishes now.
-                    batch.notify.notify_one();
-                }
                 state.pending_delete = Some(PendingDelete {
-                    sealed_batch,
+                    sealed_batch: state.batch.take(),
                     options,
                     waiters: vec![sender],
                 });
@@ -529,57 +533,22 @@ impl NamespacePublisher {
 
     async fn publish_open_batch(self) {
         let mut abort_guard = PublishAbortGuard::new(self.clone());
-        let collect_started = Instant::now();
-        let coalesce = {
-            let state = self
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            match state.batch.as_ref() {
-                Some(batch) => Some((
-                    batch.notify.clone(),
-                    batch.candidates.len() >= MAX_BATCH_CANDIDATES,
-                    batch.candidates.len(),
-                )),
-                // A pending delete needs no coalescing window.
-                None if state.pending_delete.is_some() => None,
-                None => return,
-            }
-        };
-
-        let queue_depth_start = coalesce.as_ref().map_or(0, |(_, _, depth)| *depth);
-        if let Some((notify, already_full, _)) = coalesce {
-            if !already_full {
-                tokio::select! {
-                    _ = coalescing_delay() => {}
-                    _ = notify.notified() => {}
-                }
-            }
-        }
-        let queue_depth_end = {
-            let state = self
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            state
-                .batch
-                .as_ref()
-                .map_or(0, |batch| batch.candidates.len())
-        };
-        tracing::info!(
-            phase = "batch_collect",
-            mode = self.trace_mode(),
-            store_kind = self.trace_store_kind(),
-            batch_size = usize_to_u64(queue_depth_end),
-            queue_depth_start = usize_to_u64(queue_depth_start),
-            queue_depth_end = usize_to_u64(queue_depth_end),
-            collect_ms = elapsed_ms_since(collect_started),
-            "publisher.batch_collect"
-        );
 
         // Drain work units in admission order: the batch sealed by a pending
         // delete, then the delete itself, then whatever queued behind it.
+        // There is no fixed coalescing wait — batches form from what arrives
+        // while a publish is in flight or while the pacing interval since
+        // the last publication start runs out, so a cold namespace
+        // publishes its first submission immediately.
         loop {
+            let collect_started = Instant::now();
+            let queue_depth_start = {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("namespace publisher mutex poisoned");
+                pending_queue_depth(&state)
+            };
             self.wait_for_cas_pacing().await;
 
             let unit = {
@@ -603,7 +572,7 @@ impl NamespacePublisher {
                 };
                 match unit {
                     Some(unit) => {
-                        state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
+                        state.next_allowed_cas_at = Instant::now() + self.min_publish_interval;
                         Some(unit)
                     }
                     None => {
@@ -626,6 +595,16 @@ impl NamespacePublisher {
                     if candidates.is_empty() {
                         continue;
                     }
+                    tracing::info!(
+                        phase = "batch_collect",
+                        mode = self.trace_mode(),
+                        store_kind = self.trace_store_kind(),
+                        batch_size = usize_to_u64(candidates.len()),
+                        queue_depth_start = usize_to_u64(queue_depth_start),
+                        queue_depth_end = usize_to_u64(candidates.len()),
+                        collect_ms = elapsed_ms_since(collect_started),
+                        "publisher.batch_collect"
+                    );
                     self.publish_mutation_run(&mut abort_guard, candidates)
                         .await;
                 }
@@ -799,7 +778,7 @@ impl NamespacePublisher {
                     .state
                     .lock()
                     .expect("namespace publisher mutex poisoned");
-                state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
+                state.next_allowed_cas_at = Instant::now() + self.min_publish_interval;
                 break;
             }
             tokio::time::sleep_until(sleep_until).await;
@@ -1427,7 +1406,12 @@ mod tests {
     /// A publisher with no owning registry, exercising the unowned-task
     /// fallback the production paths reserve for a dropped registry.
     fn standalone_publisher(namespace_id: &NamespaceId, fs: FsCore) -> NamespacePublisher {
-        NamespacePublisher::new(namespace_id.clone(), fs, Weak::new())
+        NamespacePublisher::new(
+            namespace_id.clone(),
+            fs,
+            Weak::new(),
+            DEFAULT_MIN_PUBLISH_INTERVAL,
+        )
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -1437,7 +1421,7 @@ mod tests {
         // racing second task release a queued delete after exactly that
         // interval, so outlasting it proves the delete is ordered behind
         // the sealed batch, not merely paced behind it.
-        tokio::time::sleep(MIN_NAMESPACE_CAS_INTERVAL + Duration::from_millis(300)).await;
+        tokio::time::sleep(DEFAULT_MIN_PUBLISH_INTERVAL + Duration::from_millis(300)).await;
     }
 
     fn create_directory_request(
@@ -1676,8 +1660,11 @@ mod tests {
         );
     }
 
+    /// A cold namespace takes whatever has batched — here a full batch
+    /// admitted before the publish task first runs — immediately, with no
+    /// coalescing wait in front of the first publication.
     #[tokio::test(flavor = "current_thread")]
-    async fn publisher_full_batch_does_not_wait_on_missed_full_notification() {
+    async fn publisher_takes_a_cold_full_batch_immediately() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
@@ -1712,6 +1699,72 @@ mod tests {
                 ChangeSeq(index as u64 + 1)
             );
         }
+    }
+
+    /// A submission to a cold namespace is taken immediately: after one
+    /// poll of the publish task there is no open batch parked behind a
+    /// timer. The old fixed coalescing delay left the candidate in the
+    /// open batch for its full 100ms window.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cold_submission_publishes_without_a_coalescing_delay() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let fs = test_fs(store);
+        create_namespace(&fs, &namespace_id).await;
+        let publisher = standalone_publisher(&namespace_id, fs);
+
+        let receiver = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("cold", "cold"),
+        );
+        tokio::task::yield_now().await;
+        {
+            let state = publisher
+                .state
+                .lock()
+                .expect("namespace publisher mutex poisoned");
+            assert!(
+                state.batch.is_none(),
+                "a cold batch must be taken immediately, not held for a coalescing timer"
+            );
+        }
+        let response = recv_commit(receiver, "cold").await;
+        assert_eq!(response.committed_seq, ChangeSeq(1));
+    }
+
+    /// Follow-up submissions inside the pacing interval coalesce and
+    /// publish no earlier than the interval boundary — the timer gives a
+    /// deterministic lower bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hot_submissions_wait_out_the_pacing_interval() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = test_writer(store.clone()).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry =
+            PublisherRegistry::new(writer).with_min_publish_interval(Duration::from_millis(400));
+
+        let warmup_started = Instant::now();
+        registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("warmup", "warmup"),
+            )
+            .await
+            .expect("warmup commit");
+
+        registry
+            .submit_commit(namespace_id.clone(), create_directory_request("hot", "hot"))
+            .await
+            .expect("hot commit");
+        let elapsed = warmup_started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "a follow-up publication must wait out the pacing interval, took {elapsed:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1884,7 +1937,20 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = test_writer(store.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry = PublisherRegistry::new(writer);
+        let registry =
+            PublisherRegistry::new(writer).with_min_publish_interval(Duration::from_millis(400));
+
+        // Warm the namespace: a cold one publishes its first submission
+        // immediately, so truly concurrent submissions could split across
+        // two publications. Inside the pacing interval the open batch
+        // deterministically holds both.
+        registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("warmup", "warmup"),
+            )
+            .await
+            .expect("warmup commit");
 
         let request_a = CommitRequest {
             commit_id: CommitId::parse("req-a").expect("valid commit id"),
@@ -1909,14 +1975,16 @@ mod tests {
             registry.submit_commit(namespace_id.clone(), request_a),
             registry.submit_commit(namespace_id.clone(), request_b)
         );
-        assert_eq!(response_a.expect("response a").committed_seq, ChangeSeq(1));
-        assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(2));
+        assert_eq!(response_a.expect("response a").committed_seq, ChangeSeq(2));
+        assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(3));
 
+        // The warmup published alone; the two concurrent submissions share
+        // one segment.
         let wal_keys = store
             .list_prefix(&wal_segment_prefix("demo"))
             .await
             .expect("list wal");
-        assert_eq!(wal_keys.len(), 1);
+        assert_eq!(wal_keys.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1940,7 +2008,18 @@ mod tests {
             .upload_content(&namespace_id, &upload.upload_id, b"hello")
             .await
             .expect("stage content");
-        let registry = PublisherRegistry::new(writer);
+        let registry =
+            PublisherRegistry::new(writer).with_min_publish_interval(Duration::from_millis(400));
+
+        // Warm the namespace so the pacing interval deterministically holds
+        // the two concurrent submissions in one batch.
+        registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("warmup", "warmup"),
+            )
+            .await
+            .expect("warmup commit");
 
         let explicit = CommitRequest {
             commit_id: CommitId::parse("explicit-commit").expect("valid commit id"),
@@ -1964,25 +2043,30 @@ mod tests {
         );
         assert_eq!(
             explicit_response.expect("explicit response").committed_seq,
-            ChangeSeq(1)
+            ChangeSeq(2)
         );
         assert_eq!(
             path_response.expect("path response").committed_seq,
-            ChangeSeq(2)
+            ChangeSeq(3)
         );
 
         let wal_keys = store
             .list_prefix(&wal_segment_prefix("demo"))
             .await
             .expect("list wal");
-        assert_eq!(wal_keys.len(), 1);
-        let wal_bytes = store
-            .get(&wal_keys[0], None)
-            .await
-            .expect("read wal")
-            .expect("wal exists");
-        let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
-        assert_eq!(segment.payload.records.len(), 2);
+        let mut record_counts = Vec::new();
+        for key in &wal_keys {
+            let wal_bytes = store
+                .get(key, None)
+                .await
+                .expect("read wal")
+                .expect("wal exists");
+            let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
+            record_counts.push(segment.payload.records.len());
+        }
+        record_counts.sort_unstable();
+        // The warmup published alone; the concurrent pair shares a segment.
+        assert_eq!(record_counts, vec![1, 2]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2194,7 +2278,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_inside_coalescing_window_waits_behind_the_sealed_batch() {
+    async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
@@ -2203,10 +2287,11 @@ mod tests {
         create_namespace(writer.core(), &namespace_id).await;
         let registry = PublisherRegistry::new(writer);
 
-        // The admitted commit's publish task is still inside its coalescing
-        // window when the delete arrives, and the batch's head CAS will
-        // block for longer than the pacing interval — the interleaving
-        // where a second, racing task could run the delete first.
+        // Park the first publication at its head CAS, batch a second commit
+        // behind it, then queue the delete: the sealed batch must publish
+        // before the delete runs, and the blocked CAS outlasts the pacing
+        // interval — the interleaving where a racing second task could run
+        // the delete first.
         store.arm_next_head_cas();
         let before = {
             let registry = registry.clone();
@@ -2217,17 +2302,25 @@ mod tests {
                     .await
             })
         };
-        let publisher = loop {
-            let existing = registry
-                .shared
-                .lock_state()
-                .publishers
-                .get(&namespace_id)
-                .cloned();
-            if let Some(publisher) = existing {
-                break publisher;
-            }
-            tokio::task::yield_now().await;
+        store.wait_for_blocked_head_cas().await;
+        let publisher = registry
+            .shared
+            .lock_state()
+            .publishers
+            .get(&namespace_id)
+            .cloned()
+            .expect("publisher exists once a publish is in flight");
+
+        // The publish task is parked in the blocked CAS, so this admission
+        // deterministically opens the next batch instead of being taken.
+        let second = {
+            let registry = registry.clone();
+            let namespace_id = namespace_id.clone();
+            tokio::spawn(async move {
+                registry
+                    .submit_commit(namespace_id, create_directory_request("second", "second"))
+                    .await
+            })
         };
         loop {
             let batch_open = {
@@ -2269,7 +2362,6 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        store.wait_for_blocked_head_cas().await;
 
         // Snapshots are taken while the CAS is blocked but asserted only
         // after the gate is released: a regression then fails the test
@@ -2292,7 +2384,8 @@ mod tests {
             (state.deleted, state.pending_delete.is_some())
         };
 
-        // Released: the admitted-before commit publishes, then the delete.
+        // Released: the parked commit publishes, then the sealed batch, and
+        // only then the delete.
         store.release_head_cas();
         assert_eq!(
             unfinished_tasks_while_blocked, 1,
@@ -2309,13 +2402,18 @@ mod tests {
         let before_response = before
             .await
             .expect("before submit task")
-            .expect("admitted-before commit publishes before the delete");
+            .expect("parked commit publishes before the delete");
         assert_eq!(before_response.committed_seq, ChangeSeq(1));
+        let second_response = second
+            .await
+            .expect("second submit task")
+            .expect("sealed batch publishes before the delete");
+        assert_eq!(second_response.committed_seq, ChangeSeq(2));
         let delete_response = delete
             .await
             .expect("delete task")
             .expect("delete succeeds after the sealed batch");
-        assert_eq!(delete_response.head_seq, ChangeSeq(1));
+        assert_eq!(delete_response.head_seq, ChangeSeq(2));
         registry.close_admission();
         registry.drain().await.expect("drain settles both units");
     }
