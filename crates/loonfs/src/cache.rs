@@ -17,7 +17,7 @@ use loonfs_core::control::{
     ControlObjectLoadError, LoadedHeadControl, LoadedMetadataRootControl,
     VerifiedNamespaceCatalogEntry,
 };
-use loonfs_core::publish::NamespaceCommitEngine;
+use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState};
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
 use loonfs_objectstore::keys::{namespace_config, wal_head};
 use std::collections::{HashMap, VecDeque};
@@ -38,10 +38,10 @@ struct NamespaceControlCacheEntry {
     /// The namespace's spec-immutable catalog pair (config plus content-store
     /// binding): loaded once, never revalidated.
     catalog: Option<VerifiedNamespaceCatalogEntry>,
-    /// This process's commit engine for the namespace: writer-session state
-    /// (acquired epoch, fencing, tail projection). Survives invalidation —
-    /// only its tail projection is dropped; removal happens on namespace
-    /// deletion or LRU eviction.
+    /// This process's commit engine for the namespace: publication
+    /// serialization plus rebuildable state (tail projection, catalog).
+    /// The session's acquired epoch and fencing live in the writer-session
+    /// registry, which this entry's invalidation or eviction never touches.
     engine: Option<Arc<AsyncMutex<NamespaceCommitEngine>>>,
 }
 
@@ -192,10 +192,11 @@ impl RuntimeControlCache {
     fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
         // The head anchor goes stale on every mutation; the catalog pair is
         // immutable for the namespace's lifetime (a deleted namespace id
-        // never rebinds), and the engine keeps its session state ("a fenced
-        // session stays fenced") — only its tail projection goes stale. A
-        // held engine lock means a publish is in flight; that publish
-        // revalidates against the live head itself.
+        // never rebinds), and the engine drops only its tail projection —
+        // the session's epoch and fencing live in the writer-session
+        // registry, which invalidation never touches. A held engine lock
+        // means a publish is in flight; that publish revalidates against
+        // the live head itself.
         if let Some(entry) = self.namespaces.get_mut(namespace_id) {
             entry.head = None;
             if let Some(engine) = &entry.engine {
@@ -220,20 +221,25 @@ impl RuntimeControlCache {
         namespace_id: &NamespaceId,
         max_cached_namespaces: usize,
         table_cache: Arc<MetadataTableCache>,
+        session: SharedWriterSessionState,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         if max_cached_namespaces == 0 {
             // Diagnostic mode: nothing is cached, every publish gets a
-            // throwaway engine.
+            // throwaway engine — carrying the session state, which is not
+            // a cache and never gets disabled.
             return Arc::new(AsyncMutex::new(
-                NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache),
+                NamespaceCommitEngine::new(namespace_id.clone())
+                    .with_table_cache(table_cache)
+                    .with_writer_session(session),
             ));
         }
         let entry = self.namespace_entry(namespace_id, max_cached_namespaces);
         if let Some(engine) = &entry.engine {
             return Arc::clone(engine);
         }
-        let mut engine =
-            NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(table_cache);
+        let mut engine = NamespaceCommitEngine::new(namespace_id.clone())
+            .with_table_cache(table_cache)
+            .with_writer_session(session);
         if let Some(catalog) = &entry.catalog {
             engine = engine.with_catalog_entry(catalog.clone());
         }
@@ -407,10 +413,12 @@ impl FsCore {
         namespace_id: &NamespaceId,
     ) -> Arc<AsyncMutex<NamespaceCommitEngine>> {
         let cache_config = &self.inner.config.runtime_cache;
+        let session = self.inner.writer_sessions.state(namespace_id);
         self.inner.control_cache().engine(
             namespace_id,
             cache_config.max_cached_namespaces,
             Arc::clone(&self.inner.metadata_table_cache),
+            session,
         )
     }
 

@@ -11,6 +11,7 @@ use crate::config::{validate_config, FsConfig};
 use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::time::current_time_ms;
+use crate::writer_session::WriterSessionRegistry;
 use crate::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry,
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse, ChangeSeq,
@@ -63,6 +64,9 @@ pub(crate) struct FsInner {
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     pub(crate) background: BackgroundWork,
     pub(crate) commit_windows: CommitWindows,
+    /// Session-owned writer state (acquired epochs, fencing), deliberately
+    /// outside every rebuildable cache; see [`crate::writer_session`].
+    pub(crate) writer_sessions: WriterSessionRegistry,
     /// Per-namespace gram-index enablement, learned in-process: `None`
     /// until any tick, enable, or disable observes the namespace. Publishes
     /// consult it so index catch-up is scheduled by index lag, not only by
@@ -130,6 +134,7 @@ impl FsCore {
                 cache_stats: RuntimeCacheStatsInner::default(),
                 background,
                 commit_windows: CommitWindows::default(),
+                writer_sessions: WriterSessionRegistry::default(),
                 grams_enabled_hints: Mutex::new(BTreeMap::new()),
             }),
         })
@@ -212,6 +217,12 @@ impl FsCore {
                 .await
                 .map_err(RuntimeError::from)
         };
+        if result.is_ok() {
+            // Only a namespace that is actually gone releases its session
+            // state: a failed delete (a fenced deleter, say) must not erase
+            // the fencing record and hand the session a fresh epoch.
+            self.inner.writer_sessions.remove(namespace_id);
+        }
         self.invalidate_namespace_cache_for_delete(namespace_id);
         result
     }
@@ -1432,10 +1443,16 @@ impl FsCore {
             return results;
         }
 
-        let engine = self.namespace_engine_with_store(namespace_id, store);
+        // Cache-disabled diagnostic mode: a throwaway engine per publish,
+        // but the session's epoch and fencing still come from the registry —
+        // no cache configuration disables session state.
+        let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
+            .with_writer_session(self.inner.writer_sessions.state(namespace_id));
+        let context = self.mutation_context();
         // Boxed for the same type-recursion reason as the cached-engine path.
-        let results: Vec<_> = Box::pin(engine.publish_namespace_mutations_batch(candidates))
+        let results: Vec<_> = Box::pin(engine.publish_batch(&store, candidates, &context))
             .await
+            .results
             .into_iter()
             .map(|result| result.map_err(RuntimeError::Core))
             .collect();
