@@ -3,8 +3,8 @@
 
 use super::grep::{
     derive_visible_path, indexed_candidates, line_matches, tail_revisions, GrepCandidates,
-    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
-    MAX_GREP_VERIFIED_FILES_PER_PAGE,
+    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_READ_IO, MAX_GREP_SCAN_FILES,
+    MAX_GREP_TAIL_FILES, MAX_GREP_VERIFIED_FILES_PER_PAGE,
 };
 use super::listing::{invalid_cursor, page_head_seq, validate_directory_cursor};
 use crate::checkpoint::{
@@ -23,8 +23,11 @@ use crate::namespace::control::read_head_and_metadata_root;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
+use futures::future::join_all;
 use loonfs_api::wire::control::{HeadState, NamespaceState};
-use loonfs_api::wire::index_grams::{IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY};
+use loonfs_api::wire::index_grams::{
+    IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_MAX_FILE_BYTES,
+};
 use loonfs_api::wire::manifest::MetadataTableFamily;
 use loonfs_api::ManifestObjectId;
 use loonfs_api::{
@@ -425,8 +428,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .map_err(CoreError::InvalidQuery)?
         {
             GramPlanOutcome::Indexable(plan) => {
-                candidates.indexed =
-                    indexed_candidates(store, &manifest.payload.index_files, &plan).await?;
+                candidates.indexed = indexed_candidates(
+                    store,
+                    self.tables.table_cache(),
+                    &manifest.payload.index_files,
+                    &plan,
+                )
+                .await?;
             }
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
@@ -466,69 +474,153 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         // candidate this page finished scanning (offset MAX), or the last
         // emitted match when the page filled mid-file.
         let mut resume_cursor: Option<(InodeId, u64)> = None;
-        'inodes: for inode_id in candidates.inodes().collect::<Vec<_>>() {
-            if let Some((last_inode, last_offset)) = resume {
-                if inode_id < last_inode || (inode_id == last_inode && last_offset == u64::MAX) {
-                    continue;
-                }
-            }
-            let Some(revision) = view.latest_revision_head(inode_id).await? else {
-                continue;
-            };
-            if !candidates.admits(inode_id, revision.revision_no) {
-                continue;
-            }
-            // With the tail skipped (`allow_stale`), serve the index's cut
-            // and nothing newer: a candidate whose newest revision is past
-            // the watermark would otherwise be verified at an unindexed
-            // revision while tail-only files stay invisible — a mix of two
-            // snapshots rather than a stale-but-consistent one.
-            if !tail_scanned && revision.committed_seq > feature.built_through_seq {
-                continue;
-            }
-            let Some(chain) = derive_visible_path(&view, inode_id).await? else {
-                continue;
-            };
-            if let Some(scope_root) = scope_root {
-                if !chain.ancestors.contains(&scope_root) {
-                    continue;
-                }
-            }
-            if verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
-                has_more = true;
-                break 'inodes;
-            }
-            verified_files += 1;
-            let content =
-                read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
-                    .await?;
-            if !crate::checkpoint::is_indexable_text_content(&content.bytes) {
-                resume_cursor = Some((inode_id, u64::MAX));
-                continue;
-            }
-            for found in line_matches(&content.bytes, &pattern) {
+        let ordered_candidates = candidates.inodes().collect::<Vec<_>>();
+        let mut next_candidate = 0usize;
+        'page: loop {
+            // Select the next fan-out batch: walk candidates in inode
+            // order through the cheap checks (metadata lookups served by
+            // the loaded view) until enough survivors need content, the
+            // verified-file budget fills, or the candidates run out. The
+            // content read is the only per-candidate store fetch, so it is
+            // the only stage that fans out — the design doc's "small fixed
+            // fan-out" for candidate reads.
+            let mut batch: Vec<GrepContentCandidate> = Vec::new();
+            let mut budget_exhausted = false;
+            while next_candidate < ordered_candidates.len() {
+                let inode_id = ordered_candidates[next_candidate];
+                next_candidate += 1;
                 if let Some((last_inode, last_offset)) = resume {
-                    if inode_id == last_inode && found.byte_offset <= last_offset {
+                    if inode_id < last_inode || (inode_id == last_inode && last_offset == u64::MAX)
+                    {
                         continue;
                     }
                 }
-                if matches.len() == limit {
-                    has_more = true;
-                    break 'inodes;
+                let Some(revision) = view.latest_revision_head(inode_id).await? else {
+                    continue;
+                };
+                if !candidates.admits(inode_id, revision.revision_no) {
+                    continue;
                 }
-                resume_cursor = Some((inode_id, found.byte_offset));
-                matches.push(GrepMatch {
-                    absolute_path: chain.path.clone(),
+                // With the tail skipped (`allow_stale`), serve the index's
+                // cut and nothing newer: a candidate whose newest revision
+                // is past the watermark would otherwise be verified at an
+                // unindexed revision while tail-only files stay invisible
+                // — a mix of two snapshots rather than a stale-but-
+                // consistent one.
+                if !tail_scanned && revision.committed_seq > feature.built_through_seq {
+                    continue;
+                }
+                let Some(chain) = derive_visible_path(&view, inode_id).await? else {
+                    continue;
+                };
+                if let Some(scope_root) = scope_root {
+                    if !chain.ancestors.contains(&scope_root) {
+                        continue;
+                    }
+                }
+                if verified_files == MAX_GREP_VERIFIED_FILES_PER_PAGE {
+                    budget_exhausted = true;
+                    break;
+                }
+                verified_files += 1;
+                // Content past the index eligibility cap can never be
+                // indexable text, so tail and scan candidates skip their
+                // doomed reads on the declared size alone — the same
+                // pre-fetch check the index builder applies
+                // (`checkpoint/index_build.rs`); index-supplied candidates
+                // are under the cap by construction. The candidate still
+                // rides the batch in inode order, so the budget and the
+                // resume cursor advance exactly as if its bytes had been
+                // fetched and refused.
+                let oversized = revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES;
+                batch.push(GrepContentCandidate {
                     inode_id,
-                    revision_no: revision.revision_no,
-                    line_number: found.line_number,
-                    byte_offset: found.byte_offset,
-                    line: found.line,
-                    line_truncated: found.line_truncated,
+                    revision,
+                    path: chain.path,
+                    oversized,
                 });
+                if batch.len() == MAX_GREP_READ_IO {
+                    break;
+                }
             }
-            // The file was fully scanned; a later stop resumes past it.
-            resume_cursor = Some((inode_id, u64::MAX));
+            if batch.is_empty() {
+                if budget_exhausted {
+                    has_more = true;
+                }
+                break 'page;
+            }
+            // The reads fan out, but their errors do not short-circuit:
+            // each result rides with its candidate into the ordered walk
+            // below, which surfaces a failure only when it reaches that
+            // candidate — the position the serial loop surfaced it. A
+            // failure the walk never reaches (the page filled first) is
+            // discarded with the rest of the speculative batch; the next
+            // page re-issues that read and reports it then. An oversized
+            // candidate carries no read at all (`None`).
+            let contents = join_all(batch.iter().map(|candidate| async move {
+                if candidate.oversized {
+                    return None;
+                }
+                Some(
+                    read_durable_content_bytes(
+                        store,
+                        &self.content_store_id,
+                        &candidate.revision.content_ref,
+                    )
+                    .await,
+                )
+            }))
+            .await;
+            // Emission stays strictly in candidate (inode) order: the batch
+            // was selected in order and its results are consumed in order,
+            // so matches, limits, errors, and the resume cursor advance
+            // exactly as the serial walk advanced them.
+            for (candidate, content) in batch.iter().zip(contents) {
+                let inode_id = candidate.inode_id;
+                let Some(content) = content else {
+                    // Skipped as oversized: scanned-and-refused without the
+                    // fetch, so the cursor moves past it like any other
+                    // ineligible file.
+                    resume_cursor = Some((inode_id, u64::MAX));
+                    continue;
+                };
+                let content = content?;
+                if !crate::checkpoint::is_indexable_text_content(&content.bytes) {
+                    resume_cursor = Some((inode_id, u64::MAX));
+                    continue;
+                }
+                for found in line_matches(&content.bytes, &pattern) {
+                    if let Some((last_inode, last_offset)) = resume {
+                        if inode_id == last_inode && found.byte_offset <= last_offset {
+                            continue;
+                        }
+                    }
+                    if matches.len() == limit {
+                        // The page filled mid-batch: contents already
+                        // fetched for the batch's later candidates are
+                        // discarded, and the cursor resumes from the last
+                        // processed candidate, never a discarded one.
+                        has_more = true;
+                        break 'page;
+                    }
+                    resume_cursor = Some((inode_id, found.byte_offset));
+                    matches.push(GrepMatch {
+                        absolute_path: candidate.path.clone(),
+                        inode_id,
+                        revision_no: candidate.revision.revision_no,
+                        line_number: found.line_number,
+                        byte_offset: found.byte_offset,
+                        line: found.line,
+                        line_truncated: found.line_truncated,
+                    });
+                }
+                // The file was fully scanned; a later stop resumes past it.
+                resume_cursor = Some((inode_id, u64::MAX));
+            }
+            if budget_exhausted {
+                has_more = true;
+                break 'page;
+            }
         }
 
         let next_cursor = if has_more {
@@ -1013,6 +1105,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             self.wal_tail_rows.as_ref(),
         )
     }
+}
+
+/// One grep candidate that survived the cheap visibility checks and awaits
+/// its content read, carrying everything match emission needs so the
+/// fetched batch is processed without further metadata lookups.
+struct GrepContentCandidate {
+    inode_id: InodeId,
+    revision: RevisionRecord,
+    path: String,
+    /// The declared content size exceeds the index eligibility cap, so no
+    /// read is scheduled: the file could never pass the post-read text
+    /// check, and the walk skips it as fully scanned.
+    oversized: bool,
 }
 
 fn validate_file_revisions_cursor(

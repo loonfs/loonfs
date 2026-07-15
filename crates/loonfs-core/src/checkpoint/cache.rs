@@ -3,6 +3,7 @@
 
 use super::runs::MetadataRunManifest;
 use crate::metadata::MetadataState;
+use loonfs_api::wire::index_grams::IndexRow;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
@@ -67,7 +68,10 @@ pub(super) struct MetadataTableCacheKey {
 /// One decoded, verified object the cache holds: a CRC-checked segment
 /// section (index, filter, or data) or a validated namespace manifest.
 /// Everything shares the cache and its byte budget; the key's `block_kind`
-/// and `block_offset` make collisions between kinds impossible.
+/// and `block_offset` make collisions between kinds impossible. Data
+/// blocks come in two payloads — metadata rows and gram-index rows — that
+/// can never collide either, because a key's identity is its segment's
+/// payload checksum and one segment object belongs to exactly one family.
 #[derive(Debug, Clone)]
 pub(super) enum DecodedMetadataTableBlock {
     Index {
@@ -80,6 +84,12 @@ pub(super) enum DecodedMetadataTableBlock {
     },
     Data {
         block: Arc<DecodedDataBlock>,
+        decoded_byte_len: usize,
+    },
+    /// A gram-index segment's data block: the same block grammar as
+    /// metadata data blocks with the index family's row payload.
+    IndexData {
+        block: Arc<DecodedDataBlock<IndexRow>>,
         decoded_byte_len: usize,
     },
     Manifest {
@@ -102,6 +112,9 @@ impl DecodedMetadataTableBlock {
                 decoded_byte_len, ..
             }
             | Self::Data {
+                decoded_byte_len, ..
+            }
+            | Self::IndexData {
                 decoded_byte_len, ..
             }
             | Self::Manifest {
@@ -635,6 +648,7 @@ mod tests {
             DecodedMetadataTableBlock::Data { block: rows, .. } => Arc::clone(rows),
             DecodedMetadataTableBlock::Index { .. }
             | DecodedMetadataTableBlock::Filter { .. }
+            | DecodedMetadataTableBlock::IndexData { .. }
             | DecodedMetadataTableBlock::Manifest { .. } => {
                 unreachable!("fixture builds a data block")
             }
@@ -647,6 +661,7 @@ mod tests {
             } => Arc::ptr_eq(hit_rows, &rows),
             DecodedMetadataTableBlock::Index { .. }
             | DecodedMetadataTableBlock::Filter { .. }
+            | DecodedMetadataTableBlock::IndexData { .. }
             | DecodedMetadataTableBlock::Manifest { .. } => false,
         };
         assert!(

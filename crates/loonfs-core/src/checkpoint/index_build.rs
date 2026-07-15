@@ -539,7 +539,13 @@ async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
         built_through_seq: feature.built_through_seq,
         backfill_cursor: Some(cursor),
     };
-    let mut content_bytes_read = 0u64;
+    // Select first, fetch after: the byte budget is charged from each
+    // reference's declared size, which the verified content read proves
+    // equal to the fetched length, so the walk stops at exactly the row
+    // the fetch-then-count serial loop stopped at.
+    let mut pending = Vec::new();
+    let mut planned_content_bytes = 0u64;
+    let mut budget_reached = false;
     for (row_key, row) in page {
         let MetadataRow::Revision {
             inode_id,
@@ -556,30 +562,29 @@ async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
         // Revisions past the enable-time watermark belong to WAL replay;
         // the cursor still advances over them so the walk terminates.
         if committed_seq <= feature.built_through_seq {
-            let indexed = index_revision_content(
-                store,
-                content_store_id,
-                inode_id,
-                revision_no,
-                &content_ref,
-                &mut unit.postings,
-                &mut content_bytes_read,
-            )
-            .await?;
-            if indexed {
-                unit.indexed_revisions += 1;
-            } else {
+            // The size cap is checked from the reference before any
+            // fetch; oversized files cost nothing to skip.
+            if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
                 unit.skipped_revisions += 1;
+            } else {
+                planned_content_bytes += content_ref.size_bytes;
+                pending.push(PendingRevisionContent {
+                    inode_id,
+                    revision_no,
+                    content_ref,
+                });
             }
         }
         unit.backfill_cursor = Some(row_key);
-        if content_bytes_read >= policy.max_content_bytes_per_step {
-            return Ok(unit);
+        if planned_content_bytes >= policy.max_content_bytes_per_step {
+            budget_reached = true;
+            break;
         }
     }
-    if walk_complete {
+    if walk_complete && !budget_reached {
         unit.backfill_cursor = None;
     }
+    fetch_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
     Ok(unit)
 }
 
@@ -642,7 +647,12 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
         built_through_seq: feature.built_through_seq,
         backfill_cursor: None,
     };
-    let mut content_bytes_read = 0u64;
+    // Select first, fetch after: the byte budget is charged from each
+    // reference's declared size, which the verified content read proves
+    // equal to the fetched length, so the unit consumes exactly the
+    // commits the fetch-then-count serial loop consumed.
+    let mut pending = Vec::new();
+    let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
     'commits: for segment in wal_chain.segments() {
         for record in segment.records() {
@@ -652,7 +662,7 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
             // A commit is consumed whole or not at all: the watermark is a
             // commit boundary, so budgets are checked between commits.
             if examined_files >= policy.max_files_per_step
-                || content_bytes_read >= policy.max_content_bytes_per_step
+                || planned_content_bytes >= policy.max_content_bytes_per_step
             {
                 break 'commits;
             }
@@ -665,20 +675,17 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
                 } = &delta.delta
                 {
                     examined_files += 1;
-                    let indexed = index_revision_content(
-                        store,
-                        content_store_id,
-                        *inode_id,
-                        *revision_no,
-                        content_ref,
-                        &mut unit.postings,
-                        &mut content_bytes_read,
-                    )
-                    .await?;
-                    if indexed {
-                        unit.indexed_revisions += 1;
-                    } else {
+                    // The size cap is checked from the reference before
+                    // any fetch; oversized files cost nothing to skip.
+                    if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
                         unit.skipped_revisions += 1;
+                    } else {
+                        planned_content_bytes += content_ref.size_bytes;
+                        pending.push(PendingRevisionContent {
+                            inode_id: *inode_id,
+                            revision_no: *revision_no,
+                            content_ref: content_ref.clone(),
+                        });
                     }
                 }
             }
@@ -689,39 +696,52 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
     if unit.built_through_seq == feature.built_through_seq {
         return Ok(None);
     }
+    fetch_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
     Ok(Some(unit))
 }
 
-/// Reads one revision's content and folds its grams into the unit's
-/// postings. Returns whether the revision was indexed (false: ineligible).
-#[allow(clippy::too_many_arguments)]
-async fn index_revision_content<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
+/// One revision a build unit selected for indexing, before its content
+/// fetch: everything eligibility already decided, so the fetch stage runs
+/// without re-deriving it.
+struct PendingRevisionContent {
     inode_id: InodeId,
     revision_no: RevisionNo,
-    content_ref: &ContentRef,
-    postings: &mut BTreeMap<Gram, Vec<GramPosting>>,
-    content_bytes_read: &mut u64,
-) -> Result<bool> {
-    // The size cap is checked from the reference before any fetch; the
-    // sniff needs bytes, so oversized files cost nothing to skip.
-    if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
-        return Ok(false);
+    content_ref: ContentRef,
+}
+
+/// Fetches the selected revisions' contents in chunks of
+/// [`MAX_MAINTENANCE_TABLE_IO`] and folds each eligible file's grams into
+/// the unit, strictly in selection order. Selection already excluded
+/// oversized revisions, so every entry here costs one content read; the
+/// text sniff still runs on the fetched bytes and drops non-text files
+/// after the read, exactly as the serial path did.
+async fn fetch_and_fold_revision_contents<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    pending: &[PendingRevisionContent],
+    unit: &mut CollectedIndexUnit,
+) -> Result<()> {
+    for chunk in pending.chunks(MAX_MAINTENANCE_TABLE_IO) {
+        let contents = try_join_all(chunk.iter().map(|revision| {
+            read_durable_content_bytes(store, content_store_id, &revision.content_ref)
+        }))
+        .await?;
+        for (revision, content) in chunk.iter().zip(contents) {
+            if !is_indexable_text_content(&content.bytes) {
+                unit.skipped_revisions += 1;
+                continue;
+            }
+            let posting = GramPosting {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+            };
+            for gram in extract_grams(&content.bytes) {
+                unit.postings.entry(gram).or_default().push(posting);
+            }
+            unit.indexed_revisions += 1;
+        }
     }
-    let content = read_durable_content_bytes(store, content_store_id, content_ref).await?;
-    *content_bytes_read += content.bytes.len() as u64;
-    if !is_indexable_text_content(&content.bytes) {
-        return Ok(false);
-    }
-    let posting = GramPosting {
-        inode_id,
-        revision_no,
-    };
-    for gram in extract_grams(&content.bytes) {
-        postings.entry(gram).or_default().push(posting);
-    }
-    Ok(true)
+    Ok(())
 }
 
 /// Batches collected postings into rows, in ascending row-key order.
