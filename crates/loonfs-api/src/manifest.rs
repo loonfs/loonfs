@@ -97,6 +97,15 @@ pub struct IndexFileRef {
     /// entry in the manifest `features` map version-gates the bytes.
     pub family: String,
     pub run_seq: ChangeSeq,
+    /// Ordinal of the logical run this segment belongs to. Every publish
+    /// that creates segments for a family stamps one ordinal — allocated
+    /// from the owning feature value — on the whole batch, so fold
+    /// triggers can count runs rather than the segments a row cap split a
+    /// batch into. Writer-side bookkeeping only: readers, garbage
+    /// collection, and forks ignore it. Absent means zero, the
+    /// pre-ordinal wire form.
+    #[serde(default, skip_serializing_if = "index_run_ordinal_is_zero")]
+    pub run_ordinal: u64,
     pub level: u32,
     pub segment_index: u32,
     pub row_count: u64,
@@ -115,6 +124,13 @@ pub struct IndexFileRef {
     pub filter_inline: Option<String>,
     /// Checksum of the segment object's full bytes, in `sha256:<hex>` form.
     pub payload_checksum: String,
+}
+
+/// Zero run ordinals are omitted from descriptors: absent means zero, so
+/// manifests written before ordinals existed keep decoding, and re-encoding
+/// them stays byte-identical.
+fn index_run_ordinal_is_zero(run_ordinal: &u64) -> bool {
+    *run_ordinal == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

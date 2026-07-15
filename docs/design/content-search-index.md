@@ -174,21 +174,77 @@ Two rules keep the cycle honest:
   always still there. Floor advancement is already an explicit
   operator action, so this is one refusal, not a scheduler.
 
-When delta index segments accumulate past the same threshold the
-metadata families use, reorganization folds them. A gram base can
-grow far past what any metadata family reaches, so index folds
-are partitioned rather than whole-family: a fold snapshots the
-segment set it will consume, then walks the gram keyspace in
-bounded row-count steps, each step merging one key range from the
-snapshot into fresh base segments and publishing a manifest that
-records the outputs and the resume cursor inside the feature
-value. Until the walk completes, snapshot inputs and outputs are
+When delta runs accumulate past the same threshold shape the
+metadata families use, a fold consumes them. A gram base can grow
+far past what any metadata family reaches, so index folds differ
+from reorganization in two ways.
+
+They are tiered: delta runs fold into a mid run, and only
+accumulated mid runs fold — together with the base — into a
+fresh base, so the whole-index rewrite happens once per
+`max_l0_runs x max_mid_runs` build runs (about 64 with the
+defaults) instead of once per delta threshold. That is a
+constant-factor amortization of base rewrites, not logarithmic
+cumulative write amplification: the level count is fixed at
+three, and logarithmic amplification needs a level count that
+grows with corpus size. The constant factor is expected to
+suffice at the corpus sizes v1 targets; if large-corpus evidence
+says otherwise, the documented next step is dynamic (size-tiered)
+leveling, where levels are added as the corpus grows (see
+"Deferred, with intent").
+
+Fold triggers count logical runs, never physical segments. Every
+publish that creates gram segments — a WAL or backfill build
+unit, a delta fold's outputs, a base fold's outputs — stamps one
+run ordinal on the whole batch, allocated from a counter in the
+feature value and incremented in the same manifest publication,
+so allocation is atomic with the root swap. The per-segment row
+cap can therefore split a run into any number of segments without
+changing fold cadence, and backfill units — which all carry the
+unchanged enable-time watermark as their `run_seq` — still count
+as distinct runs.
+
+And they are partitioned rather than whole-family: a fold
+snapshots the segment set it will consume, then walks the gram
+keyspace in bounded row-count steps, each step merging one key
+range from the snapshot into fresh segments at the fold's output
+tier and publishing a manifest that records the outputs and the
+resume cursor inside the feature value.
+Until the walk completes, snapshot inputs and outputs are
 both referenced and both served — postings are add-only, so
 readers that union them see duplicates, never gaps — and segments
 that arrive during the fold stay out of the snapshot and survive
 it. The completing step swaps the snapshot out for the outputs; a
 fold interrupted anywhere resumes from the cursor the last
-published manifest carries.
+published manifest carries. The step's row budget is soft: rows
+with equal keys are consumed as one atomic group, because the
+resume cursor is the last merged key plus a terminator and
+splitting the group would strand its tail behind the cursor.
+
+The tiering and run identity are durable writer-side bookkeeping,
+invisible to reads. Because the feature is not yet registered in
+`docs/specs`, this document is the normative home for these
+values for now:
+
+- Descriptor `level` in the manifest's index list: `0` for the
+  delta segments build units write, `1` for a delta fold's mid
+  runs, `2` for the base. Level `1` is deliberately the level
+  pre-tiering whole-set folds stamped on their outputs, so a
+  legacy base counts as one mid run and self-heals into the
+  level-2 base at its first mid-threshold fold.
+- Descriptor `run_ordinal`: the batch-wide run identity described
+  above. Absent means zero, so pre-ordinal segments decode as one
+  legacy run per level and are swept up as real runs accumulate.
+- Feature `next_run_ordinal`: the allocation counter. Absent
+  means zero.
+- Fold-state `output_level` inside the feature value: the tier
+  the in-flight fold's outputs are stamped with (`1` or `2`).
+  Absent means `2`, because pre-tiering states always described a
+  whole-set fold and must complete as the base rewrite their
+  writer intended.
+- Fold-state `run_ordinal`: the ordinal stamped on every output
+  segment of the fold, fixed when the fold starts so a resumed
+  fold keeps its identity. Absent means zero.
 
 Enabling the index on a namespace that already has data starts a
 backfill: a cursor inside the feature value walks the revisions
@@ -293,8 +349,9 @@ default-on decision:
   published systems sit near the low end of that range.
 - **Build cost.** Each eligible revision is read once, linearly
   tokenized, and sorted; the object reads dominate. Budgets make
-  this a per-tick constant, and fold amplification is
-  logarithmic, as for metadata.
+  this a per-tick constant, and tiered folds amortize the
+  whole-index rewrite by a constant factor — about 64x rarer
+  than the delta threshold with the defaults (see "Building").
 - **Query cost.** Posting reads touch a handful of blocks per
   gram after pruning. Candidate content reads dominate end-to-end
   latency, which is why the planner works to keep candidate sets
@@ -311,7 +368,8 @@ Following the segment-format convention, two different contracts:
   them is a feature-version bump and a rebuild — cheap by
   construction, since the index is derived work.
 - **Writer-side defaults.** The per-tick build budgets (256
-  files or 64 MiB), the fold step's row budget, the posting
+  files or 64 MiB), the fold run thresholds (eight delta runs,
+  eight mid runs), the fold step's row budget, the posting
   batch target (about 256), page limits, the verified-candidate
   budget, and the query tail budget are writer- or server-side
   tunables; readers take what the manifest and descriptors
@@ -322,6 +380,13 @@ Following the segment-format convention, two different contracts:
 - **Resource-type hints** (format section 8) as an eligibility
   override, once resource properties exist at all.
 - **Dead-posting reclamation**, together with tombstone collapse.
+- **Dynamic (size-tiered) leveling.** The fixed delta/mid/base
+  tiers amortize base rewrites by a constant factor; if lab
+  evidence at large corpora shows cumulative write amplification
+  still dominating, the next step is a level count that grows
+  with corpus size — true logarithmic amplification. The level
+  and run-ordinal fields are already per-segment, so adding
+  levels is writer-side policy, not a format change.
 - **Variable-length grams.** Choosing gram boundaries by corpus
   rarity instead of a fixed width shrinks posting lists for
   common substrings and sharpens selectivity; it needs a

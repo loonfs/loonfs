@@ -66,6 +66,30 @@ const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
 /// object fetch.
 const INLINE_INDEX_FILTER_MAX_BYTES: u32 = 1024;
 
+// Grams-family segment levels. The levels are writer-side fold bookkeeping
+// only: queries, garbage collection, and forks treat every referenced
+// grams segment alike, so tiering never changes what reads see. Folds run
+// in two tiers so base rewrites amortize — delta runs fold into a fresh
+// mid run when they pass `max_l0_runs` (cost proportional to recent
+// churn), and mids fold together with the base into a fresh base when
+// they pass `max_mid_runs` (the rare whole-index rewrite).
+
+/// Level of the delta segments build steps write, the metadata L0 level.
+pub(super) const INDEX_GRAMS_DELTA_LEVEL: u32 = CHECKPOINT_L0_RUN_LEVEL;
+/// Level of a completed delta fold's outputs. Deliberately equal to
+/// [`CHECKPOINT_BASE_RUN_LEVEL`], the level pre-tiering folds stamped on
+/// their whole-set outputs: a legacy base counts as one mid run under
+/// this policy (its segments decode to run ordinal zero), keeps serving
+/// reads unchanged, and once real mid runs accumulate past the threshold
+/// the base fold rewrites it into the level-2 base — a self-healing
+/// migration with no `index.grams` version bump.
+pub(super) const INDEX_GRAMS_MID_LEVEL: u32 = CHECKPOINT_BASE_RUN_LEVEL;
+/// Level of a completed mid-plus-base fold's outputs. A serialized
+/// [`GramIndexFoldState`] without an `output_level` decodes to this level
+/// (the codec's `default_fold_output_level`), because pre-tiering states
+/// always described a whole-set fold.
+pub(super) const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
+
 /// Writer-side budgets for one build step. Work stops at a commit boundary
 /// once a budget is exceeded; the next step resumes from the published
 /// watermark or cursor.
@@ -77,11 +101,25 @@ pub struct GramIndexBuildPolicy {
     pub max_content_bytes_per_step: u64,
     /// Rows per written index segment.
     pub max_rows_per_segment: usize,
-    /// Delta-level segments that trigger a fold into a fresh base, the
-    /// same threshold shape as metadata L0 runs.
-    pub max_l0_segments: usize,
+    /// Delta-level runs that trigger a fold into a fresh mid run, the
+    /// same threshold shape as metadata L0 runs. A run is one build
+    /// unit's — or one fold's — published output batch, however many
+    /// segments the per-segment row cap split it into; runs are told
+    /// apart by the ordinal stamped on their segments. A delta fold
+    /// reads only the deltas, so its cost tracks recent churn, not
+    /// index size.
+    pub max_l0_runs: usize,
+    /// Runs of mid segments that trigger folding the mids and the base
+    /// into a fresh base — the rare step that rewrites the whole index,
+    /// reached once per `max_mid_runs` delta folds. A run is counted
+    /// exactly as for `max_l0_runs`: by ordinal, never by segment.
+    pub max_mid_runs: usize,
     /// Rows one fold step merges before publishing and yielding; the
-    /// cursor in the feature value makes the walk resumable.
+    /// cursor in the feature value makes the walk resumable. The budget
+    /// is soft: rows with equal keys are consumed as one atomic group,
+    /// so a step may overshoot by the size of one such group. The resume
+    /// cursor is `last key + "\0"`, and splitting a group across steps
+    /// would strand its tail behind the cursor and drop postings.
     pub max_fold_rows_per_step: usize,
 }
 
@@ -94,7 +132,8 @@ impl GramIndexBuildPolicy {
             max_files_per_step: self.max_files_per_step.max(1),
             max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),
             max_rows_per_segment: self.max_rows_per_segment.max(1),
-            max_l0_segments: self.max_l0_segments.max(1),
+            max_l0_runs: self.max_l0_runs.max(1),
+            max_mid_runs: self.max_mid_runs.max(1),
             max_fold_rows_per_step: self.max_fold_rows_per_step.max(1),
         }
     }
@@ -106,7 +145,8 @@ impl Default for GramIndexBuildPolicy {
             max_files_per_step: 256,
             max_content_bytes_per_step: 64 * 1024 * 1024,
             max_rows_per_segment: 65_536,
-            max_l0_segments: 8,
+            max_l0_runs: 8,
+            max_mid_runs: 8,
             max_fold_rows_per_step: 131_072,
         }
     }
@@ -173,14 +213,16 @@ pub enum GramIndexFoldOutcome {
     UnsupportedFeatureVersion {
         found: u32,
     },
-    /// Fewer delta segments than the fold threshold and no fold in flight;
-    /// nothing rewritten.
+    /// Delta runs and mid runs both below their fold thresholds and no
+    /// fold in flight; nothing rewritten. Both counts are logical runs
+    /// (distinct ordinals at the level), never segments.
     NotNeeded {
-        l0_segments: usize,
+        l0_runs: usize,
+        mid_runs: usize,
     },
-    /// One bounded key range merged into fresh base segments and
-    /// published. `completed` when this step finished the walk and swapped
-    /// the snapshot out for the outputs.
+    /// One bounded key range merged into fresh segments at the fold's
+    /// output level and published. `completed` when this step finished the
+    /// walk and swapped the snapshot out for the outputs.
     StepPublished {
         merged_rows: u64,
         segments_written: u64,
@@ -248,6 +290,7 @@ pub(crate) async fn enable_grams_index<S: ObjectStore + ?Sized>(
         built_through_seq,
         backfill_cursor: Some(String::new()),
         fold: None,
+        next_run_ordinal: 0,
     };
     let predecessor_object_id = previous.payload.manifest_object_id.clone();
     // Manifest publishers must gate the root swap behind the publication
@@ -433,6 +476,7 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         unit.run_seq,
+        feature.next_run_ordinal,
         rows,
         policy.max_rows_per_segment,
     )
@@ -448,6 +492,16 @@ pub(crate) async fn build_grams_index_step<S: ObjectStore + ?Sized>(
         // A build step never touches an in-flight fold; the walk resumes
         // against whatever segments its snapshot pinned.
         fold: feature.fold.clone(),
+        // An ordinal names one published batch of segments, so the unit
+        // consumes one exactly when it wrote any. The increment rides the
+        // same manifest as the segments it names: a lost publication race
+        // discards both together, so no ordinal is ever burned or handed
+        // to two published batches.
+        next_run_ordinal: if segments_written > 0 {
+            feature.next_run_ordinal + 1
+        } else {
+            feature.next_run_ordinal
+        },
     };
     let materialized = next_feature.is_materialized();
     let predecessor_object_id = previous.payload.manifest_object_id.clone();
@@ -761,11 +815,14 @@ fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Result<Vec<
     Ok(rows)
 }
 
-/// Writes the unit's index segments and returns their descriptors.
+/// Writes the unit's index segments and returns their descriptors. All the
+/// descriptors carry `run_ordinal`: one published batch is one logical run,
+/// however many segments the row cap split it into.
 async fn write_index_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
+    run_ordinal: u64,
     rows: Vec<IndexRow>,
     max_rows_per_segment: usize,
 ) -> Result<Vec<IndexFileRef>> {
@@ -790,7 +847,14 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
         }
         descriptors.extend(
             try_join_all(chunk.into_iter().map(|(segment_index, segment_rows)| {
-                write_index_segment(store, namespace_id, run_seq, segment_index, segment_rows)
+                write_index_segment(
+                    store,
+                    namespace_id,
+                    run_seq,
+                    run_ordinal,
+                    segment_index,
+                    segment_rows,
+                )
             }))
             .await?,
         );
@@ -802,6 +866,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
+    run_ordinal: u64,
     segment_index: u32,
     rows: Vec<IndexRow>,
 ) -> Result<IndexFileRef> {
@@ -833,7 +898,8 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
         object_key,
         family: INDEX_FAMILY_GRAMS.to_owned(),
         run_seq,
-        level: CHECKPOINT_L0_RUN_LEVEL,
+        run_ordinal,
+        level: INDEX_GRAMS_DELTA_LEVEL,
         segment_index,
         row_count: built.row_count,
         min_key: built.min_key,
@@ -847,15 +913,22 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 
 /// Runs at most one gram index fold step.
 ///
-/// Folds are partitioned and resumable. The first step snapshots the
-/// segment set it will consume. Every step then merges one bounded key
-/// range from that snapshot into fresh base segments and publishes a
-/// manifest recording the outputs plus a resume cursor in the feature
-/// value. Until the final step swaps the snapshot out, both the snapshot
-/// inputs and the fold outputs stay referenced and served; postings are
-/// add-only, so readers that union them see duplicates, never gaps.
-/// Segments written while the fold runs stay out of the snapshot and
-/// survive it.
+/// Folds are tiered, partitioned, and resumable. When no fold is in
+/// flight, delta runs past `max_l0_runs` start a delta fold — snapshot
+/// the deltas only, outputs at the mid level, base untouched — and
+/// otherwise mid runs past `max_mid_runs` start a base fold, which
+/// snapshots the mids and the base together and rewrites them at the base
+/// level. One fold runs at a time: runs that cross a threshold while
+/// another fold is mid-walk wait for the tick after it completes.
+///
+/// The first step snapshots the segment set the fold will consume. Every
+/// step then merges one bounded key range from that snapshot into fresh
+/// segments at the fold's output level and publishes a manifest recording
+/// the outputs plus a resume cursor in the feature value. Until the final
+/// step swaps the snapshot out, both the snapshot inputs and the fold
+/// outputs stay referenced and served; postings are add-only, so readers
+/// that union them see duplicates, never gaps. Segments written while the
+/// fold runs stay out of the snapshot and survive it.
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
@@ -924,23 +997,67 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
     let fold_state = match feature.fold.clone() {
         Some(state) => state,
         None => {
-            let l0_segments = grams_segments
-                .iter()
-                .filter(|descriptor| descriptor.level == CHECKPOINT_L0_RUN_LEVEL)
-                .count();
-            if l0_segments < policy.max_l0_segments {
+            // Runs, not segments, at both tiers: every publish that
+            // creates gram segments stamps one batch-wide ordinal
+            // allocated from the feature value, so distinct ordinals at a
+            // level count logical runs — build units at the delta level,
+            // completed folds at the mid level — the same run counting as
+            // metadata's `l0_run_count`. Counting segments would tie fold
+            // cadence to output sizing: the row cap could split one build
+            // unit into a threshold's worth of delta segments, and one
+            // delta fold's outputs into a threshold's worth of mid
+            // segments, collapsing the base-rewrite amortization. The
+            // ordinal, not `run_seq`, is the run identity because
+            // backfill units all share the unchanged enable-time
+            // watermark as their `run_seq`. Legacy migration: pre-ordinal
+            // segments all decode to ordinal zero and therefore count as
+            // one run at their level; folds sweep them up as real runs
+            // accumulate. Pre-release, with no deployed indexes, that
+            // undercount is acceptable.
+            let l0_runs = distinct_run_ordinals_at_level(&grams_segments, INDEX_GRAMS_DELTA_LEVEL);
+            let mid_runs = distinct_run_ordinals_at_level(&grams_segments, INDEX_GRAMS_MID_LEVEL);
+            let (snapshot, output_level) = if l0_runs >= policy.max_l0_runs {
+                // Delta fold: consume the deltas only and write one fresh
+                // mid run. Whatever the base has grown to, this fold's
+                // cost is the recent churn.
+                let deltas = grams_segments
+                    .iter()
+                    .filter(|descriptor| descriptor.level == INDEX_GRAMS_DELTA_LEVEL)
+                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+                    .collect();
+                (deltas, INDEX_GRAMS_MID_LEVEL)
+            } else if mid_runs >= policy.max_mid_runs {
+                // Base fold: consume everything already folded once — the
+                // mid runs, the base, and any legacy pre-tiering base
+                // (also at the mid level) — and rewrite it as a fresh
+                // base. The rare expensive step.
+                let folded = grams_segments
+                    .iter()
+                    .filter(|descriptor| descriptor.level != INDEX_GRAMS_DELTA_LEVEL)
+                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
+                    .collect();
+                (folded, INDEX_GRAMS_BASE_LEVEL)
+            } else {
                 return Ok(GramIndexFoldReport {
                     namespace_id: namespace_id.clone(),
-                    outcome: GramIndexFoldOutcome::NotNeeded { l0_segments },
+                    outcome: GramIndexFoldOutcome::NotNeeded { l0_runs, mid_runs },
                 });
-            }
+            };
+            // A fold's outputs are one new run. Its ordinal is allocated
+            // here and carried in the durable state, so every resumed
+            // step — including after a restart or by another writer —
+            // stamps the identity the trigger chose; the counter
+            // increment below publishes with this first step's manifest,
+            // making allocation atomic with the root swap: a lost race
+            // discards both, and a retry re-allocates the same value.
+            let run_ordinal = feature.next_run_ordinal;
+            feature.next_run_ordinal += 1;
             GramIndexFoldState {
-                snapshot: grams_segments
-                    .iter()
-                    .map(|descriptor| descriptor.segment_id.as_str().to_owned())
-                    .collect(),
+                snapshot,
                 outputs: Vec::new(),
                 cursor: String::new(),
+                output_level,
+                run_ordinal,
             }
         }
     };
@@ -977,12 +1094,17 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
     // spec, "Garbage collection", rule 1); reading snapshot blocks writes
     // nothing.
     let publication_started_ms = timer.monotonic_now_ms();
-    let new_segments = write_index_base_segments(
+    let new_segments = write_index_folded_segments(
         store,
         namespace_id,
         run_seq,
+        // The ordinal and level ride the durable fold state, so a fold
+        // resumed after a restart — or by another writer — keeps stamping
+        // the identity and tier the trigger chose.
+        fold_state.run_ordinal,
         rows,
         policy.max_rows_per_segment,
+        fold_state.output_level,
     )
     .await?;
     let segments_written = new_segments.len() as u64;
@@ -1047,6 +1169,18 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Distinct run ordinals among `segments` at `level`: the number of
+/// logical runs at that tier, regardless of how many segments each run's
+/// row cap split it into.
+fn distinct_run_ordinals_at_level(segments: &[IndexFileRef], level: u32) -> usize {
+    segments
+        .iter()
+        .filter(|descriptor| descriptor.level == level)
+        .map(|descriptor| descriptor.run_ordinal)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
 /// One bounded range of merged snapshot rows.
 struct MergedRange {
     postings: BTreeMap<Gram, Vec<GramPosting>>,
@@ -1097,16 +1231,29 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
             return Ok(merged);
         };
         let (key, row) = readers[position].pop();
-        let IndexRow::GramPostings { gram, .. } = &row;
-        let gram = *gram;
-        let batch = row.postings().map_err(|error| {
-            CoreError::NamespaceCorrupt(format!(
-                "index segment `{}` carries an unreadable posting batch: {error}",
-                readers[position].object_key()
-            ))
-        })?;
-        merged.postings.entry(gram).or_default().extend(batch);
-        merged.rows += 1;
+        fold_snapshot_row(&mut merged, row, readers[position].object_key())?;
+        // Exact duplicates of this key are legal, across segments and
+        // within one: the row key is `gram-{hex}-{first batch inode}`, and
+        // the same (gram, first-inode) pair arises whenever two runs — or
+        // two batches of one run — start a batch at the same posting. The
+        // resume cursor is `key\0`, which skips everything at or below
+        // `key`, so the whole equal-key group must be consumed before the
+        // budget is re-checked or an unconsumed twin would be stranded
+        // behind the cursor and its postings dropped at the completing
+        // swap. This is what makes the row budget soft (see
+        // `GramIndexBuildPolicy::max_fold_rows_per_step`).
+        for reader in readers.iter_mut() {
+            loop {
+                // Peek is only meaningful after a refill, mirroring the
+                // loop head: a drained block must not end the group early.
+                reader.refill(store).await?;
+                if reader.peek_key() != Some(key.as_str()) {
+                    break;
+                }
+                let (_, duplicate) = reader.pop();
+                fold_snapshot_row(&mut merged, duplicate, reader.object_key())?;
+            }
+        }
         last_key = key;
     }
     // Budget filled: resume strictly after the last merged row. Peek once
@@ -1126,6 +1273,21 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
         merged.exhausted = true;
     }
     Ok(merged)
+}
+
+/// Folds one snapshot row's posting batch into the merged range and
+/// charges it against the row budget.
+fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) -> Result<()> {
+    let IndexRow::GramPostings { gram, .. } = &row;
+    let gram = *gram;
+    let batch = row.postings().map_err(|error| {
+        CoreError::NamespaceCorrupt(format!(
+            "index segment `{object_key}` carries an unreadable posting batch: {error}"
+        ))
+    })?;
+    merged.postings.entry(gram).or_default().extend(batch);
+    merged.rows += 1;
+    Ok(())
 }
 
 /// Streaming reader over one snapshot segment's rows from a start key:
@@ -1236,18 +1398,28 @@ async fn fetch_index_section<S: ObjectStore + ?Sized>(
     Ok(bytes.to_vec())
 }
 
-/// [`write_index_segments`] at the base level, for fold outputs.
-async fn write_index_base_segments<S: ObjectStore + ?Sized>(
+/// [`write_index_segments`] restamped at a fold's output level: the mid
+/// level for a delta fold, the base level for a mid-plus-base fold.
+async fn write_index_folded_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     run_seq: ChangeSeq,
+    run_ordinal: u64,
     rows: Vec<IndexRow>,
     max_rows_per_segment: usize,
+    output_level: u32,
 ) -> Result<Vec<IndexFileRef>> {
-    let mut descriptors =
-        write_index_segments(store, namespace_id, run_seq, rows, max_rows_per_segment).await?;
+    let mut descriptors = write_index_segments(
+        store,
+        namespace_id,
+        run_seq,
+        run_ordinal,
+        rows,
+        max_rows_per_segment,
+    )
+    .await?;
     for descriptor in &mut descriptors {
-        descriptor.level = CHECKPOINT_BASE_RUN_LEVEL;
+        descriptor.level = output_level;
     }
     Ok(descriptors)
 }
@@ -1333,6 +1505,23 @@ async fn write_successor_manifest_from_payload<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_state_codec_default_matches_the_base_level() {
+        // The decode default for a legacy fold state lives in `loonfs-api`
+        // while the level scheme lives here; this pin keeps the two from
+        // drifting apart. A state without an output level described a
+        // whole-set fold and must complete at the base.
+        let legacy: GramIndexFoldState = serde_json::from_value(serde_json::json!({
+            "snapshot": [],
+            "outputs": [],
+            "cursor": ""
+        }))
+        .expect("decode legacy fold state");
+        assert_eq!(legacy.output_level, INDEX_GRAMS_BASE_LEVEL);
+        assert_ne!(INDEX_GRAMS_DELTA_LEVEL, INDEX_GRAMS_MID_LEVEL);
+        assert_ne!(INDEX_GRAMS_MID_LEVEL, INDEX_GRAMS_BASE_LEVEL);
+    }
 
     #[test]
     fn eligibility_accepts_text_and_rejects_binary_and_oversize() {
