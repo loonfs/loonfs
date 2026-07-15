@@ -21,9 +21,8 @@ use loonfs_api::{
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
     DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse, FlushWalResponse,
     GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
-    ReleaseCheckpointResponse, RevisionNo,
+    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -198,15 +197,10 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        force: bool,
+        behavior: PutBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        let behavior = if force {
-            PutBehavior::Replace
-        } else {
-            PutBehavior::NoReplace
-        };
         self.writer
             .put_file_bytes(
                 &namespace_id,
@@ -268,10 +262,7 @@ impl Backend for EmbeddedBackend {
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
-                MoveOptions {
-                    behavior: MoveBehavior::NoReplace,
-                    commit_id,
-                },
+                MoveOptions { commit_id },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
@@ -597,7 +588,9 @@ mod tests {
     use super::{map_bootstrap_error, map_core_error, Backend, EmbeddedTarget};
     use crate::config::StoreConfig;
     use loonfs::{BootstrapNamespaceError, CoreError, ErrorCode};
-    use loonfs_api::{ChangeSeq, CreateCheckpointRequest, InodeId, NamespaceId, RevisionNo};
+    use loonfs_api::{
+        ChangeSeq, CreateCheckpointRequest, InodeId, NamespaceId, PutBehavior, RevisionNo,
+    };
     use loonfs_client::NamespacePath;
     use tempfile::tempdir;
 
@@ -655,7 +648,7 @@ mod tests {
                     absolute_path: "/file.txt".to_owned(),
                 },
                 b"hello",
-                false,
+                PutBehavior::NoReplace,
                 None,
             )
             .await

@@ -4,7 +4,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{
     sha256_digest,
     v0::{
@@ -399,7 +398,6 @@ fn move_path<S: ObjectStore + ?Sized>(
             commit_id: test_commit_id(commit_id),
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            behavior: MoveBehavior::NoReplace,
         },
         context,
     )
@@ -2576,7 +2574,6 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                     inode_id: file_inode,
                     new_parent_inode_id: docs_inode,
                     new_display_name: "moved.txt".to_owned(),
-                    behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 }],
                 message: None,
             },
@@ -3354,7 +3351,6 @@ async fn explicit_commit_rejects_invalid_display_names() {
                 inode_id: file.inode_id,
                 new_parent_inode_id: InodeId(1),
                 new_display_name: ".".to_owned(),
-                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }],
             message: None,
         },
@@ -3403,7 +3399,6 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("move-path").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: loonfs_api::v0::MoveBehavior::NoReplace,
         },
         &context,
     )
@@ -3528,7 +3523,6 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }),
         ],
         &context,

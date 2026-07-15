@@ -21,7 +21,7 @@ mod uploads;
 
 pub use commits::{
     ChangesResponse, CommitDelta, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
-    CommittedChange, MoveBehavior,
+    CommittedChange,
 };
 pub use operations::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointRequest, CreateCheckpointResponse,

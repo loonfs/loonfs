@@ -484,15 +484,10 @@ pub(super) async fn filesystem_operation(
             absolute_path: parse_path(&path)?,
             behavior,
         },
-        FilesystemOperation::MovePath {
-            from_path,
-            to_path,
-            behavior,
-        } => PathMutationIntent::MovePath {
+        FilesystemOperation::MovePath { from_path, to_path } => PathMutationIntent::MovePath {
             commit_id,
             from_path: parse_path(&from_path)?,
             to_path: parse_path(&to_path)?,
-            behavior,
         },
         FilesystemOperation::CopyPath { from_path, to_path } => PathMutationIntent::CopyFilePath {
             commit_id,

@@ -485,7 +485,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             .put_file_bytes(
                 &source,
                 b"hello over http\n",
-                false,
+                PutBehavior::NoReplace,
                 &MutationOptions::default(),
             )
             .expect("initial create");
@@ -493,7 +493,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         match harness.client.put_file_bytes(
             &source,
             b"conflict\n",
-            false,
+            PutBehavior::NoReplace,
             &MutationOptions::default(),
         ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
@@ -505,7 +505,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             .put_file_bytes(
                 &source,
                 b"forced overwrite\n",
-                true,
+                PutBehavior::Replace,
                 &MutationOptions::default(),
             )
             .expect("forced overwrite");
@@ -1012,11 +1012,21 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let target = NamespacePath::parse("demo:/docs/rev.txt").expect("target");
         harness
             .client
-            .put_file_bytes(&target, b"one", false, &MutationOptions::default())
+            .put_file_bytes(
+                &target,
+                b"one",
+                PutBehavior::NoReplace,
+                &MutationOptions::default(),
+            )
             .expect("create file");
         harness
             .client
-            .put_file_bytes(&target, b"two", true, &MutationOptions::default())
+            .put_file_bytes(
+                &target,
+                b"two",
+                PutBehavior::Replace,
+                &MutationOptions::default(),
+            )
             .expect("replace file");
 
         let entry = harness.client.stat_path(&target).expect("stat file");
@@ -1335,7 +1345,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             .put_file_bytes(
                 &target,
                 b"stable bytes\n",
-                false,
+                PutBehavior::NoReplace,
                 &MutationOptions::with_commit_id(commit_id),
             )
             .expect("first put");
@@ -1346,7 +1356,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             .put_file_bytes(
                 &target,
                 b"stable bytes\n",
-                false,
+                PutBehavior::NoReplace,
                 &MutationOptions::with_commit_id(commit_id),
             )
             .expect("repeat put");
@@ -1360,7 +1370,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         match harness.client.put_file_bytes(
             &target,
             b"different bytes\n",
-            false,
+            PutBehavior::NoReplace,
             &MutationOptions::with_commit_id(commit_id),
         ) {
             Err(ClientError::Api { code, .. }) => {
@@ -2036,7 +2046,7 @@ fn post_checkpoint(
     namespace: &str,
 ) -> Result<CreateCheckpointResponse, ApiError> {
     post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoint"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoints"),
         "test-token",
         serde_json::json!({ "name": "nightly" }),
     )

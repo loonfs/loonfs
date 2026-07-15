@@ -381,7 +381,7 @@ A representative v0 binding is shown below.
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
-| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` (body carries the required `name` and optional `ttl_ms`; the record is user-owned and a GC root until released or expired) |
+| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; the record is user-owned and a GC root until released or expired) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
 | Flush the WAL tail | `POST /v0/admin/namespaces/{ns}/wal/flush` (folds the visible WAL tail into metadata tables and advances the metadata root; creates no checkpoint record) |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
@@ -660,8 +660,7 @@ Representative request:
   "operation": {
     "kind": "move_path",
     "from_path": "/docs/report.txt",
-    "to_path": "/reports/report.txt",
-    "mode": "no_replace"
+    "to_path": "/reports/report.txt"
   }
 }
 ```

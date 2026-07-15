@@ -86,7 +86,7 @@ pub use v0::{
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
+    MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
     ReleaseCheckpointResponse, RestoreFileRevisionRequest,
 };
 

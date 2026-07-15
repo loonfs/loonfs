@@ -237,7 +237,6 @@ mod tests {
                 inode_id: InodeId(5),
                 new_parent_inode_id: InodeId(2),
                 new_display_name: "b.txt".to_owned(),
-                behavior: api_v0::MoveBehavior::NoReplace,
             },
             api_v0::CommitOp::DeleteSubtree {
                 root_inode_id: InodeId(9),

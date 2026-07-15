@@ -4,7 +4,7 @@
 //! shared [`ApiError`] body. Explicit commits and the change feed live in
 //! [`super::commits`]; read-result shapes live in [`super::reads`].
 
-use super::{MoveBehavior, ValidatedContentToken};
+use super::ValidatedContentToken;
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
     WriterEpoch,
@@ -184,12 +184,7 @@ pub enum FilesystemOperation {
     },
     /// Move one path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
-    MovePath {
-        from_path: String,
-        to_path: String,
-        #[serde(default)]
-        behavior: MoveBehavior,
-    },
+    MovePath { from_path: String, to_path: String },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
     CopyPath { from_path: String, to_path: String },
@@ -471,10 +466,6 @@ mod tests {
             serde_json::to_value(DeleteDirectoryBehavior::Recursive).expect("delete behavior json"),
             serde_json::json!("recursive")
         );
-        assert_eq!(
-            serde_json::to_value(MoveBehavior::NoReplace).expect("move behavior json"),
-            serde_json::json!("no_replace")
-        );
     }
 
     #[test]
@@ -506,15 +497,13 @@ mod tests {
         let move_path = FilesystemOperation::MovePath {
             from_path: "/docs/a.txt".to_owned(),
             to_path: "/docs/b.txt".to_owned(),
-            behavior: MoveBehavior::NoReplace,
         };
         assert_eq!(
             serde_json::to_value(&move_path).expect("move op json"),
             serde_json::json!({
                 "kind": "move_path",
                 "from_path": "/docs/a.txt",
-                "to_path": "/docs/b.txt",
-                "behavior": "no_replace"
+                "to_path": "/docs/b.txt"
             })
         );
     }
@@ -552,18 +541,20 @@ mod tests {
             }
         );
 
+        // Old clients may still send a `behavior` key on move ops; the
+        // tolerant wire ignores it.
         let move_path: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "move_path",
             "from_path": "/docs/a.txt",
-            "to_path": "/docs/b.txt"
+            "to_path": "/docs/b.txt",
+            "behavior": "no_replace"
         }))
-        .expect("move op defaults behavior");
+        .expect("move op tolerates legacy behavior key");
         assert_eq!(
             move_path,
             FilesystemOperation::MovePath {
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
-                behavior: MoveBehavior::NoReplace,
             }
         );
     }

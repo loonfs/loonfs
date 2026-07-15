@@ -8,16 +8,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Move behavior.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum MoveBehavior {
-    /// Move only if the destination name is absent.
-    #[default]
-    NoReplace,
-}
-
 /// Explicit semantic commit request.
 ///
 /// Use this lower-level shape when you need one commit id, optional
@@ -96,8 +86,6 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
         new_display_name: String,
-        #[serde(default)]
-        behavior: MoveBehavior,
     },
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
@@ -227,7 +215,7 @@ pub struct ChangesResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitDelta, CommitOp, CommitPrecondition, MoveBehavior};
+    use super::{CommitDelta, CommitOp, CommitPrecondition};
     use crate::{ChangeSeq, InodeId, InodeKind, NameKey};
 
     #[test]
@@ -286,16 +274,17 @@ mod tests {
     }
 
     #[test]
-    fn commit_rename_defaults_omitted_behavior_to_no_replace() {
-        assert_eq!(MoveBehavior::default(), MoveBehavior::NoReplace);
-
+    fn commit_rename_tolerates_legacy_behavior_key() {
+        // Renames are always no-replace; old clients may still send the
+        // retired `behavior` key and the tolerant wire ignores it.
         let op: CommitOp = serde_json::from_value(serde_json::json!({
             "kind": "rename",
             "inode_id": 2,
             "new_parent_inode_id": 1,
-            "new_display_name": "renamed.txt"
+            "new_display_name": "renamed.txt",
+            "behavior": "no_replace"
         }))
-        .expect("rename defaults behavior");
+        .expect("rename tolerates legacy behavior key");
 
         assert_eq!(
             op,
@@ -303,7 +292,6 @@ mod tests {
                 inode_id: InodeId(2),
                 new_parent_inode_id: InodeId(1),
                 new_display_name: "renamed.txt".to_owned(),
-                behavior: MoveBehavior::NoReplace,
             }
         );
     }

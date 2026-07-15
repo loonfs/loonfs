@@ -12,7 +12,7 @@ use crate::args::{
     FilesystemRevisionsArgs, FilesystemTransferArgs, RuntimeBehavior,
 };
 use crate::error::CliError;
-use loonfs_api::{CommitId, InodeKind, RevisionNo};
+use loonfs_api::{CommitId, InodeKind, PutBehavior, RevisionNo};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -404,10 +404,15 @@ pub(crate) async fn run_filesystem_put(
             error,
         )
     })?;
+    let behavior = if args.force {
+        PutBehavior::Replace
+    } else {
+        PutBehavior::NoReplace
+    };
     let result = context
         .target
         .backend()
-        .put_file_bytes(&spec, &bytes, args.force, commit_id)
+        .put_file_bytes(&spec, &bytes, behavior, commit_id)
         .await
         .map_err(|error| {
             fail(

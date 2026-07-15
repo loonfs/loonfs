@@ -14,7 +14,7 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest, MoveBehavior,
+        CommitRequest as ApiCommitRequest,
     },
     AbsolutePath, CommitId, ContentRef, DeleteDirectoryBehavior, DisplayName, InodeId, InodeKind,
     NameKey, NamespaceId, PutBehavior, RevisionNo,
@@ -57,7 +57,6 @@ enum PathFingerprintInput {
         namespace_id: NamespaceId,
         from_path: String,
         to_path: String,
-        behavior: MoveBehavior,
     },
     CopyFilePath {
         namespace_id: NamespaceId,
@@ -118,15 +117,11 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             behavior: *behavior,
         },
         PathMutationIntent::MovePath {
-            from_path,
-            to_path,
-            behavior,
-            ..
+            from_path, to_path, ..
         } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
             from_path: from_path.as_str().to_owned(),
             to_path: to_path.as_str().to_owned(),
-            behavior: *behavior,
         },
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
@@ -192,11 +187,8 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
             ..
         } => plan_publish_delete_path(absolute_path, *behavior, &commit_id, &view).await?,
         PathMutationIntent::MovePath {
-            from_path,
-            to_path,
-            behavior,
-            ..
-        } => plan_publish_move_path(from_path, to_path, *behavior, &commit_id, &view).await?,
+            from_path, to_path, ..
+        } => plan_publish_move_path(from_path, to_path, &commit_id, &view).await?,
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
         } => plan_publish_copy_file_path(from_path, to_path, &commit_id, &view).await?,
@@ -487,7 +479,6 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
 async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,
     to_path: &AbsolutePath,
-    behavior: MoveBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -509,7 +500,6 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
             inode_id: source.inode_id,
             new_parent_inode_id: target_parent,
             new_display_name: target_name.clone(),
-            behavior,
         }],
         preconditions: vec![
             publish_binding_is_precondition(view, &source).await?,
@@ -994,7 +984,6 @@ mod tests {
                 commit_id: CommitId::parse("move-file").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: MoveBehavior::NoReplace,
             },
         )
         .await;
@@ -1003,7 +992,6 @@ mod tests {
             planned.commit_request.ops.as_slice(),
             [CommitOp::Rename {
                 new_display_name,
-                behavior: MoveBehavior::NoReplace,
                 ..
             }] if new_display_name == "b.txt"
         ));

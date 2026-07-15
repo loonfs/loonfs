@@ -44,8 +44,8 @@ use thiserror::Error;
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta, CommitOp,
     CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, DirectPutUpload, MoveBehavior, ObjectTransferAccess,
-    UploadContentResponse, UploadMode,
+    CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
+    UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,

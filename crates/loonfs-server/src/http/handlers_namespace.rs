@@ -202,7 +202,7 @@ pub(super) async fn fork_namespace(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/checkpoint",
+        path = "/v0/admin/namespaces/{namespace}/checkpoints",
         tag = "admin",
         summary = "Create checkpoint",
         description = "Creates or reuses a named, user-owned checkpoint record pinning the current namespace view. The record is a garbage-collection root until released or expired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",

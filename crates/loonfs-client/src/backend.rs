@@ -23,8 +23,8 @@ use loonfs_api::{
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FlushWalResponse, GcRequest,
     GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    RevisionNo,
+    MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -179,14 +179,14 @@ pub trait Backend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError>;
-    /// Writes a file; `force` replaces existing content. An explicit
-    /// `commit_id` makes the call retryable by resubmission; absent, one is
-    /// generated and returned in the response.
+    /// Writes a file; `behavior` selects create-only or replace semantics.
+    /// An explicit `commit_id` makes the call retryable by resubmission;
+    /// absent, one is generated and returned in the response.
     async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        force: bool,
+        behavior: PutBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Creates a directory.
@@ -425,13 +425,13 @@ impl Backend for RemoteBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        force: bool,
+        behavior: PutBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let bytes = bytes.to_vec();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.put_file_bytes(&spec, &bytes, force, &options))
+        self.wire(move |client| client.put_file_bytes(&spec, &bytes, behavior, &options))
             .await
     }
 

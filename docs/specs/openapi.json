@@ -35,7 +35,7 @@
         ]
       }
     },
-    "/v0/admin/namespaces/{namespace}/checkpoint": {
+    "/v0/admin/namespaces/{namespace}/checkpoints": {
       "post": {
         "tags": [
           "admin"
@@ -3041,9 +3041,6 @@
               "kind"
             ],
             "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/MoveBehavior"
-              },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
@@ -3749,9 +3746,6 @@
               "kind"
             ],
             "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/MoveBehavior"
-              },
               "from_path": {
                 "type": "string"
               },
@@ -4371,13 +4365,6 @@
         "format": "int64",
         "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
         "minimum": 0
-      },
-      "MoveBehavior": {
-        "type": "string",
-        "description": "Move behavior.",
-        "enum": [
-          "no_replace"
-        ]
       },
       "NameKey": {
         "type": "string",

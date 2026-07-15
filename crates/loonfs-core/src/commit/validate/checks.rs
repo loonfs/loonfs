@@ -190,7 +190,6 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 inode_id,
                 new_parent_inode_id,
                 new_display_name,
-                behavior: _,
             } => {
                 let source_binding =
                     resolve_current_binding_for_mutation(&metadata_state, *inode_id).await?;
