@@ -1959,6 +1959,7 @@ fn test_config(store_root: std::path::PathBuf, writer_id: &str, key_prefix: &str
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         gram_index_build: loonfs_server::GramIndexBuildPolicyOverrides::default(),
         background_maintenance: true,
+        min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         allow_unauthenticated_remote: false,
         store: StoreConfig::LocalFs {

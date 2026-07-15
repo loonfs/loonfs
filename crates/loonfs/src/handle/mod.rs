@@ -49,7 +49,7 @@ enum StoreSource {
 /// trace/metrics wiring.
 struct HandleBuilderCore {
     source: StoreSource,
-    commit_window_ms: u64,
+    min_publish_interval_ms: u64,
     runtime_cache: RuntimeCacheConfig,
     gram_index_build: GramIndexBuildPolicy,
     /// An existing decoded-block cache to share instead of sizing a fresh
@@ -72,7 +72,7 @@ impl HandleBuilderCore {
     fn new(source: StoreSource) -> Self {
         Self {
             source,
-            commit_window_ms: crate::config::DEFAULT_COMMIT_WINDOW_MS,
+            min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             runtime_cache: RuntimeCacheConfig::default(),
             gram_index_build: GramIndexBuildPolicy::default(),
             shared_metadata_table_cache: None,
@@ -110,7 +110,7 @@ impl HandleBuilderCore {
             FsConfig {
                 writer_id,
                 writer_version,
-                commit_window_ms: self.commit_window_ms,
+                min_publish_interval_ms: self.min_publish_interval_ms,
                 runtime_cache: self.runtime_cache,
                 gram_index_build: self.gram_index_build,
                 trace_mode: self.trace_mode,

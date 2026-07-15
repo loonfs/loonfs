@@ -53,6 +53,13 @@ pub struct ServerConfig {
     /// dedicated maintenance process owns ticks for these namespaces.
     #[serde(default = "default_background_maintenance")]
     pub background_maintenance: bool,
+    /// Minimum interval between publication starts per namespace, in
+    /// milliseconds. A cold namespace publishes immediately; the interval
+    /// paces follow-up batches so hot namespaces amortize into fewer,
+    /// larger WAL segments. The server default favors batch economy over
+    /// the embedded default's latency bias.
+    #[serde(default = "default_min_publish_interval_ms")]
+    pub min_publish_interval_ms: u64,
     /// Largest request body accepted for service-proxied upload content
     /// requests (`PUT .../uploads/{upload_id}/content`). The server buffers
     /// each upload body in memory, so this bounds per-request memory;
@@ -71,6 +78,10 @@ pub struct ServerConfig {
 
 fn default_background_maintenance() -> bool {
     true
+}
+
+fn default_min_publish_interval_ms() -> u64 {
+    1_000
 }
 
 fn default_max_upload_bytes() -> u64 {

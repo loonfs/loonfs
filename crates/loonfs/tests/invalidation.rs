@@ -97,7 +97,7 @@ async fn writer_with_cache(
 ) -> FsWriter {
     FsWriter::builder_with_store(store.clone())
         .writer_id(writer_id)
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .runtime_cache(runtime_cache)
         .build()
         .await

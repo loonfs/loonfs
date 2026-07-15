@@ -1,4 +1,5 @@
-//! Opt-in concurrent-write front-end for the embedded runtime.
+//! The runtime's publication service: every mutation publishes through
+//! here.
 //!
 //! [`PublisherRegistry`] funnels every mutation for a namespace through one
 //! per-namespace publisher that:
@@ -16,31 +17,38 @@
 //!   ambiguity, and
 //! - paces successive head compare-and-swap attempts per namespace.
 //!
-//! Use it when one process hosts many concurrent writers to the same
-//! namespaces: the reference server constructs a registry over its
-//! [`FsWriter`](crate::FsWriter), and an embedded host with many in-process
-//! writer agents can do exactly the same.
+//! Every runtime core owns one registry, and the direct
+//! [`FsWriter`](crate::FsWriter) mutation methods, the reference server,
+//! and any embedded host with many in-process writer agents all submit
+//! through it — one publication implementation, one batching policy, one
+//! delete barrier. [`FsWriter::publisher`](crate::FsWriter::publisher)
+//! exposes the writer's registry for hosts that want to submit
+//! already-classified candidates directly.
 //!
-//! Batching is adaptive, driven by one knob
-//! ([`PublisherRegistry::with_min_publish_interval`]): a submission to a
-//! cold namespace publishes immediately, and while a publish is in flight
-//! or the namespace is within the pacing interval of its last publication
-//! start, later submissions coalesce into the next batch. A solo writer
-//! submitting sequentially therefore pays no added latency, while sustained
+//! Batching is adaptive, driven by one knob (the runtime's
+//! `min_publish_interval_ms`): a submission to a cold namespace publishes
+//! immediately, and while a publish is in flight or the namespace is
+//! within the pacing interval of its last publication start, later
+//! submissions coalesce into the next batch. A solo writer submitting
+//! sequentially therefore pays no added latency, while sustained
 //! concurrent load amortizes into batches at most one publication per
 //! interval — larger batches and fewer WAL segments instead of head
 //! compare-and-swap thrash. The trade sits on a cold burst: its first
 //! submission publishes alone and the rest coalesce into the next paced
 //! batch, so one extra segment buys the immediate first flush.
 //!
-//! The registry owns every publish task its publishers spawn. At shutdown,
+//! Admitted work is owned by registry-spawned publish tasks, never by the
+//! caller futures awaiting results: a cancelled caller abandons only its
+//! result delivery, and the publication still lands. At shutdown,
 //! [`PublisherRegistry::close_admission`] refuses new submissions with
 //! `shutting_down` and [`PublisherRegistry::drain`] settles everything
-//! already admitted. The reference server does this after its HTTP listener
-//! drains; an embedded host should do the same.
+//! already admitted; the reference server runs both once its listener
+//! drains, and
+//! [`FsWriter::shutdown_background`](crate::FsWriter::shutdown_background)
+//! drains without closing, so the handle stays usable.
 
 use crate::content_tokens::ContentAdmission;
-use crate::fs::FsCore;
+use crate::fs::{FsCore, FsInner};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
@@ -58,19 +66,14 @@ type CommitResult = Result<ApiCommitResponse, CoreError>;
 type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 
 const MAX_BATCH_CANDIDATES: usize = 1024;
-/// Default minimum interval between publication starts for one namespace.
-/// A cold namespace always publishes immediately; the interval only paces
-/// follow-up batches, so hot namespaces amortize into fewer, larger WAL
-/// segments.
-pub const DEFAULT_MIN_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const HEAD_CAS_RETRY_LIMIT: usize = 8;
 
-/// Shared front door to the per-namespace publishers of one
-/// [`FsWriter`](crate::FsWriter).
+/// Shared front door to the per-namespace publishers of one runtime core.
 ///
 /// Cloning is cheap; clones share the same per-namespace publishers, so
 /// every writer in the process should submit through clones of one
-/// registry.
+/// registry — [`FsWriter::publisher`](crate::FsWriter::publisher) hands
+/// out exactly that.
 ///
 /// The registry owns the publish tasks its publishers spawn. Shut it down
 /// in two steps once the host stops accepting work:
@@ -78,8 +81,13 @@ const HEAD_CAS_RETRY_LIMIT: usize = 8;
 #[derive(Clone)]
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,
-    fs: FsCore,
+    /// Weak: the runtime core owns this registry, so a strong reference
+    /// back would cycle the runtime into a leak. Publish work upgrades per
+    /// use and reports `shutting_down` once the core is gone.
+    core: Weak<FsInner>,
     min_publish_interval: Duration,
+    trace_mode: &'static str,
+    trace_store_kind: &'static str,
 }
 
 /// Registry state every publisher reaches back into: admission gating, the
@@ -121,13 +129,16 @@ impl RegistryShared {
 }
 
 impl PublisherRegistry {
-    /// Creates a registry whose publishers submit batches through `writer`.
-    ///
-    /// The registry lives in the writer's runtime ownership domain: batches
-    /// publish through the writer's session, and its
+    /// Creates the registry a runtime core owns. Batches publish through
+    /// the core's writer session, and its
     /// [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs any
     /// post-publish maintenance.
-    pub fn new(writer: crate::FsWriter) -> Self {
+    pub(crate) fn from_core(
+        core: Weak<FsInner>,
+        min_publish_interval: Duration,
+        trace_mode: &'static str,
+        trace_store_kind: &'static str,
+    ) -> Self {
         Self {
             shared: Arc::new(RegistryShared {
                 state: Mutex::new(RegistryState {
@@ -136,18 +147,11 @@ impl PublisherRegistry {
                     tasks: Vec::new(),
                 }),
             }),
-            fs: writer.core().clone(),
-            min_publish_interval: DEFAULT_MIN_PUBLISH_INTERVAL,
+            core,
+            min_publish_interval,
+            trace_mode,
+            trace_store_kind,
         }
-    }
-
-    /// Sets the minimum interval between publication starts for one
-    /// namespace. A cold namespace still publishes immediately; the
-    /// interval only paces follow-up batches. Smaller intervals favor
-    /// latency, larger ones favor batch size and WAL-segment economy.
-    pub fn with_min_publish_interval(mut self, min_publish_interval: Duration) -> Self {
-        self.min_publish_interval = min_publish_interval;
-        self
     }
 
     /// Submits one explicit semantic commit request through the
@@ -199,7 +203,9 @@ impl PublisherRegistry {
         publisher.submit_delete(options).await
     }
 
-    async fn submit_candidate(
+    /// Submits one already-classified candidate; the runtime's direct
+    /// mutation paths funnel through this.
+    pub(crate) async fn submit_candidate(
         &self,
         namespace_id: NamespaceId,
         candidate: NamespaceMutationCandidate,
@@ -221,9 +227,11 @@ impl PublisherRegistry {
             .or_insert_with(|| {
                 NamespacePublisher::new(
                     namespace_id.clone(),
-                    self.fs.clone(),
+                    self.core.clone(),
                     Arc::downgrade(&self.shared),
                     self.min_publish_interval,
+                    self.trace_mode,
+                    self.trace_store_kind,
                 )
             })
             .clone())
@@ -279,13 +287,17 @@ impl PublisherRegistry {
 #[derive(Clone)]
 struct NamespacePublisher {
     namespace_id: NamespaceId,
-    fs: FsCore,
+    /// Weak for the same reason as the registry's reference: the core owns
+    /// the registry that owns this publisher.
+    core: Weak<FsInner>,
     state: Arc<Mutex<NamespacePublisherState>>,
     /// Weak: the registry map owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with unowned tasks.
     shared: Weak<RegistryShared>,
     min_publish_interval: Duration,
+    trace_mode: &'static str,
+    trace_store_kind: &'static str,
 }
 
 struct NamespacePublisherState {
@@ -344,13 +356,15 @@ struct InFlightRequest {
 impl NamespacePublisher {
     fn new(
         namespace_id: NamespaceId,
-        fs: FsCore,
+        core: Weak<FsInner>,
         shared: Weak<RegistryShared>,
         min_publish_interval: Duration,
+        trace_mode: &'static str,
+        trace_store_kind: &'static str,
     ) -> Self {
         Self {
             namespace_id,
-            fs,
+            core,
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 batch: None,
                 pending_delete: None,
@@ -363,7 +377,16 @@ impl NamespacePublisher {
             })),
             shared,
             min_publish_interval,
+            trace_mode,
+            trace_store_kind,
         }
+    }
+
+    /// The owning runtime core, while it is still alive. `None` means the
+    /// core was dropped without draining; admitted work then settles as
+    /// `shutting_down`.
+    fn core(&self) -> Option<FsCore> {
+        self.core.upgrade().map(|inner| FsCore { inner })
     }
 
     fn close_admission(&self) {
@@ -659,8 +682,14 @@ impl NamespacePublisher {
                     .iter()
                     .map(|candidate| candidate.candidate.clone())
                     .collect::<Vec<_>>();
-                results = self
-                    .fs
+                let Some(core) = self.core() else {
+                    results = candidates
+                        .iter()
+                        .map(|_| Err(CoreError::ShuttingDown))
+                        .collect();
+                    break;
+                };
+                results = core
                     .publish_namespace_mutations_batch(&self.namespace_id, batch_candidates)
                     .await
                     .into_iter()
@@ -690,11 +719,13 @@ impl NamespacePublisher {
     /// Runs the delete barrier. Returns true when the publisher is now
     /// terminal and the task should exit.
     async fn execute_delete(&self, pending: PendingDelete) -> bool {
-        let outcome = self
-            .fs
-            .delete_namespace(&self.namespace_id, pending.options)
-            .await
-            .map_err(runtime_error_to_core);
+        let outcome = match self.core() {
+            Some(core) => core
+                .delete_namespace_unqueued(&self.namespace_id, pending.options)
+                .await
+                .map_err(runtime_error_to_core),
+            None => Err(CoreError::ShuttingDown),
+        };
         match outcome {
             Ok(response) => {
                 // Tombstone first, then fail everything that queued behind
@@ -853,11 +884,11 @@ impl NamespacePublisher {
     }
 
     fn trace_mode(&self) -> &'static str {
-        self.fs.config().trace_mode.as_str()
+        self.trace_mode
     }
 
     fn trace_store_kind(&self) -> &'static str {
-        self.fs.config().trace_store_kind.as_str()
+        self.trace_store_kind
     }
 }
 
@@ -1374,7 +1405,7 @@ mod tests {
                 writer_version: "test".to_owned(),
                 // The publisher under test is itself the coalescer; direct
                 // windows would only add latency to these tests.
-                commit_window_ms: 0,
+                min_publish_interval_ms: 0,
                 runtime_cache: RuntimeCacheConfig::default(),
                 gram_index_build: crate::GramIndexBuildPolicy::default(),
                 trace_mode: TraceMode::Remote,
@@ -1387,9 +1418,17 @@ mod tests {
     }
 
     async fn test_writer(store: SharedStore) -> crate::FsWriter {
+        test_writer_with_interval(store, crate::DEFAULT_MIN_PUBLISH_INTERVAL_MS).await
+    }
+
+    async fn test_writer_with_interval(
+        store: SharedStore,
+        min_publish_interval_ms: u64,
+    ) -> crate::FsWriter {
         crate::FsWriter::builder_with_store(store)
             .writer_id("writer-a")
             .writer_version("test")
+            .min_publish_interval_ms(min_publish_interval_ms)
             .trace_mode(TraceMode::Remote)
             .trace_store_kind(TraceStoreKind::LocalFs)
             .build()
@@ -1403,14 +1442,21 @@ mod tests {
             .expect("bootstrap");
     }
 
+    /// Pacing for standalone test publishers, long enough that
+    /// `wait_past_cas_pacing` outlasting it is meaningful.
+    const TEST_STANDALONE_PACING: Duration = Duration::from_secs(1);
+
     /// A publisher with no owning registry, exercising the unowned-task
-    /// fallback the production paths reserve for a dropped registry.
-    fn standalone_publisher(namespace_id: &NamespaceId, fs: FsCore) -> NamespacePublisher {
+    /// fallback the production paths reserve for a dropped registry. The
+    /// caller keeps `fs` alive; the publisher holds it weakly.
+    fn standalone_publisher(namespace_id: &NamespaceId, fs: &FsCore) -> NamespacePublisher {
         NamespacePublisher::new(
             namespace_id.clone(),
-            fs,
+            Arc::downgrade(&fs.inner),
             Weak::new(),
-            DEFAULT_MIN_PUBLISH_INTERVAL,
+            TEST_STANDALONE_PACING,
+            fs.inner.config.trace_mode.as_str(),
+            fs.inner.config.trace_store_kind.as_str(),
         )
     }
 
@@ -1421,7 +1467,7 @@ mod tests {
         // racing second task release a queued delete after exactly that
         // interval, so outlasting it proves the delete is ordered behind
         // the sealed batch, not merely paced behind it.
-        tokio::time::sleep(DEFAULT_MIN_PUBLISH_INTERVAL + Duration::from_millis(300)).await;
+        tokio::time::sleep(TEST_STANDALONE_PACING + Duration::from_millis(300)).await;
     }
 
     fn create_directory_request(
@@ -1509,7 +1555,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -1562,7 +1608,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -1602,7 +1648,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -1671,7 +1717,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         store.arm_next_head_cas();
         let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
@@ -1712,7 +1758,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store);
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         let receiver = admit_commit(
             &publisher,
@@ -1742,10 +1788,9 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = test_writer(store.clone()).await;
+        let writer = test_writer_with_interval(store.clone(), 400).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry =
-            PublisherRegistry::new(writer).with_min_publish_interval(Duration::from_millis(400));
+        let registry = writer.publisher();
 
         let warmup_started = Instant::now();
         registry
@@ -1775,7 +1820,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared);
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         // The commit lands but the CAS acknowledgement is lost. The publisher
         // retries with the same commit id and replays the durable receipt
@@ -1801,7 +1846,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         store.arm_blocking_panic();
         let doomed = admit_commit(
@@ -1852,7 +1897,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
-        let publisher = standalone_publisher(&namespace_id, fs);
+        let publisher = standalone_publisher(&namespace_id, &fs);
 
         // A publishes and blocks at its head CAS; B queues behind it.
         store.arm_next_head_cas();
@@ -1935,10 +1980,9 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = test_writer(store.clone()).await;
+        let writer = test_writer_with_interval(store.clone(), 400).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry =
-            PublisherRegistry::new(writer).with_min_publish_interval(Duration::from_millis(400));
+        let registry = writer.publisher();
 
         // Warm the namespace: a cold one publishes its first submission
         // immediately, so truly concurrent submissions could split across
@@ -1992,7 +2036,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = test_writer(store.clone()).await;
+        let writer = test_writer_with_interval(store.clone(), 400).await;
         create_namespace(writer.core(), &namespace_id).await;
         let upload = writer
             .begin_upload(
@@ -2008,8 +2052,7 @@ mod tests {
             .upload_content(&namespace_id, &upload.upload_id, b"hello")
             .await
             .expect("stage content");
-        let registry =
-            PublisherRegistry::new(writer).with_min_publish_interval(Duration::from_millis(400));
+        let registry = writer.publisher();
 
         // Warm the namespace so the pacing interval deterministically holds
         // the two concurrent submissions in one batch.
@@ -2077,7 +2120,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let writer = test_writer(shared.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry = PublisherRegistry::new(writer);
+        let registry = writer.publisher();
 
         // An admitted publication blocks at its head CAS...
         store.arm_next_head_cas();
@@ -2137,7 +2180,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let writer = test_writer(shared.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry = PublisherRegistry::new(writer);
+        let registry = writer.publisher();
 
         store.arm_blocking_panic();
         let doomed = {
@@ -2217,7 +2260,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = test_writer(store.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry = PublisherRegistry::new(writer);
+        let registry = writer.publisher();
 
         registry
             .submit_commit(
@@ -2257,7 +2300,7 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = test_writer(store.clone()).await;
-        let registry = PublisherRegistry::new(writer);
+        let registry = writer.publisher();
 
         registry.close_admission();
         let refused = registry
@@ -2285,7 +2328,7 @@ mod tests {
         let shared = store.clone() as SharedStore;
         let writer = test_writer(shared.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
-        let registry = PublisherRegistry::new(writer);
+        let registry = writer.publisher();
 
         // Park the first publication at its head CAS, batch a second commit
         // behind it, then queue the delete: the sealed batch must publish

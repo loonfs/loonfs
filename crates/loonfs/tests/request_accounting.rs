@@ -193,7 +193,7 @@ async fn warm_phase_request_accounting() {
     // runs and a WAL tail, like the 10k benchmark build.
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("acct-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -305,7 +305,7 @@ async fn warm_phase_request_accounting() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("acct-writer-2")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build second writer");

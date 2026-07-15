@@ -86,7 +86,7 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -216,7 +216,7 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-auto-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .background_work(FsBackgroundWork::Enabled)
         .build()
         .await
@@ -293,7 +293,7 @@ async fn a_configured_build_policy_bounds_each_ticks_build_step() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-config-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -374,7 +374,7 @@ async fn grep_answers_identically_across_tiered_folds() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-tiered-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -538,7 +538,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_table_cache() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-cache-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -626,7 +626,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fault-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -827,7 +827,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-oversized-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -977,7 +977,7 @@ async fn a_fold_reuses_the_index_blocks_a_grep_already_decoded() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fold-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .background_work(FsBackgroundWork::Enabled)
         .build()
         .await
@@ -1193,7 +1193,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fan-out-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");

@@ -16,10 +16,12 @@ pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize =
 /// Default decoded-byte budget for cached WAL-tail projections.
 pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
     loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES;
-/// Default commit window, in milliseconds: how long a direct publish holds
-/// its namespace's window open so concurrent publishes can join the same
-/// flush — one WAL segment, one head CAS. Zero disables coalescing.
-pub const DEFAULT_COMMIT_WINDOW_MS: u64 = 15;
+/// Default minimum interval, in milliseconds, between publication starts
+/// for one namespace (see [`crate::publisher`]). A cold namespace
+/// publishes immediately; the interval only paces follow-up batches, so
+/// concurrent submissions amortize into fewer, larger WAL segments. Zero
+/// keeps only the batching that in-flight publications force.
+pub const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 
 /// Configuration for one runtime core, assembled by the handle builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,9 +30,10 @@ pub(crate) struct FsConfig {
     pub writer_id: String,
     /// Writer version reported in mutation context.
     pub writer_version: String,
-    /// Commit window for direct publishes, in milliseconds; zero disables
-    /// coalescing.
-    pub commit_window_ms: u64,
+    /// Minimum interval between publication starts per namespace, in
+    /// milliseconds; zero keeps only the batching that in-flight
+    /// publications force.
+    pub min_publish_interval_ms: u64,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
     /// Budgets for the gram index build and fold steps this runtime's

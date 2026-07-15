@@ -1762,14 +1762,14 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
     let namespace_id = namespace_id();
     let object_store = store(temp_dir.path());
     block_on(async {
-        let fs = open_runtime_async(object_store.clone(), "commit-window-test").await;
+        let fs = open_runtime_async(object_store.clone(), "publication-batch-test").await;
         fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
 
         // Stage every file's content first: a put publishes only after its
         // bytes are durable, so racing already-staged publishes is what
-        // reaches the commit window together deterministically.
+        // reaches the publication queue together deterministically.
         let mut content_refs = Vec::new();
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = fs
@@ -1829,8 +1829,9 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         puts.2.expect("put c");
         puts.3.expect("put d");
 
-        // All four submissions entered one commit window and flushed as a
-        // single batch: one WAL segment, one head CAS.
+        // All four submissions were admitted before the publish task's
+        // first take and published as one batch: one WAL segment, one
+        // head CAS.
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
         assert_eq!(segments_after - segments_before, 1);
 
@@ -1851,13 +1852,13 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
 }
 
 #[test]
-fn commit_window_zero_publishes_each_submission_immediately() {
+fn zero_interval_publishes_sequential_submissions_immediately() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let object_store = store(temp_dir.path());
     block_on(async {
-        let fs = open_runtime_with_async(object_store.clone(), "window-zero-test", |builder| {
-            builder.commit_window_ms(0)
+        let fs = open_runtime_with_async(object_store.clone(), "zero-interval-test", |builder| {
+            builder.min_publish_interval_ms(0)
         })
         .await;
         fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1865,32 +1866,20 @@ fn commit_window_zero_publishes_each_submission_immediately() {
             .expect("create namespace");
         let segments_before = wal_segment_count(&object_store, &namespace_id).await;
 
-        let puts = tokio::join!(
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/a.txt",
-                b"alpha",
-                PutFileOptions::default()
-            ),
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/b.txt",
-                b"beta",
-                PutFileOptions::default()
-            ),
-            fs.put_file_bytes(
-                &namespace_id,
-                "/docs/c.txt",
-                b"gamma",
-                PutFileOptions::default()
-            ),
-        );
-        puts.0.expect("put a");
-        puts.1.expect("put b");
-        puts.2.expect("put c");
+        // Sequential awaited puts leave nothing to batch: with a zero
+        // pacing interval each publishes immediately as its own WAL
+        // segment. (Concurrent submissions may still batch behind an
+        // in-flight publication — that is load-driven, not timer-driven.)
+        for (path, bytes) in [
+            ("/docs/a.txt", b"alpha".as_slice()),
+            ("/docs/b.txt", b"beta".as_slice()),
+            ("/docs/c.txt", b"gamma".as_slice()),
+        ] {
+            fs.put_file_bytes(&namespace_id, path, bytes, PutFileOptions::default())
+                .await
+                .expect("sequential put");
+        }
 
-        // With coalescing disabled each publish serializes through the
-        // namespace's engine and writes its own WAL segment.
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
         assert_eq!(segments_after - segments_before, 3);
     });

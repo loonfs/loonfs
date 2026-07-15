@@ -799,6 +799,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         gram_index_build: crate::config::GramIndexBuildPolicyOverrides::default(),
         background_maintenance: true,
+        min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         allow_unauthenticated_remote: false,
         store: StoreConfig::LocalFs {

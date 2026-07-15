@@ -128,7 +128,7 @@ async fn app_with_store_and_transfer_issuer(
 ) -> Result<(Router, ServerLifecycle), ServerConfigError> {
     let (writer, reader, admin) = build_handles(&config, store).await?;
     let config = Arc::new(config);
-    let publisher = PublisherRegistry::new(writer.clone());
+    let publisher = writer.publisher();
     let lifecycle = ServerLifecycle {
         writer: writer.clone(),
         publisher: publisher.clone(),
@@ -270,6 +270,7 @@ async fn build_handles_with_metrics_jsonl_path(
         } else {
             FsBackgroundWork::ManualOnly
         })
+        .min_publish_interval_ms(config.min_publish_interval_ms)
         .runtime_cache(config.runtime_cache_config())
         .gram_index_build(config.gram_index_build_policy())
         .trace_mode(TraceMode::Remote)

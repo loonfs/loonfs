@@ -557,7 +557,7 @@ impl EmbeddedTarget {
             .background_work(FsBackgroundWork::ManualOnly)
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
-            .commit_window_ms(0)
+            .min_publish_interval_ms(0)
             .trace_store_kind(trace_store_kind)
             .build()
             .await

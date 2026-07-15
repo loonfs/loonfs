@@ -99,7 +99,7 @@ fn immutable_input_gets(gets: &[String]) -> Vec<String> {
 async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) {
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("seed-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
@@ -180,7 +180,7 @@ async fn warm_writer_stops_fetching_immutable_view_inputs() {
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("warm-writer")
-        .commit_window_ms(0)
+        .min_publish_interval_ms(0)
         .build()
         .await
         .expect("build writer");
