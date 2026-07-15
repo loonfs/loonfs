@@ -238,6 +238,15 @@ impl FsReaderBuilder {
         self
     }
 
+    /// Caps the file content size the buffered read APIs will materialize
+    /// for one call, checked against resolved metadata before any content
+    /// fetch; over-limit reads fail with `content_too_large`. Unset by
+    /// default: embedded callers read files of any size.
+    pub fn max_read_content_bytes(mut self, max_read_content_bytes: u64) -> Self {
+        self.core.max_read_content_bytes = Some(max_read_content_bytes);
+        self
+    }
+
     /// Sets the tracing mode label.
     pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
         self.core.trace_mode = trace_mode;
@@ -263,7 +272,11 @@ impl FsReaderBuilder {
     pub async fn build(self) -> Result<FsReader> {
         // Readers never mutate, so the engine identity below is inert; it
         // exists because shared internals require a non-empty actor.
-        let background = BackgroundWork::new(FsBackgroundWork::ManualOnly, None);
+        let background = BackgroundWork::new(
+            FsBackgroundWork::ManualOnly,
+            None,
+            crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+        );
         Ok(FsReader {
             core: self.core.open(
                 "loonfs-reader".to_owned(),

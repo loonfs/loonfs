@@ -281,6 +281,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         store: &S,
         absolute_path: &str,
+        max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes, CoreError> {
         let entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
@@ -293,6 +294,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .content_ref
             .clone()
             .ok_or_else(|| CoreError::PathNotFound(absolute_path.to_owned()))?;
+        ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
         Ok(AuthoritativeFileBytes {
             entry,
@@ -831,6 +833,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         absolute_path: &str,
         revision_no: RevisionNo,
+        max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes, CoreError> {
         let mut entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
@@ -843,6 +846,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         entry.revision_no = Some(revision.revision_no);
         entry.size_bytes = Some(revision.content_ref.size_bytes);
         entry.content_ref = Some(revision.content_ref.clone());
+        ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
             .await?;
         Ok(AuthoritativeFileBytes {
@@ -856,8 +860,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         inode_id: InodeId,
         revision_no: RevisionNo,
+        max_content_bytes: Option<u64>,
     ) -> Result<Vec<u8>, CoreError> {
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
+        ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
             .await?;
         Ok(read.bytes)
@@ -1118,6 +1124,22 @@ struct GrepContentCandidate {
     /// read is scheduled: the file could never pass the post-read text
     /// check, and the walk skips it as fully scanned.
     oversized: bool,
+}
+
+/// Refuses a buffered content read whose resolved size exceeds the caller's
+/// budget. The check runs on metadata, before any content fetch, so an
+/// over-limit read costs no object-store traffic and allocates nothing.
+fn ensure_within_read_limit(
+    size_bytes: u64,
+    max_content_bytes: Option<u64>,
+) -> Result<(), CoreError> {
+    match max_content_bytes {
+        Some(max_bytes) if size_bytes > max_bytes => Err(CoreError::ContentTooLarge {
+            size_bytes,
+            max_bytes,
+        }),
+        _ => Ok(()),
+    }
 }
 
 fn validate_file_revisions_cursor(

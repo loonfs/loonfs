@@ -67,6 +67,30 @@ pub struct ServerConfig {
     /// clients as the `upload.max_content_bytes` capability limit.
     #[serde(default = "default_max_upload_bytes")]
     pub max_upload_bytes: u64,
+    /// Largest file content a service-proxied read (`GET .../filesystem/
+    /// content` and inode revision content) will buffer and return. Checked
+    /// against resolved metadata before any content fetch; over-limit reads
+    /// answer `content_too_large`. Advertised to clients as the
+    /// `download.max_content_bytes` capability limit.
+    #[serde(default = "default_max_download_bytes")]
+    pub max_download_bytes: u64,
+    /// How many proxied upload bodies the server will buffer at once;
+    /// requests past the cap answer `server_busy` before any buffering.
+    /// Worst-case upload memory is this times `max_upload_bytes`.
+    #[serde(default = "default_max_concurrent_uploads")]
+    pub max_concurrent_uploads: usize,
+    /// How many proxied content reads the server will materialize at once;
+    /// requests past the cap answer `server_busy` before any fetch.
+    /// Worst-case download memory is this times `max_download_bytes`.
+    #[serde(default = "default_max_concurrent_downloads")]
+    pub max_concurrent_downloads: usize,
+    /// How many writer-scheduled maintenance ticks may run at once across
+    /// all namespaces. Each namespace runs at most one tick at a time; this
+    /// bounds the fan-out when a write burst crosses thresholds in many
+    /// namespaces together. Skipped ticks are rescheduled by the next
+    /// over-threshold publish.
+    #[serde(default = "default_max_concurrent_maintenance")]
+    pub max_concurrent_maintenance: usize,
     /// Allows serving on a non-loopback address with `auth_token` unset.
     /// Off by default: exposing every endpoint unauthenticated is almost
     /// always a misconfiguration, so validation rejects it unless this is
@@ -86,6 +110,25 @@ fn default_min_publish_interval_ms() -> u64 {
 
 fn default_max_upload_bytes() -> u64 {
     256 * 1024 * 1024
+}
+
+fn default_max_download_bytes() -> u64 {
+    // Mirrors the upload default so anything the proxy accepted, the proxy
+    // will serve back. Content ingested past this through `direct_put`
+    // needs a raised limit to be read through the server.
+    256 * 1024 * 1024
+}
+
+fn default_max_concurrent_uploads() -> usize {
+    8
+}
+
+fn default_max_concurrent_downloads() -> usize {
+    16
+}
+
+fn default_max_concurrent_maintenance() -> usize {
+    loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -228,6 +271,32 @@ impl ServerConfig {
             return Err(ServerConfigError::InvalidField {
                 field: "max_upload_bytes",
                 reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.max_download_bytes == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_download_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.max_concurrent_uploads == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_concurrent_uploads",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.max_concurrent_downloads == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_concurrent_downloads",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.max_concurrent_maintenance == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_concurrent_maintenance",
+                reason: "must be greater than zero; \
+                         set `background_maintenance = false` to disable scheduling"
+                    .to_owned(),
             });
         }
         require_non_empty("content_token_secret", self.content_token_secret.expose())?;
@@ -674,6 +743,53 @@ root = "/tmp/loonfs-server"
         );
         let error = load_server_config(&path).expect_err("zero upload limit");
         assert_invalid_field(error, "max_upload_bytes");
+    }
+
+    #[test]
+    fn transfer_bounds_default_and_reject_zero() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("valid config");
+        assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_uploads, 8);
+        assert_eq!(config.max_concurrent_downloads, 16);
+        assert_eq!(
+            config.max_concurrent_maintenance,
+            loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
+        );
+
+        for field in [
+            "max_download_bytes",
+            "max_concurrent_uploads",
+            "max_concurrent_downloads",
+            "max_concurrent_maintenance",
+        ] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+{field} = 0
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+            let error = load_server_config(&path).expect_err("zero bound must be rejected");
+            assert_invalid_field(error, field);
+        }
     }
 
     #[test]

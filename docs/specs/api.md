@@ -111,6 +111,7 @@ Registered limit keys:
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Larger content should use `direct_put` uploads. |
+| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
 
@@ -198,7 +199,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, or configuration value fails validation. The message names the offending field. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
-| `content_too_large` | 413 | The request body exceeds the deployment's `upload.max_content_bytes` limit. Send a smaller payload or use a `direct_put` upload. |
+| `content_too_large` | 413 | The request body exceeds the deployment's `upload.max_content_bytes` limit, or the requested file content exceeds its `download.max_content_bytes` limit for service-proxied reads. For uploads, send a smaller payload or use `direct_put`; for reads, the deployment limit must be raised. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
 | `namespace_deleted` | 410 | The namespace existed and was deleted. The id is permanently retired. |
 | `path_not_found` | 404 | No visible entry at the path. |
@@ -221,6 +222,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
+| `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |

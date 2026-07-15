@@ -826,7 +826,11 @@ impl FsCore {
     ) -> Result<AuthoritativeFileBytes> {
         let (engine, read_context) = self.pinned_read(namespace_id).await?;
         let read = engine
-            .read_file_with_runtime_context(absolute_path, &read_context)
+            .read_file_with_runtime_context(
+                absolute_path,
+                &read_context,
+                self.inner.config.max_read_content_bytes,
+            )
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)
@@ -948,7 +952,12 @@ impl FsCore {
     ) -> Result<AuthoritativeFileBytes> {
         let (engine, read_context) = self.pinned_read(namespace_id).await?;
         let read = engine
-            .read_file_revision_with_runtime_context(absolute_path, revision_no, &read_context)
+            .read_file_revision_with_runtime_context(
+                absolute_path,
+                revision_no,
+                &read_context,
+                self.inner.config.max_read_content_bytes,
+            )
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)
@@ -963,7 +972,12 @@ impl FsCore {
     ) -> Result<Vec<u8>> {
         let (engine, read_context) = self.pinned_read(namespace_id).await?;
         let read = engine
-            .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &read_context)
+            .read_file_revision_for_inode_with_runtime_context(
+                inode_id,
+                revision_no,
+                &read_context,
+                self.inner.config.max_read_content_bytes,
+            )
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(read)

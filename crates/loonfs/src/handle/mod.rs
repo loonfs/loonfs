@@ -50,6 +50,7 @@ enum StoreSource {
 struct HandleBuilderCore {
     source: StoreSource,
     min_publish_interval_ms: u64,
+    max_read_content_bytes: Option<u64>,
     runtime_cache: RuntimeCacheConfig,
     gram_index_build: GramIndexBuildPolicy,
     /// An existing decoded-block cache to share instead of sizing a fresh
@@ -73,6 +74,7 @@ impl HandleBuilderCore {
         Self {
             source,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+            max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
             gram_index_build: GramIndexBuildPolicy::default(),
             shared_metadata_table_cache: None,
@@ -111,6 +113,7 @@ impl HandleBuilderCore {
                 writer_id,
                 writer_version,
                 min_publish_interval_ms: self.min_publish_interval_ms,
+                max_read_content_bytes: self.max_read_content_bytes,
                 runtime_cache: self.runtime_cache,
                 gram_index_build: self.gram_index_build,
                 trace_mode: self.trace_mode,

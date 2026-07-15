@@ -516,8 +516,11 @@ fn read_file_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
     let context = read_context(store, namespace_id);
     block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_with_runtime_context(absolute_path, &context),
+        namespace_engine(store, namespace_id, &mutation_context()).read_file_with_runtime_context(
+            absolute_path,
+            &context,
+            None,
+        ),
     )
 }
 
@@ -554,7 +557,7 @@ fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     let context = read_context(store, namespace_id);
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_revision_with_runtime_context(absolute_path, revision_no, &context),
+            .read_file_revision_with_runtime_context(absolute_path, revision_no, &context, None),
     )
 }
 
@@ -567,7 +570,12 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     let context = read_context(store, namespace_id);
     block_on(
         namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &context),
+            .read_file_revision_for_inode_with_runtime_context(
+                inode_id,
+                revision_no,
+                &context,
+                None,
+            ),
     )
 }
 

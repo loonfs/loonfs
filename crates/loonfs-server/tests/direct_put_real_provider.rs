@@ -32,6 +32,10 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
+        max_download_bytes: 256 * 1024 * 1024,
+        max_concurrent_uploads: 8,
+        max_concurrent_downloads: 16,
+        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         allow_unauthenticated_remote: false,
         store: StoreConfig::AwsS3 {
             bucket: config.bucket,
@@ -63,6 +67,10 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
+        max_download_bytes: 256 * 1024 * 1024,
+        max_concurrent_uploads: 8,
+        max_concurrent_downloads: 16,
+        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         allow_unauthenticated_remote: false,
         store: StoreConfig::CloudflareR2 {
             bucket: config.bucket,

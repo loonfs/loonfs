@@ -74,6 +74,13 @@ pub enum CoreError {
         inode_id: InodeId,
         revision_no: loonfs_api::RevisionNo,
     },
+    /// A buffered content read was refused before any fetch: the resolved
+    /// content is larger than the caller's read budget allows in memory.
+    #[error(
+        "file content is {size_bytes} bytes, over the {max_bytes}-byte limit \
+         this deployment buffers for one read"
+    )]
+    ContentTooLarge { size_bytes: u64, max_bytes: u64 },
     #[error("expected file at `{path}` but found `{kind}`")]
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind}`")]
@@ -309,6 +316,7 @@ impl CoreError {
             CoreError::InvalidUploadId(_) => ErrorCode::InvalidRequest,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
+            CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,

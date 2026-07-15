@@ -375,6 +375,7 @@ pub struct FsWriterBuilder {
     writer_id: Option<String>,
     writer_version: String,
     background_work: FsBackgroundWork,
+    max_concurrent_maintenance: usize,
 }
 
 impl FsWriterBuilder {
@@ -384,6 +385,7 @@ impl FsWriterBuilder {
             writer_id: None,
             writer_version: default_writer_version(),
             background_work: FsBackgroundWork::ManualOnly,
+            max_concurrent_maintenance: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         }
     }
 
@@ -406,6 +408,28 @@ impl FsWriterBuilder {
     /// into [`FsBackgroundWork::Enabled`] explicitly.
     pub fn background_work(mut self, background_work: FsBackgroundWork) -> Self {
         self.background_work = background_work;
+        self
+    }
+
+    /// Caps how many writer-scheduled maintenance ticks may run at once
+    /// across all namespaces this writer serves. Each namespace already runs
+    /// at most one tick at a time; this bounds the fan-out when many
+    /// namespaces cross their thresholds together. Skipped ticks are
+    /// rescheduled by the next over-threshold publish. Defaults to
+    /// [`crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE`]; zero is normalized up
+    /// to one (use [`FsBackgroundWork::ManualOnly`] to disable scheduling).
+    pub fn max_concurrent_maintenance(mut self, max_concurrent_maintenance: usize) -> Self {
+        self.max_concurrent_maintenance = max_concurrent_maintenance;
+        self
+    }
+
+    /// Caps the file content size the buffered read APIs will materialize
+    /// for one call, checked against resolved metadata before any content
+    /// fetch; over-limit reads fail with `content_too_large`. Unset by
+    /// default: embedded callers read files of any size. Servers set this
+    /// so one proxied read cannot buffer arbitrarily large content.
+    pub fn max_read_content_bytes(mut self, max_read_content_bytes: u64) -> Self {
+        self.core.max_read_content_bytes = Some(max_read_content_bytes);
         self
     }
 
@@ -469,7 +493,11 @@ impl FsWriterBuilder {
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
-        let background = BackgroundWork::new(self.background_work, Some(owning_runtime()?));
+        let background = BackgroundWork::new(
+            self.background_work,
+            Some(owning_runtime()?),
+            self.max_concurrent_maintenance,
+        );
         Ok(FsWriter {
             core: self.core.open(writer_id, self.writer_version, background)?,
         })

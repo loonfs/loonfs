@@ -13,7 +13,7 @@ use loonfs_api::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, MaintenanceTickRequest, MaintenanceTickResponse, ReleaseCheckpointResponse,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -50,6 +50,10 @@ pub(super) async fn config(
     capabilities.limits.insert(
         LIMIT_UPLOAD_MAX_CONTENT_BYTES.to_owned(),
         state.config.max_upload_bytes,
+    );
+    capabilities.limits.insert(
+        LIMIT_DOWNLOAD_MAX_CONTENT_BYTES.to_owned(),
+        state.config.max_download_bytes,
     );
     Ok(Json(capabilities))
 }

@@ -35,7 +35,7 @@ Check the CLI is installed with `loon version`. If `loon current --json` reports
 
    Tell the user: data lives at `~/.loonfs/data`; durable on this machine but not shareable across machines until they switch to an S3/R2 profile or hosted Loon.
 
-2. **Durable / shared setup**. Ask the user for S3/R2 credentials (provider, bucket, region, access key, secret) or a hosted Loon server URL + auth token, then run `loon profile create <name> --mode embedded --store-kind aws-s3 ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ... --auth-token ...`). Do not invent credentials.
+2. **Durable / shared setup**. Ask the user for S3/R2 credentials (provider, bucket, region, access key, secret) or a hosted Loon server URL + auth token. Put secrets in the environment, not on the command line (argv lands in shell history): the CLI reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and `LOONFS_AUTH_TOKEN` automatically. Then run `loon profile create <name> --mode embedded --store-kind aws-s3 --bucket ... --region ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ...`). Do not invent credentials.
 
 After init, list or create a namespace: `loon namespace list`, `loon namespace create <namespace_id>`.
 

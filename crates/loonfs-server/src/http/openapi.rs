@@ -38,6 +38,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     ),
     paths(
         crate::http::health,
+        crate::http::health_ready,
         crate::http::handlers_namespace::config,
         crate::http::handlers_namespace::create_namespace,
         crate::http::handlers_namespace::namespace_status,
