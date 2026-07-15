@@ -172,7 +172,9 @@ pub(super) async fn stat_entry(
             (status = 400, description = "Invalid path or revision", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, or revision not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
+            (status = 503, description = "The server is at its concurrent content-read limit; retry shortly", body = ApiError)
         )
     )
 )]
@@ -184,6 +186,13 @@ pub(super) async fn get_content(
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    // Held for the read below: content reads buffer the whole file, so the
+    // permit is what bounds how many such buffers exist at once.
+    let _permit = state
+        .download_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| super::server_busy_error("proxied content reads"))?;
     let path = query.path;
     let revision_no = query
         .revision_no
@@ -316,7 +325,9 @@ pub(super) async fn list_inode_revisions(
             (status = 400, description = "Invalid inode id or revision", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
+            (status = 503, description = "The server is at its concurrent content-read limit; retry shortly", body = ApiError)
         )
     )
 )]
@@ -331,6 +342,11 @@ pub(super) async fn get_inode_revision_content(
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let _permit = state
+        .download_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| super::server_busy_error("proxied content reads"))?;
     let inode_id = parse_inode_id(&inode_id)?;
     let revision_no = parse_revision_no(&revision_no)?;
     let bytes = state

@@ -189,9 +189,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         options: &RuntimeReadContext,
+        max_content_bytes: Option<u64>,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        self.read_file_with_context(path.as_ref(), runtime_read_load_context(options))
-            .await
+        self.read_file_with_context(
+            path.as_ref(),
+            runtime_read_load_context(options),
+            max_content_bytes,
+        )
+        .await
     }
 
     #[doc(hidden)]
@@ -265,11 +270,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         revision_no: RevisionNo,
         options: &RuntimeReadContext,
+        max_content_bytes: Option<u64>,
     ) -> CoreResult<AuthoritativeFileBytes> {
         self.read_file_revision_with_context(
             path.as_ref(),
             revision_no,
             runtime_read_load_context(options),
+            max_content_bytes,
         )
         .await
     }
@@ -280,11 +287,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
         options: &RuntimeReadContext,
+        max_content_bytes: Option<u64>,
     ) -> CoreResult<Vec<u8>> {
         self.read_file_revision_for_inode_with_context(
             inode_id,
             revision_no,
             runtime_read_load_context(options),
+            max_content_bytes,
         )
         .await
     }
@@ -319,9 +328,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: &str,
         context: ReadLoadContext<'_>,
+        max_content_bytes: Option<u64>,
     ) -> CoreResult<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
-        view.read_file_bytes(&self.store, path).await
+        view.read_file_bytes(&self.store, path, max_content_bytes)
+            .await
     }
 
     async fn list_file_revisions_with_context(
@@ -368,9 +379,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: &str,
         revision_no: RevisionNo,
         context: ReadLoadContext<'_>,
+        max_content_bytes: Option<u64>,
     ) -> CoreResult<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes(&self.store, path, revision_no)
+        view.read_file_revision_bytes(&self.store, path, revision_no, max_content_bytes)
             .await
     }
 
@@ -379,10 +391,16 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
         context: ReadLoadContext<'_>,
+        max_content_bytes: Option<u64>,
     ) -> CoreResult<Vec<u8>> {
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes_for_inode(&self.store, inode_id, revision_no)
-            .await
+        view.read_file_revision_bytes_for_inode(
+            &self.store,
+            inode_id,
+            revision_no,
+            max_content_bytes,
+        )
+        .await
     }
 
     /// Publishes already-classified mutation candidates as one batch: one WAL

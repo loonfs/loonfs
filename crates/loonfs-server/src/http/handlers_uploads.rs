@@ -2,7 +2,7 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{authorize, AppBytes, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
+use super::{authorize, AppJson, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyBytes};
 use crate::config::ServerConfig;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -207,7 +207,8 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
             (status = 404, description = "Namespace or upload not found", body = ApiError),
             (status = 409, description = "Upload content conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Body exceeds the advertised `upload.max_content_bytes` limit", body = ApiError)
+            (status = 413, description = "Body exceeds the advertised `upload.max_content_bytes` limit", body = ApiError),
+            (status = 503, description = "The server is at its concurrent proxied-upload limit; retry shortly", body = ApiError)
         )
     )
 )]
@@ -216,15 +217,14 @@ pub(super) async fn upload_content(
     namespace: NamespaceIdPath,
     AxumPath(UploadPathParams { upload_id }): AxumPath<UploadPathParams>,
     headers: HeaderMap,
-    AppBytes(body): AppBytes,
+    body: UploadBodyBytes,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let upload_id = parse_upload_id(&upload_id)?;
-    let bytes = body.to_vec();
     let response = state
         .writer
-        .upload_content(&namespace_id, &upload_id, &bytes)
+        .upload_content(&namespace_id, &upload_id, &body.bytes)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

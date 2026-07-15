@@ -135,6 +135,7 @@ error_codes! {
     CommitIdReuseConflict => "commit_id_reuse_conflict",
     CommitOutcomeUnknown => "commit_outcome_unknown",
     CommitQueueFull => "commit_queue_full",
+    ServerBusy => "server_busy",
     ShuttingDown => "shutting_down",
     CheckpointUnavailable => "checkpoint_unavailable",
     MaintenanceRequired => "maintenance_required",
@@ -171,6 +172,7 @@ impl ErrorCode {
             // `index_lagging` clears once maintenance catches the index up,
             // so it is served as retryable unavailability.
             ErrorCode::CommitQueueFull
+            | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
             | ErrorCode::CheckpointUnavailable
             | ErrorCode::IndexLagging

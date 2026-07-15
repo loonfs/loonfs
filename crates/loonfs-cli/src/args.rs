@@ -64,13 +64,16 @@ pub(crate) struct InitArgs {
     pub bucket: Option<String>,
     #[arg(long)]
     pub region: Option<String>,
-    #[arg(long)]
+    // Provider secrets fall back to the standard environment variables so
+    // quickstarts never need them on the command line (argv is visible to
+    // `ps` and lands in shell history).
+    #[arg(long, env = "AWS_ACCESS_KEY_ID")]
     pub access_key_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
     pub secret_access_key: Option<String>,
     #[arg(long)]
     pub endpoint_url: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "AWS_SESSION_TOKEN")]
     pub session_token: Option<String>,
     #[arg(long)]
     pub account_id: Option<String>,
@@ -88,7 +91,7 @@ pub(crate) struct InitArgs {
     pub force_path_style: bool,
     #[arg(long)]
     pub server_url: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "LOONFS_AUTH_TOKEN")]
     pub auth_token: Option<String>,
 }
 
@@ -117,13 +120,14 @@ pub(crate) struct ProfileCreateArgs {
     pub bucket: Option<String>,
     #[arg(long)]
     pub region: Option<String>,
-    #[arg(long)]
+    // Same environment fallbacks as `InitArgs`, and for the same reason.
+    #[arg(long, env = "AWS_ACCESS_KEY_ID")]
     pub access_key_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
     pub secret_access_key: Option<String>,
     #[arg(long)]
     pub endpoint_url: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "AWS_SESSION_TOKEN")]
     pub session_token: Option<String>,
     #[arg(long)]
     pub force_path_style: bool,
@@ -139,7 +143,7 @@ pub(crate) struct ProfileCreateArgs {
     pub service_account_key_path: Option<String>,
     #[arg(long)]
     pub server_url: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "LOONFS_AUTH_TOKEN")]
     pub auth_token: Option<String>,
 }
 

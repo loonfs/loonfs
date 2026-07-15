@@ -2,7 +2,7 @@
 //!
 //! This module owns the route table, the server startup path, and the
 //! request glue shared by every handler (bearer-token authorization,
-//! `{namespace}` path parsing, and the JSON body extractors). The handlers
+//! `{namespace}` path parsing, and the body extractors). The handlers
 //! themselves live in sibling modules grouped by API area:
 //!
 //! - [`handlers_namespace`]: namespace lifecycle, status, capability
@@ -43,7 +43,9 @@ use crate::config::{ServerConfig, ServerConfigError};
 use axum::async_trait;
 use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Request};
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Request, State,
+};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -61,6 +63,7 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
@@ -102,6 +105,15 @@ struct AppState {
     admin: FsAdmin,
     publisher: PublisherRegistry,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+    /// Bounds concurrently buffered proxied-upload bodies; with the
+    /// per-request body limit this makes worst-case upload memory
+    /// `max_concurrent_uploads * max_upload_bytes`. Requests past the cap
+    /// answer 503 `server_busy` before any buffering.
+    upload_permits: Arc<Semaphore>,
+    /// Bounds concurrently materialized proxied content reads the same way:
+    /// worst-case download memory is
+    /// `max_concurrent_downloads * max_download_bytes`.
+    download_permits: Arc<Semaphore>,
 }
 
 /// Everything the app spawns that must settle at shutdown: the publisher
@@ -135,7 +147,9 @@ pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), Serv
     let store = config.object_store()?;
     let transfer_issuer = store.transfer_issuer();
     let store = Arc::new(store) as SharedStore;
-    app_with_store_and_transfer_issuer(config, store, transfer_issuer).await
+    let (router, lifecycle, _state) =
+        app_with_store_and_transfer_issuer(config, store, transfer_issuer).await?;
+    Ok((router, lifecycle))
 }
 
 #[cfg(test)]
@@ -148,11 +162,23 @@ async fn app_with_store(
         .0)
 }
 
+/// Test-only: the router plus its state, so tests can hold admission
+/// permits or close publisher admission and observe the served answers.
+#[cfg(test)]
+async fn app_with_store_and_state(
+    config: ServerConfig,
+    store: SharedStore,
+) -> Result<(Router, AppState), ServerConfigError> {
+    let (router, _lifecycle, state) =
+        app_with_store_and_transfer_issuer(config, store, None).await?;
+    Ok((router, state))
+}
+
 async fn app_with_store_and_transfer_issuer(
     config: ServerConfig,
     store: SharedStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
-) -> Result<(Router, ServerLifecycle), ServerConfigError> {
+) -> Result<(Router, ServerLifecycle, AppState), ServerConfigError> {
     let (writer, reader, admin) = build_handles(&config, store).await?;
     let config = Arc::new(config);
     let publisher = writer.publisher();
@@ -161,6 +187,12 @@ async fn app_with_store_and_transfer_issuer(
         publisher: publisher.clone(),
     };
     let state = AppState {
+        upload_permits: Arc::new(Semaphore::new(
+            config.max_concurrent_uploads.min(Semaphore::MAX_PERMITS),
+        )),
+        download_permits: Arc::new(Semaphore::new(
+            config.max_concurrent_downloads.min(Semaphore::MAX_PERMITS),
+        )),
         config,
         writer,
         reader,
@@ -168,7 +200,7 @@ async fn app_with_store_and_transfer_issuer(
         publisher,
         transfer_issuer,
     };
-    Ok((router(state), lifecycle))
+    Ok((router(state.clone()), lifecycle, state))
 }
 
 fn router(state: AppState) -> Router {
@@ -178,6 +210,7 @@ fn router(state: AppState) -> Router {
     let max_upload_bytes = usize::try_from(state.config.max_upload_bytes).unwrap_or(usize::MAX);
     Router::new()
         .route("/health", get(health))
+        .route("/health/ready", get(health_ready))
         // Module-qualified because handler modules also export a bare
         // `config` name in this scope.
         .route("/v0/config", get(handlers_namespace::config))
@@ -299,6 +332,10 @@ async fn build_handles_with_metrics_jsonl_path(
             FsBackgroundWork::ManualOnly
         })
         .min_publish_interval_ms(config.min_publish_interval_ms)
+        // The reader below shares this core, so the read cap covers every
+        // proxied content read the server serves.
+        .max_read_content_bytes(config.max_download_bytes)
+        .max_concurrent_maintenance(config.max_concurrent_maintenance)
         .runtime_cache(config.runtime_cache_config())
         .gram_index_build(config.gram_index_build_policy())
         .trace_mode(TraceMode::Remote)
@@ -450,6 +487,45 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/health/ready",
+        tag = "health",
+        summary = "Check readiness",
+        description = "Returns `ready` while the server admits new work. Once shutdown \
+                       begins and publisher admission closes, answers 503 `shutting_down` \
+                       so load balancers can drain the instance. `/health` stays the \
+                       liveness probe: it only reports that the process is up.",
+        security(()),
+        responses(
+            (status = 200, description = "The server admits new work", body = String),
+            (status = 503, description = "Shutdown has begun; admission is closed", body = loonfs_api::ApiError)
+        )
+    )
+)]
+async fn health_ready(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
+    if state.publisher.is_admission_closed() {
+        return Err(ApiResponseError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::ShuttingDown,
+            "publisher admission is closed; the server is shutting down",
+        ));
+    }
+    Ok("ready")
+}
+
+/// One admission cap answered in-envelope: 503 `server_busy`, distinct from
+/// `shutting_down` (drain) and `commit_queue_full` (publisher backpressure).
+fn server_busy_error(what: &str) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::ServerBusy,
+        &format!("the server is at its concurrency limit for {what}; retry shortly"),
+    )
+}
+
 fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiResponseError> {
     let Some(expected) = &config.auth_token else {
         return Ok(());
@@ -551,22 +627,41 @@ where
     }
 }
 
-/// A raw-bytes extractor whose rejections stay inside the error contract: a
-/// body over the route's limit answers 413 with a `content_too_large`
-/// `ApiError` body, and other unreadable bodies answer 400, instead of the
-/// raw framework rejection.
-struct AppBytes(Bytes);
+/// The proxied-upload body plus the admission permit that bounds how many
+/// such bodies the server buffers at once.
+///
+/// Extraction runs the admission sequence in bounded-cost order:
+/// authorization first (an unauthenticated caller must not occupy a
+/// buffering slot), then a permit — or 503 `server_busy` — and only then is
+/// the body buffered, so the permit covers the buffering itself, not just
+/// the handler. The permit rides with the bytes and frees its slot when the
+/// handler drops them. Rejections stay inside the error contract: a body
+/// over the route's limit answers 413 `content_too_large`, other unreadable
+/// bodies 400.
+struct UploadBodyBytes {
+    bytes: Bytes,
+    _permit: OwnedSemaphorePermit,
+}
 
 #[async_trait]
-impl<S> FromRequest<S> for AppBytes
-where
-    S: Send + Sync,
-{
+impl FromRequest<AppState> for UploadBodyBytes {
     type Rejection = ApiResponseError;
 
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authorize(&state.config, req.headers())?;
+        let permit = state
+            .upload_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| server_busy_error("proxied uploads"))?;
         match Bytes::from_request(req, state).await {
-            Ok(bytes) => Ok(AppBytes(bytes)),
+            Ok(bytes) => Ok(UploadBodyBytes {
+                bytes,
+                _permit: permit,
+            }),
             Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
                 Err(body_too_large_error())
             }

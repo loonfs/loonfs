@@ -21,6 +21,13 @@ pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
 /// concurrent submissions amortize into fewer, larger WAL segments. Zero
 /// keeps only the batching that in-flight publications force.
 pub const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
+/// Default cap on concurrently running writer-scheduled maintenance ticks,
+/// across all namespaces of one handle. Each namespace already runs at most
+/// one tick at a time; this bounds how many namespaces may tick at once, so
+/// a write burst across many namespaces cannot fan out into unbounded
+/// concurrent maintenance. A skipped tick is rescheduled by the next
+/// publish that observes the namespace still over its threshold.
+pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: usize = 2;
 
 /// Configuration for one runtime core, assembled by the handle builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +40,11 @@ pub(crate) struct FsConfig {
     /// milliseconds; zero keeps only the batching that in-flight
     /// publications force.
     pub min_publish_interval_ms: u64,
+    /// Largest file content the buffered read APIs will materialize for one
+    /// call, checked against resolved metadata before any content fetch.
+    /// `None` (the embedded default) reads files of any size; servers set
+    /// this so one proxied read cannot buffer arbitrarily large content.
+    pub max_read_content_bytes: Option<u64>,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
     /// Budgets for the gram index build and fold steps this runtime's

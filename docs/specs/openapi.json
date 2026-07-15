@@ -35,6 +35,41 @@
         ]
       }
     },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Check readiness",
+        "description": "Returns `ready` while the server admits new work. Once shutdown begins and publisher admission closes, answers 503 `shutting_down` so load balancers can drain the instance. `/health` stays the liveness probe: it only reports that the process is up.",
+        "operationId": "health_ready",
+        "responses": {
+          "200": {
+            "description": "The server admits new work",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Shutdown has begun; admission is closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/v0/admin/namespaces/{namespace}/checkpoints": {
       "post": {
         "tags": [
@@ -1198,6 +1233,26 @@
                 }
               }
             }
+          },
+          "413": {
+            "description": "Content exceeds the advertised `download.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is at its concurrent content-read limit; retry shortly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1872,6 +1927,26 @@
                 }
               }
             }
+          },
+          "413": {
+            "description": "Content exceeds the advertised `download.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is at its concurrent content-read limit; retry shortly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -2391,6 +2466,16 @@
           },
           "413": {
             "description": "Body exceeds the advertised `upload.max_content_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is at its concurrent proxied-upload limit; retry shortly",
             "content": {
               "application/json": {
                 "schema": {

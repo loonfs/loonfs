@@ -61,7 +61,9 @@ fn error_status_mapping_matches_the_api_spec_table() {
 }
 
 use super::error::status_for_core_error_code;
-use super::{app_with_store, build_handles_with_metrics_jsonl_path, SharedStore};
+use super::{
+    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path, SharedStore,
+};
 use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
@@ -648,11 +650,246 @@ async fn capability_document_advertises_the_upload_limit() {
             capabilities.limits.get("upload.max_content_bytes").copied(),
             Some(256 * 1024 * 1024)
         );
+        assert_eq!(
+            capabilities
+                .limits
+                .get("download.max_content_bytes")
+                .copied(),
+            Some(256 * 1024 * 1024)
+        );
     })
     .await
     .expect("join blocking task");
 
     harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_concurrent_uploads = 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    // Hold the only buffering slot, standing in for a slow concurrent
+    // upload; the next proxied body must be refused before buffering.
+    let held = state
+        .upload_permits
+        .clone()
+        .try_acquire_owned()
+        .expect("hold the only upload slot");
+
+    let client_config = ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".to_owned()),
+        request_timeout_ms: None,
+    };
+    let config_for_busy = client_config.clone();
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(config_for_busy);
+        let target = NamespacePath::parse("demo:/one.bin").expect("target");
+        assert_api_error(
+            client.write_file_bytes(&target, &[0u8; 64], &MutationOptions::default()),
+            503,
+            "server_busy",
+            Some("the server is at its concurrency limit for proxied uploads; retry shortly"),
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    drop(held);
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(client_config);
+        let target = NamespacePath::parse("demo:/one.bin").expect("target");
+        client
+            .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
+            .expect("a freed slot admits the upload");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/note.txt",
+        b"bounded",
+        "download-busy-seed-01",
+    )
+    .await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_concurrent_downloads = 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let held = state
+        .download_permits
+        .clone()
+        .try_acquire_owned()
+        .expect("hold the only download slot");
+
+    let client_config = ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".to_owned()),
+        request_timeout_ms: None,
+    };
+    let config_for_busy = client_config.clone();
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(config_for_busy);
+        let target = NamespacePath::parse("demo:/note.txt").expect("target");
+        assert_api_error(
+            client.read_file_bytes(&target),
+            503,
+            "server_busy",
+            Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    drop(held);
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(client_config);
+        let target = NamespacePath::parse("demo:/note.txt").expect("target");
+        let bytes = client
+            .read_file_bytes(&target)
+            .expect("a freed slot admits the read");
+        assert_eq!(bytes, b"bounded");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_content_read_over_the_download_limit_answers_content_too_large() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/big.bin",
+        &[0u8; 64],
+        "download-limit-seed-01",
+    )
+    .await;
+    write_file_bytes(
+        &seed_writer,
+        &namespace_id("demo"),
+        "/small.bin",
+        &[0u8; 8],
+        "download-limit-seed-02",
+    )
+    .await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_download_bytes = 16;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
+        });
+        assert_api_error(
+            client.read_file_bytes(&NamespacePath::parse("demo:/big.bin").expect("target")),
+            413,
+            "content_too_large",
+            None,
+        );
+        // Content inside the limit still reads through the same route.
+        let bytes = client
+            .read_file_bytes(&NamespacePath::parse("demo:/small.bin").expect("target"))
+            .expect("small content fits under the limit");
+        assert_eq!(bytes.len(), 8);
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let config = test_config(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let ready_url = format!("http://{addr}/health/ready");
+    let url = ready_url.clone();
+    tokio::task::spawn_blocking(move || {
+        let body = ureq::get(&url)
+            .call()
+            .expect("an admitting server is ready")
+            .into_string()
+            .expect("readiness body");
+        assert_eq!(body, "ready");
+    })
+    .await
+    .expect("join blocking task");
+
+    state.publisher.close_admission();
+
+    tokio::task::spawn_blocking(move || match ureq::get(&ready_url).call() {
+        Err(ureq::Error::Status(503, response)) => {
+            let body = response.into_string().expect("readiness body");
+            assert!(
+                body.contains("shutting_down"),
+                "readiness names the shutdown: {body}"
+            );
+        }
+        other => panic!("expected 503 from a draining server, got {other:?}"),
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
 }
 
 /// Seeds a namespace with enough durable state that an explicit
@@ -813,6 +1050,10 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
+        max_download_bytes: 256 * 1024 * 1024,
+        max_concurrent_uploads: 8,
+        max_concurrent_downloads: 16,
+        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         allow_unauthenticated_remote: false,
         store: StoreConfig::LocalFs {
             root: root.display().to_string(),

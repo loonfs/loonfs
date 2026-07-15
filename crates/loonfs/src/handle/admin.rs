@@ -250,7 +250,11 @@ impl FsAdminBuilder {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
-        let background = BackgroundWork::new(FsBackgroundWork::ManualOnly, None);
+        let background = BackgroundWork::new(
+            FsBackgroundWork::ManualOnly,
+            None,
+            crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+        );
         Ok(FsAdmin {
             core: self.core.open(actor_id, self.actor_version, background)?,
         })

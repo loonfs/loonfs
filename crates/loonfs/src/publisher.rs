@@ -237,6 +237,12 @@ impl PublisherRegistry {
             .clone())
     }
 
+    /// Whether [`Self::close_admission`] has run: later submissions fail
+    /// with `shutting_down`. Readiness probes report this state.
+    pub fn is_admission_closed(&self) -> bool {
+        self.shared.lock_state().closed
+    }
+
     /// Closes the front door: every later submission fails with
     /// `shutting_down`, while already-admitted work keeps publishing.
     /// Idempotent.
@@ -1406,12 +1412,17 @@ mod tests {
                 // The publisher under test is itself the coalescer; direct
                 // windows would only add latency to these tests.
                 min_publish_interval_ms: 0,
+                max_read_content_bytes: None,
                 runtime_cache: RuntimeCacheConfig::default(),
                 gram_index_build: crate::GramIndexBuildPolicy::default(),
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,
             },
-            BackgroundWork::new(FsBackgroundWork::ManualOnly, None),
+            BackgroundWork::new(
+                FsBackgroundWork::ManualOnly,
+                None,
+                crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            ),
             None,
         )
         .expect("open runtime")
