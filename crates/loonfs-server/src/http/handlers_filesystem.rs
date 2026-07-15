@@ -392,11 +392,14 @@ pub(super) async fn restore_inode_revision(
         }],
         message: None,
     };
+    let commit_id = commit.commit_id.clone();
     let response = state
         .publisher
         .submit_commit(namespace_id.clone(), commit)
         .await
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
+        })?;
     Ok(Json(response))
 }
 
@@ -434,6 +437,9 @@ pub(super) async fn filesystem_operation(
         content_tokens,
         operation,
     } = request;
+    // Failed and uncertain outcomes echo the idempotency key the caller can
+    // resubmit under (API spec, "Mutation responses and safe retry").
+    let commit_id_for_errors = commit_id.clone();
     let put_payload_class = match &operation {
         FilesystemOperation::PutFile { content_ref, .. } => Some(payload_class(
             usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
@@ -527,8 +533,10 @@ pub(super) async fn filesystem_operation(
             .submit_path_intent(namespace_id.clone(), intent)
             .await
     };
-    let response = response_result
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
+    let response = response_result.map_err(|error| {
+        ApiResponseError::core_for_namespace(&namespace_id, error)
+            .with_commit_id(&commit_id_for_errors)
+    })?;
     Ok(Json(response))
 }
 
@@ -561,11 +569,14 @@ pub(super) async fn commit_operations(
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let commit_id = request.commit_id.clone();
     let response = state
         .publisher
         .submit_commit(namespace_id.clone(), request)
         .await
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
+        })?;
     Ok(Json(response))
 }
 

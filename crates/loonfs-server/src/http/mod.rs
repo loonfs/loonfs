@@ -43,9 +43,11 @@ use crate::config::{ServerConfig, ServerConfigError};
 use axum::async_trait;
 use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Request};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use loonfs::publisher::PublisherRegistry;
@@ -62,6 +64,31 @@ use thiserror::Error;
 
 type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
+
+/// Response header carrying the request's correlation id.
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+tokio::task_local! {
+    /// Correlation id of the request being served. Scoped around every
+    /// handler by [`with_request_id`]; [`error::ApiResponseError`] reads it
+    /// when rendering an error body.
+    pub(super) static REQUEST_ID: String;
+}
+
+/// Assigns each request a correlation id: every response carries it as the
+/// `x-request-id` header, and error bodies repeat it as
+/// `ApiError.request_id` so a caller's log line and the server's trace can
+/// be joined without header plumbing.
+async fn with_request_id(request: Request, next: Next) -> Response {
+    let request_id = loonfs_api::generated_id("req");
+    let mut response = REQUEST_ID
+        .scope(request_id.clone(), next.run(request))
+        .await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
+}
 
 /// Purpose-specific handles over one shared store client: read endpoints go
 /// through `reader`, mutations through `writer` (and its publisher),
@@ -227,6 +254,7 @@ fn router(state: AppState) -> Router {
             post(maintenance_tick),
         )
         .route("/v0/admin/namespaces/:namespace/gc", post(gc_namespace))
+        .layer(middleware::from_fn(with_request_id))
         .with_state(state)
 }
 
