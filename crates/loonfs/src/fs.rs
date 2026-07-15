@@ -1141,6 +1141,7 @@ impl FsCore {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                behavior: options.behavior,
             },
         )
         .await
@@ -1161,6 +1162,7 @@ impl FsCore {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                behavior: options.behavior,
             },
         )
         .await

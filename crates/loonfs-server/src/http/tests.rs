@@ -72,6 +72,7 @@ use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsWriter, MaintenanceTickOptions,
     PutFileOptions, TraceMode, TraceStoreKind,
 };
+use loonfs_api::MoveBehavior;
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_objectstore::keys::wal_head;
@@ -311,9 +312,12 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
         );
         let destination = NamespacePath::parse("missing:/notes/renamed.txt").expect("target");
         assert_api_error(
-            harness
-                .client
-                .move_path(&target, &destination, &MutationOptions::default()),
+            harness.client.move_path(
+                &target,
+                &destination,
+                MoveBehavior::NoReplace,
+                &MutationOptions::default(),
+            ),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
@@ -417,9 +421,12 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
         let from = NamespacePath::parse("demo:/tmp/a.txt").expect("from");
         let to = NamespacePath::parse("demo:/docs/a.txt").expect("to");
         assert_api_error(
-            harness
-                .client
-                .move_path(&from, &to, &MutationOptions::default()),
+            harness.client.move_path(
+                &from,
+                &to,
+                MoveBehavior::NoReplace,
+                &MutationOptions::default(),
+            ),
             409,
             "path_conflict",
             None,
@@ -475,7 +482,12 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         let to = NamespacePath::parse("demo:/docs/source.txt").expect("to");
         harness
             .client
-            .move_path(&from, &to, &MutationOptions::default())
+            .move_path(
+                &from,
+                &to,
+                MoveBehavior::NoReplace,
+                &MutationOptions::default(),
+            )
             .expect("move lands in the recreated subtree");
     })
     .await

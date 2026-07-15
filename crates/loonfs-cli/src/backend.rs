@@ -18,11 +18,12 @@ use loonfs::{
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
-    DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse, FlushWalResponse,
-    GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
+    CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
+    DeleteDirectoryBehavior, DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse,
+    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -254,6 +255,7 @@ impl Backend for EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: MoveBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
@@ -262,7 +264,10 @@ impl Backend for EmbeddedBackend {
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
-                MoveOptions { commit_id },
+                MoveOptions {
+                    behavior,
+                    commit_id,
+                },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
@@ -272,6 +277,7 @@ impl Backend for EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: CopyBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
@@ -280,7 +286,10 @@ impl Backend for EmbeddedBackend {
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
-                CopyOptions { commit_id },
+                CopyOptions {
+                    behavior,
+                    commit_id,
+                },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))

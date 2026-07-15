@@ -8,8 +8,8 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::path::helpers::parse_mutation_path;
 use loonfs_api::{
-    CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, NamespaceId, PutBehavior,
-    RevisionNo,
+    CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, MoveBehavior, NamespaceId,
+    PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -158,6 +158,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
             commit_id,
             from_path: parse_mutation_path(from_path)?,
             to_path: parse_mutation_path(to_path)?,
+            behavior: MoveBehavior::NoReplace,
         },
         context,
     )

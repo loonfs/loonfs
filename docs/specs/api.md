@@ -660,10 +660,18 @@ Representative request:
   "operation": {
     "kind": "move_path",
     "from_path": "/docs/report.txt",
-    "to_path": "/reports/report.txt"
+    "to_path": "/reports/report.txt",
+    "behavior": "replace"
   }
 }
 ```
+
+Move and copy accept the same `behavior` choice as put: `no_replace` (the
+default) fails when the destination is occupied, and `replace` replaces a
+file destination. A replacing move deletes the destination file and rebinds
+the source in one commit; a replacing copy appends a revision to the
+destination inode, keeping its identity and revision history. Only a file
+destination can be replaced, and a path never replaces itself.
 
 A successful response is returned only after the underlying change is actually
 committed: the WAL segment is durable and the head has advanced. Path

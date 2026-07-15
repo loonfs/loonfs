@@ -19,13 +19,13 @@ use loonfs_api::{
         UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
-    CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
+    CommitId, ContentRef, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorDetails, ErrorKind,
     FilesystemOperation, FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest,
     GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
+    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
     RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
@@ -851,6 +851,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: MoveBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
@@ -868,6 +869,7 @@ impl Client {
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
+                    behavior,
                 },
             },
         )?;
@@ -878,6 +880,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: CopyBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
@@ -895,6 +898,7 @@ impl Client {
                 operation: FilesystemOperation::CopyPath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
+                    behavior,
                 },
             },
         )?;

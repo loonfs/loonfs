@@ -12,7 +12,7 @@ use crate::args::{
     FilesystemRevisionsArgs, FilesystemTransferArgs, RuntimeBehavior,
 };
 use crate::error::CliError;
-use loonfs_api::{CommitId, InodeKind, PutBehavior, RevisionNo};
+use loonfs_api::{CommitId, CopyBehavior, InodeKind, MoveBehavior, PutBehavior, RevisionNo};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -646,16 +646,26 @@ async fn run_filesystem_transfer(
                 )),
             ));
         }
+        let behavior = if args.force {
+            CopyBehavior::Replace
+        } else {
+            CopyBehavior::NoReplace
+        };
         context
             .target
             .backend()
-            .copy_path(&from, &to, commit_id)
+            .copy_path(&from, &to, behavior, commit_id)
             .await
     } else {
+        let behavior = if args.force {
+            MoveBehavior::Replace
+        } else {
+            MoveBehavior::NoReplace
+        };
         context
             .target
             .backend()
-            .move_path(&from, &to, commit_id)
+            .move_path(&from, &to, behavior, commit_id)
             .await
     }
     .map_err(|error| {

@@ -338,6 +338,8 @@ pub(crate) struct FilesystemTransferArgs {
     pub target: TargetSelectorArgs,
     pub source_path: String,
     pub dest_path: String,
+    #[arg(long)]
+    pub force: bool,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
     #[arg(long)]

@@ -78,6 +78,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::DeleteNamespaceResponse,
         loonfs_api::PutBehavior,
         loonfs_api::DeleteDirectoryBehavior,
+        loonfs_api::MoveBehavior,
+        loonfs_api::CopyBehavior,
         FilesystemOperation,
         FilesystemOperationRequest,
         loonfs_api::FileRevision,
