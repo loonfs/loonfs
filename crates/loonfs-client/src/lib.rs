@@ -21,12 +21,12 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
     CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorKind, FilesystemOperation,
-    FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
-    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
-    RevisionNo,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorDetails, ErrorKind,
+    FilesystemOperation, FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest,
+    GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -109,6 +109,11 @@ pub enum ClientError {
         /// Capability feature key accompanying `not_supported` errors.
         feature: Option<String>,
         message: String,
+        /// Correlation id the server assigned to the failed request.
+        request_id: Option<String>,
+        /// Structured context for the code, when the server sent any. Boxed
+        /// so the rare detailed error does not widen every client result.
+        details: Option<Box<ErrorDetails>>,
     },
     #[error("i/o error: {0}")]
     Io(String),
@@ -990,6 +995,8 @@ impl Client {
                         code: body.code,
                         feature: body.feature,
                         message: body.message,
+                        request_id: body.request_id,
+                        details: body.details,
                     },
                     Err(err) => ClientError::Http(err.to_string()),
                 }
@@ -1120,6 +1127,8 @@ mod tests {
             code: code.to_owned(),
             feature: None,
             message: "test".to_owned(),
+            request_id: None,
+            details: None,
         }
     }
 

@@ -82,12 +82,12 @@ pub use v0::{
     AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DisableGramsIndexResponse,
-    EnableGramsIndexResponse, FileRevision, FilesystemOperation, FilesystemOperationRequest,
-    FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch,
-    GrepRequest, GrepResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
-    RestoreFileRevisionRequest,
+    EnableGramsIndexResponse, ErrorDetails, FileRevision, FilesystemOperation,
+    FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
+    ReleaseCheckpointResponse, RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

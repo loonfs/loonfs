@@ -69,6 +69,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     components(schemas(
         loonfs_api::CapabilityDocument,
         ApiError,
+        loonfs_api::ErrorDetails,
+        loonfs_api::WriterEpoch,
         CreateNamespaceRequest,
         ForkNamespaceRequest,
         loonfs_api::NamespaceSummary,

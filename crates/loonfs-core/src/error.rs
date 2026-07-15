@@ -15,8 +15,8 @@ use crate::storage::content::{DurableContentValidationError, ImmutableObjectWrit
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
-    NamespaceId, NamespaceIdValidationError, UploadId,
+    ChangeSeq, CommitId, CommitIdValidationError, ErrorDetails, GeneratedIdValidationError,
+    InodeId, InodeKind, NamespaceId, NamespaceIdValidationError, UploadId, WriterEpoch,
 };
 use loonfs_objectstore::ObjectStoreError;
 use thiserror::Error;
@@ -146,7 +146,7 @@ pub enum CoreError {
     /// This writer session's epoch was superseded. Terminal for the session:
     /// callers surface it without reacquiring.
     #[error("writer session fenced: {0}")]
-    WriterFenced(String),
+    WriterFenced(WriterFence),
     #[error("object store error for `{object_key}`: {message}")]
     Store { object_key: String, message: String },
     /// Non-store internal failure (codec, overflow, invariant breach). Same
@@ -344,6 +344,86 @@ impl CoreError {
 
     pub fn message(&self) -> String {
         self.to_string()
+    }
+
+    /// Structured wire details for this error, when the variant carries
+    /// machine-usable identity (API spec, "Standard error contract"). The
+    /// server serializes this beside [`CoreError::code`]; embedded callers
+    /// can match the typed variants directly instead.
+    pub fn details(&self) -> Option<ErrorDetails> {
+        match self {
+            CoreError::WriterFenced(fence) => Some(ErrorDetails {
+                fenced_epoch: Some(fence.fenced_epoch),
+                active_writer_epoch: Some(fence.active_epoch),
+                active_writer: fence.active_writer.clone(),
+                ..ErrorDetails::default()
+            }),
+            CoreError::CommitIdReuseConflict(commit_id) => Some(ErrorDetails {
+                commit_id: CommitId::parse(commit_id).ok(),
+                ..ErrorDetails::default()
+            }),
+            CoreError::RebootstrapRequired {
+                after_seq,
+                retention_floor_seq,
+            } => Some(ErrorDetails {
+                after_seq: Some(*after_seq),
+                retention_floor_seq: Some(*retention_floor_seq),
+                ..ErrorDetails::default()
+            }),
+            CoreError::CommitValidation(error) => commit_validation_details(error),
+            _ => None,
+        }
+    }
+}
+
+/// The fencing event a writer session observed: the epoch the session held,
+/// the epoch that displaced it, and the winner's writer id when the head
+/// recorded one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriterFence {
+    /// Epoch the fenced session held.
+    pub fenced_epoch: WriterEpoch,
+    /// Epoch that owns the namespace now.
+    pub active_epoch: WriterEpoch,
+    /// Writer id recorded by the winning acquirer, when known.
+    pub active_writer: Option<String>,
+}
+
+impl std::fmt::Display for WriterFence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "epoch {} was fenced by epoch {} (writer `{}`)",
+            self.fenced_epoch,
+            self.active_epoch,
+            self.active_writer.as_deref().unwrap_or("unknown")
+        )
+    }
+}
+
+fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetails> {
+    match error {
+        CommitValidationError::ReplaceFileBaseRevisionMismatch {
+            inode_id,
+            expected,
+            actual,
+        }
+        | CommitValidationError::RestoreRevisionBaseRevisionMismatch {
+            inode_id,
+            expected,
+            actual,
+        } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            expected_revision: Some(*expected),
+            actual_revision: *actual,
+            ..ErrorDetails::default()
+        }),
+        CommitValidationError::StaleWriterEpoch { active, requested } => Some(ErrorDetails {
+            fenced_epoch: Some(*requested),
+            active_writer_epoch: Some(*active),
+            ..ErrorDetails::default()
+        }),
+        _ => None,
     }
 }
 
@@ -551,8 +631,12 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreError, ErrorCode, ErrorKind, MetadataViewError};
-    use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+    use super::{
+        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataViewError, WriterFence,
+    };
+    use loonfs_api::{
+        ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
+    };
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
@@ -630,5 +714,42 @@ mod tests {
             let error = CoreError::from(metadata_error);
             assert_eq!(error.code(), code);
         }
+    }
+
+    #[test]
+    fn identity_bearing_errors_expose_structured_wire_details() {
+        let fenced = CoreError::WriterFenced(WriterFence {
+            fenced_epoch: WriterEpoch(3),
+            active_epoch: WriterEpoch(4),
+            active_writer: Some("writer-b".to_owned()),
+        });
+        let details = fenced.details().expect("fence details");
+        assert_eq!(details.fenced_epoch, Some(WriterEpoch(3)));
+        assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
+        assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
+        assert!(fenced
+            .to_string()
+            .contains("epoch 3 was fenced by epoch 4 (writer `writer-b`)"));
+
+        let reuse = CoreError::CommitIdReuseConflict("retry-key-1".to_owned());
+        let details = reuse.details().expect("reuse details");
+        assert_eq!(
+            details.commit_id,
+            Some(CommitId::parse("retry-key-1").expect("valid commit id"))
+        );
+
+        let stale =
+            CoreError::CommitValidation(CommitValidationError::ReplaceFileBaseRevisionMismatch {
+                inode_id: InodeId(7),
+                expected: RevisionNo(2),
+                actual: Some(RevisionNo(5)),
+            });
+        let details = stale.details().expect("stale-revision details");
+        assert_eq!(details.inode_id, Some(InodeId(7)));
+        assert_eq!(details.expected_revision, Some(RevisionNo(2)));
+        assert_eq!(details.actual_revision, Some(RevisionNo(5)));
+
+        // Errors without machine-usable identity stay detail-free.
+        assert!(CoreError::Internal("boom".to_owned()).details().is_none());
     }
 }

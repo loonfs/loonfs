@@ -822,6 +822,12 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
         .set("authorization", "Bearer test-token")
         .send_json(request)
         .expect("bad token should fall back to content validation");
+        // Every response carries the correlation id header, success included.
+        let request_id = response
+            .header("x-request-id")
+            .expect("x-request-id header")
+            .to_owned();
+        assert!(request_id.starts_with("req_"), "got `{request_id}`");
         let response: CommitResponse =
             serde_json::from_reader(response.into_reader()).expect("decode operation response");
         assert_eq!(response.committed_seq, ChangeSeq(1));
@@ -1206,8 +1212,20 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
             .client
             .commit_operations(namespace, &conflicting_request)
         {
-            Err(ClientError::Api { code, .. }) => {
-                assert_eq!(code, "commit_id_reuse_conflict")
+            Err(ClientError::Api {
+                code,
+                request_id,
+                details,
+                ..
+            }) => {
+                assert_eq!(code, "commit_id_reuse_conflict");
+                // The error carries the caller's reconciliation identity as
+                // structured fields, not prose (API spec, "Standard error
+                // contract").
+                let details = details.expect("structured details");
+                assert_eq!(details.commit_id, Some(first_request.commit_id.clone()));
+                let request_id = request_id.expect("request id");
+                assert!(request_id.starts_with("req_"), "got `{request_id}`");
             }
             other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
         }
@@ -1990,6 +2008,8 @@ fn get_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> Resu
             code: "invalid_json".to_owned(),
             feature: None,
             message: err.to_string(),
+            request_id: None,
+            details: None,
         }),
         Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
             response.into_reader(),
@@ -1998,11 +2018,15 @@ fn get_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> Resu
             code: "invalid_json".to_owned(),
             feature: None,
             message: err.to_string(),
+            request_id: None,
+            details: None,
         })),
         Err(ureq::Error::Transport(error)) => Err(ApiError {
             code: "transport".to_owned(),
             feature: None,
             message: error.to_string(),
+            request_id: None,
+            details: None,
         }),
     }
 }
@@ -2083,6 +2107,8 @@ fn decode_admin_response<T: serde::de::DeserializeOwned>(
             code: "invalid_json".to_owned(),
             feature: None,
             message: err.to_string(),
+            request_id: None,
+            details: None,
         }),
         Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
             response.into_reader(),
@@ -2091,11 +2117,15 @@ fn decode_admin_response<T: serde::de::DeserializeOwned>(
             code: "invalid_json".to_owned(),
             feature: None,
             message: err.to_string(),
+            request_id: None,
+            details: None,
         })),
         Err(ureq::Error::Transport(error)) => Err(ApiError {
             code: "transport".to_owned(),
             feature: None,
             message: error.to_string(),
+            request_id: None,
+            details: None,
         }),
     }
 }

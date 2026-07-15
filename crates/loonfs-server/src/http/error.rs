@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::{BootstrapNamespaceError, CoreError, ErrorCode, ErrorKind, RuntimeError};
-use loonfs_api::{ApiError, NamespaceId, NamespaceIdValidationError};
+use loonfs_api::{ApiError, CommitId, ErrorDetails, NamespaceId, NamespaceIdValidationError};
 
 pub(super) struct ApiResponseError {
     status: StatusCode,
@@ -20,6 +20,8 @@ impl ApiResponseError {
                 code: code.as_str().to_owned(),
                 feature: None,
                 message: message.to_owned(),
+                request_id: None,
+                details: None,
             },
         }
     }
@@ -31,8 +33,23 @@ impl ApiResponseError {
                 code: ErrorCode::NotSupported.as_str().to_owned(),
                 feature: Some(feature.to_owned()),
                 message: message.to_owned(),
+                request_id: None,
+                details: None,
             },
         }
+    }
+
+    /// Stamps the mutation's idempotency key into the error details, so a
+    /// failed or uncertain outcome carries the caller's reconciliation
+    /// handle (API spec, "Mutation responses and safe retry"). Details the
+    /// error already carries win over the stamp.
+    pub(super) fn with_commit_id(mut self, commit_id: &CommitId) -> Self {
+        self.body
+            .details
+            .get_or_insert_with(Box::<ErrorDetails>::default)
+            .commit_id
+            .get_or_insert_with(|| commit_id.clone());
+        self
     }
 
     pub(super) fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
@@ -66,6 +83,7 @@ impl ApiResponseError {
     fn core(error: CoreError) -> Self {
         let status = status_for_core_error_code(error.code());
         let mut response = Self::new(status, error.code(), &error.to_string());
+        response.body.details = error.details().map(Box::new);
         // `not_supported` responses name the capability the caller lacks
         // (API spec, "Standard error contract"); for a data-dependent
         // capability that is the namespace feature key, not an endpoint.
@@ -132,7 +150,11 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
 }
 
 impl IntoResponse for ApiResponseError {
-    fn into_response(self) -> Response {
+    fn into_response(mut self) -> Response {
+        // The correlation id is scoped by the request-id middleware; a body
+        // rendered outside a request scope (tests constructing errors
+        // directly) simply omits it.
+        self.body.request_id = super::REQUEST_ID.try_with(|id| id.clone()).ok();
         (self.status, Json(self.body)).into_response()
     }
 }

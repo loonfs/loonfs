@@ -6,7 +6,9 @@ use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::content::ContentAdmission;
 use crate::context::MutationContext;
-use crate::error::{CoreError, MetadataProjectionLoadError, MetadataViewError, Result};
+use crate::error::{
+    CoreError, MetadataProjectionLoadError, MetadataViewError, Result, WriterFence,
+};
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
@@ -106,7 +108,7 @@ pub struct WriterSessionState {
     /// every later publish fails with `writer_fenced` without touching the
     /// store; the session never reacquires on its own. Reacquisition is an
     /// explicit caller decision, left to a future takeover API.
-    fenced: Option<String>,
+    fenced: Option<WriterFence>,
 }
 
 /// Shared handle to one namespace's [`WriterSessionState`].
@@ -215,11 +217,11 @@ impl NamespaceCommitEngine {
         let candidate_count = candidates.len();
         let already_acquired = {
             let session = self.lock_session();
-            if let Some(message) = &session.fenced {
-                let message = message.clone();
+            if let Some(fence) = &session.fenced {
+                let fence = fence.clone();
                 drop(session);
                 return NamespaceCommitEnginePublishResult {
-                    results: repeated_error(candidate_count, CoreError::WriterFenced(message)),
+                    results: repeated_error(candidate_count, CoreError::WriterFenced(fence)),
                     wal_tail_segments: 0,
                     resulting_read_state: None,
                 };
@@ -231,7 +233,7 @@ impl NamespaceCommitEngine {
             None => match acquire_writer_epoch(store, &self.namespace_id, context).await {
                 Ok(value) => {
                     let mut session = self.lock_session();
-                    if let Some(message) = session.fenced.clone() {
+                    if let Some(fence) = session.fenced.clone() {
                         // Another engine sharing this session observed
                         // fencing while we were acquiring; the session
                         // stays fenced.
@@ -239,7 +241,7 @@ impl NamespaceCommitEngine {
                         return NamespaceCommitEnginePublishResult {
                             results: repeated_error(
                                 candidate_count,
-                                CoreError::WriterFenced(message),
+                                CoreError::WriterFenced(fence),
                             ),
                             wal_tail_segments: 0,
                             resulting_read_state: None,
@@ -293,9 +295,9 @@ impl NamespaceCommitEngine {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate();
-                if let CoreError::WriterFenced(message) = &error {
+                if let CoreError::WriterFenced(fence) = &error {
                     let mut session = self.lock_session();
-                    session.fenced = Some(message.clone());
+                    session.fenced = Some(fence.clone());
                     session.acquired_writer = None;
                 }
                 return NamespaceCommitEnginePublishResult {

@@ -63,15 +63,11 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         // The epoch is the fence: any takeover bumps it, so a mismatch means
         // another writer owns the namespace and this delete must not land.
         if head.writer_epoch != acquired_writer.writer_epoch {
-            let winner = head
-                .writer
-                .as_ref()
-                .map(|writer| writer.writer_id.as_str())
-                .unwrap_or("unknown");
-            return Err(CoreError::WriterFenced(format!(
-                "delete with epoch {} was fenced by epoch {} (writer `{winner}`)",
-                acquired_writer.writer_epoch.0, head.writer_epoch.0
-            )));
+            return Err(CoreError::WriterFenced(crate::error::WriterFence {
+                fenced_epoch: acquired_writer.writer_epoch,
+                active_epoch: head.writer_epoch,
+                active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
+            }));
         }
 
         if let Some(expected) = options.expected_head_seq {
