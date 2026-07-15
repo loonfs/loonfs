@@ -17,7 +17,7 @@ use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCom
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceMutationCandidate {
@@ -86,17 +86,39 @@ pub struct ResultingReadState {
     pub tail_rows: Arc<MetadataState>,
 }
 
-#[derive(Debug, Clone)]
-pub struct NamespaceCommitEngine {
-    namespace_id: NamespaceId,
-    publish_tail_projection: Option<PublishTailProjection>,
+/// Writer-session state for one namespace: the epoch this session acquired
+/// and its terminal fencing record.
+///
+/// This is authoritative session state, not a cache of durable state —
+/// nothing in the store can rebuild "this session was fenced". Runtimes keep
+/// one shared instance per namespace in a registry that outlives every
+/// rebuildable cache (invalidation, LRU eviction, cache-disabled
+/// configurations) and hand it to each engine they build for the namespace.
+/// An engine built without one gets private state, which keeps the
+/// documented one-shot semantics: each one-shot commit is its own
+/// acquisition decision.
+#[derive(Debug, Default)]
+pub struct WriterSessionState {
     /// Epoch acquired lazily on this session's first publish and reused for
     /// its lifetime; no per-publish acquisition CAS.
     acquired_writer: Option<AcquiredWriter>,
     /// Terminal fencing record. Once another session supersedes our epoch,
     /// every later publish fails with `writer_fenced` without touching the
-    /// store; the session never reacquires on its own.
+    /// store; the session never reacquires on its own. Reacquisition is an
+    /// explicit caller decision, left to a future takeover API.
     fenced: Option<String>,
+}
+
+/// Shared handle to one namespace's [`WriterSessionState`].
+pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
+
+#[derive(Debug, Clone)]
+pub struct NamespaceCommitEngine {
+    namespace_id: NamespaceId,
+    publish_tail_projection: Option<PublishTailProjection>,
+    /// This session's epoch and fencing for the namespace; see
+    /// [`WriterSessionState`].
+    session: SharedWriterSessionState,
     /// Local monotonic source for the self-enforced publish budget.
     timer: Arc<dyn MonotonicTimer>,
     /// Shared decoded-block cache for publish-view table reads. Blocks are
@@ -113,12 +135,27 @@ impl NamespaceCommitEngine {
         Self {
             namespace_id,
             publish_tail_projection: None,
-            acquired_writer: None,
-            fenced: None,
+            session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             table_cache: None,
             catalog_entry: None,
         }
+    }
+
+    /// Attaches the runtime's session state for this namespace, so the
+    /// acquired epoch and fencing outlive this engine instance.
+    pub fn with_writer_session(mut self, session: SharedWriterSessionState) -> Self {
+        self.session = session;
+        self
+    }
+
+    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionState> {
+        // Poisoning is propagated as a panic: every critical section is a
+        // plain field read or write, so a poisoned lock means another
+        // thread panicked mid-update.
+        self.session
+            .lock()
+            .expect("writer session state lock poisoned")
     }
 
     #[cfg(test)]
@@ -138,9 +175,10 @@ impl NamespaceCommitEngine {
     }
 
     pub fn invalidate(&mut self) {
-        // Drops only the tail projection. The acquired epoch is a number
-        // whose validity is re-checked against the head on every publish
-        // view load, and a fenced session stays fenced.
+        // Drops only the tail projection. The acquired epoch and fencing
+        // are session state, not cached state: the epoch's validity is
+        // re-checked against the head on every publish view load, and a
+        // fenced session stays fenced.
         self.publish_tail_projection = None;
     }
 
@@ -175,18 +213,40 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        if let Some(message) = &self.fenced {
-            return NamespaceCommitEnginePublishResult {
-                results: repeated_error(candidate_count, CoreError::WriterFenced(message.clone())),
-                wal_tail_segments: 0,
-                resulting_read_state: None,
-            };
-        }
-        let acquired_writer = match &self.acquired_writer {
-            Some(value) => value.clone(),
+        let already_acquired = {
+            let session = self.lock_session();
+            if let Some(message) = &session.fenced {
+                let message = message.clone();
+                drop(session);
+                return NamespaceCommitEnginePublishResult {
+                    results: repeated_error(candidate_count, CoreError::WriterFenced(message)),
+                    wal_tail_segments: 0,
+                    resulting_read_state: None,
+                };
+            }
+            session.acquired_writer.clone()
+        };
+        let acquired_writer = match already_acquired {
+            Some(value) => value,
             None => match acquire_writer_epoch(store, &self.namespace_id, context).await {
                 Ok(value) => {
-                    self.acquired_writer = Some(value.clone());
+                    let mut session = self.lock_session();
+                    if let Some(message) = session.fenced.clone() {
+                        // Another engine sharing this session observed
+                        // fencing while we were acquiring; the session
+                        // stays fenced.
+                        drop(session);
+                        return NamespaceCommitEnginePublishResult {
+                            results: repeated_error(
+                                candidate_count,
+                                CoreError::WriterFenced(message),
+                            ),
+                            wal_tail_segments: 0,
+                            resulting_read_state: None,
+                        };
+                    }
+                    session.acquired_writer = Some(value.clone());
+                    drop(session);
                     value
                 }
                 Err(error) => {
@@ -234,8 +294,9 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 self.invalidate();
                 if let CoreError::WriterFenced(message) = &error {
-                    self.fenced = Some(message.clone());
-                    self.acquired_writer = None;
+                    let mut session = self.lock_session();
+                    session.fenced = Some(message.clone());
+                    session.acquired_writer = None;
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
@@ -452,6 +513,73 @@ mod tests {
             .envelope
             .state;
         assert_eq!(head.writer_epoch, epoch_after_takeover);
+        assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
+    }
+
+    #[tokio::test]
+    async fn shared_session_keeps_fencing_across_engine_rebuilds() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer_a = context("writer-a", "session-a");
+        bootstrap_namespace(&store, &namespace_id, &writer_a, false)
+            .await
+            .expect("bootstrap");
+
+        let session = SharedWriterSessionState::default();
+        let mut engine_a1 = NamespaceCommitEngine::new(namespace_id.clone())
+            .with_writer_session(Arc::clone(&session));
+        engine_a1
+            .publish_batch(&store, vec![create_dir("from-a-first", "alpha")], &writer_a)
+            .await
+            .results
+            .remove(0)
+            .expect("writer a first commit");
+
+        let writer_b = context("writer-b", "session-b");
+        let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
+        engine_b
+            .publish_batch(&store, vec![create_dir("from-b-first", "beta")], &writer_b)
+            .await
+            .results
+            .remove(0)
+            .expect("writer b takeover commit");
+
+        let fenced = engine_a1
+            .publish_batch(
+                &store,
+                vec![create_dir("from-a-second", "gamma")],
+                &writer_a,
+            )
+            .await;
+        let error = fenced.results[0].as_ref().expect_err("fenced publish");
+        assert_eq!(error.code(), ErrorCode::WriterFenced);
+        let epoch_after_fencing = read_head_object(&store, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state
+            .writer_epoch;
+
+        // A rebuilt engine — cache eviction, cache-disabled mode — shares
+        // the session state, so the session stays terminally fenced and
+        // never touches the head.
+        drop(engine_a1);
+        let mut engine_a2 =
+            NamespaceCommitEngine::new(namespace_id.clone()).with_writer_session(session);
+        let still_fenced = engine_a2
+            .publish_batch(&store, vec![create_dir("from-a-third", "delta")], &writer_a)
+            .await;
+        let error = still_fenced.results[0]
+            .as_ref()
+            .expect_err("rebuilt engine stays fenced");
+        assert_eq!(error.code(), ErrorCode::WriterFenced);
+        let head = read_head_object(&store, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state;
+        assert_eq!(head.writer_epoch, epoch_after_fencing);
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
     }
 

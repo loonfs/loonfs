@@ -38,6 +38,7 @@ mod options;
 pub mod publisher;
 mod time;
 mod trace;
+mod writer_session;
 
 use thiserror::Error;
 
