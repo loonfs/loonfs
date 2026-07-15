@@ -35,7 +35,7 @@
         ]
       }
     },
-    "/v0/admin/namespaces/{namespace}/checkpoint": {
+    "/v0/admin/namespaces/{namespace}/checkpoints": {
       "post": {
         "tags": [
           "admin"
@@ -3041,9 +3041,6 @@
               "kind"
             ],
             "properties": {
-              "behavior": {
-                "$ref": "#/components/schemas/MoveBehavior"
-              },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               },
@@ -3371,6 +3368,14 @@
       "ContentStoreId": {
         "type": "string",
         "description": "Durable id for an immutable content store.\n\nContent stores own file bytes. Namespaces point at content stores."
+      },
+      "CopyBehavior": {
+        "type": "string",
+        "description": "Copy behavior for path-oriented copies, mirroring [`PutBehavior`].",
+        "enum": [
+          "no_replace",
+          "replace"
+        ]
       },
       "CreateCheckpointRequest": {
         "type": "object",
@@ -3776,6 +3781,9 @@
               "kind"
             ],
             "properties": {
+              "behavior": {
+                "$ref": "#/components/schemas/CopyBehavior"
+              },
               "from_path": {
                 "type": "string"
               },
@@ -4374,9 +4382,10 @@
       },
       "MoveBehavior": {
         "type": "string",
-        "description": "Move behavior.",
+        "description": "Move behavior for path-oriented moves, mirroring [`PutBehavior`].",
         "enum": [
-          "no_replace"
+          "no_replace",
+          "replace"
         ]
       },
       "NameKey": {

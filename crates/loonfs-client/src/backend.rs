@@ -20,11 +20,11 @@ use crate::{Client, ClientError, MutationOptions, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
-    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
-    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FlushWalResponse, GcRequest,
-    GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    RevisionNo,
+    CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
+    DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
+    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse,
+    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -179,14 +179,14 @@ pub trait Backend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError>;
-    /// Writes a file; `force` replaces existing content. An explicit
-    /// `commit_id` makes the call retryable by resubmission; absent, one is
-    /// generated and returned in the response.
+    /// Writes a file; `behavior` selects create-only or replace semantics.
+    /// An explicit `commit_id` makes the call retryable by resubmission;
+    /// absent, one is generated and returned in the response.
     async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        force: bool,
+        behavior: PutBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Creates a directory.
@@ -201,18 +201,22 @@ pub trait Backend {
         spec: &NamespacePath,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
-    /// Moves a path within a namespace.
+    /// Moves a path within a namespace; `behavior` selects create-only or
+    /// replace semantics for the destination.
     async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: MoveBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
-    /// Copies a file within a namespace.
+    /// Copies a file within a namespace; `behavior` selects create-only or
+    /// replace semantics for the destination.
     async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: CopyBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Restores a file to one of its retained revisions.
@@ -425,13 +429,13 @@ impl Backend for RemoteBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        force: bool,
+        behavior: PutBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let bytes = bytes.to_vec();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.put_file_bytes(&spec, &bytes, force, &options))
+        self.wire(move |client| client.put_file_bytes(&spec, &bytes, behavior, &options))
             .await
     }
 
@@ -461,12 +465,13 @@ impl Backend for RemoteBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: MoveBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let from = from.clone();
         let to = to.clone();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.move_path(&from, &to, &options))
+        self.wire(move |client| client.move_path(&from, &to, behavior, &options))
             .await
     }
 
@@ -474,12 +479,13 @@ impl Backend for RemoteBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: CopyBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let from = from.clone();
         let to = to.clone();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.copy_path(&from, &to, &options))
+        self.wire(move |client| client.copy_path(&from, &to, behavior, &options))
             .await
     }
 

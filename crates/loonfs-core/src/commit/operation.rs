@@ -1,6 +1,5 @@
 //! [`CommitOp`]: the core form of one semantic commit operation.
 
-use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{ContentRef, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +39,6 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
         new_display_name: String,
-        behavior: MoveBehavior,
     },
     DeleteSubtree {
         root_inode_id: InodeId,

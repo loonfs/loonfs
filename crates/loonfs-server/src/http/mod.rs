@@ -237,7 +237,7 @@ fn router(state: AppState) -> Router {
         .route("/v0/namespaces/:namespace/commits", post(commit_operations))
         .route("/v0/namespaces/:namespace/changes", get(list_changes))
         .route(
-            "/v0/admin/namespaces/:namespace/checkpoint",
+            "/v0/admin/namespaces/:namespace/checkpoints",
             post(create_checkpoint),
         )
         .route(

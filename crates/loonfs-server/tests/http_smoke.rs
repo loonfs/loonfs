@@ -8,9 +8,10 @@ use loonfs_api::{
         CompleteUploadRequest, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, CommitResponse,
-    ContentRef, CreateCheckpointResponse, FilesystemOperation, FilesystemOperationRequest, InodeId,
-    InodeKind, ListPathEntriesResponse, ManifestId, NamespaceId, PutBehavior, RevisionNo,
-    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
+    ContentRef, CopyBehavior, CreateCheckpointResponse, FilesystemOperation,
+    FilesystemOperationRequest, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
+    MoveBehavior, NamespaceId, PutBehavior, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -485,7 +486,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             .put_file_bytes(
                 &source,
                 b"hello over http\n",
-                false,
+                PutBehavior::NoReplace,
                 &MutationOptions::default(),
             )
             .expect("initial create");
@@ -493,7 +494,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         match harness.client.put_file_bytes(
             &source,
             b"conflict\n",
-            false,
+            PutBehavior::NoReplace,
             &MutationOptions::default(),
         ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
@@ -505,7 +506,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             .put_file_bytes(
                 &source,
                 b"forced overwrite\n",
-                true,
+                PutBehavior::Replace,
                 &MutationOptions::default(),
             )
             .expect("forced overwrite");
@@ -513,7 +514,12 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         let destination = NamespacePath::parse("demo:/docs/copy.txt").expect("destination");
         harness
             .client
-            .copy_path(&source, &destination, &MutationOptions::default())
+            .copy_path(
+                &source,
+                &destination,
+                CopyBehavior::NoReplace,
+                &MutationOptions::default(),
+            )
             .expect("copy path");
 
         let source_entry = harness.client.stat_path(&source).expect("source stat");
@@ -1012,11 +1018,21 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let target = NamespacePath::parse("demo:/docs/rev.txt").expect("target");
         harness
             .client
-            .put_file_bytes(&target, b"one", false, &MutationOptions::default())
+            .put_file_bytes(
+                &target,
+                b"one",
+                PutBehavior::NoReplace,
+                &MutationOptions::default(),
+            )
             .expect("create file");
         harness
             .client
-            .put_file_bytes(&target, b"two", true, &MutationOptions::default())
+            .put_file_bytes(
+                &target,
+                b"two",
+                PutBehavior::Replace,
+                &MutationOptions::default(),
+            )
             .expect("replace file");
 
         let entry = harness.client.stat_path(&target).expect("stat file");
@@ -1037,7 +1053,12 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
         harness
             .client
-            .move_path(&target, &moved, &MutationOptions::default())
+            .move_path(
+                &target,
+                &moved,
+                MoveBehavior::NoReplace,
+                &MutationOptions::default(),
+            )
             .expect("move path");
         assert!(matches!(
             harness.client.list_file_revisions(&target),
@@ -1335,7 +1356,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             .put_file_bytes(
                 &target,
                 b"stable bytes\n",
-                false,
+                PutBehavior::NoReplace,
                 &MutationOptions::with_commit_id(commit_id),
             )
             .expect("first put");
@@ -1346,7 +1367,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             .put_file_bytes(
                 &target,
                 b"stable bytes\n",
-                false,
+                PutBehavior::NoReplace,
                 &MutationOptions::with_commit_id(commit_id),
             )
             .expect("repeat put");
@@ -1360,7 +1381,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         match harness.client.put_file_bytes(
             &target,
             b"different bytes\n",
-            false,
+            PutBehavior::NoReplace,
             &MutationOptions::with_commit_id(commit_id),
         ) {
             Err(ClientError::Api { code, .. }) => {
@@ -1402,6 +1423,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             .copy_path(
                 &source,
                 &copied,
+                CopyBehavior::NoReplace,
                 &MutationOptions::with_commit_id("req-v1-copy"),
             )
             .expect("copy first");
@@ -1410,6 +1432,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             .copy_path(
                 &source,
                 &copied,
+                CopyBehavior::NoReplace,
                 &MutationOptions::with_commit_id("req-v1-copy"),
             )
             .expect("copy repeat");
@@ -1425,6 +1448,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             .move_path(
                 &copied,
                 &moved,
+                MoveBehavior::NoReplace,
                 &MutationOptions::with_commit_id("req-v1-move"),
             )
             .expect("move first");
@@ -1433,6 +1457,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             .move_path(
                 &copied,
                 &moved,
+                MoveBehavior::NoReplace,
                 &MutationOptions::with_commit_id("req-v1-move"),
             )
             .expect("move repeat");
@@ -1895,7 +1920,12 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         // there is no lease to wait out, only last-writer-wins fencing.
         let host_b_target = NamespacePath::parse("demo:/docs/host-b.txt").expect("host b target");
         let moved = client_b
-            .move_path(&host_a_target, &host_b_target, &MutationOptions::default())
+            .move_path(
+                &host_a_target,
+                &host_b_target,
+                MoveBehavior::NoReplace,
+                &MutationOptions::default(),
+            )
             .expect("host b takes over on first write");
         assert!(
             moved.committed_seq.0 >= 2,
@@ -2036,7 +2066,7 @@ fn post_checkpoint(
     namespace: &str,
 ) -> Result<CreateCheckpointResponse, ApiError> {
     post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoint"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoints"),
         "test-token",
         serde_json::json!({ "name": "nightly" }),
     )

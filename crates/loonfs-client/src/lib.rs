@@ -15,17 +15,17 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, MoveBehavior, ObjectTransferAccess,
-        UploadContentResponse, UploadMode, ValidatedContentToken,
+        CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
+        UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
-    CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
+    CommitId, ContentRef, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorDetails, ErrorKind,
     FilesystemOperation, FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest,
     GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
+    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
     RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
@@ -598,7 +598,7 @@ impl Client {
     ) -> Result<CreateCheckpointResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace}/checkpoint",
+            "{}/v0/admin/namespaces/{namespace}/checkpoints",
             self.base_url
         );
         self.request_json(self.agent.post(&url), Some(request))
@@ -762,7 +762,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        force: bool,
+        behavior: PutBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
@@ -775,11 +775,7 @@ impl Client {
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
                     content_ref: staged.content_ref,
-                    behavior: if force {
-                        PutBehavior::Replace
-                    } else {
-                        PutBehavior::NoReplace
-                    },
+                    behavior,
                 },
             },
         )?;
@@ -792,7 +788,7 @@ impl Client {
         bytes: &[u8],
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
-        self.put_file_bytes(spec, bytes, true, options)
+        self.put_file_bytes(spec, bytes, PutBehavior::Replace, options)
     }
 
     pub fn create_directory(
@@ -855,6 +851,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: MoveBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
@@ -872,7 +869,7 @@ impl Client {
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
-                    behavior: MoveBehavior::NoReplace,
+                    behavior,
                 },
             },
         )?;
@@ -883,6 +880,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+        behavior: CopyBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
@@ -900,6 +898,7 @@ impl Client {
                 operation: FilesystemOperation::CopyPath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
+                    behavior,
                 },
             },
         )?;

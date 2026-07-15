@@ -4,7 +4,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::v0::MoveBehavior;
 use loonfs_api::{
     sha256_digest,
     v0::{
@@ -24,8 +23,9 @@ use loonfs_api::{
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind, ManifestId,
-    NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo, UploadId, WriterEpoch,
+    CopyBehavior, DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind,
+    ManifestId, MoveBehavior, NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo,
+    UploadId, WriterEpoch,
 };
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
@@ -420,6 +420,7 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
             commit_id: test_commit_id(commit_id),
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
+            behavior: CopyBehavior::NoReplace,
         },
         context,
     )
@@ -2576,7 +2577,6 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                     inode_id: file_inode,
                     new_parent_inode_id: docs_inode,
                     new_display_name: "moved.txt".to_owned(),
-                    behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 }],
                 message: None,
             },
@@ -3354,7 +3354,6 @@ async fn explicit_commit_rejects_invalid_display_names() {
                 inode_id: file.inode_id,
                 new_parent_inode_id: InodeId(1),
                 new_display_name: ".".to_owned(),
-                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
             }],
             message: None,
         },
@@ -3403,7 +3402,7 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("move-path").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: loonfs_api::v0::MoveBehavior::NoReplace,
+            behavior: MoveBehavior::NoReplace,
         },
         &context,
     )
@@ -3418,6 +3417,7 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("copy-path").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
+            behavior: CopyBehavior::NoReplace,
         },
         &context,
     )
@@ -3528,7 +3528,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: loonfs_api::v0::MoveBehavior::NoReplace,
+                behavior: MoveBehavior::NoReplace,
             }),
         ],
         &context,
@@ -5902,4 +5902,176 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         .expect_err("file under tombstoned subtree must not resolve");
     resolve_path(&store, &namespace_id(), "/dead")
         .expect_err("tombstoned directory must not resolve");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn move_replace_atomically_replaces_a_file_destination() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"alpha",
+        PutBehavior::NoReplace,
+        &context,
+        Some("put-a"),
+    )
+    .expect("put a");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/b.txt",
+        b"beta",
+        PutBehavior::NoReplace,
+        &context,
+        Some("put-b"),
+    )
+    .expect("put b");
+
+    // The default stays create-only: an occupied destination is a conflict.
+    let error = submit_intent(
+        &store,
+        &namespace_id,
+        PathMutationIntent::MovePath {
+            commit_id: CommitId::parse("move-no-replace").expect("valid commit id"),
+            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            behavior: MoveBehavior::NoReplace,
+        },
+        &context,
+    )
+    .expect_err("no-replace move onto an occupied name fails");
+    assert!(matches!(error, CoreError::DestinationExists(_)));
+
+    // Replace compiles to one commit: the destination file's delete and the
+    // source's rebind land atomically.
+    submit_intent(
+        &store,
+        &namespace_id,
+        PathMutationIntent::MovePath {
+            commit_id: CommitId::parse("move-replace").expect("valid commit id"),
+            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            behavior: MoveBehavior::Replace,
+        },
+        &context,
+    )
+    .expect("replace move");
+
+    let read = read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read destination");
+    assert_eq!(read.bytes, b"alpha");
+    read_file_bytes(&store, &namespace_id, "/docs/a.txt").expect_err("source path is gone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn move_replace_rejects_directory_destinations_and_self_moves() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"alpha",
+        PutBehavior::NoReplace,
+        &context,
+        Some("put-a"),
+    )
+    .expect("put a");
+    create_directory_path(&store, &namespace_id, "/docs/dir", &context, Some("mkdir"))
+        .expect("mkdir");
+
+    // Mirrors put: only a file destination can be replaced.
+    let error = submit_intent(
+        &store,
+        &namespace_id,
+        PathMutationIntent::MovePath {
+            commit_id: CommitId::parse("move-onto-dir").expect("valid commit id"),
+            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/dir").expect("path"),
+            behavior: MoveBehavior::Replace,
+        },
+        &context,
+    )
+    .expect_err("replace move onto a directory fails");
+    assert!(matches!(error, CoreError::ExpectedFile { .. }));
+
+    // A path never replaces itself, force or not.
+    let error = submit_intent(
+        &store,
+        &namespace_id,
+        PathMutationIntent::MovePath {
+            commit_id: CommitId::parse("move-onto-self").expect("valid commit id"),
+            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            behavior: MoveBehavior::Replace,
+        },
+        &context,
+    )
+    .expect_err("replace move onto itself fails");
+    assert!(matches!(error, CoreError::DestinationExists(_)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_replace_appends_a_revision_to_the_destination_inode() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"alpha",
+        PutBehavior::NoReplace,
+        &context,
+        Some("put-a"),
+    )
+    .expect("put a");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/b.txt",
+        b"beta",
+        PutBehavior::NoReplace,
+        &context,
+        Some("put-b"),
+    )
+    .expect("put b");
+    let before = list_file_revisions(&store, &namespace_id, "/docs/b.txt")
+        .expect("destination revisions before");
+
+    submit_intent(
+        &store,
+        &namespace_id,
+        PathMutationIntent::CopyFilePath {
+            commit_id: CommitId::parse("copy-replace").expect("valid commit id"),
+            from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            behavior: CopyBehavior::Replace,
+        },
+        &context,
+    )
+    .expect("replace copy");
+
+    // Mirrors put onto an existing file: the destination keeps its inode and
+    // revision history, gaining one revision with the source's content.
+    let read = read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read destination");
+    assert_eq!(read.bytes, b"alpha");
+    let after = list_file_revisions(&store, &namespace_id, "/docs/b.txt")
+        .expect("destination revisions after");
+    assert_eq!(after.inode_id, before.inode_id);
+    assert_eq!(after.revisions.len(), before.revisions.len() + 1);
+    let source = read_file_bytes(&store, &namespace_id, "/docs/a.txt").expect("source still read");
+    assert_eq!(source.bytes, b"alpha");
 }

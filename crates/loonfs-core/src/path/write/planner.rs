@@ -14,10 +14,10 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest, MoveBehavior,
+        CommitRequest as ApiCommitRequest,
     },
-    AbsolutePath, CommitId, ContentRef, DeleteDirectoryBehavior, DisplayName, InodeId, InodeKind,
-    NameKey, NamespaceId, PutBehavior, RevisionNo,
+    AbsolutePath, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, DisplayName,
+    InodeId, InodeKind, MoveBehavior, NameKey, NamespaceId, PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
@@ -63,6 +63,7 @@ enum PathFingerprintInput {
         namespace_id: NamespaceId,
         from_path: String,
         to_path: String,
+        behavior: CopyBehavior,
     },
     RestoreRevision {
         namespace_id: NamespaceId,
@@ -129,11 +130,15 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             behavior: *behavior,
         },
         PathMutationIntent::CopyFilePath {
-            from_path, to_path, ..
+            from_path,
+            to_path,
+            behavior,
+            ..
         } => PathFingerprintInput::CopyFilePath {
             namespace_id: namespace_id.clone(),
             from_path: from_path.as_str().to_owned(),
             to_path: to_path.as_str().to_owned(),
+            behavior: *behavior,
         },
         PathMutationIntent::RestoreRevision {
             absolute_path,
@@ -198,8 +203,11 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
             ..
         } => plan_publish_move_path(from_path, to_path, *behavior, &commit_id, &view).await?,
         PathMutationIntent::CopyFilePath {
-            from_path, to_path, ..
-        } => plan_publish_copy_file_path(from_path, to_path, &commit_id, &view).await?,
+            from_path,
+            to_path,
+            behavior,
+            ..
+        } => plan_publish_copy_file_path(from_path, to_path, *behavior, &commit_id, &view).await?,
         PathMutationIntent::RestoreRevision {
             absolute_path,
             source_revision_no,
@@ -498,29 +506,62 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     let source = view.metadata_state.resolve_visible_path(from_path).await?;
     let target_parent = publish_resolve_parent_directory(view, to_path).await?;
     let target_name = final_component(to_path)?;
-    match view.metadata_state.resolve_visible_path(to_path).await {
+    // Replace compiles to an atomic delete-plus-rename: the destination
+    // file's delete and the source's rebind land in one commit, and the
+    // rename's target-name check observes the in-commit unbind. Mirrors
+    // put: only a file destination can be replaced, and a path never
+    // replaces itself.
+    let replaced = match view.metadata_state.resolve_visible_path(to_path).await {
+        Ok(existing)
+            if behavior == MoveBehavior::Replace && existing.inode_id != source.inode_id =>
+        {
+            if existing.inode_kind != InodeKind::File {
+                return Err(CoreError::ExpectedFile {
+                    path: to_path.as_str().to_owned(),
+                    kind: existing.inode_kind,
+                });
+            }
+            Some(existing)
+        }
         Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
-        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) if is_missing_visible_path(&error) => None,
         Err(error) => return Err(error),
+    };
+    let mut ops = Vec::new();
+    let mut preconditions = vec![publish_binding_is_precondition(view, &source).await?];
+    match &replaced {
+        Some(existing) => {
+            ops.push(ApiCommitOp::DeleteFile {
+                inode_id: existing.inode_id,
+            });
+            preconditions.push(publish_binding_is_precondition(view, existing).await?);
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: existing.inode_id,
+            });
+        }
+        None => {
+            preconditions.push(publish_child_name_absent_precondition(
+                view,
+                target_parent,
+                &target_name,
+            ));
+        }
     }
+    ops.push(ApiCommitOp::Rename {
+        inode_id: source.inode_id,
+        new_parent_inode_id: target_parent,
+        new_display_name: target_name.clone(),
+    });
+    preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+        inode_id: source.inode_id,
+    });
+    preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+        inode_id: target_parent,
+    });
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::Rename {
-            inode_id: source.inode_id,
-            new_parent_inode_id: target_parent,
-            new_display_name: target_name.clone(),
-            behavior,
-        }],
-        preconditions: vec![
-            publish_binding_is_precondition(view, &source).await?,
-            publish_child_name_absent_precondition(view, target_parent, &target_name),
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: source.inode_id,
-            },
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: target_parent,
-            },
-        ],
+        ops,
+        preconditions,
         message: None,
     })
 }
@@ -528,6 +569,7 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
 async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,
     to_path: &AbsolutePath,
+    behavior: CopyBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -544,11 +586,26 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
         });
     }
 
-    match view.metadata_state.resolve_visible_path(to_path).await {
+    // Replace mirrors put onto an existing file: the copy appends a new
+    // revision to the destination inode, keeping its identity and revision
+    // history. Only a file destination can be replaced, and a path never
+    // replaces itself.
+    let replaced = match view.metadata_state.resolve_visible_path(to_path).await {
+        Ok(existing)
+            if behavior == CopyBehavior::Replace && existing.inode_id != source.inode_id =>
+        {
+            if existing.inode_kind != InodeKind::File {
+                return Err(CoreError::ExpectedFile {
+                    path: to_path.as_str().to_owned(),
+                    kind: existing.inode_kind,
+                });
+            }
+            Some(existing)
+        }
         Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
-        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) if is_missing_visible_path(&error) => None,
         Err(error) => return Err(error),
-    }
+    };
 
     let revision = view
         .metadata_state
@@ -558,27 +615,58 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
 
     let target_parent = publish_resolve_parent_directory(view, to_path).await?;
     let target_name = final_component(to_path)?;
+    let mut ops = Vec::new();
+    let mut preconditions = vec![
+        publish_binding_is_precondition(view, &source).await?,
+        ApiCommitPrecondition::InodeRevisionIs {
+            inode_id: source.inode_id,
+            revision_no: revision.revision_no,
+        },
+        ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+            inode_id: source.inode_id,
+        },
+    ];
+    match &replaced {
+        Some(existing) => {
+            let existing_revision = view
+                .metadata_state
+                .latest_revision_head(existing.inode_id)
+                .await?
+                .ok_or_else(|| CoreError::PathNotFound(to_path.as_str().to_owned()))?;
+            ops.push(ApiCommitOp::ReplaceFile {
+                inode_id: existing.inode_id,
+                base_revision_no: existing_revision.revision_no,
+                content_ref: revision.content_ref,
+            });
+            preconditions.push(publish_binding_is_precondition(view, existing).await?);
+            preconditions.push(ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: existing.inode_id,
+                revision_no: existing_revision.revision_no,
+            });
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: existing.inode_id,
+            });
+        }
+        None => {
+            ops.push(ApiCommitOp::CreateFile {
+                parent_inode_id: target_parent,
+                display_name: target_name.clone(),
+                content_ref: revision.content_ref,
+            });
+            preconditions.push(publish_child_name_absent_precondition(
+                view,
+                target_parent,
+                &target_name,
+            ));
+        }
+    }
+    preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+        inode_id: target_parent,
+    });
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::CreateFile {
-            parent_inode_id: target_parent,
-            display_name: target_name.clone(),
-            content_ref: revision.content_ref,
-        }],
-        preconditions: vec![
-            publish_binding_is_precondition(view, &source).await?,
-            ApiCommitPrecondition::InodeRevisionIs {
-                inode_id: source.inode_id,
-                revision_no: revision.revision_no,
-            },
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: source.inode_id,
-            },
-            publish_child_name_absent_precondition(view, target_parent, &target_name),
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: target_parent,
-            },
-        ],
+        ops,
+        preconditions,
         message: None,
     })
 }
@@ -1003,7 +1091,6 @@ mod tests {
             planned.commit_request.ops.as_slice(),
             [CommitOp::Rename {
                 new_display_name,
-                behavior: MoveBehavior::NoReplace,
                 ..
             }] if new_display_name == "b.txt"
         ));
@@ -1094,6 +1181,7 @@ mod tests {
                 commit_id: CommitId::parse("copy-file").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
+                behavior: CopyBehavior::NoReplace,
             },
         )
         .await;

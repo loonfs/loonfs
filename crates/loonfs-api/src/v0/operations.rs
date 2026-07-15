@@ -4,7 +4,7 @@
 //! shared [`ApiError`] body. Explicit commits and the change feed live in
 //! [`super::commits`]; read-result shapes live in [`super::reads`].
 
-use super::{MoveBehavior, ValidatedContentToken};
+use super::ValidatedContentToken;
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
     WriterEpoch,
@@ -159,6 +159,30 @@ pub enum DeleteDirectoryBehavior {
     Recursive,
 }
 
+/// Move behavior for path-oriented moves, mirroring [`PutBehavior`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MoveBehavior {
+    /// Fail if the destination path already exists.
+    #[default]
+    NoReplace,
+    /// Replace the current file at the destination if one exists.
+    Replace,
+}
+
+/// Copy behavior for path-oriented copies, mirroring [`PutBehavior`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CopyBehavior {
+    /// Fail if the destination path already exists.
+    #[default]
+    NoReplace,
+    /// Replace the current file at the destination if one exists.
+    Replace,
+}
+
 /// One path-oriented filesystem operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -192,7 +216,12 @@ pub enum FilesystemOperation {
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
-    CopyPath { from_path: String, to_path: String },
+    CopyPath {
+        from_path: String,
+        to_path: String,
+        #[serde(default)]
+        behavior: CopyBehavior,
+    },
     /// Restore an older revision as the current revision for a path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
@@ -471,10 +500,6 @@ mod tests {
             serde_json::to_value(DeleteDirectoryBehavior::Recursive).expect("delete behavior json"),
             serde_json::json!("recursive")
         );
-        assert_eq!(
-            serde_json::to_value(MoveBehavior::NoReplace).expect("move behavior json"),
-            serde_json::json!("no_replace")
-        );
     }
 
     #[test]
@@ -506,7 +531,7 @@ mod tests {
         let move_path = FilesystemOperation::MovePath {
             from_path: "/docs/a.txt".to_owned(),
             to_path: "/docs/b.txt".to_owned(),
-            behavior: MoveBehavior::NoReplace,
+            behavior: MoveBehavior::Replace,
         };
         assert_eq!(
             serde_json::to_value(&move_path).expect("move op json"),
@@ -514,7 +539,22 @@ mod tests {
                 "kind": "move_path",
                 "from_path": "/docs/a.txt",
                 "to_path": "/docs/b.txt",
-                "behavior": "no_replace"
+                "behavior": "replace"
+            })
+        );
+
+        let copy_path = FilesystemOperation::CopyPath {
+            from_path: "/docs/a.txt".to_owned(),
+            to_path: "/docs/b.txt".to_owned(),
+            behavior: CopyBehavior::Replace,
+        };
+        assert_eq!(
+            serde_json::to_value(&copy_path).expect("copy op json"),
+            serde_json::json!({
+                "kind": "copy_path",
+                "from_path": "/docs/a.txt",
+                "to_path": "/docs/b.txt",
+                "behavior": "replace"
             })
         );
     }
@@ -564,6 +604,21 @@ mod tests {
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
                 behavior: MoveBehavior::NoReplace,
+            }
+        );
+
+        let copy_path: FilesystemOperation = serde_json::from_value(serde_json::json!({
+            "kind": "copy_path",
+            "from_path": "/docs/a.txt",
+            "to_path": "/docs/b.txt"
+        }))
+        .expect("copy op defaults behavior");
+        assert_eq!(
+            copy_path,
+            FilesystemOperation::CopyPath {
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+                behavior: CopyBehavior::NoReplace,
             }
         );
     }

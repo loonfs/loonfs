@@ -72,12 +72,10 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
             inode_id,
             new_parent_inode_id,
             new_display_name,
-            behavior,
         } => CommitOp::Rename {
             inode_id,
             new_parent_inode_id,
             new_display_name,
-            behavior,
         },
         api_v0::CommitOp::DeleteSubtree { root_inode_id } => {
             CommitOp::DeleteSubtree { root_inode_id }
@@ -188,7 +186,6 @@ mod tests {
                     inode_id: InodeId(2),
                     new_parent_inode_id: InodeId(1),
                     new_display_name: "b.txt".to_owned(),
-                    behavior: loonfs_api::v0::MoveBehavior::NoReplace,
                 },
                 ApiCommitOp::DeleteSubtree {
                     root_inode_id: InodeId(3),

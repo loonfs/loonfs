@@ -4,8 +4,8 @@
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, EffectiveLimit, GcConfig, GcReport, ManifestId,
-    MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
+    ChangeSeq, CommitId, CopyBehavior, DeleteDirectoryBehavior, EffectiveLimit, GcConfig, GcReport,
+    ManifestId, MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
 };
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, GcResponse,
@@ -214,26 +214,19 @@ impl Default for DeleteOptions {
 }
 
 /// Options for moving a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MoveOptions {
-    /// Destination handling behavior.
+    /// Create-only or replace-existing behavior for the destination.
     pub behavior: MoveBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
-impl Default for MoveOptions {
-    fn default() -> Self {
-        Self {
-            behavior: MoveBehavior::NoReplace,
-            commit_id: None,
-        }
-    }
-}
-
 /// Options for copying a file path.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopyOptions {
+    /// Create-only or replace-existing behavior for the destination.
+    pub behavior: CopyBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }

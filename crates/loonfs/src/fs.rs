@@ -1162,6 +1162,7 @@ impl FsCore {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                 to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                behavior: options.behavior,
             },
         )
         .await
@@ -1747,7 +1748,7 @@ fn file_revisions_page_response(
 mod tests {
     use crate::{
         ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, DisplayName, InodeId,
-        MoveBehavior, NameKey, NamePolicy, RevisionNo,
+        NameKey, NamePolicy, RevisionNo,
     };
 
     /// Runs build steps until the index reports up to date, so each call
@@ -1966,7 +1967,6 @@ mod tests {
                     inode_id: InodeId(2),
                     new_parent_inode_id: InodeId(1),
                     new_display_name: "report.txt".to_owned(),
-                    behavior: MoveBehavior::NoReplace,
                 },
             ],
             message: None,

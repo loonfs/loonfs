@@ -65,7 +65,7 @@ fn openapi_documents_current_server_paths() {
         ),
         ("/v0/namespaces/{namespace}/commits", "post"),
         ("/v0/namespaces/{namespace}/changes", "get"),
-        ("/v0/admin/namespaces/{namespace}/checkpoint", "post"),
+        ("/v0/admin/namespaces/{namespace}/checkpoints", "post"),
         ("/v0/admin/namespaces/{namespace}/retention/advance", "post"),
         ("/v0/admin/namespaces/{namespace}/maintenance/tick", "post"),
         ("/v0/admin/namespaces/{namespace}/gc", "post"),

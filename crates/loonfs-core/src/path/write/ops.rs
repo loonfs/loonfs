@@ -8,7 +8,7 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::path::helpers::parse_mutation_path;
 use loonfs_api::{
-    v0::MoveBehavior, CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, NamespaceId,
+    CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, MoveBehavior, NamespaceId,
     PutBehavior, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
