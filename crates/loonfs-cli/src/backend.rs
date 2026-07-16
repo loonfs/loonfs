@@ -312,6 +312,7 @@ impl Backend for EmbeddedBackend {
     async fn create_directory(
         &self,
         spec: &NamespacePath,
+        parents: bool,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
@@ -321,6 +322,7 @@ impl Backend for EmbeddedBackend {
                 &spec.absolute_path,
                 CreateDirectoryOptions {
                     commit_id: commit_id.clone(),
+                    parents,
                 },
             )
         })
@@ -568,6 +570,7 @@ impl ResolvedTarget {
     pub(crate) async fn resolve(
         profile_name: &str,
         profile: &ProfileConfig,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
@@ -586,6 +589,7 @@ impl ResolvedTarget {
                 profile_name,
                 server_url,
                 auth_token.as_ref().map(|token| token.expose()),
+                no_retry,
             )?)),
         }
     }
@@ -662,11 +666,13 @@ impl RemoteTarget {
         _profile_name: &str,
         server_url: &str,
         auth_token: Option<&str>,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         let client = Client::new(ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(ToOwned::to_owned),
             request_timeout_ms: None,
+            disable_transient_retry: no_retry,
         });
         Ok(Self {
             backend: RemoteBackend::new(client),

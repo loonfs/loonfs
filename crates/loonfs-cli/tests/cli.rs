@@ -898,6 +898,86 @@ key_prefix = "../bad"
 }
 
 #[test]
+fn mkdir_parents_get_noclobber_and_version_metadata() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    // mkdir still requires the parent by default; -p creates the chain.
+    let missing_parent = harness.run(&["--json", "mkdir", "/a/b/c"]);
+    assert_failure(&missing_parent);
+    assert_eq!(json_error(&missing_parent)["code"], "path_not_found");
+    let with_parents = harness.run(&["--json", "mkdir", "-p", "/a/b/c"]);
+    assert_success(&with_parents);
+    assert_eq!(json_data(&with_parents)["target"], "demo:/a/b/c");
+    let created_ancestor = harness.run(&["--json", "stat", "/a/b"]);
+    assert_success(&created_ancestor);
+    assert_eq!(json_data(&created_ancestor)["inode_kind"], "dir");
+
+    // get refuses to clobber a local file unless forced.
+    let payload = harness.temp_dir.path().join("f.txt");
+    fs::write(&payload, b"remote bytes").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().unwrap(), "/f.txt"]));
+    let dest = harness.temp_dir.path().join("dest.txt");
+    fs::write(&dest, b"precious local bytes").expect("existing local file");
+    let refused = harness.run(&["--json", "get", "/f.txt", dest.to_str().unwrap()]);
+    assert_failure(&refused);
+    assert_eq!(json_error(&refused)["code"], "destination_exists");
+    assert_eq!(fs::read(&dest).expect("unchanged"), b"precious local bytes");
+    let forced = harness.run(&["--json", "get", "/f.txt", dest.to_str().unwrap(), "--force"]);
+    assert_success(&forced);
+    assert_eq!(fs::read(&dest).expect("replaced"), b"remote bytes");
+
+    // --version is a real flag now, and both forms carry build metadata.
+    assert_success(&harness.run(&["--version"]));
+    let version = harness.run(&["--json", "version"]);
+    assert_success(&version);
+    let data = json_data(&version);
+    assert!(!data["commit"].as_str().expect("commit").is_empty());
+    assert!(!data["commit_date"]
+        .as_str()
+        .expect("commit date")
+        .is_empty());
+}
+
+#[test]
+fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+
+    // Piped stdin (no terminal): the command names the requirement instead
+    // of surfacing the prompt machinery's i/o error.
+    let refused = harness.run(&["--json", "namespace", "delete", "demo"]);
+    assert_failure(&refused);
+    assert_eq!(
+        json_error(&refused)["code"],
+        "non_interactive_input_required"
+    );
+
+    let deleted = harness.run(&["--json", "namespace", "delete", "demo", "--yes"]);
+    assert_success(&deleted);
+}
+
+#[test]
+fn index_enable_runs_a_tick_when_the_index_is_already_enabled() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let enabled = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&enabled);
+    assert!(json_data(&enabled)["backfill_tick"].is_object());
+
+    let retried = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&retried);
+    assert_eq!(json_data(&retried)["already_enabled"], true);
+    assert!(json_data(&retried)["backfill_tick"].is_object());
+}
+
+#[test]
 fn legacy_commands_are_rejected() {
     let harness = Harness::new();
 

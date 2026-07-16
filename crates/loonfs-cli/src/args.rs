@@ -3,11 +3,24 @@
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
 
+/// `loon x.y.z (commit date)`: the string served by both `--version` and
+/// the `version` subcommand, built from the metadata `build.rs` embeds.
+pub(crate) const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("LOON_GIT_COMMIT"),
+    " ",
+    env!("LOON_GIT_COMMIT_DATE"),
+    ")"
+);
+
 #[derive(Debug, Parser)]
-#[command(name = "loon")]
+#[command(name = "loon", version = LONG_VERSION)]
 pub(crate) struct Cli {
+    /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Never prompt; fail instead when input would be required.
     #[arg(long, global = true)]
     pub no_input: bool,
     #[command(subcommand)]
@@ -16,38 +29,59 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Create the config file and a first profile.
     Init(InitArgs),
+    /// Manage connection profiles (embedded stores and remote servers).
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// Create, fork, or delete namespaces.
     Namespace {
         #[command(subcommand)]
         command: NamespaceCommand,
     },
+    /// Set the default namespace for a profile.
     Use(NamespaceUseArgs),
+    /// Show the active profile and its default namespace.
     Current(CurrentArgs),
+    /// List a directory.
     Ls(FilesystemLsArgs),
+    /// Describe one path (kind, size, revision, content digest).
     Stat(FilesystemPathArgs),
+    /// Print a file's content to stdout.
     Cat(FilesystemCatArgs),
+    /// Search file content through the gram index.
     Grep(FilesystemGrepArgs),
+    /// Download a file to a local path (or `-` for stdout).
     Get(FilesystemGetArgs),
+    /// Upload a local file to a namespace path.
     Put(FilesystemPutArgs),
+    /// List a file's revision history, newest first.
     Revisions(FilesystemRevisionsArgs),
+    /// Write a prior revision's content as the file's next revision.
     Restore(FilesystemRestoreArgs),
-    Mkdir(FilesystemPathMutationArgs),
+    /// Create a directory.
+    Mkdir(FilesystemMkdirArgs),
+    /// Delete a file or empty directory.
     Rm(FilesystemPathMutationArgs),
+    /// Move or rename a path.
     Mv(FilesystemTransferArgs),
+    /// Copy a file to another path.
     Cp(FilesystemTransferArgs),
+    /// List committed changes after a sequence number.
     Changes(ChangesArgs),
+    /// Maintenance operations: checkpoints, ticks, retention, GC, indexes.
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
     },
+    /// Inspect the CLI config file.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Print version and build metadata.
     Version,
 }
 
@@ -97,11 +131,17 @@ pub(crate) struct InitArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProfileCommand {
+    /// Add a profile to the config file.
     Create(ProfileCreateArgs),
+    /// List configured profiles.
     List,
+    /// Show one profile (secrets redacted).
     Show { name: Option<String> },
+    /// Update fields of an existing profile.
     Update(ProfileUpdateArgs),
+    /// Remove a profile from the config file.
     Remove { name: String },
+    /// Make a profile the default.
     Use { name: String },
 }
 
@@ -184,8 +224,13 @@ pub(crate) struct ProfileUpdateArgs {
 
 #[derive(Debug, Args, Clone)]
 pub(crate) struct ProfileSelectorArgs {
+    /// Profile to run against (defaults to the configured default profile).
     #[arg(long)]
     pub profile: Option<String>,
+    /// Disable the bounded automatic retry of transient server errors
+    /// (`server_busy`, `commit_queue_full`) in remote mode.
+    #[arg(long)]
+    pub no_retry: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -211,8 +256,11 @@ pub(crate) struct CurrentArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum NamespaceCommand {
+    /// Create a new empty namespace.
     Create(NamespaceCreateArgs),
+    /// Permanently delete a namespace and retire its id.
     Delete(NamespaceDeleteArgs),
+    /// Fork a namespace into a new one; O(1), no bytes copied.
     Fork(NamespaceForkArgs),
 }
 
@@ -270,6 +318,20 @@ pub(crate) struct FilesystemPathMutationArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FilesystemMkdirArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+    /// Create missing parent directories as well.
+    #[arg(short = 'p', long)]
+    pub parents: bool,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemRevisionsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -317,9 +379,15 @@ pub(crate) struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub remote_path: String,
+    /// Local destination (defaults to the remote basename; `-` streams to
+    /// stdout).
     pub local_destination: Option<String>,
+    /// Download this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
+    /// Overwrite the local destination if it already exists.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -378,13 +446,21 @@ pub(crate) struct ChangesArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum AdminCommand {
+    /// Pin the namespace's current state under a named checkpoint.
     Checkpoint(AdminCheckpointArgs),
+    /// Release a checkpoint pin.
     CheckpointRelease(AdminCheckpointReleaseArgs),
+    /// Flush the WAL tail into a durable segment.
     Flush(AdminNamespaceArgs),
+    /// Advance the retention floor to reclaim old history.
     RetentionAdvance(AdminNamespaceArgs),
+    /// Run one maintenance tick (checkpoint, folds, index catch-up).
     Tick(AdminTickArgs),
+    /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
+    /// Enable the gram content index and start its backfill.
     IndexEnable(AdminNamespaceArgs),
+    /// Disable the gram content index.
     IndexDisable(AdminNamespaceArgs),
 }
 
@@ -444,7 +520,9 @@ pub(crate) struct AdminGcArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ConfigCommand {
+    /// Print the config file path.
     Path,
+    /// Print the config file (secrets redacted).
     Show,
 }
 

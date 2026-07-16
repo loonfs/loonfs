@@ -28,15 +28,25 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct CliError {
     pub code: String,
     pub message: String,
+    /// Correlation id the server assigned to the failed request; absent for
+    /// embedded and local failures, which have no server hop.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub request_id: Option<String>,
+    /// Structured context for the code, when the backend carried any.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub details: Option<Box<loonfs_api::ErrorDetails>>,
 }
 
 impl From<loonfs_client::backend::BackendError> for CliError {
     /// Backend failures pass through verbatim: the seam already carries the
-    /// registry or backend-local code and message this CLI reports.
+    /// registry or backend-local code, message, and any server diagnostics
+    /// this CLI reports.
     fn from(error: loonfs_client::backend::BackendError) -> Self {
         Self {
             code: error.code,
             message: error.message,
+            request_id: error.request_id,
+            details: error.details,
         }
     }
 }
@@ -46,6 +56,8 @@ impl CliError {
         Self {
             code: code.into(),
             message: message.into(),
+            request_id: None,
+            details: None,
         }
     }
 

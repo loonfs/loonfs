@@ -4,7 +4,7 @@ use super::context::{fail, validate_namespace_id};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
-    NamespaceForkArgs, NamespaceUseArgs,
+    NamespaceForkArgs, NamespaceUseArgs, RuntimeBehavior,
 };
 use crate::config::save_config;
 use crate::error::CliError;
@@ -17,10 +17,11 @@ use crate::resolve::{load_cli_config, resolve_target_profile, resolve_target_pro
 pub(crate) async fn run_namespace_command(
     kind: CommandKind,
     command: NamespaceCommand,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
         NamespaceCommand::Create(args) => run_namespace_create(kind, args).await,
-        NamespaceCommand::Delete(args) => run_namespace_delete(kind, args).await,
+        NamespaceCommand::Delete(args) => run_namespace_delete(kind, args, runtime).await,
         NamespaceCommand::Fork(args) => run_namespace_fork(kind, args).await,
     }
 }
@@ -30,7 +31,7 @@ async fn run_namespace_create(
     args: NamespaceCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(explicit_profile)
+    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -67,9 +68,10 @@ async fn run_namespace_create(
 async fn run_namespace_delete(
     kind: CommandKind,
     args: NamespaceDeleteArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(explicit_profile)
+    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -83,6 +85,21 @@ async fn run_namespace_delete(
     })?;
 
     if !args.yes {
+        // Without a terminal (or under --no-input / --json) there is no
+        // prompt to answer; say what is required instead of surfacing the
+        // prompt machinery's i/o error.
+        if !runtime.interactive {
+            return Err(fail(
+                kind,
+                Some(resolved.profile_name),
+                Some(mode),
+                CliError::new(
+                    "non_interactive_input_required",
+                    "deleting a namespace requires confirmation: pass --yes, or run \
+                     interactively to confirm at the prompt",
+                ),
+            ));
+        }
         // Deletion is terminal and retires the id; require the operator to
         // type the namespace id back (or pass --yes).
         let typed = prompt_line(&format!(
@@ -137,7 +154,7 @@ async fn run_namespace_fork(
     args: NamespaceForkArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(explicit_profile)
+    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -186,9 +203,10 @@ pub(crate) async fn run_namespace_use(
     let explicit_profile = args.profile.profile.as_deref();
     let mut loaded = load_cli_config()
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
-        .await
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let resolved =
+        resolve_target_profile_from_config(&loaded.config, explicit_profile, args.profile.no_retry)
+            .await
+            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     validate_namespace_id(&args.namespace).map_err(|error| {
         fail(

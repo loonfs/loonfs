@@ -481,9 +481,10 @@ pub(super) async fn filesystem_operation(
         })
     };
     let intent = match operation {
-        FilesystemOperation::CreateDirectory { path } => PathMutationIntent::CreateDir {
+        FilesystemOperation::CreateDirectory { path, parents } => PathMutationIntent::CreateDir {
             commit_id,
             absolute_path: parse_path(&path)?,
+            parents,
         },
         FilesystemOperation::PutFile {
             path,

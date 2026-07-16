@@ -178,11 +178,11 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         let other = NamespacePath::parse("demo:/other").expect("other path");
         harness
             .client
-            .create_directory(&docs, &MutationOptions::default())
+            .create_directory(&docs, false, &MutationOptions::default())
             .expect("create docs dir");
         harness
             .client
-            .create_directory(&other, &MutationOptions::default())
+            .create_directory(&other, false, &MutationOptions::default())
             .expect("create other dir");
         for name in ["a.txt", "b.txt", "c.txt"] {
             let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
@@ -274,7 +274,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
         let docs = NamespacePath::parse("demo:/docs").expect("docs path");
         harness
             .client
-            .create_directory(&docs, &MutationOptions::default())
+            .create_directory(&docs, false, &MutationOptions::default())
             .expect("create docs dir");
         for name in ["B.txt", "a.txt", "c.txt"] {
             let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
@@ -311,7 +311,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         let directory = NamespacePath::parse("demo:/notes").expect("parse directory path");
         harness
             .client
-            .create_directory(&directory, &MutationOptions::default())
+            .create_directory(&directory, false, &MutationOptions::default())
             .expect("create directory");
         let directory_entry = harness
             .client
@@ -1995,6 +1995,7 @@ async fn start_server(config: ServerConfig) -> TestServer {
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         }),
         server_url: format!("http://{}", addr),
         store_root,

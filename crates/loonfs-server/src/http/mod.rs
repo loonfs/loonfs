@@ -553,6 +553,9 @@ fn server_busy_error(what: &str) -> ApiResponseError {
         ErrorCode::ServerBusy,
         &format!("the server is at its concurrency limit for {what}; retry shortly"),
     )
+    // Transfer slots clear in fractions of a second; one second is the
+    // smallest Retry-After HTTP can express.
+    .with_retry_after(1)
 }
 
 fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiResponseError> {

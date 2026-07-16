@@ -19,6 +19,8 @@ pub enum PathMutationIntent {
     CreateDir {
         commit_id: CommitId,
         absolute_path: AbsolutePath,
+        /// Also create missing ancestor directories, like `PutFile` does.
+        parents: bool,
     },
     /// Put one file at a path.
     PutFile {

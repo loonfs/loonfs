@@ -29,17 +29,19 @@ pub(crate) fn load_cli_config() -> Result<LoadedConfig, CliError> {
 
 pub(crate) async fn resolve_target_profile(
     explicit_profile: Option<&str>,
+    no_retry: bool,
 ) -> Result<ResolvedProfile, CliError> {
     let loaded = load_cli_config()?;
-    resolve_target_profile_from_config(&loaded.config, explicit_profile).await
+    resolve_target_profile_from_config(&loaded.config, explicit_profile, no_retry).await
 }
 
 pub(crate) async fn resolve_target_profile_from_config(
     config: &CliConfig,
     explicit_profile: Option<&str>,
+    no_retry: bool,
 ) -> Result<ResolvedProfile, CliError> {
     let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
-    let target = ResolvedTarget::resolve(profile_name, profile).await?;
+    let target = ResolvedTarget::resolve(profile_name, profile, no_retry).await?;
     Ok(ResolvedProfile {
         profile_name: profile_name.to_owned(),
         target,

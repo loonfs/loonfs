@@ -3784,6 +3784,10 @@
                   "create_directory"
                 ]
               },
+              "parents": {
+                "type": "boolean",
+                "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
+              },
               "path": {
                 "type": "string"
               }

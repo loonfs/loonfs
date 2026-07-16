@@ -8,12 +8,13 @@ use super::context::{
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
-    FilesystemPathArgs, FilesystemPathMutationArgs, FilesystemPutArgs, FilesystemRestoreArgs,
-    FilesystemRevisionsArgs, FilesystemTransferArgs, RuntimeBehavior,
+    FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPathMutationArgs, FilesystemPutArgs,
+    FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemTransferArgs, RuntimeBehavior,
 };
 use crate::error::CliError;
 use loonfs_api::{CommitId, CopyBehavior, InodeKind, MoveBehavior, PutBehavior, RevisionNo};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // --- filesystem ---
@@ -25,6 +26,36 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
                 .map_err(|error| CliError::invalid_input(format!("invalid --commit-id: {error}")))
         })
         .transpose()
+}
+
+/// Writes via a same-directory temp file and an atomic rename, so a failed
+/// or interrupted download never leaves a truncated file at the target.
+fn write_local_file_atomically(
+    destination: &Path,
+    bytes: &[u8],
+    force: bool,
+) -> std::io::Result<()> {
+    let file_name = destination
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("destination has no file name"))?;
+    let mut prefix = std::ffi::OsString::from(".");
+    prefix.push(file_name);
+    prefix.push(".loon-partial-");
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    let persisted = if force {
+        temp.persist(destination)
+    } else {
+        temp.persist_noclobber(destination)
+    };
+    persisted.map(|_| ()).map_err(|error| error.error)
 }
 
 pub(crate) async fn run_filesystem_ls(
@@ -117,7 +148,7 @@ pub(crate) async fn run_filesystem_grep(
     };
     let mut matches = Vec::new();
     let mut tail_scanned = true;
-    loop {
+    let (namespace_id, head_seq, built_through_seq) = loop {
         let response = context
             .target
             .backend()
@@ -135,15 +166,25 @@ pub(crate) async fn run_filesystem_grep(
         tail_scanned &= response.tail_scanned;
         match response.next_cursor {
             Some(cursor) => request.cursor = Some(cursor),
-            None => break,
+            None => {
+                // The final page's snapshot describes the completed query.
+                break (
+                    response.namespace_id,
+                    response.head_seq,
+                    response.built_through_seq,
+                );
+            }
         }
-    }
+    };
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::GrepMatches {
             pattern: args.pattern,
+            namespace_id: namespace_id.to_string(),
+            head_seq: head_seq.0,
+            built_through_seq: built_through_seq.0,
             matches,
             tail_scanned,
         },
@@ -261,6 +302,7 @@ pub(crate) async fn run_filesystem_get(
     let data = match args.local_destination.as_deref() {
         Some("-") => CommandData::StreamBytes(bytes),
         other => {
+            let derived_name = other.is_none();
             let destination =
                 destination_path_for_get(&spec.absolute_path, other).map_err(|error| {
                     fail(
@@ -270,12 +312,37 @@ pub(crate) async fn run_filesystem_get(
                         error,
                     )
                 })?;
-            fs::write(&destination, &bytes).map_err(|error| {
+            // The local working copy is the one thing this CLI touches
+            // that has no revision history behind it, so clobbering it is
+            // opt-in. `persist_noclobber` closes the race between checking
+            // and installing the completed temporary file.
+            write_local_file_atomically(&destination, &bytes, args.force).map_err(|error| {
+                if !args.force && error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return fail(
+                        kind,
+                        Some(context.profile_name.clone()),
+                        Some(context.mode.clone()),
+                        CliError::new(
+                            "destination_exists",
+                            format!(
+                                "local file `{}` already exists; pass --force to overwrite",
+                                destination.display()
+                            ),
+                        ),
+                    );
+                }
+                let mut error = CliError::io(error);
+                if derived_name {
+                    error.message.push_str(
+                        "; if the remote name exceeds local filesystem limits, pass an \
+                         explicit destination or `-` for stdout",
+                    );
+                }
                 fail(
                     kind,
                     Some(context.profile_name.clone()),
                     Some(context.mode.clone()),
-                    CliError::io(error),
+                    error,
                 )
             })?;
             CommandData::FileTransfer {
@@ -531,7 +598,7 @@ pub(crate) async fn run_filesystem_restore(
 
 pub(crate) async fn run_filesystem_mkdir(
     kind: CommandKind,
-    args: FilesystemPathMutationArgs,
+    args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
@@ -553,7 +620,7 @@ pub(crate) async fn run_filesystem_mkdir(
     let result = context
         .target
         .backend()
-        .create_directory(&spec, commit_id)
+        .create_directory(&spec, args.parents, commit_id)
         .await
         .map_err(|error| {
             fail(
