@@ -1,11 +1,11 @@
 ---
 name: loon
-description: Use the `loon` CLI (LoonFS) for durable, multiplayer, versioned agent workspaces. Use when the user asks to read, write, list, move, copy, fork, restore, or hand off files stored in Loon; mentions Loon namespaces, shared agent state, durable handoffs, persisted project docs, artifacts that future agents should read, rolling back an agent's changes, branching a workspace for an experiment, or files that are not in the local filesystem but sound like a shared or persistent workspace.
+description: Use the `loon` CLI (LoonFS) for durable, shared, versioned agent workspaces. Use when the user asks to read, write, list, move, copy, fork, restore, or hand off files stored in Loon; mentions Loon namespaces, shared agent state, durable handoffs, persisted project docs, artifacts that future agents should read, rolling back an agent's changes, branching a workspace for an experiment, or files that are not in the local filesystem but sound like a shared or persistent workspace.
 ---
 
 # loon
 
-Use `loon` to give an agent task a durable, versioned, multiplayer workspace. Treat Loon state as shared team and agent state: writes, deletes, restores, and moves are immediately visible to other users and agents with access to the same namespace.
+Use `loon` to give an agent task a durable, versioned, shared workspace. Treat Loon state as shared team and agent state: writes, deletes, restores, and moves are immediately visible to other users and agents with access to the same namespace.
 
 Binary: `loon` on `PATH`. Run `loon help` or `loon <subcommand> --help` if the exact CLI shape is unclear.
 
@@ -37,7 +37,7 @@ Check the CLI is installed with `loon version`. If `loon current --json` reports
 
 2. **Durable / shared setup**. Ask the user for S3/R2 credentials (provider, bucket, region, access key, secret) or a hosted Loon server URL + auth token. Put secrets in the environment, not on the command line (argv lands in shell history): the CLI reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and `LOONFS_AUTH_TOKEN` automatically. Then run `loon profile create <name> --mode embedded --store-kind aws-s3 --bucket ... --region ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ...`). Do not invent credentials.
 
-After init, list or create a namespace: `loon namespace list`, `loon namespace create <namespace_id>`.
+After init, create a namespace with `loon namespace create <namespace_id>`, or use the one the user names.
 
 ## Two canonical patterns
 
@@ -66,7 +66,7 @@ loon get /plans/gtm-q3.md ./gtm-q3.md --namespace <ns>
 loon put ./gtm-q3.md /plans/gtm-q3-marketing-led.md --namespace <ns>
 ```
 
-At session end, surface both paths so the user can compare. To promote the alternate to canonical, `loon mv` it over the original after the user confirms — revision history is preserved. For "I wrote v2 into the original and want to undo," use Pattern B (restore), not a fork.
+At session end, surface both paths so the user can compare. To promote the alternate to canonical after the user confirms, copy it over the original: `loon cp /plans/gtm-q3-marketing-led.md /plans/gtm-q3.md --force`. The copy lands as a new revision of the original file, so the original's full history stays restorable; optionally `loon rm` the alternate afterwards. Do not `mv` over the original — a move replaces the file's identity and makes the original's revision history unreachable. For "I wrote v2 into the original and want to undo," use Pattern B (restore), not a fork.
 
 #### A.2 — Fork the namespace (heavyweight)
 
@@ -80,7 +80,7 @@ loon namespace fork <source_namespace> <source_namespace>-<task_or_agent_id>
 
 After forking, **operate exclusively in the child namespace** — pass `--namespace <child>` on every data command. When the work is done: promote the child (leave it canonical), merge selected files back into the source by `cat` + `put`, or abandon the fork (no cleanup needed; abandoned forks cost nothing in content storage).
 
-For agent fleets where work cannot be cleanly partitioned by path (several agents trying alternate framings of the same artifact): one child namespace per agent. If the fleet's work *can* be partitioned by path (one agent per section of a brief, each writing to its own file), keep them in the same namespace and skip the fork — Loon's multiplayer-by-default model handles non-overlapping concurrent writes.
+For agent fleets: one child namespace per agent. LoonFS is single-writer per namespace — reads are concurrent from anywhere, but only one writer owns a namespace at a time. Writing through a shared Loon server (`--mode remote`) is safe for any number of parallel agents because the server is the writer and serializes their commits; in embedded mode each CLI process is the writer, so parallel embedded writes to one namespace fail with `writer_fenced`. Forks avoid the contention in every mode.
 
 ### Pattern B — Restore on failure
 
@@ -97,7 +97,7 @@ For multi-file rollbacks: repeat per path. If the scope is large (more than ~5 f
 
 ## Namespace discipline
 
-Pick the namespace from the task subject, not from the current working directory — the user may be in one repo while asking about a different workspace. If the namespace is ambiguous, run `loon namespace list --json` to surface options or ask the user. Do not fall back to the active default.
+Pick the namespace from the task subject, not from the current working directory — the user may be in one repo while asking about a different workspace. If the namespace is ambiguous, ask the user — namespaces are addressed by id and there is no listing command. Do not fall back to the active default.
 
 Always pass `--namespace <ns>` explicitly on every data command. The active default (`loon current`) is shared local profile state that another terminal or agent can change. Do not run `loon use <ns>` from this skill unless the user explicitly asks to change the default.
 
@@ -118,12 +118,14 @@ loon get       <remote> <local> --namespace <ns> [--revision <n>]
 # write
 loon put       <local>  <remote> --namespace <ns> [--force]
 loon mkdir     <dir>    --namespace <ns>
-loon mv        <src>    <dst>    --namespace <ns>
-loon cp        <src>    <dst>    --namespace <ns>
+loon mv        <src>    <dst>    --namespace <ns> [--force]
+loon cp        <src>    <dst>    --namespace <ns> [--force]
 loon rm        <path>   --namespace <ns>
 ```
 
-**Before any destructive operation** (`put` over an existing path, `mv`, `cp`, `rm`, `restore`): run `loon stat` first, show the user the current size and revision, and ask before proceeding. `--force` on `put` requires explicit user confirmation. Revisions survive `rm`, so accidental deletes can be recovered via Pattern B.
+**Safe retries.** Every write accepts `--commit-id <id>`. When a write fails in an uncertain way (timeout, `server_busy`, killed process), retry it with the same commit id and identical arguments: a retry of a commit that already landed returns the original result instead of writing twice, and a reused id with different content fails with `commit_id_reuse_conflict`. Generate one id per logical write (for example `c-$(uuidgen)`) and hold it across attempts.
+
+**Before any destructive operation** (`put` over an existing path, `mv`, `cp`, `rm`, `restore`): run `loon stat` first, show the user the current size and revision, and ask before proceeding. `--force` requires explicit user confirmation. Treat `rm` — and `mv --force` over an existing file — as permanent: the deleted or replaced file's revision history stops being reachable from its path, and there is no undelete.
 
 For generated artifacts, prefer clear paths:
 

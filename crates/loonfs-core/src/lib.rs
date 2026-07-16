@@ -46,6 +46,7 @@
 //!     vec![NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
 //!         commit_id: CommitId::generate(),
 //!         absolute_path: AbsolutePath::parse("/plans").expect("path"),
+//!         parents: false,
 //!     })],
 //!     &context,
 //! );
@@ -128,5 +129,7 @@ pub use timing::{MonotonicTimer, StdMonotonicTimer};
 
 /// Grep page-limit defaults, advertised through the capability document.
 pub mod grep_limits {
-    pub use crate::path::read::{DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT};
+    pub use crate::path::read::{
+        DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
+    };
 }

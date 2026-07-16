@@ -4,7 +4,7 @@
 
 use super::error::ApiResponseError;
 use super::handlers_uploads::{content_admissions_for_put, current_unix_ms};
-use super::{authorize, AppJson, AppState, NamespaceIdPath};
+use super::{authorize, AppJson, AppState, CommitAppJson, NamespaceIdPath};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -481,9 +481,10 @@ pub(super) async fn filesystem_operation(
         })
     };
     let intent = match operation {
-        FilesystemOperation::CreateDirectory { path } => PathMutationIntent::CreateDir {
+        FilesystemOperation::CreateDirectory { path, parents } => PathMutationIntent::CreateDir {
             commit_id,
             absolute_path: parse_path(&path)?,
+            parents,
         },
         FilesystemOperation::PutFile {
             path,
@@ -591,6 +592,7 @@ pub(super) async fn filesystem_operation(
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Commit conflict", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Commit body exceeds the advertised `commit.max_body_bytes` limit", body = ApiError),
             (status = 503, description = "Commit unavailable", body = ApiError)
         )
     )
@@ -598,10 +600,8 @@ pub(super) async fn filesystem_operation(
 pub(super) async fn commit_operations(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
-    AppJson(request): AppJson<ApiCommitRequest>,
+    CommitAppJson(request): CommitAppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let commit_id = request.commit_id.clone();
     let response = state

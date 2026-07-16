@@ -190,7 +190,13 @@ pub enum CopyBehavior {
 pub enum FilesystemOperation {
     /// Create one directory.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
-    CreateDirectory { path: String },
+    CreateDirectory {
+        path: String,
+        /// Also create missing ancestor directories (the same auto-create
+        /// `put_file` performs). The final component must still be new.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        parents: bool,
+    },
     /// Create or replace one file with an already-durable content ref.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpPutFile"))]
     PutFile {
@@ -510,12 +516,27 @@ mod tests {
     fn filesystem_delete_and_move_operations_use_behavior_field() {
         let create_directory = FilesystemOperation::CreateDirectory {
             path: "/docs".to_owned(),
+            parents: false,
         };
         assert_eq!(
             serde_json::to_value(&create_directory).expect("create directory op json"),
             serde_json::json!({
                 "kind": "create_directory",
                 "path": "/docs"
+            })
+        );
+
+        let create_directory_with_parents = FilesystemOperation::CreateDirectory {
+            path: "/docs/notes".to_owned(),
+            parents: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&create_directory_with_parents)
+                .expect("create directory with parents op json"),
+            serde_json::json!({
+                "kind": "create_directory",
+                "path": "/docs/notes",
+                "parents": true
             })
         );
 

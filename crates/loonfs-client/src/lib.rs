@@ -47,7 +47,23 @@ pub struct ClientConfig {
     /// transfers are not cut off while a stalled connection still fails.
     #[serde(default)]
     pub request_timeout_ms: Option<u64>,
+    /// Disables the bounded automatic retry of quick-clearing transient
+    /// server errors (`server_busy`, `commit_queue_full`). Off by default:
+    /// every request the client sends is idempotent to resend — mutations
+    /// carry their commit id in the body, staging repeats are recognized —
+    /// so retrying is safe.
+    #[serde(default)]
+    pub disable_transient_retry: bool,
 }
+
+/// Cap on attempts for transient-error retry: one initial try plus three
+/// retries, sleeping with doubling backoff in between.
+const MAX_TRANSIENT_ATTEMPTS: u32 = 4;
+/// First transient-retry sleep; doubles per retry up to
+/// [`MAX_TRANSIENT_RETRY_DELAY`].
+const INITIAL_TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+/// Ceiling for one transient-retry sleep.
+const MAX_TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Socket read/write inactivity timeout applied to every request. A
 /// connection that makes no progress for this long fails instead of hanging
@@ -60,6 +76,9 @@ pub struct Client {
     base_url: String,
     auth_token: Option<String>,
     agent: ureq::Agent,
+    /// Whether transient server errors are retried (see
+    /// [`ClientConfig::disable_transient_retry`]).
+    transient_retry: bool,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,
 }
@@ -149,6 +168,23 @@ impl ClientError {
     }
 }
 
+/// Deterministic doubling, the same shape as the object-store transport
+/// retry: workspace policy avoids ambient randomness, and a bounded
+/// per-request retry does not need jitter.
+fn transient_retry_backoff(attempt: u32) -> std::time::Duration {
+    let doublings = attempt.saturating_sub(1).min(16);
+    INITIAL_TRANSIENT_RETRY_DELAY
+        .saturating_mul(1u32 << doublings)
+        .min(MAX_TRANSIENT_RETRY_DELAY)
+}
+
+/// The blocking client waits an isolated OS timer between attempts; there
+/// is no async runtime on this call path to time against.
+#[allow(clippy::disallowed_methods)]
+fn transient_retry_pause(backoff: std::time::Duration) {
+    std::thread::sleep(backoff);
+}
+
 /// Coarse status-class fallback for error codes this build does not know.
 fn kind_for_status_class(status: u16) -> Option<ErrorKind> {
     match status {
@@ -233,6 +269,7 @@ impl Client {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             agent: agent.build(),
+            transient_retry: !config.disable_transient_retry,
             capabilities: Arc::new(OnceLock::new()),
         }
     }
@@ -318,25 +355,44 @@ impl Client {
     }
 
     pub fn list_path(&self, spec: &NamespacePath) -> Result<ListPathEntriesResponse, ClientError> {
-        let mut entries = Vec::new();
-        let mut envelope = None;
-        let mut cursor = None;
-        loop {
-            let page = self.list_path_page(spec, None, cursor.as_deref())?;
-            let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
-                namespace_id: page.namespace_id.clone(),
-                absolute_path: page.absolute_path.clone(),
-                head_seq: page.head_seq,
-                entries: Vec::new(),
-                next_cursor: None,
-            });
-            entries.extend(page.entries);
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                // Pages arrive in canonical name-key order; concatenation
-                // preserves it, so aggregation must not re-sort.
-                envelope_ref.entries = entries;
-                return Ok(envelope.expect("first page initializes response envelope"));
+        // A commit landing between pages retires the cursor with
+        // `rebootstrap_required`; aggregation restarts from a fresh first
+        // page instead of surfacing the mid-listing race. Bounded so a
+        // write-hot namespace cannot pin this loop forever.
+        const MAX_LISTING_RESTARTS: u32 = 3;
+        let mut restarts = 0;
+        'restart: loop {
+            let mut entries = Vec::new();
+            let mut envelope = None;
+            let mut cursor = None;
+            loop {
+                let page = match self.list_path_page(spec, None, cursor.as_deref()) {
+                    Ok(page) => page,
+                    Err(error)
+                        if cursor.is_some()
+                            && restarts < MAX_LISTING_RESTARTS
+                            && error.error_code() == Some(ErrorCode::RebootstrapRequired) =>
+                    {
+                        restarts += 1;
+                        continue 'restart;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
+                    namespace_id: page.namespace_id.clone(),
+                    absolute_path: page.absolute_path.clone(),
+                    head_seq: page.head_seq,
+                    entries: Vec::new(),
+                    next_cursor: None,
+                });
+                entries.extend(page.entries);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    // Pages arrive in canonical name-key order; concatenation
+                    // preserves it, so aggregation must not re-sort.
+                    envelope_ref.entries = entries;
+                    return Ok(envelope.expect("first page initializes response envelope"));
+                }
             }
         }
     }
@@ -531,9 +587,9 @@ impl Client {
         let request = self
             .authenticated(self.agent.put(&url))
             .set("content-type", "application/octet-stream");
-        let response = request
-            .send_bytes(bytes)
-            .map_err(|err| self.map_error(err))?;
+        // Proxied uploads are the request most likely to hit the server's
+        // concurrency cap; staging the same bytes again is idempotent.
+        let response = self.call_with_transient_retry(&request, Some(bytes))?;
         serde_json::from_reader(response.into_reader())
             .map_err(|err| ClientError::Json(err.to_string()))
     }
@@ -794,6 +850,7 @@ impl Client {
     pub fn create_directory(
         &self,
         spec: &NamespacePath,
+        parents: bool,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
@@ -804,6 +861,7 @@ impl Client {
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::CreateDirectory {
                     path: spec.absolute_path.clone(),
+                    parents,
                 },
             },
         )?;
@@ -984,8 +1042,15 @@ impl Client {
     {
         let request = self.authenticated(request);
         let response = match body {
-            Some(body) => request.send_json(body).map_err(|err| self.map_error(err))?,
-            None => request.call().map_err(|err| self.map_error(err))?,
+            Some(body) => {
+                // Serialized once: every retry attempt resends identical
+                // bytes under the same commit id.
+                let bytes =
+                    serde_json::to_vec(body).map_err(|err| ClientError::Json(err.to_string()))?;
+                let request = request.set("content-type", "application/json");
+                self.call_with_transient_retry(&request, Some(&bytes))?
+            }
+            None => self.call_with_transient_retry(&request, None)?,
         };
         serde_json::from_reader(response.into_reader())
             .map_err(|err| ClientError::Json(err.to_string()))
@@ -993,12 +1058,49 @@ impl Client {
 
     fn request_bytes(&self, url: &str) -> Result<Vec<u8>, ClientError> {
         let request = self.authenticated(self.agent.get(url));
-        let response = request.call().map_err(|err| self.map_error(err))?;
+        let response = self.call_with_transient_retry(&request, None)?;
         let mut reader = response.into_reader();
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut reader, &mut bytes)
             .map_err(|err| ClientError::Io(err.to_string()))?;
         Ok(bytes)
+    }
+
+    /// Sends one request, resending on quick-clearing transient errors
+    /// (`server_busy`, `commit_queue_full`) with doubling backoff, bounded
+    /// by [`MAX_TRANSIENT_ATTEMPTS`]. Resending is safe for every request
+    /// this client issues: mutation bodies carry their commit id (replayed,
+    /// never double-committed) and staging repeats are recognized by the
+    /// server. Other unavailability codes are excluded on purpose —
+    /// `maintenance_required` and `index_lagging` clear on a maintenance
+    /// tick, not on a resend.
+    fn call_with_transient_retry(
+        &self,
+        request: &ureq::Request,
+        body: Option<&[u8]>,
+    ) -> Result<ureq::Response, ClientError> {
+        let mut attempts = 0;
+        loop {
+            let outcome = match body {
+                Some(bytes) => request.clone().send_bytes(bytes),
+                None => request.clone().call(),
+            };
+            let error = match outcome {
+                Ok(response) => return Ok(response),
+                Err(error) => self.map_error(error),
+            };
+            attempts += 1;
+            let transient = matches!(
+                &error,
+                ClientError::Api { code, .. }
+                    if code == ErrorCode::ServerBusy.as_str()
+                        || code == ErrorCode::CommitQueueFull.as_str()
+            );
+            if !self.transient_retry || !transient || attempts >= MAX_TRANSIENT_ATTEMPTS {
+                return Err(error);
+            }
+            transient_retry_pause(transient_retry_backoff(attempts));
+        }
     }
 
     fn authenticated(&self, request: ureq::Request) -> ureq::Request {
@@ -1268,6 +1370,7 @@ auth_token = "   "
             server_url: "http://127.0.0.1:9".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
+            disable_transient_retry: false,
         });
 
         for result in [

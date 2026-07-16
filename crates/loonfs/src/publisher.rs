@@ -1544,6 +1544,7 @@ mod tests {
         let path = NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("path-trace").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/private/path").expect("path"),
+            parents: false,
         });
 
         assert_eq!(operation_class(&commit), "explicit_commit");

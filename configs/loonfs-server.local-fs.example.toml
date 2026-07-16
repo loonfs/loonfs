@@ -24,6 +24,12 @@ writer_version = "loonfs-server/0.1.0"
 # as the `download.max_content_bytes` capability limit. Defaults to 256 MiB.
 #max_download_bytes = 268435456
 
+# Largest JSON body the commits endpoint accepts, in bytes. Commit bodies
+# are metadata only (file bytes ride uploads), so over-limit commits should
+# be split into smaller batches. Advertised to clients as the
+# `commit.max_body_bytes` capability limit. Defaults to 8 MiB.
+#max_commit_body_bytes = 8388608
+
 # How many proxied upload bodies / content reads the server will hold in
 # memory at once; requests past a cap answer 503 `server_busy`. Worst-case
 # transfer memory is the count cap times the matching byte cap.

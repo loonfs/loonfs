@@ -24,7 +24,9 @@ pub(crate) struct CommandFailure {
     pub kind: CommandKind,
     pub profile: Option<String>,
     pub mode: Option<String>,
-    pub error: CliError,
+    /// Boxed to keep `Result<CommandOutput, CommandFailure>` small now that
+    /// [`CliError`] carries request diagnostics (clippy `result_large_err`).
+    pub error: Box<CliError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -55,7 +57,13 @@ pub(crate) enum CommandData {
     RetentionAdvanced(AdvanceRetentionResponse),
     MaintenanceTicked(MaintenanceTickResponse),
     GarbageCollected(GcResponse),
-    GramsIndexEnabled(EnableGramsIndexResponse),
+    GramsIndexEnabled {
+        #[serde(flatten)]
+        enabled: EnableGramsIndexResponse,
+        /// The maintenance tick this command ran to start the backfill;
+        /// absent when the index was already enabled.
+        backfill_tick: Option<MaintenanceTickResponse>,
+    },
     GramsIndexDisabled(DisableGramsIndexResponse),
     Changes(ChangesResponse),
     PathEntries {
@@ -64,6 +72,12 @@ pub(crate) enum CommandData {
     PathEntry(AuthoritativePathEntry),
     GrepMatches {
         pattern: String,
+        namespace_id: String,
+        /// Namespace head the final page was evaluated against.
+        head_seq: u64,
+        /// Index watermark: content committed at or below this sequence is
+        /// searchable through the index.
+        built_through_seq: u64,
         matches: Vec<GrepMatch>,
         tail_scanned: bool,
     },
@@ -101,6 +115,10 @@ pub(crate) enum CommandData {
     },
     Version {
         version: String,
+        /// Git commit the binary was built from ("unknown" without git).
+        commit: String,
+        /// Commit date of that commit ("unknown" without git).
+        commit_date: String,
     },
     StreamBytes(Vec<u8>),
 }

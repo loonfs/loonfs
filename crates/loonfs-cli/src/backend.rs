@@ -34,23 +34,93 @@ pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
-/// admin handle. Embedded CLI writes stay `ManualOnly` — a one-shot command
-/// never schedules background maintenance; `loon admin` commands are the
-/// explicit maintenance path.
+/// admin handle. The embedded writer runs `FsBackgroundWork::Enabled` — the
+/// same policy as the reference server — so a publish that crosses the WAL
+/// threshold schedules its own maintenance tick, and every mutation settles
+/// scheduled work before the one-shot process exits. A publish gated on
+/// `maintenance_required` waits for the tick that same gated publish
+/// scheduled, then resubmits, so embedded writes recover from WAL debt
+/// instead of hard-stopping. `loon admin` commands remain the explicit path
+/// for everything else (GC, retention, forced ticks).
 pub(crate) struct EmbeddedBackend {
     writer: FsWriter,
     reader: FsReader,
     admin: FsAdmin,
 }
 
+/// How many times a gated publish resubmits after settling the maintenance
+/// tick it scheduled. One recovery is the normal case; the second covers a
+/// tick that raced another writer's debt. Past that the error surfaces.
+const MAX_MAINTENANCE_RECOVERIES: usize = 2;
+
+impl EmbeddedBackend {
+    /// Waits out writer-scheduled maintenance so a one-shot command never
+    /// exits (tearing down the runtime) while a tick is mid-flight. A settle
+    /// failure after a committed mutation is reported as a warning on
+    /// stderr, never as the mutation's outcome — the commit landed.
+    async fn settle_background_work_after<T>(
+        &self,
+        result: Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        match (result, self.writer.wait_for_background_work().await) {
+            (result, Ok(())) => result,
+            (Ok(value), Err(error)) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: background maintenance did not settle cleanly: {error}"
+                );
+                Ok(value)
+            }
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
+
+    /// Runs one mutation with `maintenance_required` recovery: a gated
+    /// publish observes the oversized WAL tail and schedules its own
+    /// recovery tick (the writer policy is `Enabled`), so settle that tick
+    /// and resubmit. A gated attempt commits nothing, so the resubmission
+    /// cannot double-apply.
+    async fn publish_with_maintenance_recovery<T, F, Fut>(
+        &self,
+        namespace: &str,
+        attempt: F,
+    ) -> Result<T, BackendError>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, RuntimeError>>,
+    {
+        let mut result = attempt().await;
+        for _ in 0..MAX_MAINTENANCE_RECOVERIES {
+            let gated = matches!(
+                &result,
+                Err(RuntimeError::Core(error))
+                    if matches!(error.code(), ErrorCode::MaintenanceRequired)
+            );
+            if !gated {
+                break;
+            }
+            self.writer
+                .wait_for_background_work()
+                .await
+                .map_err(map_runtime_error)?;
+            result = attempt().await;
+        }
+        let result = result.map_err(|error| map_namespace_scoped_runtime_error(namespace, error));
+        self.settle_background_work_after(result).await
+    }
+}
+
 #[async_trait]
 impl Backend for EmbeddedBackend {
     async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
         let namespace_id = parse_namespace_id(namespace_id)?;
-        self.writer
+        let result = self
+            .writer
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
-            .map_err(map_runtime_error)
+            .map_err(map_runtime_error);
+        self.settle_background_work_after(result).await
     }
 
     async fn delete_namespace(
@@ -62,10 +132,12 @@ impl Backend for EmbeddedBackend {
         let options = DeleteNamespaceOptions {
             expected_head_seq: expected_head_seq.map(ChangeSeq),
         };
-        self.writer
+        let result = self
+            .writer
             .delete_namespace(&namespace_id, options)
             .await
-            .map_err(map_runtime_error)
+            .map_err(map_runtime_error);
+        self.settle_background_work_after(result).await
     }
 
     async fn fork_namespace(
@@ -75,10 +147,12 @@ impl Backend for EmbeddedBackend {
     ) -> Result<NamespaceSummary, BackendError> {
         let source_namespace_id = parse_namespace_id(source)?;
         let new_namespace_id = parse_namespace_id(new_namespace_id)?;
-        self.writer
+        let result = self
+            .writer
             .fork_namespace(&source_namespace_id, &new_namespace_id)
             .await
-            .map_err(map_runtime_error)
+            .map_err(map_runtime_error);
+        self.settle_background_work_after(result).await
     }
 
     async fn namespace_status(
@@ -202,18 +276,18 @@ impl Backend for EmbeddedBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.writer
-            .put_file_bytes(
+        self.publish_with_maintenance_recovery(&spec.namespace, || {
+            self.writer.put_file_bytes(
                 &namespace_id,
                 &spec.absolute_path,
                 bytes,
                 PutFileOptions {
                     behavior,
-                    commit_id,
+                    commit_id: commit_id.clone(),
                 },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        })
+        .await
     }
 
     async fn delete_path(
@@ -222,33 +296,37 @@ impl Backend for EmbeddedBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.writer
-            .delete_path(
+        self.publish_with_maintenance_recovery(&spec.namespace, || {
+            self.writer.delete_path(
                 &namespace_id,
                 &spec.absolute_path,
                 DeleteOptions {
                     behavior: DeleteDirectoryBehavior::NonRecursive,
-                    commit_id,
+                    commit_id: commit_id.clone(),
                 },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        })
+        .await
     }
 
     async fn create_directory(
         &self,
         spec: &NamespacePath,
+        parents: bool,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.writer
-            .create_directory(
+        self.publish_with_maintenance_recovery(&spec.namespace, || {
+            self.writer.create_directory(
                 &namespace_id,
                 &spec.absolute_path,
-                CreateDirectoryOptions { commit_id },
+                CreateDirectoryOptions {
+                    commit_id: commit_id.clone(),
+                    parents,
+                },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        })
+        .await
     }
 
     async fn move_path(
@@ -259,18 +337,18 @@ impl Backend for EmbeddedBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
-        self.writer
-            .move_path(
+        self.publish_with_maintenance_recovery(&from.namespace, || {
+            self.writer.move_path(
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 MoveOptions {
                     behavior,
-                    commit_id,
+                    commit_id: commit_id.clone(),
                 },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
+        })
+        .await
     }
 
     async fn copy_path(
@@ -281,18 +359,18 @@ impl Backend for EmbeddedBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
-        self.writer
-            .copy_path(
+        self.publish_with_maintenance_recovery(&from.namespace, || {
+            self.writer.copy_path(
                 &namespace_id,
                 &from.absolute_path,
                 &to.absolute_path,
                 CopyOptions {
                     behavior,
-                    commit_id,
+                    commit_id: commit_id.clone(),
                 },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
+        })
+        .await
     }
 
     async fn restore_file_revision(
@@ -302,15 +380,17 @@ impl Backend for EmbeddedBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.writer
-            .restore_file_revision(
+        self.publish_with_maintenance_recovery(&spec.namespace, || {
+            self.writer.restore_file_revision(
                 &namespace_id,
                 &spec.absolute_path,
                 source_revision_no,
-                RestoreRevisionOptions { commit_id },
+                RestoreRevisionOptions {
+                    commit_id: commit_id.clone(),
+                },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        })
+        .await
     }
 
     async fn undelete(
@@ -508,6 +588,7 @@ impl ResolvedTarget {
     pub(crate) async fn resolve(
         profile_name: &str,
         profile: &ProfileConfig,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
@@ -526,6 +607,7 @@ impl ResolvedTarget {
                 profile_name,
                 server_url,
                 auth_token.as_ref().map(|token| token.expose()),
+                no_retry,
             )?)),
         }
     }
@@ -568,7 +650,11 @@ impl EmbeddedTarget {
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
             .writer_version(writer_version.clone())
-            .background_work(FsBackgroundWork::ManualOnly)
+            // The server's policy: publishes past the WAL threshold schedule
+            // their own tick. The backend settles scheduled work after each
+            // mutation, so a one-shot command exits with maintenance done
+            // rather than stalling at the WAL backpressure cap.
+            .background_work(FsBackgroundWork::Enabled)
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
@@ -598,11 +684,13 @@ impl RemoteTarget {
         _profile_name: &str,
         server_url: &str,
         auth_token: Option<&str>,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         let client = Client::new(ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(ToOwned::to_owned),
             request_timeout_ms: None,
+            disable_transient_retry: no_retry,
         });
         Ok(Self {
             backend: RemoteBackend::new(client),
@@ -611,14 +699,19 @@ impl RemoteTarget {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::{map_bootstrap_error, map_core_error, Backend, EmbeddedTarget};
     use crate::config::StoreConfig;
-    use loonfs::{BootstrapNamespaceError, CoreError, ErrorCode};
+    use loonfs::{
+        BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
+        FsWriter, PutFileOptions, RuntimeError, SharedObjectStore,
+    };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, InodeId, NamespaceId, PutBehavior, RevisionNo,
     };
     use loonfs_client::NamespacePath;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[test]
@@ -722,5 +815,121 @@ mod tests {
             .expect_err("changes on missing namespace");
         assert_eq!(changes.code, ErrorCode::NamespaceNotFound.as_str());
         assert_eq!(changes.message, "namespace `missing` does not exist");
+    }
+
+    #[tokio::test]
+    async fn embedded_writes_never_stall_at_the_wal_backpressure_cap() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let store = StoreConfig::LocalFs {
+            root: temp_dir.path().display().to_string(),
+            key_prefix: None,
+        };
+        let target = EmbeddedTarget::new(&store, None, None)
+            .await
+            .expect("build embedded target");
+        target
+            .backend
+            .create_namespace("demo")
+            .await
+            .expect("create namespace");
+
+        // More publishes than the WAL backpressure cap: the Enabled policy
+        // must keep ticking the tail down so no write ever stalls on
+        // `maintenance_required` (each stall used to require a manual
+        // `loon admin tick`).
+        for index in 0..140 {
+            target
+                .backend
+                .put_file_bytes(
+                    &NamespacePath {
+                        namespace: "demo".to_owned(),
+                        absolute_path: format!("/files/f{index}.txt"),
+                    },
+                    b"payload",
+                    PutBehavior::NoReplace,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("put {index} failed: {} {}", error.code, error.message)
+                });
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_writes_recover_from_preexisting_wal_debt() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let store_config = StoreConfig::LocalFs {
+            root: temp_dir.path().display().to_string(),
+            key_prefix: None,
+        };
+
+        // Accumulate WAL debt the way pre-fix builds did: a ManualOnly
+        // writer publishes until the backpressure gate refuses the next
+        // publish outright.
+        let store: SharedObjectStore = Arc::new(
+            store_config
+                .configured_object_store()
+                .expect("configure store"),
+        );
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("debt-builder")
+            .writer_version("test")
+            .background_work(FsBackgroundWork::ManualOnly)
+            .min_publish_interval_ms(0)
+            .build()
+            .await
+            .expect("build debt writer");
+        let namespace = NamespaceId::parse("demo").expect("namespace id");
+        writer
+            .create_namespace(&namespace, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let mut stalled = false;
+        for index in 0..200 {
+            let result = writer
+                .put_file_bytes(
+                    &namespace,
+                    &format!("/files/f{index}.txt"),
+                    b"payload",
+                    PutFileOptions {
+                        behavior: PutBehavior::NoReplace,
+                        commit_id: None,
+                    },
+                )
+                .await;
+            match result {
+                Ok(_) => {}
+                Err(RuntimeError::Core(error))
+                    if matches!(error.code(), ErrorCode::MaintenanceRequired) =>
+                {
+                    stalled = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected stall error: {error}"),
+            }
+        }
+        assert!(stalled, "ManualOnly writer never hit the backpressure cap");
+
+        // The embedded backend digs itself out: the gated publish schedules
+        // its own tick, the backend settles it and resubmits.
+        let target = EmbeddedTarget::new(&store_config, None, None)
+            .await
+            .expect("build embedded target");
+        target
+            .backend
+            .put_file_bytes(
+                &NamespacePath {
+                    namespace: "demo".to_owned(),
+                    absolute_path: "/recovered.txt".to_owned(),
+                },
+                b"payload",
+                PutBehavior::NoReplace,
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("recovery put failed: {} {}", error.code, error.message)
+            });
     }
 }

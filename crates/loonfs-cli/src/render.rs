@@ -80,6 +80,9 @@ pub(crate) fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Res
         stderr.write_all(b"\n")?;
     } else {
         stderr.write_all(failure.error.message.as_bytes())?;
+        if let Some(request_id) = &failure.error.request_id {
+            stderr.write_all(format!(" (request id: {request_id})").as_bytes())?;
+        }
         stderr.write_all(b"\n")?;
     }
     Ok(())
@@ -274,11 +277,21 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        CommandData::GramsIndexEnabled(response) => {
+        CommandData::GramsIndexEnabled {
+            enabled: response,
+            backfill_tick,
+        } => {
             if response.already_enabled {
                 format!(
-                    "gram index already enabled on {} (built through seq {})",
+                    "gram index already enabled on {} (built through seq {}); ran a maintenance \
+                     tick to continue the backfill",
                     response.namespace_id, response.built_through_seq.0
+                )
+            } else if backfill_tick.is_some() {
+                format!(
+                    "gram index enabled on {}; ran a maintenance tick to start the \
+                     backfill (later ticks continue it)",
+                    response.namespace_id
                 )
             } else {
                 format!(
@@ -298,6 +311,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             pattern,
             matches,
             tail_scanned,
+            ..
         } => {
             let mut lines: Vec<String> = matches
                 .iter()
@@ -403,7 +417,11 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::ConfigShow { config } => {
             toml::to_string_pretty(config).unwrap_or_else(|_| "failed to render config".to_owned())
         }
-        CommandData::Version { version } => version.clone(),
+        CommandData::Version {
+            version,
+            commit,
+            commit_date,
+        } => format!("{version} ({commit} {commit_date})"),
         CommandData::StreamBytes(_) => String::new(),
     }
 }
@@ -467,9 +485,9 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),
             mode: Some("remote".to_owned()),
-            error: CliError::from(crate::backend::BackendError::client_error(
+            error: Box::new(CliError::from(crate::backend::BackendError::client_error(
                 "connection refused",
-            )),
+            ))),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
             &json_error(&failure).expect("json error renders")

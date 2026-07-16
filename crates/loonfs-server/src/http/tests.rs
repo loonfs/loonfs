@@ -196,6 +196,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
+        disable_transient_retry: false,
     });
     tokio::task::spawn_blocking(move || {
         client
@@ -580,6 +581,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
                 server_url: format!("http://{addr}"),
                 auth_token,
                 request_timeout_ms: None,
+                disable_transient_retry: false,
             });
             assert_api_error(
                 client.namespace_status("demo"),
@@ -616,6 +618,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         });
         let target = NamespacePath::parse("demo:/big.bin").expect("target");
         assert_api_error(
@@ -657,11 +660,225 @@ async fn capability_document_advertises_the_upload_limit() {
                 .copied(),
             Some(256 * 1024 * 1024)
         );
+        // Every limit a request can trip is discoverable: transfer
+        // concurrency, the commit-body cap, and the grep scan budgets.
+        assert_eq!(
+            capabilities.limits.get("upload.max_concurrent").copied(),
+            Some(8)
+        );
+        assert_eq!(
+            capabilities.limits.get("download.max_concurrent").copied(),
+            Some(16)
+        );
+        assert_eq!(
+            capabilities.limits.get("commit.max_body_bytes").copied(),
+            Some(8 * 1024 * 1024)
+        );
+        assert_eq!(
+            capabilities
+                .limits
+                .get("query.grep.scan_budget_files")
+                .copied(),
+            Some(4096)
+        );
+        assert_eq!(
+            capabilities
+                .limits
+                .get("query.grep.tail_budget_files")
+                .copied(),
+            Some(512)
+        );
     })
     .await
     .expect("join blocking task");
 
     harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_unknown_routes_and_methods_answer_in_envelope() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let config = test_config(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    tokio::task::spawn_blocking(move || {
+        // Unknown path: in-envelope 404 instead of axum's empty body.
+        let error = ureq::get(&format!("http://{addr}/v0/nonexistent"))
+            .call()
+            .expect_err("unknown route should answer 404");
+        let ureq::Error::Status(status, response) = error else {
+            panic!("expected a status error for an unknown route");
+        };
+        assert_eq!(status, 404);
+        assert!(response.header("x-request-id").is_some());
+        let body = response.into_string().expect("read 404 body");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("json 404 body");
+        assert_eq!(body["code"], "route_not_found");
+
+        // Served path, unserved method: in-envelope 405.
+        let error = ureq::delete(&format!("http://{addr}/v0/config"))
+            .call()
+            .expect_err("wrong method should answer 405");
+        let ureq::Error::Status(status, response) = error else {
+            panic!("expected a status error for a wrong method");
+        };
+        assert_eq!(status, 405);
+        let body = response.into_string().expect("read 405 body");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("json 405 body");
+        assert_eq!(body["code"], "method_not_allowed");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_commit_body_over_the_limit_answers_content_too_large() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_commit_body_bytes = 1024;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    tokio::task::spawn_blocking(move || {
+        // The limit rejects on size before any parsing, so an oversized
+        // JSON-shaped body is enough to exercise it.
+        let oversized = format!(r#"{{"filler":"{}"}}"#, "d".repeat(4096));
+        let error = ureq::post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+            .set("content-type", "application/json")
+            .send_string(&oversized)
+            .expect_err("unauthorized commit should fail before buffering");
+        let ureq::Error::Status(status, _) = error else {
+            panic!("expected a status error for an unauthorized commit");
+        };
+        assert_eq!(status, 401);
+
+        let error = ureq::post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string(&oversized)
+            .expect_err("over-limit commit body should answer 413");
+        let ureq::Error::Status(status, response) = error else {
+            panic!("expected a status error for an over-limit commit body");
+        };
+        assert_eq!(status, 413);
+        let body = response.into_string().expect("read 413 body");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("json 413 body");
+        assert_eq!(body["code"], "content_too_large");
+        let message = body["message"].as_str().expect("message string");
+        assert!(
+            message.contains("commit.max_body_bytes"),
+            "413 guidance should name the commit-body limit, got: {message}"
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let fs = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/file.txt",
+        b"one",
+        "c-rev1",
+    )
+    .await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/file.txt",
+        b"two",
+        "c-rev2",
+    )
+    .await;
+
+    let config = test_config(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let cursor = tokio::task::spawn_blocking({
+        move || {
+            let response = ureq::get(&format!(
+                "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+            ))
+            .set("authorization", "Bearer test-token")
+            .query("path", "/notes/file.txt")
+            .query("limit", "1")
+            .call()
+            .expect("first revisions page");
+            let body = response.into_string().expect("read revisions body");
+            let body: serde_json::Value = serde_json::from_str(&body).expect("json revisions");
+            body["next_cursor"]
+                .as_str()
+                .expect("two revisions produce a next_cursor")
+                .to_owned()
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    // Any commit advances the head and retires outstanding cursors.
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/other.txt",
+        b"x",
+        "c-rev3",
+    )
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let error = ureq::get(&format!(
+            "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+        ))
+        .set("authorization", "Bearer test-token")
+        .query("path", "/notes/file.txt")
+        .query("limit", "1")
+        .query("cursor", &cursor)
+        .call()
+        .expect_err("stale cursor should answer rebootstrap_required");
+        let ureq::Error::Status(status, response) = error else {
+            panic!("expected a status error for a stale cursor");
+        };
+        assert_eq!(status, 409);
+        let body = response.into_string().expect("read stale-cursor body");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("json stale-cursor body");
+        assert_eq!(body["code"], "rebootstrap_required");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -694,6 +911,9 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
+        // These tests assert the raw concurrency-cap answer; the client's
+        // transient retry would otherwise sleep through it.
+        disable_transient_retry: true,
     };
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
@@ -716,6 +936,56 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         client
             .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
             .expect("a freed slot admits the upload");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_concurrent_uploads = 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let held = state
+        .upload_permits
+        .clone()
+        .try_acquire_owned()
+        .expect("hold the only upload slot");
+    // Free the slot while the client sleeps between attempts: the first
+    // try answers server_busy, a later retry lands. An isolated timer is
+    // the point of this test — it exercises the client's real backoff.
+    #[allow(clippy::disallowed_methods)]
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(held);
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+        });
+        let target = NamespacePath::parse("demo:/retried.bin").expect("target");
+        client
+            .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
+            .expect("transient retry rides out the briefly full slot");
     })
     .await
     .expect("join blocking task");
@@ -759,6 +1029,9 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
+        // These tests assert the raw concurrency-cap answer; the client's
+        // transient retry would otherwise sleep through it.
+        disable_transient_retry: true,
     };
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
@@ -826,6 +1099,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         });
         assert_api_error(
             client.read_file_bytes(&NamespacePath::parse("demo:/big.bin").expect("target")),
@@ -1022,6 +1296,7 @@ async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestH
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         }),
         server,
     }
@@ -1051,6 +1326,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,
+        max_commit_body_bytes: 8 * 1024 * 1024,
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,

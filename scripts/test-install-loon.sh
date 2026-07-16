@@ -5,6 +5,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 version=$(cargo pkgid -p loonfs-cli | sed 's/.*#//')
 target="${LOONFS_TEST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
+expected_version="$version ($(git -C "$repo_root" rev-parse --short=12 HEAD) $(git -C "$repo_root" show -s --format=%cs HEAD))"
 
 tmpdir=$(mktemp -d)
 cleanup() {
@@ -53,8 +54,8 @@ pinned_install_dir="$tmpdir/install-pinned"
 LOONFS_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --install-dir "$latest_install_dir"
 LOONFS_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$pinned_install_dir"
 
-"$latest_install_dir/loon" version | grep -Fx "$version" >/dev/null
-"$pinned_install_dir/loon" version | grep -Fx "$version" >/dev/null
+"$latest_install_dir/loon" version | grep -Fx "$expected_version" >/dev/null
+"$pinned_install_dir/loon" version | grep -Fx "$expected_version" >/dev/null
 
 printf '0000000000000000000000000000000000000000000000000000000000000000  loon-%s.tar.gz\n' "$target" > "$pinned_dir/SHA256SUMS"
 expect_failure "checksum failure" \

@@ -31,7 +31,8 @@ use loonfs_api::{
     EnableGramsIndexResponse, FileRevision, FileRevisionsPageCursor, GrepRequest, GrepResponse,
     Page, PageRequest, PaginationPolicy, UploadId, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, PROFILE_ADMIN_V0,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_ADMIN_V0,
     PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
@@ -288,6 +289,14 @@ impl FsCore {
                 limits.insert(
                     LIMIT_QUERY_GREP_MAX.to_owned(),
                     loonfs_core::grep_limits::MAX_GREP_PAGE_LIMIT as u64,
+                );
+                limits.insert(
+                    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES.to_owned(),
+                    loonfs_core::grep_limits::MAX_GREP_SCAN_FILES as u64,
+                );
+                limits.insert(
+                    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES.to_owned(),
+                    loonfs_core::grep_limits::MAX_GREP_TAIL_FILES as u64,
                 );
                 limits
             },
@@ -1115,6 +1124,7 @@ impl FsCore {
             PathMutationIntent::CreateDir {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                parents: options.parents,
             },
         )
         .await

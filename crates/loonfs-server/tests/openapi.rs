@@ -111,6 +111,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "CommitOpDeleteFile",
                 "CommitOpRename",
                 "CommitOpDeleteSubtree",
+                "CommitOpUndelete",
             ][..],
         ),
         (
@@ -131,6 +132,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "CommitDeltaUnbindDirentry",
                 "CommitDeltaAppendFileRevision",
                 "CommitDeltaTombstoneSubtree",
+                "CommitDeltaClearSubtreeTombstone",
             ][..],
         ),
         (
@@ -141,6 +143,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FsOpDeletePath",
                 "FsOpMovePath",
                 "FsOpCopyPath",
+                "FsOpUndelete",
                 "FsOpRestoreRevision",
             ][..],
         ),
