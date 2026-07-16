@@ -626,7 +626,7 @@ The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
 Revision listing endpoints return newest revisions first and use the same
-`limit` / `cursor` pattern as directory and namespace listing. Path-based
+`limit` / `cursor` pattern as directory listing. Path-based
 revision listing resolves the current path to its current inode, while inode
 revision listing is stable across later renames. Responses include
 `next_cursor` only when another page is available.

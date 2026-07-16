@@ -1,4 +1,4 @@
-# Loon — durable, multiplayer, versioned agent workspaces
+# Loon — durable, shared, versioned agent workspaces
 
 > Drop-in `AGENTS.md` snippet for any tool that follows the [agents.md](https://agents.md) convention (Codex, Aider, OpenHands, GitHub Copilot, Gemini CLI, Devin, Windsurf, Zed, Factory, Jules, VS Code, and others). Append this block to an existing `AGENTS.md`, or use this file as-is.
 
@@ -9,7 +9,7 @@
 - **Namespaces** — isolated, versioned workspaces backed by object storage.
 - **O(1) forks** — branch a namespace when multiple files or agents would otherwise collide; no byte copy.
 - **Per-file revision history + restore** — roll back any path to any prior revision.
-- **Multiplayer-by-default** — multiple agents and humans can read and write the same namespace concurrently.
+- **Shared by default** — every agent and human with access to a namespace sees the same committed files, and any number of clients can read concurrently. Writes go through a single writer per namespace (see the fleet note under Pattern A).
 
 Binary: `loon` on `PATH`. Run `loon help` or `loon <subcommand> --help` for exact shapes.
 
@@ -36,7 +36,7 @@ If `loon current --json` reports no configured profile:
   ```
 - **Shared / cross-machine setup**: ask the user for S3 / R2 credentials or a hosted Loon server URL + auth token; do not invent them. Put secrets in the environment, not on the command line (argv lands in shell history): the CLI reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and `LOONFS_AUTH_TOKEN` automatically. Then run `loon profile create <name> --mode embedded --store-kind aws-s3 --bucket ... --region ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ...`).
 
-Create or pick a namespace: `loon namespace list`, `loon namespace create <id>`.
+Create a namespace with `loon namespace create <id>`, or use the one the user names. Namespaces are addressed by id — there is no listing command; if the target namespace is ambiguous, ask the user.
 
 ## Pattern A — Branch your work
 
@@ -48,7 +48,7 @@ Before a risky, exploratory, or parallel edit, give the work an isolated branch.
 
 **A.1 — Sibling filename (lightweight).** One agent iterating on one artifact. Keep the original at its current path; write the alternate to a clearly-named sibling. No fork, no `--namespace` change.
 
-Examples: `/plans/gtm-q3.md` stays; alternate at `/plans/gtm-q3-marketing-led.md`. Or `/proposals/acme-rev3.md` alongside `/proposals/acme-rev2.md`. At session end, surface both paths so the user can compare and pick. To promote the alternate to canonical, `loon mv` it over the original after confirming — revision history is preserved. For "undo a write to the original," use Pattern B (restore), not a fork.
+Examples: `/plans/gtm-q3.md` stays; alternate at `/plans/gtm-q3-marketing-led.md`. Or `/proposals/acme-rev3.md` alongside `/proposals/acme-rev2.md`. At session end, surface both paths so the user can compare and pick. To promote the alternate to canonical after the user confirms, copy it over the original: `loon cp <alternate> <canonical> --force`. The copy lands as a new revision of the original file, so the original's full history stays restorable; optionally `loon rm` the alternate afterwards. Do not `mv` over the original — a move replaces the file's identity and makes the original's revision history unreachable. For "undo a write to the original," use Pattern B (restore), not a fork.
 
 **A.2 — Fork the namespace (heavyweight).** Multi-file artifacts that cross-reference each other (plan + appendices, design doc + diagrams), or multi-agent fleets that would collide on overlapping paths.
 
@@ -58,7 +58,7 @@ loon namespace fork <source_namespace> <source_namespace>-<task_or_agent_id>
 
 `fork` is O(1) and does not copy bytes. Operate exclusively in the child namespace by passing `--namespace <child>` on every command. Good child namespace names: `gtm-q3-marketing-led`, `rfc-billing-event-sourced`, `acme-proposal-rev3`, `brief-2026-06-04-agent-a`.
 
-For agent fleets where work can be partitioned cleanly by path (one agent per section of a brief, each writing its own file), keep them in the same namespace and skip the fork — Loon handles non-overlapping concurrent writes natively.
+A note on fleets: LoonFS is single-writer per namespace. Reads are concurrent from anywhere, but only one writer owns a namespace at a time. Writing through a shared Loon server (`--mode remote`) is safe for any number of parallel agents — the server is the writer and serializes their commits. In embedded mode each CLI process is the writer, so parallel embedded writes to one namespace fail with `writer_fenced`; give each embedded agent its own fork instead.
 
 ## Pattern B — Restore on failure
 
@@ -85,7 +85,7 @@ loon cp /docs/a.md /archive/a.md --namespace <ns>
 loon rm /docs/old.md --namespace <ns>
 ```
 
-Use `--json` for parseable commands (`ls`, `stat`, `revisions`, `profile list`, `namespace list`, `current`). Do not combine `--json` with streaming output (`cat`, `get -`).
+Use `--json` for parseable commands (`ls`, `stat`, `revisions`, `profile list`, `current`). Do not combine `--json` with streaming output (`cat`, `get -`).
 
 ## Writes — inspect first
 
@@ -93,7 +93,12 @@ Before `put` over an existing path, or before `rm`, `mv`, `cp`, `restore`:
 
 1. `loon stat <path> --namespace <ns> --json` to see size and revision.
 2. Show the user; ask before overwriting / deleting / moving.
-3. Only pass `--force` to `put` after explicit user confirmation.
+3. Only pass `--force` after explicit user confirmation.
+4. Treat `rm` — and `mv --force` over an existing file — as permanent: the deleted or replaced file's revision history stops being reachable from its path. There is no undelete.
+
+## Safe retries
+
+Every write accepts `--commit-id <id>`. When a write fails in an uncertain way (timeout, `server_busy`, killed process), retry it with the same commit id and identical arguments: a retry of a commit that already landed returns the original result instead of writing twice, and a reused id with different content fails with `commit_id_reuse_conflict`. Generate one id per logical write (for example `c-$(uuidgen)`) and hold it across attempts.
 
 After writing, report both the path and the namespace — for example, `Wrote /plans/gtm-q3.md in namespace gtm-2026`.
 
@@ -101,6 +106,6 @@ After writing, report both the path and the namespace — for example, `Wrote /p
 
 - Never upload secrets, credentials, `.env` files, tokens, or private keys.
 - Ask before uploading customer data unless the namespace is already approved for that data.
-- Report failed Loon commands explicitly (command intent, namespace, path, error summary); do not silently retry.
+- Report failed Loon commands explicitly (command intent, namespace, path, error summary); if you retry, reuse the same `--commit-id` (see Safe retries).
 - For risky changes (>5 writes, bulk edits, deletes), branch first (sibling filename or fork, per the Pattern A decision rule) rather than editing in place.
 - Do not use Loon for source-code edits. Use the local filesystem and git for code; use Loon for docs, plans, briefs, RFCs, proposals, postmortems.
