@@ -41,6 +41,7 @@ enum PathFingerprintInput {
     CreateDir {
         namespace_id: NamespaceId,
         absolute_path: String,
+        parents: bool,
     },
     PutFile {
         namespace_id: NamespaceId,
@@ -94,9 +95,14 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
     intent: &PathMutationIntent,
 ) -> Result<PathIntentFingerprint, CoreError> {
     let identity = match intent {
-        PathMutationIntent::CreateDir { absolute_path, .. } => PathFingerprintInput::CreateDir {
+        PathMutationIntent::CreateDir {
+            absolute_path,
+            parents,
+            ..
+        } => PathFingerprintInput::CreateDir {
             namespace_id: namespace_id.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
+            parents: *parents,
         },
         PathMutationIntent::PutFile {
             absolute_path,
@@ -173,9 +179,11 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
         metadata_state,
     };
     let commit_request = match intent {
-        PathMutationIntent::CreateDir { absolute_path, .. } => {
-            plan_publish_create_directory(absolute_path, &commit_id, &view).await?
-        }
+        PathMutationIntent::CreateDir {
+            absolute_path,
+            parents,
+            ..
+        } => plan_publish_create_directory(absolute_path, *parents, &commit_id, &view).await?,
         PathMutationIntent::PutFile {
             absolute_path,
             content_ref,
@@ -321,6 +329,7 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
 
 async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
+    parents: bool,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -339,20 +348,42 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
     }
-    let parent_inode_id = publish_resolve_parent_directory(view, absolute_path).await?;
+    let mut ops = Vec::new();
+    let parent_inode_id = if parents {
+        // The same ancestor auto-create the put-file plan performs.
+        let mut next_inode_id = view.head.next_inode_id;
+        publish_ensure_parent_directories(absolute_path, view, &mut ops, &mut next_inode_id).await?
+    } else {
+        publish_resolve_parent_directory(view, absolute_path).await?
+    };
     let display_name = final_component(absolute_path)?;
+    ops.push(ApiCommitOp::CreateDirectory {
+        parent_inode_id,
+        display_name: display_name.clone(),
+    });
+    // A parent allocated by this same commit cannot have conflicting
+    // children yet, so the name and ancestor preconditions only apply when
+    // the parent already exists — mirroring the put-file plan.
+    let mut preconditions = Vec::new();
+    if view
+        .metadata_state
+        .visible_inode(parent_inode_id)
+        .await?
+        .is_some()
+    {
+        preconditions.push(publish_child_name_absent_precondition(
+            view,
+            parent_inode_id,
+            &display_name,
+        ));
+        preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+            inode_id: parent_inode_id,
+        });
+    }
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::CreateDirectory {
-            parent_inode_id,
-            display_name: display_name.clone(),
-        }],
-        preconditions: vec![
-            publish_child_name_absent_precondition(view, parent_inode_id, &display_name),
-            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: parent_inode_id,
-            },
-        ],
+        ops,
+        preconditions,
         message: None,
     })
 }
@@ -852,6 +883,7 @@ mod tests {
         let intent = PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("c_00000000000000000000000000000042").expect("commit id"),
             absolute_path: AbsolutePath::parse("/docs").expect("path"),
+            parents: false,
         };
 
         let fingerprint =
@@ -859,7 +891,11 @@ mod tests {
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:09720e44df06757059ecba380849fc1e35ec24b5f34603b9588492fa4a323453"
+            // Updated pre-release when `CreateDir` gained the `parents`
+            // semantic parameter (no deployed namespaces hold the prior
+            // value); post-release this literal only moves with a scheme
+            // tag bump.
+            "v0:sha256:06414b716b076c98e7a61e465ae729b2340045c133437a557c76902d73a5f33b"
         );
     }
 
@@ -920,6 +956,7 @@ mod tests {
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs//a/").expect("path"),
+                parents: false,
             },
         )
         .expect("left fingerprint");
@@ -928,6 +965,7 @@ mod tests {
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-b").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
+                parents: false,
             },
         )
         .expect("right fingerprint");
@@ -943,6 +981,7 @@ mod tests {
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs").expect("path"),
+                parents: false,
             },
         )
         .expect("baseline fingerprint");
@@ -951,6 +990,7 @@ mod tests {
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-drafts").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/drafts").expect("path"),
+                parents: false,
             },
         )
         .expect("changed fingerprint");
@@ -966,6 +1006,7 @@ mod tests {
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs").expect("path"),
+                parents: false,
             },
         )
         .expect("path fingerprint");
@@ -995,6 +1036,7 @@ mod tests {
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs").expect("path"),
+                parents: false,
             },
         )
         .await;

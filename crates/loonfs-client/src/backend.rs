@@ -22,9 +22,9 @@ use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
     CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
-    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
+    ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -49,6 +49,11 @@ pub struct BackendError {
     pub code: String,
     /// Human-readable description of the failure.
     pub message: String,
+    /// Correlation id the server assigned to the failed request. Always
+    /// `None` for embedded and local failures, which have no server hop.
+    pub request_id: Option<String>,
+    /// Structured context for the code, when the transport carried any.
+    pub details: Option<Box<ErrorDetails>>,
 }
 
 impl BackendError {
@@ -57,6 +62,8 @@ impl BackendError {
         Self {
             code: code.into(),
             message: message.into(),
+            request_id: None,
+            details: None,
         }
     }
 
@@ -106,7 +113,18 @@ impl From<ClientError> for BackendError {
                 Self::new(ErrorCode::InvalidRequest.as_str(), message)
             }
             ClientError::Http(message) | ClientError::Json(message) => Self::client_error(message),
-            ClientError::Api { code, message, .. } => Self::new(code, message),
+            ClientError::Api {
+                code,
+                message,
+                request_id,
+                details,
+                ..
+            } => Self {
+                code,
+                message,
+                request_id,
+                details,
+            },
             ClientError::Io(message) => Self::io_error(format!("i/o error: {message}")),
         }
     }
@@ -189,10 +207,11 @@ pub trait Backend {
         behavior: PutBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
-    /// Creates a directory.
+    /// Creates a directory; `parents` also creates missing ancestors.
     async fn create_directory(
         &self,
         spec: &NamespacePath,
+        parents: bool,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Deletes a file or empty directory.
@@ -442,11 +461,12 @@ impl Backend for RemoteBackend {
     async fn create_directory(
         &self,
         spec: &NamespacePath,
+        parents: bool,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.create_directory(&spec, &options))
+        self.wire(move |client| client.create_directory(&spec, parents, &options))
             .await
     }
 

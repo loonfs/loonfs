@@ -10,6 +10,8 @@ use loonfs_api::{ApiError, CommitId, ErrorDetails, NamespaceId, NamespaceIdValid
 pub(super) struct ApiResponseError {
     status: StatusCode,
     body: ApiError,
+    /// Emitted as a `Retry-After` header, for retryable capacity errors.
+    retry_after_seconds: Option<u32>,
 }
 
 impl ApiResponseError {
@@ -23,6 +25,7 @@ impl ApiResponseError {
                 request_id: None,
                 details: None,
             },
+            retry_after_seconds: None,
         }
     }
 
@@ -36,7 +39,16 @@ impl ApiResponseError {
                 request_id: None,
                 details: None,
             },
+            retry_after_seconds: None,
         }
+    }
+
+    /// Stamps a `Retry-After` hint onto the response, HTTP's native shape
+    /// for "come back shortly" so generic clients and proxies pace
+    /// themselves too.
+    pub(super) fn with_retry_after(mut self, seconds: u32) -> Self {
+        self.retry_after_seconds = Some(seconds);
+        self
     }
 
     /// Stamps the mutation's idempotency key into the error details, so a
@@ -155,6 +167,14 @@ impl IntoResponse for ApiResponseError {
         // rendered outside a request scope (tests constructing errors
         // directly) simply omits it.
         self.body.request_id = super::REQUEST_ID.try_with(|id| id.clone()).ok();
-        (self.status, Json(self.body)).into_response()
+        let mut response = (self.status, Json(self.body)).into_response();
+        if let Some(seconds) = self.retry_after_seconds {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }

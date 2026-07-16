@@ -196,6 +196,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
+        disable_transient_retry: false,
     });
     tokio::task::spawn_blocking(move || {
         client
@@ -580,6 +581,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
                 server_url: format!("http://{addr}"),
                 auth_token,
                 request_timeout_ms: None,
+                disable_transient_retry: false,
             });
             assert_api_error(
                 client.namespace_status("demo"),
@@ -616,6 +618,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         });
         let target = NamespacePath::parse("demo:/big.bin").expect("target");
         assert_api_error(
@@ -694,6 +697,9 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
+        // These tests assert the raw concurrency-cap answer; the client's
+        // transient retry would otherwise sleep through it.
+        disable_transient_retry: true,
     };
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
@@ -716,6 +722,56 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         client
             .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
             .expect("a freed slot admits the upload");
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let mut config = test_config(temp_dir.path(), "server-writer");
+    config.max_concurrent_uploads = 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (router, state) = app_with_store_and_state(config, store)
+        .await
+        .expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    let held = state
+        .upload_permits
+        .clone()
+        .try_acquire_owned()
+        .expect("hold the only upload slot");
+    // Free the slot while the client sleeps between attempts: the first
+    // try answers server_busy, a later retry lands. An isolated timer is
+    // the point of this test — it exercises the client's real backoff.
+    #[allow(clippy::disallowed_methods)]
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(held);
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+        });
+        let target = NamespacePath::parse("demo:/retried.bin").expect("target");
+        client
+            .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
+            .expect("transient retry rides out the briefly full slot");
     })
     .await
     .expect("join blocking task");
@@ -759,6 +815,9 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
+        // These tests assert the raw concurrency-cap answer; the client's
+        // transient retry would otherwise sleep through it.
+        disable_transient_retry: true,
     };
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
@@ -826,6 +885,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         });
         assert_api_error(
             client.read_file_bytes(&NamespacePath::parse("demo:/big.bin").expect("target")),
@@ -1022,6 +1082,7 @@ async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestH
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         }),
         server,
     }

@@ -300,6 +300,7 @@ async fn start_server(config: ServerConfig) -> TestServer {
             server_url: server_url.clone(),
             auth_token: Some(AUTH_TOKEN.to_owned()),
             request_timeout_ms: None,
+            disable_transient_retry: false,
         }),
         server_url,
         server,

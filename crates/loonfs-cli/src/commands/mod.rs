@@ -23,7 +23,7 @@ pub(crate) async fn run(
             kind,
             profile: None,
             mode: None,
-            error: crate::error::CliError::json_not_supported_for_streaming(),
+            error: Box::new(crate::error::CliError::json_not_supported_for_streaming()),
         });
     }
 
@@ -34,12 +34,16 @@ pub(crate) async fn run(
             mode: None,
             data: CommandData::Version {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                commit: env!("LOON_GIT_COMMIT").to_owned(),
+                commit_date: env!("LOON_GIT_COMMIT_DATE").to_owned(),
             },
         }),
         Command::Init(args) => config::run_config_init(kind, args, runtime),
         Command::Config { command } => config::run_config_command(kind, command),
         Command::Profile { command } => profile::run_profile_command(kind, command, runtime),
-        Command::Namespace { command } => namespace::run_namespace_command(kind, command).await,
+        Command::Namespace { command } => {
+            namespace::run_namespace_command(kind, command, runtime).await
+        }
         Command::Use(args) => namespace::run_namespace_use(kind, args).await,
         Command::Current(args) => namespace::run_namespace_current(kind, args).await,
         Command::Ls(args) => fs::run_filesystem_ls(kind, args).await,

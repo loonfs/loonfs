@@ -1115,6 +1115,7 @@ impl FsCore {
             PathMutationIntent::CreateDir {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                parents: options.parents,
             },
         )
         .await

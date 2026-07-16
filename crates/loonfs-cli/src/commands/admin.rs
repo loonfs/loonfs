@@ -247,11 +247,38 @@ async fn run_admin_index_enable(
                 error,
             )
         })?;
+    // A freshly enabled index is only queryable once maintenance builds it;
+    // kick the first tick here instead of leaving search unavailable until
+    // someone discovers `loon admin tick`. A tick failure surfaces as the
+    // command's failure — the enable itself persisted, so rerunning is safe
+    // and retries the tick.
+    let backfill_tick = if response.already_enabled {
+        None
+    } else {
+        Some(
+            context
+                .target
+                .backend()
+                .maintenance_tick(&context.namespace, MaintenanceTickRequest::default())
+                .await
+                .map_err(|error| {
+                    fail(
+                        kind,
+                        Some(context.profile_name.clone()),
+                        Some(context.mode.clone()),
+                        error,
+                    )
+                })?,
+        )
+    };
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::GramsIndexEnabled(response),
+        data: CommandData::GramsIndexEnabled {
+            enabled: response,
+            backfill_tick,
+        },
     })
 }
 

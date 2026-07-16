@@ -341,6 +341,7 @@ fn create_directory_path<S: ObjectStore + ?Sized>(
         PathMutationIntent::CreateDir {
             commit_id: test_commit_id(commit_id),
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            parents: false,
         },
         context,
     )

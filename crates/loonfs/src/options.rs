@@ -193,6 +193,8 @@ impl Default for PutFileOptions {
 pub struct CreateDirectoryOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Also create missing ancestor directories, like `put_file` does.
+    pub parents: bool,
 }
 
 /// Options for deleting a path.
