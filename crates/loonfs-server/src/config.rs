@@ -292,6 +292,12 @@ impl ServerConfig {
                 reason: "must be greater than zero".to_owned(),
             });
         }
+        if self.max_commit_body_bytes == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_commit_body_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
         if self.max_concurrent_uploads == 0 {
             return Err(ServerConfigError::InvalidField {
                 field: "max_concurrent_uploads",
@@ -774,6 +780,7 @@ root = "/tmp/loonfs-server"
         );
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.max_commit_body_bytes, 8 * 1024 * 1024);
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
         assert_eq!(
@@ -783,6 +790,7 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
+            "max_commit_body_bytes",
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",

@@ -633,6 +633,28 @@ where
 /// instead of the raw framework rejection.
 struct AppJson<T>(T);
 
+async fn extract_json<S, T>(
+    req: axum::extract::Request,
+    state: &S,
+    body_too_large: fn() -> ApiResponseError,
+) -> Result<T, ApiResponseError>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    match Json::<T>::from_request(req, state).await {
+        Ok(Json(value)) => Ok(value),
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(body_too_large())
+        }
+        Err(rejection) => Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            &rejection.body_text(),
+        )),
+    }
+}
+
 #[async_trait]
 impl<S, T> FromRequest<S> for AppJson<T>
 where
@@ -642,17 +664,32 @@ where
     type Rejection = ApiResponseError;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(req, state).await {
-            Ok(Json(value)) => Ok(AppJson(value)),
-            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                Err(json_body_too_large_error())
-            }
-            Err(rejection) => Err(ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &rejection.body_text(),
-            )),
-        }
+        extract_json(req, state, json_body_too_large_error)
+            .await
+            .map(AppJson)
+    }
+}
+
+/// Commit JSON is both larger than the framework default and potentially
+/// expensive to buffer, so authenticate before reading it and give its 413
+/// the route-specific recovery guidance.
+struct CommitAppJson<T>(T);
+
+#[async_trait]
+impl<T> FromRequest<AppState> for CommitAppJson<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = ApiResponseError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authorize(&state.config, req.headers())?;
+        extract_json(req, state, commit_body_too_large_error)
+            .await
+            .map(CommitAppJson)
     }
 }
 
@@ -715,17 +752,24 @@ fn upload_body_too_large_error() -> ApiResponseError {
     )
 }
 
-/// 413 for over-limit JSON request bodies. Commits are the one JSON route
-/// that legitimately grows, and commit bodies are metadata — `direct_put`
-/// advice would point at the wrong limit — so the guidance names the
-/// commit-body cap and the fix is splitting the batch.
+/// 413 for ordinary JSON routes that retain the framework's default bound.
 fn json_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
-        "JSON request body exceeds this deployment's limit; commit bodies are \
-         capped by the `commit.max_body_bytes` capability limit — split large \
-         commits into smaller batches",
+        "JSON request body exceeds this route's body limit",
+    )
+}
+
+/// 413 for over-limit commit JSON. Commit bodies are metadata, so the fix
+/// is splitting the batch rather than routing content through `direct_put`.
+fn commit_body_too_large_error() -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::ContentTooLarge,
+        "commit request body exceeds this deployment's \
+         `commit.max_body_bytes` capability limit — split the commit into \
+         smaller batches",
     )
 }
 

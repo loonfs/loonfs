@@ -759,6 +759,15 @@ async fn http_commit_body_over_the_limit_answers_content_too_large() {
         // JSON-shaped body is enough to exercise it.
         let oversized = format!(r#"{{"filler":"{}"}}"#, "d".repeat(4096));
         let error = ureq::post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+            .set("content-type", "application/json")
+            .send_string(&oversized)
+            .expect_err("unauthorized commit should fail before buffering");
+        let ureq::Error::Status(status, _) = error else {
+            panic!("expected a status error for an unauthorized commit");
+        };
+        assert_eq!(status, 401);
+
+        let error = ureq::post(&format!("http://{addr}/v0/namespaces/demo/commits"))
             .set("authorization", "Bearer test-token")
             .set("content-type", "application/json")
             .send_string(&oversized)
@@ -787,8 +796,22 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let fs = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
-    write_file_bytes(&fs, &namespace_id("demo"), "/notes/file.txt", b"one", "c-rev1").await;
-    write_file_bytes(&fs, &namespace_id("demo"), "/notes/file.txt", b"two", "c-rev2").await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/file.txt",
+        b"one",
+        "c-rev1",
+    )
+    .await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/file.txt",
+        b"two",
+        "c-rev2",
+    )
+    .await;
 
     let config = test_config(temp_dir.path(), "server-writer");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -822,7 +845,14 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     .expect("join blocking task");
 
     // Any commit advances the head and retires outstanding cursors.
-    write_file_bytes(&fs, &namespace_id("demo"), "/notes/other.txt", b"x", "c-rev3").await;
+    write_file_bytes(
+        &fs,
+        &namespace_id("demo"),
+        "/notes/other.txt",
+        b"x",
+        "c-rev3",
+    )
+    .await;
 
     tokio::task::spawn_blocking(move || {
         let error = ureq::get(&format!(
