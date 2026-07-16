@@ -36,7 +36,7 @@ If `loon current --json` reports no configured profile:
   ```
 - **Shared / cross-machine setup**: ask the user for S3 / R2 credentials or a hosted Loon server URL + auth token; do not invent them. Put secrets in the environment, not on the command line (argv lands in shell history): the CLI reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and `LOONFS_AUTH_TOKEN` automatically. Then run `loon profile create <name> --mode embedded --store-kind aws-s3 --bucket ... --region ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ...`).
 
-Create a namespace with `loon namespace create <id>`, or use the one the user names. Namespaces are addressed by id — there is no listing command; if the target namespace is ambiguous, ask the user.
+Create a namespace with `loon namespace create <id>`, or use the one the user names.
 
 ## Pattern A — Branch your work
 

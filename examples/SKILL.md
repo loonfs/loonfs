@@ -37,7 +37,7 @@ Check the CLI is installed with `loon version`. If `loon current --json` reports
 
 2. **Durable / shared setup**. Ask the user for S3/R2 credentials (provider, bucket, region, access key, secret) or a hosted Loon server URL + auth token. Put secrets in the environment, not on the command line (argv lands in shell history): the CLI reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and `LOONFS_AUTH_TOKEN` automatically. Then run `loon profile create <name> --mode embedded --store-kind aws-s3 --bucket ... --region ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ...`). Do not invent credentials.
 
-After init, create a namespace with `loon namespace create <namespace_id>`, or use the one the user names. Namespaces are addressed by id — there is no listing command.
+After init, create a namespace with `loon namespace create <namespace_id>`, or use the one the user names.
 
 ## Two canonical patterns
 
