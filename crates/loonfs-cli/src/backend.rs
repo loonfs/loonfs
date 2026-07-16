@@ -683,11 +683,11 @@ mod tests {
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
         FsWriter, PutFileOptions, RuntimeError, SharedObjectStore,
     };
-    use std::sync::Arc;
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, InodeId, NamespaceId, PutBehavior, RevisionNo,
     };
     use loonfs_client::NamespacePath;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[test]
