@@ -4,13 +4,14 @@
 //! it turns "the payload is larger than the window allows at this link speed"
 //! into a deterministic failure that retries cannot fix. The connector here
 //! replaces the provider client's total-request timeout with two
-//! progress-shaped bounds:
+//! progress-shaped bounds, the same shape mainstream storage clients use:
 //!
 //! - The request phase (connect, request-body upload, response headers) gets
-//!   [`request_phase_bound`]: the base attempt timeout plus time for the
-//!   request body at the per-request transfer floor. Control-plane requests
-//!   carry no or tiny bodies, so their bound stays the base attempt timeout;
-//!   payload-bearing requests get a bound proportional to what they carry.
+//!   [`request_phase_bound`]: one flat bound for control-plane requests and
+//!   one flat, generous bound for payload-bearing requests. Payload bodies
+//!   are bounded by the multipart part size, so a flat number per request is
+//!   sufficient stall protection — no request ever carries a body a healthy
+//!   link cannot move inside it.
 //! - Response bodies get an idle bound: every body frame must arrive within
 //!   the base attempt timeout of the previous one. Bytes moving means the
 //!   transfer is alive; a body that stalls is cut without putting a total
@@ -19,9 +20,7 @@
 //! Timeouts surface as [`HttpErrorKind::Timeout`], which the provider client
 //! retries exactly where it would retry its own request timeouts.
 
-use crate::provider_object_store::{
-    request_phase_bound, PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_REQUEST_TRANSFER_FLOOR_BYTES_PER_SEC,
-};
+use crate::provider_object_store::{request_phase_bound, PROVIDER_ATTEMPT_TIMEOUT};
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
@@ -45,12 +44,11 @@ use tokio::runtime::Handle;
 pub(crate) enum TransferTimeoutError {
     #[error(
         "request phase exceeded its transfer bound of {bound_secs}s \
-         (request body {request_body_bytes} bytes, floor {floor_bytes_per_sec} bytes/s)"
+         (request body {request_body_bytes} bytes)"
     )]
     RequestPhase {
         request_body_bytes: u64,
         bound_secs: u64,
-        floor_bytes_per_sec: u64,
     },
     #[error(
         "response body stalled for {idle_secs}s after {received_bytes} received bytes; \
@@ -103,7 +101,6 @@ impl HttpService for TransferTimeoutService {
                     TransferTimeoutError::RequestPhase {
                         request_body_bytes,
                         bound_secs: bound.as_secs(),
-                        floor_bytes_per_sec: PROVIDER_REQUEST_TRANSFER_FLOOR_BYTES_PER_SEC,
                     },
                 ))
             })?;
@@ -198,6 +195,9 @@ impl Body for IdleDeadlineBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_object_store::{
+        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT, PROVIDER_TRANSFER_BODY_MIN_BYTES,
+    };
     use http::Response;
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -299,20 +299,49 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn large_request_bound_scales_with_the_request_body() {
-        // 64 MiB at the request floor adds 1024s to the base bound; a
-        // response arriving after the base bound alone must succeed.
+    async fn payload_request_gets_the_transfer_bound() {
+        // A payload-bearing request that needs longer than the control-plane
+        // bound must survive up to the transfer bound...
         let service = service_with(
             PROVIDER_ATTEMPT_TIMEOUT + Duration::from_secs(60),
             vec![(Duration::ZERO, Bytes::from_static(b"done"))],
         );
-
         let response = service
-            .call(request_with_body(vec![0u8; 64 * 1024 * 1024]))
+            .call(request_with_body(vec![0u8; 8 * 1024 * 1024]))
             .await
-            .expect("scaled bound admits the slow response");
+            .expect("transfer bound admits the slow payload request");
         let body = response.into_body().bytes().await.expect("body");
         assert_eq!(body, "done");
+
+        // ...and be cut once the transfer bound itself is exceeded.
+        let service = service_with(
+            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT + Duration::from_secs(1),
+            Vec::new(),
+        );
+        let error = service
+            .call(request_with_body(vec![0u8; 8 * 1024 * 1024]))
+            .await
+            .expect_err("payload request past the transfer bound must time out");
+        assert_eq!(error.kind(), HttpErrorKind::Timeout);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sub_payload_body_keeps_the_control_plane_bound() {
+        let service = service_with(
+            PROVIDER_ATTEMPT_TIMEOUT + Duration::from_secs(1),
+            Vec::new(),
+        );
+
+        let error = service
+            .call(request_with_body(vec![
+                0u8;
+                (PROVIDER_TRANSFER_BODY_MIN_BYTES - 1)
+                    as usize
+            ]))
+            .await
+            .expect_err("bodies below the payload cutoff keep the base bound");
+
+        assert_eq!(error.kind(), HttpErrorKind::Timeout);
     }
 
     #[tokio::test(start_paused = true)]

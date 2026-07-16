@@ -28,91 +28,73 @@ pub struct ProviderObjectStoreConfig {
     pub sha256_checksum_metadata: bool,
 }
 
-/// The base bound for one HTTP attempt: the whole request phase for a
-/// control-plane request, and the response-body idle bound for every
-/// request. Payload-bearing request phases extend it by payload size (see
-/// [`request_phase_bound`]); an attempt that makes no progress for this long
-/// fails and counts against the operation deadline instead of consuming it
-/// invisibly.
+/// Bound for one control-plane HTTP attempt's request phase, and the
+/// response-body idle bound for every request. An attempt that makes no
+/// progress for this long fails and counts against the operation deadline
+/// instead of consuming it invisibly.
 pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One HTTP attempt's connect timeout.
 pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The base deadline for one logical object-store operation, consumed across
+/// Hard deadline for one logical object-store operation, consumed across
 /// every retry of that operation rather than restarting per attempt. Reads
-/// get it as the provider client's retry timeout; writes and deletes get it
-/// through `TransportRetryPolicy`, extended by payload size (see
-/// [`transfer_op_deadline`]) so slow links exhaust the retry budget instead
-/// of a clock sized for control-plane objects. The deadline gates starting
-/// another attempt, so a small-object operation's total wall time is bounded
-/// by `PROVIDER_OP_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT`; the GC grace window
-/// is derived above that small-object bound (format spec, "Garbage
-/// collection", rule 1), which stays valid because every object the floor
-/// inequality times — WAL segments inside the publish budget, the root
-/// compare-and-swap — is a small control object whose deadline reduces to
-/// this base.
+/// get it as the provider client's retry timeout; single-request writes and
+/// deletes get it through `TransportRetryPolicy`. The deadline gates
+/// starting another attempt, so one operation's total wall time is bounded
+/// by the deadline plus one attempt bound. The GC grace window is derived
+/// above this bound (format spec, "Garbage collection", rule 1); multipart
+/// uploads deliberately carry no whole-operation clock (their parts are
+/// individually bounded), which leaves the floor inequality untouched
+/// because everything it times — WAL segments inside the publish budget,
+/// the root compare-and-swap — is a small control object on the
+/// single-request path.
 pub const PROVIDER_OP_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Payload size at and above which overwrite and create puts use the
-/// provider's native multipart upload instead of one whole-object PUT. The
-/// format spec allows this for large immutable file data and forbids relying
-/// on it for small mutable control objects (format spec, "Provider
-/// contract"): compare-and-swap puts never take this path.
-pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+/// Payload size at and above which overwrite puts use the provider's native
+/// multipart upload instead of one whole-object PUT, matching the multipart
+/// thresholds mainstream storage clients ship. The format spec allows this
+/// for large immutable file data and forbids relying on it for small
+/// mutable control objects: create-if-absent and compare-and-swap puts
+/// never take this path, because providers complete multipart uploads as
+/// unconditional overwrites and those modes exist to carry real provider
+/// preconditions.
+pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Fixed size of every multipart part except the last. Cloudflare R2
 /// requires all non-final parts to share one size, and every supported
-/// provider requires at least 5 MiB per non-final part; 32 MiB keeps part
-/// counts low (10,000-part ceilings) while each part stays a cheap retry.
-pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 32 * 1024 * 1024;
+/// provider requires at least 5 MiB per non-final part; 8 MiB matches the
+/// part size mainstream storage clients default to, and keeps every part a
+/// cheap retry that fits comfortably inside one flat attempt bound.
+pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Concurrent in-flight parts per multipart upload.
 pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
 
-/// The sustained aggregate transfer rate the transport treats as the floor
-/// of a healthy link. Operation deadlines for payload-bearing writes scale
-/// by it; a transfer that cannot sustain it eventually exhausts its deadline
-/// with a diagnostic naming the payload size and this floor.
-pub const PROVIDER_MIN_TRANSFER_RATE_BYTES_PER_SEC: u64 = 256 * 1024;
+/// Bound for one payload-bearing HTTP attempt's request phase. A request
+/// body is opaque to progress observation while it uploads, so a flat
+/// generous bound stands in for stall detection: parts are at most
+/// [`PROVIDER_MULTIPART_PART_BYTES`], and an 8 MiB body that cannot finish
+/// inside this bound is moving slower than roughly 70 KiB/s — treated as
+/// stalled and retried on a fresh connection.
+pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The per-request transfer floor: concurrent multipart parts share the
-/// link, so one HTTP request is only expected to sustain the aggregate floor
-/// divided by the part window. Request-phase bounds scale by this rate.
-pub(crate) const PROVIDER_REQUEST_TRANSFER_FLOOR_BYTES_PER_SEC: u64 =
-    PROVIDER_MIN_TRANSFER_RATE_BYTES_PER_SEC / PROVIDER_MULTIPART_PART_WINDOW as u64;
+/// Request bodies at least this large are payload transfers and get
+/// [`PROVIDER_TRANSFER_ATTEMPT_TIMEOUT`] as their request-phase bound;
+/// smaller bodies are control-plane traffic bounded by
+/// [`PROVIDER_ATTEMPT_TIMEOUT`]. Sits well below the part size so multipart
+/// tail parts classify with their siblings.
+pub(crate) const PROVIDER_TRANSFER_BODY_MIN_BYTES: u64 = 1024 * 1024;
 
-/// Bound for one HTTP attempt's request phase (connect, request-body upload,
-/// response headers): the base attempt timeout plus time for the request
-/// body at the per-request transfer floor. Control-plane requests carry no
-/// or tiny bodies, so their bound is the base; payload transfers get a bound
-/// proportional to what they carry, which removes the deterministic
-/// payload-larger-than-the-window failure a fixed total timeout produces.
+/// Bound for one HTTP attempt's request phase (connect, request-body
+/// upload, response headers), by request body size: flat and small for
+/// control-plane requests, flat and generous for payload transfers.
 pub(crate) fn request_phase_bound(request_body_bytes: u64) -> Duration {
-    PROVIDER_ATTEMPT_TIMEOUT.saturating_add(transfer_duration_at_floor(
-        request_body_bytes,
-        PROVIDER_REQUEST_TRANSFER_FLOOR_BYTES_PER_SEC,
-    ))
-}
-
-/// Deadline for one logical write operation carrying `payload_bytes`: the
-/// base operation deadline plus two full passes over the payload at the
-/// aggregate floor, so the retry budget stays reachable for payloads that
-/// are slow because they are large. For control-plane payloads this reduces
-/// to the base.
-pub(crate) fn transfer_op_deadline(base: Duration, payload_bytes: u64) -> Duration {
-    let one_pass =
-        transfer_duration_at_floor(payload_bytes, PROVIDER_MIN_TRANSFER_RATE_BYTES_PER_SEC);
-    base.saturating_add(one_pass.saturating_mul(2))
-}
-
-fn transfer_duration_at_floor(payload_bytes: u64, floor_bytes_per_sec: u64) -> Duration {
-    Duration::from_millis(
-        payload_bytes
-            .saturating_mul(1000)
-            .checked_div(floor_bytes_per_sec)
-            .unwrap_or(0),
-    )
+    if request_body_bytes >= PROVIDER_TRANSFER_BODY_MIN_BYTES {
+        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
+    } else {
+        PROVIDER_ATTEMPT_TIMEOUT
+    }
 }
 
 /// Client options every provider builder applies: an explicit per-attempt
@@ -380,44 +362,30 @@ impl ProviderObjectStore {
     /// Writes one large payload through the provider's native multipart
     /// upload: fixed-size parts uploaded through a bounded window, each part
     /// retried in place on transient failures (part indices are stable, so a
-    /// retry re-sends the same part), one payload-scaled deadline across the
-    /// whole operation, and a best-effort abort so a failed upload does not
-    /// strand parts.
+    /// retry re-sends the same part), and a best-effort abort so a failed
+    /// upload does not strand parts.
     ///
-    /// Create semantics are approximated with a pre-check: providers
-    /// complete multipart uploads as unconditional overwrites, so two
-    /// concurrent creates of the same key can both report success with the
-    /// last completion standing. The only large create-if-absent writers are
-    /// content-addressed immutable blobs, where every racer carries
-    /// identical bytes and any interleaving converges to the same object;
-    /// small contended create-if-absent objects (WAL entries, records) stay
-    /// on the single-request path with real provider preconditions.
+    /// There is deliberately no whole-operation clock: every part attempt is
+    /// individually bounded and every retry loop is count-bounded, so a
+    /// healthy transfer takes as long as the link needs while a stuck one
+    /// still fails within one part's retry budget. Only overwrite puts route
+    /// here — providers complete multipart uploads as unconditional
+    /// overwrites, so the conditional modes stay on the single-request path
+    /// where real provider preconditions exist.
     async fn put_large_multipart(
         &self,
         multipart: &dyn MultipartStore,
         key: &str,
         path: &Path,
         bytes: Bytes,
-        create_if_absent: bool,
         checksum_sha256: Option<String>,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let size_bytes = bytes.len() as u64;
-        if create_if_absent && self.head(key).await?.is_some() {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
-        }
-
-        let deadline = OperationDeadline::start(
-            self.timer.as_ref(),
-            transfer_op_deadline(self.transport_retry.op_deadline, size_bytes),
-        );
         let upload = MultipartWrite {
             store: self,
             multipart,
             key,
             path,
-            deadline,
         };
 
         let upload_id = upload.create(size_bytes).await?;
@@ -438,35 +406,48 @@ impl ProviderObjectStore {
     }
 
     /// Applies the shared retry gate for one failed write attempt: `None`
-    /// means the budget is spent (count or deadline) and the caller must
-    /// surface the error; `Some` carries the backoff to sleep before the
-    /// next attempt. The exhaustion log names the payload size and the
-    /// transfer floor so a too-slow-link failure is attributable instead of
-    /// reading as weather.
+    /// means the budget is spent and the caller must surface the error;
+    /// `Some` carries the backoff to sleep before the next attempt. The
+    /// budget is the retry count, plus the operation deadline when the
+    /// operation carries one (multipart transfers deliberately do not — see
+    /// [`Self::put_large_multipart`]). Exhaustion logs name the payload
+    /// size so a too-slow-link failure is attributable instead of reading
+    /// as weather.
     fn next_write_backoff(
         &self,
         key: &str,
         operation: &'static str,
         payload_bytes: u64,
         retries: &mut u32,
-        deadline: &OperationDeadline<'_>,
+        deadline: Option<&OperationDeadline<'_>>,
         err: &provider_store::Error,
     ) -> Option<Duration> {
         if *retries >= self.transport_retry.max_retries {
-            return None;
-        }
-        let Some(remaining) = deadline.remaining() else {
             tracing::warn!(
                 object_key = key,
                 operation,
                 retry = *retries,
                 payload_bytes,
-                min_transfer_rate_bytes_per_sec = PROVIDER_MIN_TRANSFER_RATE_BYTES_PER_SEC,
                 error = %err,
-                "object store operation deadline exhausted; not retrying",
+                "object store write retry budget exhausted; not retrying",
             );
             return None;
-        };
+        }
+        let mut remaining = Duration::MAX;
+        if let Some(deadline) = deadline {
+            let Some(deadline_remaining) = deadline.remaining() else {
+                tracing::warn!(
+                    object_key = key,
+                    operation,
+                    retry = *retries,
+                    payload_bytes,
+                    error = %err,
+                    "object store operation deadline exhausted; not retrying",
+                );
+                return None;
+            };
+            remaining = deadline_remaining;
+        }
         *retries += 1;
         let backoff = transport_retry_backoff(&self.transport_retry, *retries).min(remaining);
         tracing::info!(
@@ -483,13 +464,12 @@ impl ProviderObjectStore {
 }
 
 /// One in-progress multipart write: the store, the provider multipart
-/// surface, the object being written, and the operation's shared deadline.
+/// surface, and the object being written.
 struct MultipartWrite<'op> {
     store: &'op ProviderObjectStore,
     multipart: &'op dyn MultipartStore,
     key: &'op str,
     path: &'op Path,
-    deadline: OperationDeadline<'op>,
 }
 
 impl MultipartWrite<'_> {
@@ -511,7 +491,7 @@ impl MultipartWrite<'_> {
                 "create_multipart",
                 payload_bytes,
                 &mut retries,
-                &self.deadline,
+                None,
                 &err,
             ) else {
                 return Err(map_provider_error(self.key, err));
@@ -589,7 +569,7 @@ impl MultipartWrite<'_> {
                 "put_part",
                 payload_bytes,
                 &mut retries,
-                &self.deadline,
+                None,
                 &err,
             ) else {
                 return Err(map_provider_error(self.key, err));
@@ -635,7 +615,7 @@ impl MultipartWrite<'_> {
                 "complete_multipart",
                 size_bytes,
                 &mut retries,
-                &self.deadline,
+                None,
                 &err,
             ) else {
                 return Err(map_provider_error(self.key, err));
@@ -767,24 +747,17 @@ impl ObjectStore for ProviderObjectStore {
         }
 
         let create_if_absent = matches!(mode, PutMode::CreateIfAbsent);
-        if size_bytes >= self.multipart_geometry.threshold_bytes {
+        if matches!(mode, PutMode::Overwrite)
+            && size_bytes >= self.multipart_geometry.threshold_bytes
+        {
             if let Some(multipart) = self.multipart.clone() {
                 return self
-                    .put_large_multipart(
-                        multipart.as_ref(),
-                        key,
-                        &path,
-                        bytes,
-                        create_if_absent,
-                        checksum_sha256,
-                    )
+                    .put_large_multipart(multipart.as_ref(), key, &path, bytes, checksum_sha256)
                     .await;
             }
         }
-        let deadline = OperationDeadline::start(
-            self.timer.as_ref(),
-            transfer_op_deadline(self.transport_retry.op_deadline, size_bytes),
-        );
+        let deadline =
+            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
         let mut retries: u32 = 0;
         // True once an attempt failed after possibly reaching the store, so a
         // later "already exists" may be our own first attempt having landed.
@@ -832,9 +805,14 @@ impl ObjectStore for ProviderObjectStore {
             // The operation deadline is consumed across attempts, never
             // restarted: no new attempt starts once it is spent, and the
             // backoff never sleeps past it.
-            let Some(backoff) =
-                self.next_write_backoff(key, "put", size_bytes, &mut retries, &deadline, &err)
-            else {
+            let Some(backoff) = self.next_write_backoff(
+                key,
+                "put",
+                size_bytes,
+                &mut retries,
+                Some(&deadline),
+                &err,
+            ) else {
                 return Err(map_provider_error(key, err));
             };
             transport_retry_pause(backoff).await;
@@ -859,7 +837,7 @@ impl ObjectStore for ProviderObjectStore {
                 return Err(map_provider_error(key, err));
             }
             let Some(backoff) =
-                self.next_write_backoff(key, "delete", 0, &mut retries, &deadline, &err)
+                self.next_write_backoff(key, "delete", 0, &mut retries, Some(&deadline), &err)
             else {
                 return Err(map_provider_error(key, err));
             };
@@ -1771,21 +1749,19 @@ mod tests {
     }
 
     #[test]
-    fn transfer_bounds_scale_with_payload_size() {
+    fn request_phase_bound_has_two_flat_tiers() {
         assert_eq!(request_phase_bound(0), PROVIDER_ATTEMPT_TIMEOUT);
-        // 64 MiB at the 64 KiB/s per-request floor adds 1024s to the base.
         assert_eq!(
-            request_phase_bound(64 * 1024 * 1024),
-            PROVIDER_ATTEMPT_TIMEOUT + Duration::from_secs(1024)
+            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES - 1),
+            PROVIDER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
-            transfer_op_deadline(PROVIDER_OP_DEADLINE, 0),
-            PROVIDER_OP_DEADLINE
+            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES),
+            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
         );
-        // Two full passes over the payload at the 256 KiB/s aggregate floor.
         assert_eq!(
-            transfer_op_deadline(PROVIDER_OP_DEADLINE, 30 * 256 * 1024),
-            PROVIDER_OP_DEADLINE + Duration::from_secs(60)
+            request_phase_bound(PROVIDER_MULTIPART_PART_BYTES),
+            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
         );
     }
 
@@ -1885,30 +1861,11 @@ mod tests {
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
+    /// Conditional modes never ride multipart: providers complete multipart
+    /// uploads as unconditional overwrites, so create-if-absent keeps its
+    /// real provider precondition on the single-request path at any size.
     #[tokio::test]
-    async fn large_create_if_absent_conflicts_without_uploading() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        store
-            .put_overwrite(MULTIPART_KEY, Bytes::from_static(b"existing"))
-            .await
-            .expect("seed existing object");
-
-        let error = store
-            .put_if_absent(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
-            .await
-            .expect_err("existing object fails the create precondition");
-
-        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
-        assert_eq!(
-            flaky.multipart_creates.load(Ordering::SeqCst),
-            0,
-            "conflict is decided before any part is uploaded"
-        );
-    }
-
-    #[tokio::test]
-    async fn large_create_if_absent_uploads_when_absent() {
+    async fn large_create_if_absent_stays_single_request() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
         let payload = multipart_payload(1300);
@@ -1917,12 +1874,19 @@ mod tests {
             .put_if_absent(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
             .expect("create absent large object");
-
-        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
         assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
+
+        let error = store
+            .put_if_absent(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("existing object fails the create precondition");
+        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
         assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from(payload))
+            flaky.multipart_creates.load(Ordering::SeqCst),
+            0,
+            "the conflict is decided by the provider precondition, not a pre-check"
         );
     }
 
@@ -2047,12 +2011,12 @@ mod tests {
         );
     }
 
+    /// Multipart transfers carry no whole-operation clock: with a stepping
+    /// timer that would spend the single-request deadline almost instantly,
+    /// part retries still run to their full count budget.
     #[tokio::test]
-    async fn multipart_part_retries_stop_once_the_operation_deadline_is_spent() {
+    async fn multipart_part_retries_are_count_bounded_not_clock_bounded() {
         let flaky = Arc::new(FlakyStore::default());
-        // Each timer reading advances 45s against a ~120s payload-scaled
-        // deadline: the retry gate finds it spent well before the count
-        // budget of 4 retries.
         let store = multipart_test_store(Arc::clone(&flaky))
             .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
         script_part(&flaky, 0, (0..6).map(|_| WriteScript::FailWithoutLanding));
@@ -2060,13 +2024,13 @@ mod tests {
         let error = store
             .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
             .await
-            .expect_err("deadline exhaustion surfaces the transport failure");
+            .expect_err("persistent part failure surfaces after the retry budget");
 
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        let attempts = part_attempts(&flaky, 0);
-        assert!(
-            attempts < 5,
-            "deadline must stop the part loop before the count budget ({attempts} attempts)"
+        assert_eq!(
+            part_attempts(&flaky, 0),
+            5,
+            "1 attempt + max_retries, unaffected by elapsed time"
         );
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }

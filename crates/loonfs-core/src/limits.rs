@@ -11,19 +11,19 @@
 
 use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OP_DEADLINE};
 
-/// Provider operation deadline for small control objects, in milliseconds
-/// (`loonfs-objectstore` consumes it across every retry of one logical
-/// operation). Payload-bearing writes extend it by payload size; the floor
-/// derivation below stays valid because every object it times — WAL
-/// segments inside the publish budget, checkpoint records, the root
-/// compare-and-swap — is a small control object whose deadline reduces to
-/// this base, and publications self-enforce their budgets by wall clock
-/// regardless of how long any single provider operation was allowed to run.
+/// Provider operation deadline, in milliseconds (`loonfs-objectstore`
+/// consumes it across every retry of one single-request operation).
+/// Multipart transfers of large immutable payloads carry no
+/// whole-operation clock — their parts are individually time- and
+/// retry-bounded — which leaves the floor derivation below untouched:
+/// every object it times (WAL segments inside the publish budget,
+/// checkpoint records, the root compare-and-swap) is a small control
+/// object on the single-request path, and publications self-enforce their
+/// budgets by wall clock regardless of per-operation deadlines.
 pub const PROVIDER_OP_DEADLINE_MS: u64 = PROVIDER_OP_DEADLINE.as_millis() as u64;
 
-/// One provider HTTP attempt's base request timeout, in milliseconds
-/// (payload-bearing request phases extend it by payload size). A
-/// small-object operation's total wall time is bounded by
+/// One control-plane provider HTTP attempt's request timeout, in
+/// milliseconds. An operation's total wall time is bounded by
 /// `PROVIDER_OP_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS`, because the
 /// deadline gates starting an attempt rather than preempting one.
 pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis() as u64;

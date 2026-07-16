@@ -1442,12 +1442,13 @@ publishing CAS) — under these rules:
    provider bounds in `loonfs-objectstore`), every publication self-enforces
    its budget by refusing to initiate its root compare-and-swap once the
    budget is spent, and provider operations consume one deadline across
-   retries. Payload-bearing writes may scale their deadline with payload
-   size; the floor's provider terms remain the small-object bounds because
-   everything the inequality times — the budget self-checks, which are wall
-   clock regardless of per-operation deadlines, and the final
-   compare-and-swap — concerns small control objects. A window below the
-   floor is rejected as `invalid_request` at every surface. Under the floor's inequality, any acknowledged root
+   retries. Multipart transfers of large immutable payloads carry no
+   whole-operation deadline; the floor's provider terms remain the
+   small-object bounds because everything the inequality times — the budget
+   self-checks, which are wall clock regardless of per-operation deadlines,
+   and the final compare-and-swap — concerns small control objects. A
+   window below the floor is rejected as `invalid_request` at every
+   surface. Under the floor's inequality, any acknowledged root
    publication lands its compare-and-swap before an object it references
    could age past `T`, so GC never deletes or releases any object younger
    than `T`, reachable or not, and treats any checkpoint record younger
