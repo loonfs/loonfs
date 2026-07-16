@@ -74,6 +74,13 @@ pub struct ServerConfig {
     /// `download.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
     pub max_download_bytes: u64,
+    /// Largest JSON body the commits endpoint accepts
+    /// (`POST .../namespaces/{ns}/commits`). Commit bodies carry metadata
+    /// only — file bytes ride uploads — so this bounds per-request parse
+    /// memory for bulk commits. Advertised to clients as the
+    /// `commit.max_body_bytes` capability limit.
+    #[serde(default = "default_max_commit_body_bytes")]
+    pub max_commit_body_bytes: u64,
     /// How many proxied upload bodies the server will buffer at once;
     /// requests past the cap answer `server_busy` before any buffering.
     /// Worst-case upload memory is this times `max_upload_bytes`.
@@ -117,6 +124,12 @@ fn default_max_download_bytes() -> u64 {
     // will serve back. Content ingested past this through `direct_put`
     // needs a raised limit to be read through the server.
     256 * 1024 * 1024
+}
+
+fn default_max_commit_body_bytes() -> u64 {
+    // A 5,000-op commit serializes to roughly 1.5 MB; 8 MiB leaves bulk
+    // headroom while bounding what one request can make the parser buffer.
+    8 * 1024 * 1024
 }
 
 fn default_max_concurrent_uploads() -> usize {
@@ -276,6 +289,12 @@ impl ServerConfig {
         if self.max_download_bytes == 0 {
             return Err(ServerConfigError::InvalidField {
                 field: "max_download_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
+        if self.max_commit_body_bytes == 0 {
+            return Err(ServerConfigError::InvalidField {
+                field: "max_commit_body_bytes",
                 reason: "must be greater than zero".to_owned(),
             });
         }
@@ -761,6 +780,7 @@ root = "/tmp/loonfs-server"
         );
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.max_commit_body_bytes, 8 * 1024 * 1024);
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
         assert_eq!(
@@ -770,6 +790,7 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
+            "max_commit_body_bytes",
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",

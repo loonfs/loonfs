@@ -34,11 +34,26 @@ pub const LIMIT_UPLOAD_MAX_CONTENT_BYTES: &str = "upload.max_content_bytes";
 /// Advisory limit: the largest file content a service-proxied read will
 /// buffer and return in one response.
 pub const LIMIT_DOWNLOAD_MAX_CONTENT_BYTES: &str = "download.max_content_bytes";
+/// Advisory limit: how many service-proxied upload bodies the deployment
+/// buffers at once; requests past the cap answer `server_busy`.
+pub const LIMIT_UPLOAD_MAX_CONCURRENT: &str = "upload.max_concurrent";
+/// Advisory limit: how many service-proxied content reads the deployment
+/// materializes at once; requests past the cap answer `server_busy`.
+pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
+/// Advisory limit: the largest JSON body the commits endpoint accepts.
+/// Metadata-only; file bytes ride uploads, not commit bodies.
+pub const LIMIT_COMMIT_MAX_BODY_BYTES: &str = "commit.max_body_bytes";
 /// Advisory limit: matches per grep page when the request omits `limit`.
 pub const LIMIT_QUERY_GREP_DEFAULT: &str = "query.grep.default_limit";
 /// Advisory limit: the largest accepted grep page limit. Distinct from the
 /// pagination keys — a grep item costs a verified file read, not a row.
 pub const LIMIT_QUERY_GREP_MAX: &str = "query.grep.max_limit";
+/// Advisory limit: files a plan-less `allow_scan` grep will scan before
+/// refusing with `query_unindexable`.
+pub const LIMIT_QUERY_GREP_SCAN_BUDGET_FILES: &str = "query.grep.scan_budget_files";
+/// Advisory limit: unindexed-tail revisions one grep scans exhaustively
+/// before failing with `index_lagging`.
+pub const LIMIT_QUERY_GREP_TAIL_BUDGET_FILES: &str = "query.grep.tail_budget_files";
 
 /// A deployment's self-description (API spec, "Capability discovery").
 ///
