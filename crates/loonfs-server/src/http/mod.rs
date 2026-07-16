@@ -204,10 +204,12 @@ async fn app_with_store_and_transfer_issuer(
 }
 
 fn router(state: AppState) -> Router {
-    // The upload-content route carries raw file bytes and gets the
-    // configured budget; every other route keeps axum's conservative
-    // default JSON body limit.
+    // Two routes carry legitimately large bodies and get configured
+    // budgets: upload content (raw file bytes) and commits (bulk metadata
+    // JSON). Every other route keeps axum's conservative default limit.
     let max_upload_bytes = usize::try_from(state.config.max_upload_bytes).unwrap_or(usize::MAX);
+    let max_commit_body_bytes =
+        usize::try_from(state.config.max_commit_body_bytes).unwrap_or(usize::MAX);
     Router::new()
         .route("/health", get(health))
         .route("/health/ready", get(health_ready))
@@ -267,7 +269,10 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/:namespace/uploads/:upload_id/complete",
             post(complete_upload),
         )
-        .route("/v0/namespaces/:namespace/commits", post(commit_operations))
+        .route(
+            "/v0/namespaces/:namespace/commits",
+            post(commit_operations).layer(DefaultBodyLimit::max(max_commit_body_bytes)),
+        )
         .route("/v0/namespaces/:namespace/changes", get(list_changes))
         .route(
             "/v0/admin/namespaces/:namespace/checkpoints",
@@ -287,8 +292,32 @@ fn router(state: AppState) -> Router {
             post(maintenance_tick),
         )
         .route("/v0/admin/namespaces/:namespace/gc", post(gc_namespace))
+        // Unmatched paths and wrong methods answer inside the error
+        // contract instead of axum's empty default bodies.
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(with_request_id))
         .with_state(state)
+}
+
+/// 404 for paths outside the served surface. Deliberately unauthenticated:
+/// the route set is public in the API spec, and `authorize` runs per
+/// matched handler.
+async fn route_not_found() -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::NOT_FOUND,
+        ErrorCode::RouteNotFound,
+        "no v0 route matches this path; see the API spec for the served surface",
+    )
+}
+
+/// 405 for matched paths hit with an unserved method.
+async fn method_not_allowed() -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        ErrorCode::MethodNotAllowed,
+        "this path exists but does not serve this HTTP method",
+    )
 }
 
 /// Opens the server's runtime handles inside the serving runtime.
@@ -616,7 +645,7 @@ where
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(AppJson(value)),
             Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                Err(body_too_large_error())
+                Err(json_body_too_large_error())
             }
             Err(rejection) => Err(ApiResponseError::new(
                 StatusCode::BAD_REQUEST,
@@ -663,7 +692,7 @@ impl FromRequest<AppState> for UploadBodyBytes {
                 _permit: permit,
             }),
             Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                Err(body_too_large_error())
+                Err(upload_body_too_large_error())
             }
             Err(rejection) => Err(ApiResponseError::new(
                 StatusCode::BAD_REQUEST,
@@ -674,13 +703,29 @@ impl FromRequest<AppState> for UploadBodyBytes {
     }
 }
 
-fn body_too_large_error() -> ApiResponseError {
+/// 413 for over-limit upload bodies: the guidance names the upload byte cap
+/// and the `direct_put` path that bypasses proxied buffering entirely.
+fn upload_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         "request body exceeds this deployment's limit; check the \
          `upload.max_content_bytes` capability limit, and prefer `direct_put` \
          uploads for large content",
+    )
+}
+
+/// 413 for over-limit JSON request bodies. Commits are the one JSON route
+/// that legitimately grows, and commit bodies are metadata — `direct_put`
+/// advice would point at the wrong limit — so the guidance names the
+/// commit-body cap and the fix is splitting the batch.
+fn json_body_too_large_error() -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::ContentTooLarge,
+        "JSON request body exceeds this deployment's limit; commit bodies are \
+         capped by the `commit.max_body_bytes` capability limit — split large \
+         commits into smaller batches",
     )
 }
 

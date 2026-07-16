@@ -74,6 +74,13 @@ pub struct ServerConfig {
     /// `download.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
     pub max_download_bytes: u64,
+    /// Largest JSON body the commits endpoint accepts
+    /// (`POST .../namespaces/{ns}/commits`). Commit bodies carry metadata
+    /// only — file bytes ride uploads — so this bounds per-request parse
+    /// memory for bulk commits. Advertised to clients as the
+    /// `commit.max_body_bytes` capability limit.
+    #[serde(default = "default_max_commit_body_bytes")]
+    pub max_commit_body_bytes: u64,
     /// How many proxied upload bodies the server will buffer at once;
     /// requests past the cap answer `server_busy` before any buffering.
     /// Worst-case upload memory is this times `max_upload_bytes`.
@@ -117,6 +124,12 @@ fn default_max_download_bytes() -> u64 {
     // will serve back. Content ingested past this through `direct_put`
     // needs a raised limit to be read through the server.
     256 * 1024 * 1024
+}
+
+fn default_max_commit_body_bytes() -> u64 {
+    // A 5,000-op commit serializes to roughly 1.5 MB; 8 MiB leaves bulk
+    // headroom while bounding what one request can make the parser buffer.
+    8 * 1024 * 1024
 }
 
 fn default_max_concurrent_uploads() -> usize {
