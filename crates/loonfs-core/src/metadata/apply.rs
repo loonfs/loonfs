@@ -136,8 +136,21 @@ impl MetadataState {
                     root_inode_id: *root_inode_id,
                     tombstone_seq: committed_seq,
                     tombstone_delta_index: *delta_index,
+                    cleared: false,
                 });
                 InvariantId::TombstoneSubtreeWritesTombstoneRow
+            }
+            WalDelta::ClearSubtreeTombstone {
+                delta_index,
+                root_inode_id,
+            } => {
+                self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
+                    root_inode_id: *root_inode_id,
+                    tombstone_seq: committed_seq,
+                    tombstone_delta_index: *delta_index,
+                    cleared: true,
+                });
+                InvariantId::ClearSubtreeTombstoneWritesClearedRow
             }
         }
     }

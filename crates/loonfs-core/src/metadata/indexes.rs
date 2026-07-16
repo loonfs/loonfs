@@ -169,7 +169,12 @@ impl MetadataIndexes {
         &self,
         root_inode_id: InodeId,
     ) -> Option<SubtreeTombstoneRecord> {
-        self.tombstone_by_root.get(&root_inode_id).cloned()
+        // The index keeps the newest record per root, cleared or not; a
+        // cleared newest record means no tombstone is active.
+        self.tombstone_by_root
+            .get(&root_inode_id)
+            .filter(|tombstone| !tombstone.cleared)
+            .cloned()
     }
 
     pub(super) fn latest_revision(&self, inode_id: InodeId) -> Option<RevisionRecord> {

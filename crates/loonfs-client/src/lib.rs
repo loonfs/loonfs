@@ -905,6 +905,30 @@ impl Client {
         Ok(response)
     }
 
+    /// Recovers a deleted file or subtree: clears the tombstone rooted at
+    /// `inode_id` (the id the delete reported) and re-binds it at the spec's
+    /// path.
+    pub fn undelete(
+        &self,
+        spec: &NamespacePath,
+        inode_id: InodeId,
+        options: &MutationOptions,
+    ) -> Result<ApiCommitResponse, ClientError> {
+        let commit_id = options.resolve_commit_id()?;
+        let response = self.apply_filesystem_operation(
+            &spec.namespace,
+            &FilesystemOperationRequest {
+                commit_id,
+                content_tokens: Vec::new(),
+                operation: FilesystemOperation::Undelete {
+                    inode_id,
+                    path: spec.absolute_path.clone(),
+                },
+            },
+        )?;
+        Ok(response)
+    }
+
     pub fn restore_file_revision(
         &self,
         spec: &NamespacePath,

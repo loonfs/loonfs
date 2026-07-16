@@ -43,4 +43,9 @@ pub enum CommitOp {
     DeleteSubtree {
         root_inode_id: InodeId,
     },
+    Undelete {
+        inode_id: InodeId,
+        parent_inode_id: InodeId,
+        display_name: String,
+    },
 }

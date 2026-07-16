@@ -127,6 +127,27 @@ pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    /// A cleared record revokes every older tombstone for the same root:
+    /// newest-by-(seq, delta) wins at every read site, so an undelete
+    /// writes a newer cleared record and a later re-delete supersedes it.
+    pub cleared: bool,
+}
+
+/// The newest-wins active-tombstone rule, shared by every aggregation site:
+/// among records at or below `visible_seq`, the newest by
+/// `(tombstone_seq, tombstone_delta_index)` speaks for the root, and a
+/// cleared newest record means no tombstone is active. Keep every reader on
+/// this helper — a site with its own copy of the rule is how visibility
+/// splits from the durable truth.
+pub(crate) fn active_tombstone_from_records(
+    records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
+    visible_seq: ChangeSeq,
+) -> Option<SubtreeTombstoneRecord> {
+    records
+        .into_iter()
+        .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
+        .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
+        .filter(|tombstone| !tombstone.cleared)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

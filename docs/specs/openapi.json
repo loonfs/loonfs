@@ -2977,6 +2977,37 @@
                 "minimum": 0
               }
             }
+          },
+          {
+            "type": "object",
+            "title": "CommitDeltaClearSubtreeTombstone",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "root_inode_id",
+              "kind"
+            ],
+            "properties": {
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clear_subtree_tombstone"
+                ]
+              },
+              "root_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
           }
         ],
         "description": "Durable metadata fact exposed through the change feed.\n\nSync and projection clients can apply deltas directly."
@@ -3159,6 +3190,34 @@
                 ]
               },
               "root_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "CommitOpUndelete",
+            "description": "Recover a deleted file or subtree: clear the tombstone rooted at\nthe inode and re-bind it under a visible parent directory.",
+            "required": [
+              "inode_id",
+              "parent_inode_id",
+              "display_name",
+              "kind"
+            ],
+            "properties": {
+              "display_name": {
+                "type": "string"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undelete"
+                ]
+              },
+              "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               }
             }
@@ -3885,8 +3944,31 @@
           },
           {
             "type": "object",
+            "title": "FsOpUndelete",
+            "description": "Restore an older revision as the current revision for a path.\nRecover a deleted file or subtree: clear the tombstone rooted at\n`inode_id` (the id the delete reported) and re-bind it at `path`.",
+            "required": [
+              "inode_id",
+              "path",
+              "kind"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undelete"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
             "title": "FsOpRestoreRevision",
-            "description": "Restore an older revision as the current revision for a path.",
             "required": [
               "path",
               "source_revision_no",

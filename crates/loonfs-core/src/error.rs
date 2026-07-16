@@ -431,6 +431,11 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             active_writer_epoch: Some(*active),
             ..ErrorDetails::default()
         }),
+        CommitValidationError::UndeleteInodeMissing { inode_id }
+        | CommitValidationError::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            ..ErrorDetails::default()
+        }),
         _ => None,
     }
 }
@@ -602,6 +607,8 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::DirectoryEmptyPreconditionInodeMissing { .. } => {
             ErrorCode::PathNotFound
         }
+        CommitValidationError::UndeleteInodeMissing { .. } => ErrorCode::PathNotFound,
+        CommitValidationError::UndeleteTargetNotDeleted { .. } => ErrorCode::NotDeleted,
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
         CommitValidationError::StaleWriterEpoch { .. } => ErrorCode::WriterFenced,

@@ -69,6 +69,9 @@ pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    /// A cleared record revokes every older tombstone for the same root,
+    /// mirroring the core row semantics.
+    pub cleared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,10 +173,28 @@ impl MetadataState {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
+                            cleared: false,
                         });
                     push_unique_invariant(
                         &mut checked_invariants,
                         "tombstone_subtree_writes_tombstone_row",
+                    );
+                }
+                WalDelta::ClearSubtreeTombstone {
+                    delta_index,
+                    root_inode_id,
+                } => {
+                    metadata_state
+                        .subtree_tombstones
+                        .push(SubtreeTombstoneRecord {
+                            root_inode_id: *root_inode_id,
+                            tombstone_seq: committed_seq,
+                            tombstone_delta_index: *delta_index,
+                            cleared: true,
+                        });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "clear_subtree_tombstone_writes_cleared_row",
                     );
                 }
             }

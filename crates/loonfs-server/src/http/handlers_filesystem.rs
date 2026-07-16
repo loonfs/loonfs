@@ -528,6 +528,11 @@ pub(super) async fn filesystem_operation(
             absolute_path: parse_path(&path)?,
             source_revision_no,
         },
+        FilesystemOperation::Undelete { inode_id, path } => PathMutationIntent::Undelete {
+            commit_id,
+            inode_id,
+            absolute_path: parse_path(&path)?,
+        },
     };
     let response_result = if let Some(payload_class) = put_payload_class {
         let span = tracing::info_span!(

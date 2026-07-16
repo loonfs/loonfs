@@ -22,9 +22,9 @@ use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
     CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
-    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
+    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -224,6 +224,14 @@ pub trait Backend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError>;
+    /// Recovers a deleted file or subtree to the spec's path; `inode_id` is
+    /// the id the delete reported.
+    async fn undelete(
+        &self,
+        spec: &NamespacePath,
+        inode_id: InodeId,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
 
@@ -498,6 +506,18 @@ impl Backend for RemoteBackend {
         let spec = spec.clone();
         let options = mutation_options(commit_id);
         self.wire(move |client| client.restore_file_revision(&spec, source_revision_no, &options))
+            .await
+    }
+
+    async fn undelete(
+        &self,
+        spec: &NamespacePath,
+        inode_id: InodeId,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
+        let spec = spec.clone();
+        let options = mutation_options(commit_id);
+        self.wire(move |client| client.undelete(&spec, inode_id, &options))
             .await
     }
 

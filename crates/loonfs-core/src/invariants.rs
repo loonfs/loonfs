@@ -108,6 +108,7 @@ define_invariant_ids! {
     (UnbindDirentryWritesUnbindRow, "unbind_direntry_writes_unbind_row"),
     (AppendFileRevisionWritesRevisionRow, "append_file_revision_writes_revision_row"),
     (TombstoneSubtreeWritesTombstoneRow, "tombstone_subtree_writes_tombstone_row"),
+    (ClearSubtreeTombstoneWritesClearedRow, "clear_subtree_tombstone_writes_cleared_row"),
     (WalReplayRecordsCommitReceipt, "wal_replay_records_commit_receipt"),
 }
 

@@ -170,6 +170,14 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
             delta_index: *delta_index,
             root_inode_id: *root_inode_id,
         },
+        WalDelta::ClearSubtreeTombstone {
+            delta_index,
+            root_inode_id,
+        } => CommitDelta::ClearSubtreeTombstone {
+            semantic_op_index,
+            delta_index: *delta_index,
+            root_inode_id: *root_inode_id,
+        },
     })
 }
 

@@ -14,15 +14,15 @@ use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickResult, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind,
+    RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind, UndeleteOptions,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
     CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     DeleteDirectoryBehavior, DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse,
-    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
+    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
     ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
@@ -308,6 +308,24 @@ impl Backend for EmbeddedBackend {
                 &spec.absolute_path,
                 source_revision_no,
                 RestoreRevisionOptions { commit_id },
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+    }
+
+    async fn undelete(
+        &self,
+        spec: &NamespacePath,
+        inode_id: InodeId,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
+        let namespace_id = parse_namespace_id(&spec.namespace)?;
+        self.writer
+            .undelete(
+                &namespace_id,
+                inode_id,
+                &spec.absolute_path,
+                UndeleteOptions { commit_id },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))

@@ -271,6 +271,58 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
                 }
             }
+            CommitOp::Undelete {
+                inode_id,
+                parent_inode_id,
+                display_name,
+            } => {
+                // The target must exist and be the root of the newest,
+                // still-live deletion. A child of a deleted directory is
+                // covered by its ancestor's tombstone, not its own —
+                // recover the directory, not the child.
+                if metadata_state.inode_at_seq(*inode_id).await?.is_none() {
+                    return Err(CommitValidationError::UndeleteInodeMissing {
+                        inode_id: *inode_id,
+                    }
+                    .into());
+                }
+                if metadata_state
+                    .active_subtree_tombstone(*inode_id)
+                    .await?
+                    .is_none()
+                {
+                    return Err(CommitValidationError::UndeleteTargetNotDeleted {
+                        inode_id: *inode_id,
+                    }
+                    .into());
+                }
+                // The new home mirrors create validation: an existing,
+                // visible directory parent (visibility rules out a parent
+                // inside the recovered subtree, so the bind cannot cycle),
+                // a free name, and no covering tombstone over the parent.
+                let name_key = validate_child_name_absent(
+                    &metadata_state,
+                    *parent_inode_id,
+                    display_name,
+                    name_policy,
+                )
+                .await?;
+                validate_create_parent_not_covered(
+                    &metadata_state,
+                    *parent_inode_id,
+                    checked_invariants,
+                )
+                .await?;
+                ValidatedOp::Undelete {
+                    op_index,
+                    inode_id: *inode_id,
+                    parent_inode_id: *parent_inode_id,
+                    display_name: display_name.clone(),
+                    name_key,
+                    clear_tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
+            }
         };
         metadata_state.apply_validated_op_mut(committed_seq, &validated_op);
         validated_ops.push(validated_op);

@@ -73,6 +73,14 @@ pub(super) trait CommitValidationView {
         inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>;
 
+    /// The live tombstone rooted exactly at `root_inode_id`, if any —
+    /// undelete's target check, distinct from the ancestor-walking
+    /// [`Self::covering_subtree_tombstone`].
+    async fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>;
+
     async fn would_create_directory_cycle(
         &self,
         inode_id: InodeId,
@@ -206,6 +214,16 @@ impl CommitValidationView for InMemoryValidationView<'_> {
             .map_err(commit_validation_from_core)
     }
 
+    async fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+        self.view()
+            .active_subtree_tombstone(root_inode_id)
+            .await
+            .map_err(commit_validation_from_core)
+    }
+
     async fn would_create_directory_cycle(
         &self,
         inode_id: InodeId,
@@ -306,6 +324,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationView for PublishValidationView<'_,
         inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         self.view().covering_subtree_tombstone(inode_id).await
+    }
+
+    async fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+        self.view().active_subtree_tombstone(root_inode_id).await
     }
 
     async fn would_create_directory_cycle(

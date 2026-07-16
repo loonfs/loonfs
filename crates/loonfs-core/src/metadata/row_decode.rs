@@ -90,10 +90,12 @@ pub(super) fn tombstone_from_manifest_row(row: MetadataRow) -> Option<SubtreeTom
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,
+            cleared,
         } => Some(SubtreeTombstoneRecord {
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,
+            cleared,
         }),
         _ => None,
     }

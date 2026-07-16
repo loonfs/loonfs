@@ -50,6 +50,7 @@ pub(crate) async fn run(
         Command::Put(args) => fs::run_filesystem_put(kind, args).await,
         Command::Revisions(args) => fs::run_filesystem_revisions(kind, args).await,
         Command::Restore(args) => fs::run_filesystem_restore(kind, args).await,
+        Command::Undelete(args) => fs::run_filesystem_undelete(kind, args).await,
         Command::Mkdir(args) => fs::run_filesystem_mkdir(kind, args).await,
         Command::Rm(args) => fs::run_filesystem_rm(kind, args).await,
         Command::Mv(args) => fs::run_filesystem_mv(kind, args).await,

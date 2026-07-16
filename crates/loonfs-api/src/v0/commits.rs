@@ -90,6 +90,14 @@ pub enum CommitOp {
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
     DeleteSubtree { root_inode_id: InodeId },
+    /// Recover a deleted file or subtree: clear the tombstone rooted at
+    /// the inode and re-bind it under a visible parent directory.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitOpUndelete"))]
+    Undelete {
+        inode_id: InodeId,
+        parent_inode_id: InodeId,
+        display_name: String,
+    },
 }
 
 /// Race check evaluated before a commit is accepted.
@@ -181,6 +189,15 @@ pub enum CommitDelta {
     },
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaTombstoneSubtree"))]
     TombstoneSubtree {
+        semantic_op_index: u32,
+        delta_index: u32,
+        root_inode_id: InodeId,
+    },
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "CommitDeltaClearSubtreeTombstone")
+    )]
+    ClearSubtreeTombstone {
         semantic_op_index: u32,
         delta_index: u32,
         root_inode_id: InodeId,

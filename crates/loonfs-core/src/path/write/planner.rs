@@ -70,6 +70,11 @@ enum PathFingerprintInput {
         absolute_path: String,
         source_revision_no: RevisionNo,
     },
+    Undelete {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+        absolute_path: String,
+    },
 }
 
 fn path_intent_fingerprint(
@@ -149,6 +154,15 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             absolute_path: absolute_path.as_str().to_owned(),
             source_revision_no: *source_revision_no,
         },
+        PathMutationIntent::Undelete {
+            inode_id,
+            absolute_path,
+            ..
+        } => PathFingerprintInput::Undelete {
+            namespace_id: namespace_id.clone(),
+            inode_id: *inode_id,
+            absolute_path: absolute_path.as_str().to_owned(),
+        },
     };
     path_intent_fingerprint(&identity)
 }
@@ -216,6 +230,11 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
             plan_publish_restore_revision(absolute_path, *source_revision_no, &commit_id, &view)
                 .await?
         }
+        PathMutationIntent::Undelete {
+            inode_id,
+            absolute_path,
+            ..
+        } => plan_publish_undelete(*inode_id, absolute_path, &commit_id, &view).await?,
     };
     Ok(PlannedPathMutation {
         commit_id,
@@ -344,6 +363,49 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateDirectory {
+            parent_inode_id,
+            display_name: display_name.clone(),
+        }],
+        preconditions: vec![
+            publish_child_name_absent_precondition(view, parent_inode_id, &display_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: parent_inode_id,
+            },
+        ],
+        message: None,
+    })
+}
+
+async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
+    inode_id: InodeId,
+    absolute_path: &AbsolutePath,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    ensure_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
+    match view
+        .metadata_state
+        .resolve_visible_path(absolute_path)
+        .await
+    {
+        Ok(_) => {
+            return Err(CoreError::DestinationExists(
+                absolute_path.as_str().to_owned(),
+            ));
+        }
+        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) => return Err(error),
+    }
+    // The destination parent must already exist: recovery targets a place
+    // the caller can see, and commit validation re-checks the tombstone
+    // root, the parent, and the name under the publish lock.
+    let parent_inode_id = publish_resolve_parent_directory(view, absolute_path).await?;
+    let display_name = final_component(absolute_path)?;
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::Undelete {
+            inode_id,
             parent_inode_id,
             display_name: display_name.clone(),
         }],

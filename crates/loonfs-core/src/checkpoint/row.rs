@@ -76,6 +76,7 @@ pub(super) fn manifest_rows_for_family(
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
+                cleared: tombstone.cleared,
             })
             .collect::<Vec<_>>(),
         MetadataTableFamily::CommitReceipts => metadata_state

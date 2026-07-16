@@ -22,7 +22,7 @@ use crate::{
     MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, ObjectStore, PutFileOptions,
     ReleaseCheckpointResponse, RestoreRevisionOptions, RevisionNo, RuntimeCacheStats,
-    UploadContentResponse,
+    UndeleteOptions, UploadContentResponse,
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
@@ -1196,6 +1196,27 @@ impl FsCore {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 source_revision_no,
+            },
+        )
+        .await
+    }
+
+    /// Recovers a deleted file or subtree: clears the tombstone rooted at
+    /// `inode_id` and binds it at `absolute_path`. The inode id is the one
+    /// the delete reported (also visible in the change feed).
+    pub(crate) async fn undelete(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        absolute_path: &str,
+        options: UndeleteOptions,
+    ) -> Result<CommitResponse> {
+        self.publish_path_intent(
+            namespace_id,
+            PathMutationIntent::Undelete {
+                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                inode_id,
+                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
             },
         )
         .await

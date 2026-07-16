@@ -9,7 +9,7 @@ use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
     FilesystemPathArgs, FilesystemPathMutationArgs, FilesystemPutArgs, FilesystemRestoreArgs,
-    FilesystemRevisionsArgs, FilesystemTransferArgs, RuntimeBehavior,
+    FilesystemRevisionsArgs, FilesystemTransferArgs, FilesystemUndeleteArgs, RuntimeBehavior,
 };
 use crate::error::CliError;
 use loonfs_api::{CommitId, CopyBehavior, InodeKind, MoveBehavior, PutBehavior, RevisionNo};
@@ -431,6 +431,7 @@ pub(crate) async fn run_filesystem_put(
             target: render_target(&context.namespace, &spec.absolute_path),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
+            inode_id: None,
         },
     })
 }
@@ -456,6 +457,15 @@ pub(crate) async fn run_filesystem_rm(
             error,
         )
     })?;
+    // Resolve the inode before deleting: the delete unbinds the path, and
+    // the id is what `loon undelete` needs to recover it.
+    let deleted_inode = context
+        .target
+        .backend()
+        .stat_path(&spec)
+        .await
+        .ok()
+        .map(|entry| entry.inode_id.0);
     let result = context
         .target
         .backend()
@@ -478,6 +488,7 @@ pub(crate) async fn run_filesystem_rm(
             target: render_target(&context.namespace, &spec.absolute_path),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
+            inode_id: deleted_inode,
         },
     })
 }
@@ -525,6 +536,55 @@ pub(crate) async fn run_filesystem_restore(
             target: render_target(&context.namespace, &spec.absolute_path),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
+            inode_id: None,
+        },
+    })
+}
+
+pub(crate) async fn run_filesystem_undelete(
+    kind: CommandKind,
+    args: FilesystemUndeleteArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let result = context
+        .target
+        .backend()
+        .undelete(&spec, loonfs_api::InodeId(args.inode), commit_id)
+        .await
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, &spec.absolute_path),
+            committed_seq: result.committed_seq.0,
+            commit_id: result.commit_id.to_string(),
+            inode_id: Some(args.inode),
         },
     })
 }
@@ -572,6 +632,7 @@ pub(crate) async fn run_filesystem_mkdir(
             target: render_target(&context.namespace, &spec.absolute_path),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
+            inode_id: None,
         },
     })
 }

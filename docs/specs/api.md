@@ -212,6 +212,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
+| `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
@@ -713,6 +714,26 @@ and path revision restore:
   }
 }
 ```
+
+and undelete, which recovers a deleted file or subtree by re-binding the
+deletion's root inode (the id the delete reported, also visible in the
+change feed) at a destination path — the inode's identity and retained
+revision history come back with it:
+
+```json
+{
+  "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
+  "operation": {
+    "kind": "undelete",
+    "inode_id": 42,
+    "path": "/docs/report.txt"
+  }
+}
+```
+
+Only the root of a deletion can be undeleted (`not_deleted` otherwise), the
+destination parent must exist and be visible, and the destination name must
+be free.
 
 Inode-based restore is available when a caller already has stable inode
 identity and the expected current base revision:

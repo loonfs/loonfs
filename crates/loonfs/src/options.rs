@@ -238,6 +238,13 @@ pub struct RestoreRevisionOptions {
     pub commit_id: Option<CommitId>,
 }
 
+/// Options for recovering a deleted file or subtree.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UndeleteOptions {
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+}
+
 /// Options for reading the change feed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListChangesOptions {

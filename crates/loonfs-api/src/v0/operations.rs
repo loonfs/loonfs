@@ -223,6 +223,10 @@ pub enum FilesystemOperation {
         behavior: CopyBehavior,
     },
     /// Restore an older revision as the current revision for a path.
+    /// Recover a deleted file or subtree: clear the tombstone rooted at
+    /// `inode_id` (the id the delete reported) and re-bind it at `path`.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
+    Undelete { inode_id: InodeId, path: String },
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
         path: String,

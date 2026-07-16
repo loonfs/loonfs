@@ -368,12 +368,20 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             target,
             committed_seq,
             commit_id,
+            inode_id,
         } => match output.kind {
             CommandKind::FilesystemPut => {
                 format!("stored {target} @ seq {committed_seq} (commit {commit_id})")
             }
-            CommandKind::FilesystemRm => {
-                format!("removed {target} @ seq {committed_seq} (commit {commit_id})")
+            CommandKind::FilesystemRm => match inode_id {
+                Some(inode_id) => format!(
+                    "removed {target} @ seq {committed_seq} (commit {commit_id}); \
+                     recover with `loon undelete <path> --inode {inode_id}`"
+                ),
+                None => format!("removed {target} @ seq {committed_seq} (commit {commit_id})"),
+            },
+            CommandKind::FilesystemUndelete => {
+                format!("recovered {target} @ seq {committed_seq} (commit {commit_id})")
             }
             _ => format!("{target} @ seq {committed_seq} (commit {commit_id})"),
         },

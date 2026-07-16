@@ -1126,6 +1126,166 @@ fn delete_options_select_recursive_behavior() {
 }
 
 #[test]
+fn undelete_recovers_a_deleted_file_with_its_history() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "undelete-test");
+    let namespace_id = namespace_id();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"draft one",
+        PutFileOptions::default(),
+    )
+    .expect("put revision one");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"draft two",
+        PutFileOptions {
+            behavior: PutBehavior::Replace,
+            commit_id: None,
+        },
+    )
+    .expect("put revision two");
+    let inode_id = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect("stat before delete")
+        .inode_id;
+
+    fs.delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+        .expect("delete file");
+
+    // Recovery re-attaches the same inode — identity, content, and the full
+    // revision history come back, even at a new path.
+    block_on(fs.writer.undelete(
+        &namespace_id,
+        inode_id,
+        "/docs/recovered.txt",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect("undelete");
+    let recovered = fs
+        .stat_path_blocking(&namespace_id, "/docs/recovered.txt")
+        .expect("stat recovered file");
+    assert_eq!(recovered.inode_id, inode_id);
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/recovered.txt")
+            .expect("read recovered content")
+            .bytes,
+        b"draft two"
+    );
+    assert_eq!(
+        block_on(fs.reader.read_file_revision_bytes(
+            &namespace_id,
+            "/docs/recovered.txt",
+            loonfs::RevisionNo(1),
+        ))
+        .expect("read prior revision through the recovered path")
+        .bytes,
+        b"draft one"
+    );
+
+    // The recovered inode is no longer deleted: a second undelete conflicts.
+    let error = block_on(fs.writer.undelete(
+        &namespace_id,
+        inode_id,
+        "/docs/again.txt",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect_err("double undelete should conflict");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
+    ));
+
+    // A later delete supersedes the clear, and recovery works again — this
+    // time back to the original path.
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs/recovered.txt",
+        DeleteOptions::default(),
+    )
+    .expect("delete recovered file again");
+    block_on(fs.writer.undelete(
+        &namespace_id,
+        inode_id,
+        "/docs/report.txt",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect("undelete after re-delete");
+    assert_eq!(
+        fs.stat_path_blocking(&namespace_id, "/docs/report.txt")
+            .expect("stat restored original path")
+            .inode_id,
+        inode_id
+    );
+}
+
+#[test]
+fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "undelete-subtree-test");
+    let namespace_id = namespace_id();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/notes/a.txt",
+        b"alpha",
+        PutFileOptions::default(),
+    )
+    .expect("put nested file");
+    let directory_inode = fs
+        .stat_path_blocking(&namespace_id, "/docs/notes")
+        .expect("stat directory")
+        .inode_id;
+    let child_inode = fs
+        .stat_path_blocking(&namespace_id, "/docs/notes/a.txt")
+        .expect("stat child")
+        .inode_id;
+
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs/notes",
+        DeleteOptions {
+            behavior: loonfs::DeleteDirectoryBehavior::Recursive,
+            commit_id: None,
+        },
+    )
+    .expect("recursive delete");
+
+    // A child is covered by the subtree root's tombstone, not its own:
+    // recovery targets the root.
+    let error = block_on(fs.writer.undelete(
+        &namespace_id,
+        child_inode,
+        "/docs/a-alone.txt",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect_err("child of a deleted directory is not the deletion root");
+    assert!(matches!(
+        error,
+        RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
+    ));
+
+    block_on(fs.writer.undelete(
+        &namespace_id,
+        directory_inode,
+        "/docs/notes",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect("undelete the subtree root");
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/notes/a.txt")
+            .expect("nested file is visible again")
+            .bytes,
+        b"alpha"
+    );
+}
+
+#[test]
 fn directory_pages_use_canonical_name_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-order-test");

@@ -80,6 +80,15 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
         api_v0::CommitOp::DeleteSubtree { root_inode_id } => {
             CommitOp::DeleteSubtree { root_inode_id }
         }
+        api_v0::CommitOp::Undelete {
+            inode_id,
+            parent_inode_id,
+            display_name,
+        } => CommitOp::Undelete {
+            inode_id,
+            parent_inode_id,
+            display_name,
+        },
     }
 }
 

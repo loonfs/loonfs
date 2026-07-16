@@ -1326,11 +1326,13 @@ pub(super) fn append_rows_to_metadata(
                     root_inode_id,
                     tombstone_seq,
                     tombstone_delta_index,
+                    cleared,
                 },
             ) => metadata_state.push_subtree_tombstone(SubtreeTombstoneRecord {
                 root_inode_id: *root_inode_id,
                 tombstone_seq: *tombstone_seq,
                 tombstone_delta_index: *tombstone_delta_index,
+                cleared: *cleared,
             }),
             (
                 MetadataTableFamily::CommitReceipts,

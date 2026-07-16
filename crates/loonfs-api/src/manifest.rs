@@ -179,6 +179,10 @@ pub enum MetadataRow {
         root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
         tombstone_delta_index: u32,
+        /// A cleared row revokes every older tombstone for the same root;
+        /// readers take the newest row per root and treat a cleared newest
+        /// row as "no active tombstone".
+        cleared: bool,
     },
     CommitReceipt {
         commit_id: CommitId,
@@ -273,6 +277,10 @@ impl MetadataRow {
                 root_inode_id,
                 tombstone_seq,
                 tombstone_delta_index,
+                // The clear state lives in the value: cleared rows sort
+                // exactly like the tombstones they revoke, so newest-per-
+                // root scans see them in one prefix pass.
+                cleared: _,
             } => {
                 format!(
                     "tombstone-{:020}-{:020}-{:010}",

@@ -201,6 +201,10 @@ pub enum CommitValidationError {
         covering_root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
     },
+    #[error("undelete target inode `{inode_id}` is missing")]
+    UndeleteInodeMissing { inode_id: InodeId },
+    #[error("undelete target inode `{inode_id}` is not the root of a live deletion")]
+    UndeleteTargetNotDeleted { inode_id: InodeId },
     #[error(
         "revision counter overflow restoring inode `{inode_id}` at base revision `{base_revision_no}`"
     )]

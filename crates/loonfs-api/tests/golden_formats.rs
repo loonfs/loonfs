@@ -821,6 +821,13 @@ fn wal_delta_wire_tags_match_spec_names() {
             }),
             "tombstone_subtree",
         ),
+        (
+            serde_json::to_value(WalDelta::ClearSubtreeTombstone {
+                delta_index: 0,
+                root_inode_id: InodeId(2),
+            }),
+            "clear_subtree_tombstone",
+        ),
     ];
     for (value, expected_tag) in cases {
         let value = value.expect("serialize delta");
@@ -890,6 +897,13 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             root_inode_id: InodeId(5),
             tombstone_seq: ChangeSeq(8),
             tombstone_delta_index: 0,
+            cleared: false,
+        },
+        MetadataRow::Tombstone {
+            root_inode_id: InodeId(5),
+            tombstone_seq: ChangeSeq(9),
+            tombstone_delta_index: 0,
+            cleared: true,
         },
     ];
     for row in &rows {
