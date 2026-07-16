@@ -27,9 +27,11 @@ pub const DEFAULT_GREP_PAGE_LIMIT: usize = 100;
 pub const MAX_GREP_PAGE_LIMIT: usize = 1000;
 /// Unindexed-tail revisions one query will scan exhaustively before
 /// failing with `index_lagging` (or skipping the tail under `allow_stale`).
-pub(super) const MAX_GREP_TAIL_FILES: usize = 512;
+/// Advertised as the `query.grep.tail_budget_files` capability limit.
+pub const MAX_GREP_TAIL_FILES: usize = 512;
 /// Files a plan-less `allow_scan` query will scan before refusing.
-pub(super) const MAX_GREP_SCAN_FILES: usize = 4096;
+/// Advertised as the `query.grep.scan_budget_files` capability limit.
+pub const MAX_GREP_SCAN_FILES: usize = 4096;
 /// Longest match line returned, in bytes; longer lines are truncated.
 pub(super) const GREP_LINE_CAP_BYTES: usize = 512;
 /// Candidate files one page will read and verify before returning with a

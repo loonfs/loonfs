@@ -36,6 +36,22 @@ loon namespace create {namespace_id}
 loon use {namespace_id}
 ```
 
+## Running a server
+
+Embedded mode gives one process at a time direct object-store access. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
+
+```bash
+cargo build -p loonfs-server
+./target/debug/loonfs-server --config configs/loonfs-server.local-fs.example.toml
+```
+
+Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, `writer_version`, and a `[store]` block; everything else defaults. Connect a client:
+
+```bash
+export LOONFS_AUTH_TOKEN={auth_token}
+loon init default --no-input --mode remote --server-url http://127.0.0.1:9400
+```
+
 ## Documentation
 
 Visit loonfs.com/docs to learn more.

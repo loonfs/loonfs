@@ -28,6 +28,9 @@ pub enum ErrorKind {
     NotSupported,
     /// The requested object does not exist. Refresh state or choose another target.
     NotFound,
+    /// The path routes somewhere, but not for this HTTP method. Fix the
+    /// request; retrying unchanged will not succeed.
+    MethodNotAllowed,
     /// The target was deleted and its id is permanently retired. Do not
     /// retry; choose another target.
     Gone,
@@ -119,6 +122,8 @@ error_codes! {
     Unauthorized => "unauthorized",
     ContentTooLarge => "content_too_large",
     NotSupported => "not_supported",
+    RouteNotFound => "route_not_found",
+    MethodNotAllowed => "method_not_allowed",
     NamespaceNotFound => "namespace_not_found",
     NamespaceDeleted => "namespace_deleted",
     NamespaceExists => "namespace_exists",
@@ -166,7 +171,9 @@ impl ErrorCode {
             ErrorCode::NamespaceNotFound
             | ErrorCode::PathNotFound
             | ErrorCode::RevisionNotFound
-            | ErrorCode::UploadNotFound => ErrorKind::NotFound,
+            | ErrorCode::UploadNotFound
+            | ErrorCode::RouteNotFound => ErrorKind::NotFound,
+            ErrorCode::MethodNotAllowed => ErrorKind::MethodNotAllowed,
             ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             // `index_lagging` clears once maintenance catches the index up,

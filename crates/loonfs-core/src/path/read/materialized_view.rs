@@ -441,7 +441,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
                     return Err(CoreError::QueryUnindexable(
-                        "set allow_scan to search without the index".to_owned(),
+                        "the pattern has no run of at least 3 literal bytes for the \
+                         trigram index; set allow_scan to search without it"
+                            .to_owned(),
                     ));
                 }
                 candidates.unfiltered = self.scan_candidate_inodes().await?;
@@ -688,7 +690,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             if inodes.len() > MAX_GREP_SCAN_FILES {
                 return Err(CoreError::QueryUnindexable(format!(
                     "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
-                     use a pattern with literal bytes"
+                     give the pattern a run of at least 3 literal bytes so the \
+                     trigram index can narrow candidates"
                 )));
             }
             if exhausted {
@@ -1148,9 +1151,14 @@ fn validate_file_revisions_cursor(
     inode_id: InodeId,
 ) -> Result<(), CoreError> {
     if cursor.head_seq != head_seq {
-        return Err(invalid_cursor(
-            "file revisions cursor snapshot does not match the current namespace head",
-        ));
+        // A stale snapshot is the same restart-from-fresh-state condition
+        // directory listing reports, not a malformed request: both answer
+        // `rebootstrap_required` (API spec, "Pagination").
+        return Err(MetadataViewError::UnsupportedHistoricalRead {
+            requested_seq: cursor.head_seq,
+            head_seq,
+        }
+        .into());
     }
     if cursor.inode_id != inode_id {
         return Err(invalid_cursor(

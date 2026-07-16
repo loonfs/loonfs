@@ -1128,6 +1128,16 @@
               }
             }
           },
+          "413": {
+            "description": "Commit body exceeds the advertised `commit.max_body_bytes` limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Commit unavailable",
             "content": {

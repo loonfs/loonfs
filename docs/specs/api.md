@@ -80,7 +80,9 @@ therefore identical for both backends.
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.default_limit": 100,
-    "query.grep.max_limit": 1000
+    "query.grep.max_limit": 1000,
+    "query.grep.scan_budget_files": 4096,
+    "query.grep.tail_budget_files": 512
   }
 }
 ```
@@ -112,8 +114,13 @@ Registered limit keys:
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Larger content should use `direct_put` uploads. |
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. |
+| `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
+| `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
+| `commit.max_body_bytes` | Largest JSON body accepted by `POST .../commits`. Commit bodies are metadata only — file bytes ride uploads — so over-limit commits should be split into smaller batches, not routed through `direct_put`. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
+| `query.grep.scan_budget_files` | Files a plan-less `allow_scan` grep will scan before refusing with `query_unindexable`. |
+| `query.grep.tail_budget_files` | Unindexed-tail revisions one grep scans exhaustively before failing with `index_lagging`. |
 
 ### 2.2 Feature registry
 
@@ -199,7 +206,9 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, or configuration value fails validation. The message names the offending field. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
-| `content_too_large` | 413 | The request body exceeds the deployment's `upload.max_content_bytes` limit, or the requested file content exceeds its `download.max_content_bytes` limit for service-proxied reads. For uploads, send a smaller payload or use `direct_put`; for reads, the deployment limit must be raised. |
+| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads, `commit.max_body_bytes` for commit bodies. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put`; for commits, split the batch; for reads, the deployment limit must be raised. |
+| `route_not_found` | 404 | No route matches the request path. |
+| `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
 | `namespace_deleted` | 410 | The namespace existed and was deleted. The id is permanently retired. |
 | `path_not_found` | 404 | No visible entry at the path. |
@@ -217,7 +226,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
-| `query_unindexable` | 400 | The pattern requires no literal bytes, so the gram index cannot narrow candidates; rewrite the pattern or set `allow_scan`. |
+| `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index cannot narrow candidates; rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
 | `rebootstrap_required` | 409 | The resume position — a change cursor or listing snapshot — is no longer available; restart from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
@@ -584,6 +593,13 @@ required on every page; the cursor pins the snapshot and resume position, but
 the request path remains the authority for what is being listed. Responses
 include `next_cursor` only when another page is available.
 
+A cursor pins the head sequence it was issued at, and v0 serves pages only
+against the current head: once any commit advances the namespace, resuming an
+older cursor answers `rebootstrap_required` — restart the listing from a
+fresh first page. Directory listing and revision listing behave identically
+here. (A malformed cursor, or one replayed against a different target, stays
+`invalid_request`.)
+
 ```json
 {
   "namespace_id": "demo",
@@ -626,7 +642,7 @@ The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
 Revision listing endpoints return newest revisions first and use the same
-`limit` / `cursor` pattern as directory and namespace listing. Path-based
+`limit` / `cursor` pattern as directory listing. Path-based
 revision listing resolves the current path to its current inode, while inode
 revision listing is stable across later renames. Responses include
 `next_cursor` only when another page is available.

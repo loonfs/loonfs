@@ -148,6 +148,7 @@ fn status_for_error_kind(kind: ErrorKind) -> StatusCode {
         ErrorKind::ContentTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        ErrorKind::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
         ErrorKind::Gone => StatusCode::GONE,
         ErrorKind::AlreadyExists | ErrorKind::Conflict => StatusCode::CONFLICT,
         ErrorKind::NotSupported => StatusCode::NOT_IMPLEMENTED,
