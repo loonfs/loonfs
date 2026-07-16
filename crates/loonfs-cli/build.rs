@@ -6,14 +6,25 @@
 use std::process::Command;
 
 fn main() {
-    // HEAD moves on checkout/commit; refs cover branch fast-forwards.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs");
+    // Ask Git for its real paths: in a linked worktree `.git` is a file,
+    // not the directory `../../.git`. Detached checkouts only need HEAD;
+    // branch checkouts also watch the loose ref that moves on each commit.
+    watch_git_path("HEAD");
+    watch_git_path("packed-refs");
+    if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watch_git_path(&head_ref);
+    }
     let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
     let commit_date =
         git(&["show", "-s", "--format=%cs", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=LOON_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=LOON_GIT_COMMIT_DATE={commit_date}");
+}
+
+fn watch_git_path(path: &str) {
+    if let Some(path) = git(&["rev-parse", "--git-path", path]) {
+        println!("cargo:rerun-if-changed={path}");
+    }
 }
 
 fn git(args: &[&str]) -> Option<String> {

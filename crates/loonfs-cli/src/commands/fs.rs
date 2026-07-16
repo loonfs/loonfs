@@ -14,6 +14,7 @@ use crate::args::{
 use crate::error::CliError;
 use loonfs_api::{CommitId, CopyBehavior, InodeKind, MoveBehavior, PutBehavior, RevisionNo};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // --- filesystem ---
@@ -29,22 +30,32 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
 
 /// Writes via a same-directory temp file and an atomic rename, so a failed
 /// or interrupted download never leaves a truncated file at the target.
-fn write_local_file_atomically(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_local_file_atomically(
+    destination: &Path,
+    bytes: &[u8],
+    force: bool,
+) -> std::io::Result<()> {
     let file_name = destination
         .file_name()
         .ok_or_else(|| std::io::Error::other("destination has no file name"))?;
-    let mut temp_name = std::ffi::OsString::from(".");
-    temp_name.push(file_name);
-    temp_name.push(format!(".loon-partial-{}", std::process::id()));
-    let temp_path = match destination.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(parent) => parent.join(&temp_name),
-        None => PathBuf::from(&temp_name),
+    let mut prefix = std::ffi::OsString::from(".");
+    prefix.push(file_name);
+    prefix.push(".loon-partial-");
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    let persisted = if force {
+        temp.persist(destination)
+    } else {
+        temp.persist_noclobber(destination)
     };
-    let written = fs::write(&temp_path, bytes).and_then(|()| fs::rename(&temp_path, destination));
-    if written.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    written
+    persisted.map(|_| ()).map_err(|error| error.error)
 }
 
 pub(crate) async fn run_filesystem_ls(
@@ -303,23 +314,23 @@ pub(crate) async fn run_filesystem_get(
                 })?;
             // The local working copy is the one thing this CLI touches
             // that has no revision history behind it, so clobbering it is
-            // opt-in. (The check races a file appearing before the rename;
-            // for a CLI that window is acceptable.)
-            if !args.force && destination.exists() {
-                return Err(fail(
-                    kind,
-                    Some(context.profile_name),
-                    Some(context.mode),
-                    CliError::new(
-                        "destination_exists",
-                        format!(
-                            "local file `{}` already exists; pass --force to overwrite",
-                            destination.display()
+            // opt-in. `persist_noclobber` closes the race between checking
+            // and installing the completed temporary file.
+            write_local_file_atomically(&destination, &bytes, args.force).map_err(|error| {
+                if !args.force && error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return fail(
+                        kind,
+                        Some(context.profile_name.clone()),
+                        Some(context.mode.clone()),
+                        CliError::new(
+                            "destination_exists",
+                            format!(
+                                "local file `{}` already exists; pass --force to overwrite",
+                                destination.display()
+                            ),
                         ),
-                    ),
-                ));
-            }
-            write_local_file_atomically(&destination, &bytes).map_err(|error| {
+                    );
+                }
                 let mut error = CliError::io(error);
                 if derived_name {
                     error.message.push_str(

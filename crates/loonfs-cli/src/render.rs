@@ -283,7 +283,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         } => {
             if response.already_enabled {
                 format!(
-                    "gram index already enabled on {} (built through seq {})",
+                    "gram index already enabled on {} (built through seq {}); ran a maintenance \
+                     tick to continue the backfill",
                     response.namespace_id, response.built_through_seq.0
                 )
             } else if backfill_tick.is_some() {

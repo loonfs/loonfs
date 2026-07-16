@@ -24,12 +24,12 @@ loonfs = { path = "../loonfs" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
-tempfile.workspace = true
 ureq.workspace = true
 
 [lints]
