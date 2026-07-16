@@ -1,5 +1,6 @@
-//! The shared provider transport: timeouts, per-operation deadlines, and
-//! the bounded retry loops for idempotent-safe writes.
+//! The shared provider transport: timeouts, per-operation deadlines,
+//! bounded retry loops for idempotent-safe writes, and multipart upload for
+//! large immutable payloads.
 
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -8,9 +9,10 @@ use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
 use loonfs_api::sha256_digest;
 use object_store as provider_store;
+use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
 use provider_store::{
     GetOptions, GetRange, ObjectMeta, PutOptions, PutPayload, PutResult, UpdateVersion,
@@ -26,9 +28,10 @@ pub struct ProviderObjectStoreConfig {
     pub sha256_checksum_metadata: bool,
 }
 
-/// One HTTP attempt's request timeout, applied through the provider client's
-/// options. An attempt that makes no progress for this long fails and counts
-/// against the operation deadline instead of consuming it invisibly.
+/// Bound for one control-plane HTTP attempt's request phase, and the
+/// response-body idle bound for every request. An attempt that makes no
+/// progress for this long fails and counts against the operation deadline
+/// instead of consuming it invisibly.
 pub const PROVIDER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One HTTP attempt's connect timeout.
@@ -36,16 +39,70 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hard deadline for one logical object-store operation, consumed across
 /// every retry of that operation rather than restarting per attempt. Reads
-/// get it as the provider client's retry timeout; writes and deletes get it
-/// through `TransportRetryPolicy`. The deadline gates starting another
-/// attempt, so one operation's total wall time is bounded by
-/// `PROVIDER_OP_DEADLINE + PROVIDER_ATTEMPT_TIMEOUT`. The GC grace window is
-/// derived above this bound (format spec, "Garbage collection", rule 1).
+/// get it as the provider client's retry timeout; single-request writes and
+/// deletes get it through `TransportRetryPolicy`. The deadline gates
+/// starting another attempt, so one operation's total wall time is bounded
+/// by the deadline plus one attempt bound. The GC grace window is derived
+/// above this bound (format spec, "Garbage collection", rule 1); multipart
+/// uploads deliberately carry no whole-operation clock (their parts are
+/// individually bounded), which leaves the floor inequality untouched
+/// because everything it times — WAL segments inside the publish budget,
+/// the root compare-and-swap — is a small control object on the
+/// single-request path.
 pub const PROVIDER_OP_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Client options every provider builder applies: explicit per-attempt
-/// request and connect timeouts, so attempt time is bounded by these named
-/// constants instead of an upstream default.
+/// Payload size at and above which overwrite puts use the provider's native
+/// multipart upload instead of one whole-object PUT, matching the multipart
+/// thresholds mainstream storage clients ship. The format spec allows this
+/// for large immutable file data and forbids relying on it for small
+/// mutable control objects: create-if-absent and compare-and-swap puts
+/// never take this path, because providers complete multipart uploads as
+/// unconditional overwrites and those modes exist to carry real provider
+/// preconditions.
+pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Fixed size of every multipart part except the last. Cloudflare R2
+/// requires all non-final parts to share one size, and every supported
+/// provider requires at least 5 MiB per non-final part; 8 MiB matches the
+/// part size mainstream storage clients default to, and keeps every part a
+/// cheap retry that fits comfortably inside one flat attempt bound.
+pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Concurrent in-flight parts per multipart upload.
+pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
+
+/// Bound for one payload-bearing HTTP attempt's request phase. A request
+/// body is opaque to progress observation while it uploads, so a flat
+/// generous bound stands in for stall detection: parts are at most
+/// [`PROVIDER_MULTIPART_PART_BYTES`], and an 8 MiB body that cannot finish
+/// inside this bound is moving slower than roughly 70 KiB/s — treated as
+/// stalled and retried on a fresh connection.
+pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Request bodies at least this large are payload transfers and get
+/// [`PROVIDER_TRANSFER_ATTEMPT_TIMEOUT`] as their request-phase bound;
+/// smaller bodies are control-plane traffic bounded by
+/// [`PROVIDER_ATTEMPT_TIMEOUT`]. Sits well below the part size so multipart
+/// tail parts classify with their siblings.
+pub(crate) const PROVIDER_TRANSFER_BODY_MIN_BYTES: u64 = 1024 * 1024;
+
+/// Bound for one HTTP attempt's request phase (connect, request-body
+/// upload, response headers), by request body size: flat and small for
+/// control-plane requests, flat and generous for payload transfers.
+pub(crate) fn request_phase_bound(request_body_bytes: u64) -> Duration {
+    if request_body_bytes >= PROVIDER_TRANSFER_BODY_MIN_BYTES {
+        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
+    } else {
+        PROVIDER_ATTEMPT_TIMEOUT
+    }
+}
+
+/// Client options every provider builder applies: an explicit per-attempt
+/// total-request timeout and connect timeout, so a client built from these
+/// options alone is bounded by named constants instead of upstream defaults.
+/// [`crate::transfer_timeouts::TransferTimeoutConnector`] strips the
+/// total-request timeout and replaces it with payload-aware request bounds
+/// and response-body idle bounds.
 pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
     provider_store::ClientOptions::new()
         .with_timeout(PROVIDER_ATTEMPT_TIMEOUT)
@@ -139,9 +196,32 @@ async fn transport_retry_pause(backoff: Duration) {
     tokio::time::sleep(backoff).await;
 }
 
+/// The size routing for multipart writes: payloads at or above the
+/// threshold are uploaded as fixed-size parts. One production value
+/// ([`PROVIDER_MULTIPART_THRESHOLD_BYTES`], [`PROVIDER_MULTIPART_PART_BYTES`]);
+/// tests shrink it to exercise the machinery without allocating gigabytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MultipartGeometry {
+    threshold_bytes: u64,
+    part_bytes: u64,
+}
+
+impl MultipartGeometry {
+    const DEFAULT: Self = Self {
+        threshold_bytes: PROVIDER_MULTIPART_THRESHOLD_BYTES,
+        part_bytes: PROVIDER_MULTIPART_PART_BYTES,
+    };
+}
+
 #[derive(Clone)]
 pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
+    /// The provider's native multipart surface, used for payloads at or
+    /// above [`PROVIDER_MULTIPART_THRESHOLD_BYTES`]. `None` only for
+    /// providers without one; their large puts stay whole-object PUTs under
+    /// the payload-scaled bounds.
+    multipart: Option<Arc<dyn MultipartStore>>,
+    multipart_geometry: MultipartGeometry,
     key_prefix: Option<String>,
     sha256_checksum_metadata: bool,
     transport_retry: TransportRetryPolicy,
@@ -153,6 +233,7 @@ impl fmt::Debug for ProviderObjectStore {
         f.debug_struct("ProviderObjectStore")
             .field("key_prefix", &self.key_prefix)
             .field("sha256_checksum_metadata", &self.sha256_checksum_metadata)
+            .field("multipart_upload", &self.multipart.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -160,10 +241,13 @@ impl fmt::Debug for ProviderObjectStore {
 impl ProviderObjectStore {
     pub fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
+        multipart: Option<Arc<dyn MultipartStore>>,
         config: ProviderObjectStoreConfig,
     ) -> Result<Self, ObjectStoreError> {
         Ok(Self {
             inner,
+            multipart,
+            multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
             sha256_checksum_metadata: config.sha256_checksum_metadata,
             transport_retry: TransportRetryPolicy::DEFAULT,
@@ -174,6 +258,15 @@ impl ProviderObjectStore {
     #[cfg(test)]
     fn with_transport_retry(mut self, transport_retry: TransportRetryPolicy) -> Self {
         self.transport_retry = transport_retry;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_multipart_geometry(mut self, threshold_bytes: u64, part_bytes: u64) -> Self {
+        self.multipart_geometry = MultipartGeometry {
+            threshold_bytes,
+            part_bytes,
+        };
         self
     }
 
@@ -264,6 +357,285 @@ impl ProviderObjectStore {
             start: range.start_inclusive,
             end: bounded_end,
         }))))
+    }
+
+    /// Writes one large payload through the provider's native multipart
+    /// upload: fixed-size parts uploaded through a bounded window, each part
+    /// retried in place on transient failures (part indices are stable, so a
+    /// retry re-sends the same part), and a best-effort abort so a failed
+    /// upload does not strand parts.
+    ///
+    /// There is deliberately no whole-operation clock: every part attempt is
+    /// individually bounded and every retry loop is count-bounded, so a
+    /// healthy transfer takes as long as the link needs while a stuck one
+    /// still fails within one part's retry budget. Only overwrite puts route
+    /// here — providers complete multipart uploads as unconditional
+    /// overwrites, so the conditional modes stay on the single-request path
+    /// where real provider preconditions exist.
+    async fn put_large_multipart(
+        &self,
+        multipart: &dyn MultipartStore,
+        key: &str,
+        path: &Path,
+        bytes: Bytes,
+        checksum_sha256: Option<String>,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let size_bytes = bytes.len() as u64;
+        let upload = MultipartWrite {
+            store: self,
+            multipart,
+            key,
+            path,
+        };
+
+        let upload_id = upload.create(size_bytes).await?;
+        let result = upload.upload_parts_and_complete(&upload_id, &bytes).await;
+        match result {
+            Ok(mut metadata) => {
+                metadata.checksum_sha256 = checksum_sha256;
+                Ok(metadata)
+            }
+            Err(err) => {
+                // Best effort, and harmless when the failure raced a landed
+                // completion: the upload id no longer exists then, and the
+                // abort cannot touch the completed object.
+                upload.abort(&upload_id).await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Applies the shared retry gate for one failed write attempt: `None`
+    /// means the budget is spent and the caller must surface the error;
+    /// `Some` carries the backoff to sleep before the next attempt. The
+    /// budget is the retry count, plus the operation deadline when the
+    /// operation carries one (multipart transfers deliberately do not — see
+    /// [`Self::put_large_multipart`]). Exhaustion logs name the payload
+    /// size so a too-slow-link failure is attributable instead of reading
+    /// as weather.
+    fn next_write_backoff(
+        &self,
+        key: &str,
+        operation: &'static str,
+        payload_bytes: u64,
+        retries: &mut u32,
+        deadline: Option<&OperationDeadline<'_>>,
+        err: &provider_store::Error,
+    ) -> Option<Duration> {
+        if *retries >= self.transport_retry.max_retries {
+            tracing::warn!(
+                object_key = key,
+                operation,
+                retry = *retries,
+                payload_bytes,
+                error = %err,
+                "object store write retry budget exhausted; not retrying",
+            );
+            return None;
+        }
+        let mut remaining = Duration::MAX;
+        if let Some(deadline) = deadline {
+            let Some(deadline_remaining) = deadline.remaining() else {
+                tracing::warn!(
+                    object_key = key,
+                    operation,
+                    retry = *retries,
+                    payload_bytes,
+                    error = %err,
+                    "object store operation deadline exhausted; not retrying",
+                );
+                return None;
+            };
+            remaining = deadline_remaining;
+        }
+        *retries += 1;
+        let backoff = transport_retry_backoff(&self.transport_retry, *retries).min(remaining);
+        tracing::info!(
+            object_key = key,
+            operation,
+            retry = *retries,
+            max_retries = self.transport_retry.max_retries,
+            backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+            error = %err,
+            "transient object store write failure, backing off before retry",
+        );
+        Some(backoff)
+    }
+}
+
+/// One in-progress multipart write: the store, the provider multipart
+/// surface, and the object being written.
+struct MultipartWrite<'op> {
+    store: &'op ProviderObjectStore,
+    multipart: &'op dyn MultipartStore,
+    key: &'op str,
+    path: &'op Path,
+}
+
+impl MultipartWrite<'_> {
+    async fn create(
+        &self,
+        payload_bytes: u64,
+    ) -> Result<provider_store::MultipartId, ObjectStoreError> {
+        let mut retries: u32 = 0;
+        loop {
+            let err = match self.multipart.create_multipart(self.path).await {
+                Ok(upload_id) => return Ok(upload_id),
+                Err(err) => err,
+            };
+            if !provider_transport_retryable(&err) {
+                return Err(map_provider_error(self.key, err));
+            }
+            let Some(backoff) = self.store.next_write_backoff(
+                self.key,
+                "create_multipart",
+                payload_bytes,
+                &mut retries,
+                None,
+                &err,
+            ) else {
+                return Err(map_provider_error(self.key, err));
+            };
+            transport_retry_pause(backoff).await;
+        }
+    }
+
+    async fn upload_parts_and_complete(
+        &self,
+        upload_id: &provider_store::MultipartId,
+        bytes: &Bytes,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let part_size = self.store.multipart_geometry.part_bytes as usize;
+        let part_count = bytes.len().div_ceil(part_size);
+        let mut part_ids: Vec<Option<PartId>> = vec![None; part_count];
+        let mut in_flight = FuturesUnordered::new();
+        let mut next_part = 0usize;
+
+        loop {
+            while in_flight.len() < PROVIDER_MULTIPART_PART_WINDOW && next_part < part_count {
+                let part_index = next_part;
+                let start = part_index * part_size;
+                let end = (start + part_size).min(bytes.len());
+                let payload = bytes.slice(start..end);
+                in_flight.push(async move {
+                    let uploaded = self.upload_part(upload_id, part_index, payload).await;
+                    (part_index, uploaded)
+                });
+                next_part += 1;
+            }
+            match in_flight.next().await {
+                Some((part_index, Ok(part_id))) => part_ids[part_index] = Some(part_id),
+                // Dropping the window cancels the sibling part uploads; the
+                // caller aborts the upload so no parts are stranded.
+                Some((_, Err(err))) => return Err(err),
+                None => break,
+            }
+        }
+
+        let parts = part_ids
+            .into_iter()
+            .map(|part_id| part_id.expect("every part completed before the window drained"))
+            .collect();
+        self.complete(upload_id, parts, bytes.len() as u64).await
+    }
+
+    async fn upload_part(
+        &self,
+        upload_id: &provider_store::MultipartId,
+        part_index: usize,
+        payload: Bytes,
+    ) -> Result<PartId, ObjectStoreError> {
+        let payload_bytes = payload.len() as u64;
+        let mut retries: u32 = 0;
+        loop {
+            let err = match self
+                .multipart
+                .put_part(
+                    self.path,
+                    upload_id,
+                    part_index,
+                    PutPayload::from(payload.clone()),
+                )
+                .await
+            {
+                Ok(part_id) => return Ok(part_id),
+                Err(err) => err,
+            };
+            if !provider_transport_retryable(&err) {
+                return Err(map_provider_error(self.key, err));
+            }
+            let Some(backoff) = self.store.next_write_backoff(
+                self.key,
+                "put_part",
+                payload_bytes,
+                &mut retries,
+                None,
+                &err,
+            ) else {
+                return Err(map_provider_error(self.key, err));
+            };
+            transport_retry_pause(backoff).await;
+        }
+    }
+
+    async fn complete(
+        &self,
+        upload_id: &provider_store::MultipartId,
+        parts: Vec<PartId>,
+        size_bytes: u64,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let mut retries: u32 = 0;
+        loop {
+            let err = match self
+                .multipart
+                .complete_multipart(self.path, upload_id, parts.clone())
+                .await
+            {
+                Ok(result) => {
+                    return Ok(ProviderObjectStore::from_put_result(
+                        result, size_bytes, None,
+                    ))
+                }
+                Err(err) => err,
+            };
+            if !provider_transport_retryable(&err) {
+                return Err(map_provider_error(self.key, err));
+            }
+            // Ambiguous outcome: the completion may have landed before the
+            // transport failure. The payload is too large to read back, so
+            // landed-write detection is by size identity, which the caller's
+            // content addressing makes sufficient.
+            if let Ok(Some(metadata)) = self.store.head(self.key).await {
+                if metadata.size_bytes == size_bytes {
+                    return Ok(metadata);
+                }
+            }
+            let Some(backoff) = self.store.next_write_backoff(
+                self.key,
+                "complete_multipart",
+                size_bytes,
+                &mut retries,
+                None,
+                &err,
+            ) else {
+                return Err(map_provider_error(self.key, err));
+            };
+            transport_retry_pause(backoff).await;
+        }
+    }
+
+    async fn abort(&self, upload_id: &provider_store::MultipartId) {
+        // Best effort: an unaborted upload only strands parts until the
+        // bucket's lifecycle rule for incomplete multipart uploads collects
+        // them, so an abort failure is logged rather than surfaced.
+        if let Err(err) = self.multipart.abort_multipart(self.path, upload_id).await {
+            tracing::warn!(
+                object_key = self.key,
+                operation = "abort_multipart",
+                error = %err,
+                "failed to abort multipart upload after a write failure",
+            );
+        }
     }
 }
 
@@ -375,6 +747,15 @@ impl ObjectStore for ProviderObjectStore {
         }
 
         let create_if_absent = matches!(mode, PutMode::CreateIfAbsent);
+        if matches!(mode, PutMode::Overwrite)
+            && size_bytes >= self.multipart_geometry.threshold_bytes
+        {
+            if let Some(multipart) = self.multipart.clone() {
+                return self
+                    .put_large_multipart(multipart.as_ref(), key, &path, bytes, checksum_sha256)
+                    .await;
+            }
+        }
         let deadline =
             OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
         let mut retries: u32 = 0;
@@ -421,33 +802,19 @@ impl ObjectStore for ProviderObjectStore {
                 return Err(map_provider_error(key, err));
             }
 
-            if retries >= self.transport_retry.max_retries {
-                return Err(map_provider_error(key, err));
-            }
             // The operation deadline is consumed across attempts, never
             // restarted: no new attempt starts once it is spent, and the
             // backoff never sleeps past it.
-            let Some(remaining) = deadline.remaining() else {
-                tracing::warn!(
-                    object_key = key,
-                    operation = "put",
-                    retry = retries,
-                    error = %err,
-                    "object store operation deadline exhausted; not retrying",
-                );
+            let Some(backoff) = self.next_write_backoff(
+                key,
+                "put",
+                size_bytes,
+                &mut retries,
+                Some(&deadline),
+                &err,
+            ) else {
                 return Err(map_provider_error(key, err));
             };
-            retries += 1;
-            let backoff = transport_retry_backoff(&self.transport_retry, retries).min(remaining);
-            tracing::info!(
-                object_key = key,
-                operation = "put",
-                retry = retries,
-                max_retries = self.transport_retry.max_retries,
-                backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                error = %err,
-                "transient object store write failure, backing off before retry",
-            );
             transport_retry_pause(backoff).await;
         }
     }
@@ -466,30 +833,14 @@ impl ObjectStore for ProviderObjectStore {
                 Err(err) if provider_not_found(&err) => return Ok(()),
                 Err(err) => err,
             };
-            if !provider_transport_retryable(&err) || retries >= self.transport_retry.max_retries {
+            if !provider_transport_retryable(&err) {
                 return Err(map_provider_error(key, err));
             }
-            let Some(remaining) = deadline.remaining() else {
-                tracing::warn!(
-                    object_key = key,
-                    operation = "delete",
-                    retry = retries,
-                    error = %err,
-                    "object store operation deadline exhausted; not retrying",
-                );
+            let Some(backoff) =
+                self.next_write_backoff(key, "delete", 0, &mut retries, Some(&deadline), &err)
+            else {
                 return Err(map_provider_error(key, err));
             };
-            retries += 1;
-            let backoff = transport_retry_backoff(&self.transport_retry, retries).min(remaining);
-            tracing::info!(
-                object_key = key,
-                operation = "delete",
-                retry = retries,
-                max_retries = self.transport_retry.max_retries,
-                backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                error = %err,
-                "transient object store write failure, backing off before retry",
-            );
             transport_retry_pause(backoff).await;
         }
     }
@@ -614,8 +965,10 @@ mod tests {
     use object_store::memory::InMemory;
 
     fn memory_store() -> ProviderObjectStore {
+        let inner = Arc::new(InMemory::default());
         ProviderObjectStore::new(
-            Arc::new(InMemory::default()),
+            Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
+            Some(inner),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
                 sha256_checksum_metadata: true,
@@ -749,7 +1102,7 @@ mod tests {
     }
 
     use provider_store::{GetResult, ListResult, MultipartUpload, PutMultipartOptions};
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -767,15 +1120,28 @@ mod tests {
 
     /// Provider double that fails scripted attempts before delegating to an
     /// in-memory store, so retry behavior is observable per attempt.
+    ///
+    /// Multipart state is held here rather than delegated: the in-memory
+    /// provider requires parts to arrive in index order, while real
+    /// providers (and this transport's retry-driven interleavings) allow
+    /// any order.
     #[derive(Default)]
     struct FlakyStore {
         inner: InMemory,
         put_script: Mutex<VecDeque<WriteScript>>,
         get_script: Mutex<VecDeque<ReadScript>>,
         delete_script: Mutex<VecDeque<WriteScript>>,
+        part_script: Mutex<HashMap<usize, VecDeque<WriteScript>>>,
+        complete_script: Mutex<VecDeque<WriteScript>>,
         puts: AtomicUsize,
         gets: AtomicUsize,
         deletes: AtomicUsize,
+        multipart_creates: AtomicUsize,
+        part_attempts: Mutex<HashMap<usize, usize>>,
+        multipart_completes: AtomicUsize,
+        multipart_aborts: AtomicUsize,
+        next_upload_id: AtomicUsize,
+        multipart_uploads: Mutex<HashMap<String, BTreeMap<usize, Bytes>>>,
     }
 
     impl fmt::Debug for FlakyStore {
@@ -890,9 +1256,153 @@ mod tests {
         }
     }
 
+    impl FlakyStore {
+        fn store_part(
+            &self,
+            id: &provider_store::MultipartId,
+            part_idx: usize,
+            data: PutPayload,
+        ) -> provider_store::Result<()> {
+            let mut uploads = self.multipart_uploads.lock().expect("uploads");
+            let upload =
+                uploads
+                    .get_mut(id.as_str())
+                    .ok_or_else(|| provider_store::Error::NotFound {
+                        path: id.clone(),
+                        source: "no such upload".into(),
+                    })?;
+            upload.insert(part_idx, Bytes::from(data));
+            Ok(())
+        }
+
+        async fn land_completion(
+            &self,
+            path: &Path,
+            id: &provider_store::MultipartId,
+            parts: &[PartId],
+        ) -> provider_store::Result<PutResult> {
+            let upload = self
+                .multipart_uploads
+                .lock()
+                .expect("uploads")
+                .remove(id.as_str())
+                .ok_or_else(|| provider_store::Error::NotFound {
+                    path: id.clone(),
+                    source: "no such upload".into(),
+                })?;
+            assert_eq!(
+                upload.len(),
+                parts.len(),
+                "completion must list exactly the uploaded parts"
+            );
+            let mut buf = Vec::new();
+            for part in upload.values() {
+                buf.extend_from_slice(part);
+            }
+            provider_store::ObjectStore::put_opts(
+                &self.inner,
+                path,
+                buf.into(),
+                PutOptions::default(),
+            )
+            .await
+        }
+    }
+
+    #[async_trait]
+    impl MultipartStore for FlakyStore {
+        async fn create_multipart(
+            &self,
+            _path: &Path,
+        ) -> provider_store::Result<provider_store::MultipartId> {
+            self.multipart_creates.fetch_add(1, Ordering::SeqCst);
+            let id = self
+                .next_upload_id
+                .fetch_add(1, Ordering::SeqCst)
+                .to_string();
+            self.multipart_uploads
+                .lock()
+                .expect("uploads")
+                .insert(id.clone(), BTreeMap::new());
+            Ok(id)
+        }
+
+        async fn put_part(
+            &self,
+            path: &Path,
+            id: &provider_store::MultipartId,
+            part_idx: usize,
+            data: PutPayload,
+        ) -> provider_store::Result<PartId> {
+            *self
+                .part_attempts
+                .lock()
+                .expect("part attempts")
+                .entry(part_idx)
+                .or_default() += 1;
+            let script = self
+                .part_script
+                .lock()
+                .expect("part script")
+                .get_mut(&part_idx)
+                .and_then(VecDeque::pop_front);
+            match script {
+                Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
+                Some(WriteScript::LandThenFail) => {
+                    self.store_part(id, part_idx, data)?;
+                    Err(transport_glitch())
+                }
+                Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
+                None => {
+                    self.store_part(id, part_idx, data)?;
+                    Ok(PartId {
+                        content_id: part_idx.to_string(),
+                    })
+                }
+            }
+        }
+
+        async fn complete_multipart(
+            &self,
+            path: &Path,
+            id: &provider_store::MultipartId,
+            parts: Vec<PartId>,
+        ) -> provider_store::Result<PutResult> {
+            self.multipart_completes.fetch_add(1, Ordering::SeqCst);
+            let script = self
+                .complete_script
+                .lock()
+                .expect("complete script")
+                .pop_front();
+            match script {
+                Some(WriteScript::FailWithoutLanding) => Err(transport_glitch()),
+                Some(WriteScript::LandThenFail) => {
+                    self.land_completion(path, id, &parts).await?;
+                    Err(transport_glitch())
+                }
+                Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
+                None => self.land_completion(path, id, &parts).await,
+            }
+        }
+
+        async fn abort_multipart(
+            &self,
+            _path: &Path,
+            id: &provider_store::MultipartId,
+        ) -> provider_store::Result<()> {
+            self.multipart_aborts.fetch_add(1, Ordering::SeqCst);
+            self.multipart_uploads
+                .lock()
+                .expect("uploads")
+                .remove(id.as_str());
+            Ok(())
+        }
+    }
+
     fn retrying_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
         ProviderObjectStore::new(
-            flaky,
+            Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
+            Some(flaky),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
                 sha256_checksum_metadata: true,
@@ -1236,5 +1746,292 @@ mod tests {
             .expect("transient delete failure is retried");
         assert_eq!(flaky.deletes.load(Ordering::SeqCst), 4);
         assert!(store.head(transient_key).await.expect("head").is_none());
+    }
+
+    #[test]
+    fn request_phase_bound_has_two_flat_tiers() {
+        assert_eq!(request_phase_bound(0), PROVIDER_ATTEMPT_TIMEOUT);
+        assert_eq!(
+            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES - 1),
+            PROVIDER_ATTEMPT_TIMEOUT
+        );
+        assert_eq!(
+            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES),
+            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
+        );
+        assert_eq!(
+            request_phase_bound(PROVIDER_MULTIPART_PART_BYTES),
+            PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
+        );
+    }
+
+    const MULTIPART_TEST_THRESHOLD: u64 = 1024;
+    const MULTIPART_TEST_PART: u64 = 512;
+    const MULTIPART_KEY: &str =
+        "content-stores/cs_0123456789abcdef0123456789abcdef/blobs/sha256/ab/cd/abcdef0123456789";
+
+    /// Retrying store with a test-sized multipart geometry: payloads of
+    /// 1024+ bytes go multipart in 512-byte parts.
+    fn multipart_test_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
+        retrying_store(flaky).with_multipart_geometry(MULTIPART_TEST_THRESHOLD, MULTIPART_TEST_PART)
+    }
+
+    fn multipart_payload(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index % 251) as u8).collect()
+    }
+
+    fn script_part(
+        flaky: &FlakyStore,
+        part_index: usize,
+        script: impl IntoIterator<Item = WriteScript>,
+    ) {
+        flaky
+            .part_script
+            .lock()
+            .expect("part script")
+            .entry(part_index)
+            .or_default()
+            .extend(script);
+    }
+
+    fn part_attempts(flaky: &FlakyStore, part_index: usize) -> usize {
+        flaky
+            .part_attempts
+            .lock()
+            .expect("part attempts")
+            .get(&part_index)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn large_put_routes_through_multipart_and_preserves_bytes() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        // Unaligned tail: parts of 512, 512, and 276 bytes.
+        let payload = multipart_payload(1300);
+
+        let metadata = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("multipart put");
+
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.puts.load(Ordering::SeqCst),
+            0,
+            "no whole-object PUT for a payload above the threshold"
+        );
+        assert_eq!(part_attempts(&flaky, 0), 1);
+        assert_eq!(part_attempts(&flaky, 1), 1);
+        assert_eq!(part_attempts(&flaky, 2), 1);
+        assert_eq!(metadata.size_bytes, 1300);
+        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_threshold_boundary_routes_exactly() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+
+        store
+            .put_overwrite(
+                "namespaces/demo/uploads/upl_small.bin",
+                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD as usize - 1)),
+            )
+            .await
+            .expect("below-threshold put");
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+
+        store
+            .put_overwrite(
+                MULTIPART_KEY,
+                Bytes::from(multipart_payload(MULTIPART_TEST_THRESHOLD as usize)),
+            )
+            .await
+            .expect("at-threshold put");
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Conditional modes never ride multipart: providers complete multipart
+    /// uploads as unconditional overwrites, so create-if-absent keeps its
+    /// real provider precondition on the single-request path at any size.
+    #[tokio::test]
+    async fn large_create_if_absent_stays_single_request() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let payload = multipart_payload(1300);
+
+        let metadata = store
+            .put_if_absent(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("create absent large object");
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
+
+        let error = store
+            .put_if_absent(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("existing object fails the create precondition");
+        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_eq!(
+            flaky.multipart_creates.load(Ordering::SeqCst),
+            0,
+            "the conflict is decided by the provider precondition, not a pre-check"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_part_failures_are_retried_in_place() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        script_part(
+            &flaky,
+            1,
+            [
+                WriteScript::FailWithoutLanding,
+                WriteScript::FailWithoutLanding,
+            ],
+        );
+        let payload = multipart_payload(1300);
+
+        store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("multipart put survives transient part failures");
+
+        assert_eq!(part_attempts(&flaky, 0), 1);
+        assert_eq!(
+            part_attempts(&flaky, 1),
+            3,
+            "the failing part retries in place under the same index"
+        );
+        assert_eq!(part_attempts(&flaky, 2), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_part_budget_exhaustion_aborts_the_upload() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        script_part(&flaky, 0, (0..6).map(|_| WriteScript::FailWithoutLanding));
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("persistent part failure surfaces after the retry budget");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(part_attempts(&flaky, 0), 5, "1 attempt + max_retries");
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.multipart_aborts.load(Ordering::SeqCst),
+            1,
+            "a failed upload is aborted so no parts are stranded"
+        );
+        assert!(store.head(MULTIPART_KEY).await.expect("head").is_none());
+    }
+
+    #[tokio::test]
+    async fn multipart_auth_failure_is_not_retried() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        script_part(&flaky, 0, [WriteScript::FailAuth]);
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("auth rejection surfaces immediately");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(part_attempts(&flaky, 0), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_transport_failure_resolves_landed_completion() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        flaky
+            .complete_script
+            .lock()
+            .expect("complete script")
+            .push_back(WriteScript::LandThenFail);
+        let payload = multipart_payload(1300);
+
+        let metadata = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("landed completion reported as the success it was");
+
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(metadata.size_bytes, 1300);
+        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_failure_without_landing_retries_the_completion() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        flaky
+            .complete_script
+            .lock()
+            .expect("complete script")
+            .push_back(WriteScript::FailWithoutLanding);
+        let payload = multipart_payload(1300);
+
+        store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("completion retried after a transient failure");
+
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    /// Multipart transfers carry no whole-operation clock: with a stepping
+    /// timer that would spend the single-request deadline almost instantly,
+    /// part retries still run to their full count budget.
+    #[tokio::test]
+    async fn multipart_part_retries_are_count_bounded_not_clock_bounded() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky))
+            .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
+        script_part(&flaky, 0, (0..6).map(|_| WriteScript::FailWithoutLanding));
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("persistent part failure surfaces after the retry budget");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(
+            part_attempts(&flaky, 0),
+            5,
+            "1 attempt + max_retries, unaffected by elapsed time"
+        );
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
 }

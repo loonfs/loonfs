@@ -1187,6 +1187,7 @@ dependencies = [
  "fs4",
  "futures",
  "http",
+ "http-body",
  "loonfs-api",
  "object_store",
  "serde",

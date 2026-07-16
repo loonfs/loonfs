@@ -7,7 +7,7 @@ use crate::namespace::catalog::load_namespace_content_store_id;
 use bytes::Bytes;
 use loonfs_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_THRESHOLD_BYTES};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
@@ -267,10 +267,25 @@ pub(crate) async fn write_immutable_object<S: ObjectStore + ?Sized>(
     object_key: &str,
     expected_bytes: &[u8],
 ) -> Result<(), ImmutableObjectWriteError> {
-    match store
-        .put_if_absent(object_key, Bytes::copy_from_slice(expected_bytes))
-        .await
-    {
+    // Payloads large enough for multipart upload are written with overwrite
+    // semantics: providers complete multipart uploads as unconditional
+    // overwrites, so create-if-absent cannot ride them. Overwrite loses
+    // nothing here because every immutable-object key is collision-free by
+    // construction — content blobs are addressed by their own digest, and
+    // table/index objects carry a generated id owned by one writer — so any
+    // writer of the same key carries the same bytes, and reads re-verify
+    // digests regardless. Small payloads keep the create precondition as a
+    // cheap corruption tripwire.
+    let write_result = if expected_bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES {
+        store
+            .put_overwrite(object_key, Bytes::copy_from_slice(expected_bytes))
+            .await
+    } else {
+        store
+            .put_if_absent(object_key, Bytes::copy_from_slice(expected_bytes))
+            .await
+    };
+    match write_result {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {
             if existing_object_matches_expected_bytes(store, object_key, expected_bytes).await? {
@@ -369,6 +384,7 @@ mod tests {
     use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::PROVIDER_MULTIPART_THRESHOLD_BYTES;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
@@ -550,12 +566,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn immutable_write_mode_routes_by_multipart_threshold() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = ModeRecordingStore::new(inner);
+
+        let small = b"small immutable bytes".to_vec();
+        let small_ref = ContentRef::whole_file_v0(&small);
+        let small_key =
+            content_blob(content_store_id.as_str(), &small_ref.digest).expect("content key");
+        write_immutable_object(&store, &small_key, &small)
+            .await
+            .expect("small write");
+
+        let large = vec![0u8; usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize")];
+        let large_ref = ContentRef::whole_file_v0(&large);
+        let large_key =
+            content_blob(content_store_id.as_str(), &large_ref.digest).expect("content key");
+        write_immutable_object(&store, &large_key, &large)
+            .await
+            .expect("large write");
+
+        let modes = store.put_modes.lock().expect("modes").clone();
+        assert_eq!(
+            modes,
+            vec![PutMode::CreateIfAbsent, PutMode::Overwrite],
+            "small blobs keep the create precondition; multipart-sized blobs \
+             use overwrite because multipart completion cannot carry one"
+        );
+    }
+
     fn assert_error_contains(error: &ImmutableObjectWriteError, expected: &str) {
         let message = error.to_string();
         assert!(
             message.contains(expected),
             "expected error to contain `{expected}`, got `{message}`"
         );
+    }
+
+    #[derive(Debug)]
+    struct ModeRecordingStore {
+        inner: LocalFsStore,
+        put_modes: std::sync::Mutex<Vec<PutMode>>,
+    }
+
+    impl ModeRecordingStore {
+        fn new(inner: LocalFsStore) -> Self {
+            Self {
+                inner,
+                put_modes: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for ModeRecordingStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.put_modes.lock().expect("modes").push(mode.clone());
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
     }
 
     fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {
