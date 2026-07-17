@@ -1200,13 +1200,9 @@ fn index_grams_feature_mid_fold_matches_golden_bytes() {
 }
 
 #[test]
-fn index_grams_feature_base_fold_golden_omits_the_output_level() {
-    // A base fold at run ordinal zero serializes without `output_level`
-    // and without either ordinal field — byte-identical to what
-    // pre-tiering, pre-ordinal writers persisted for their whole-set
-    // folds — so this golden doubles as the legacy-decode pin: a state
-    // without the fields must complete at the base level as part of the
-    // ordinal-zero run.
+fn index_grams_feature_base_fold_golden_serializes_every_field() {
+    // A base fold at run ordinal zero: `output_level` and both ordinal
+    // fields are required and always serialized, zero included.
     let mut feature = sample_feature_with_fold(2);
     feature.next_run_ordinal = 0;
     feature.fold.as_mut().expect("fold state").run_ordinal = 0;
@@ -1215,12 +1211,12 @@ fn index_grams_feature_base_fold_golden_omits_the_output_level() {
     let golden = read_golden("index_grams_feature_fold_base.v1.json");
     let golden_text = String::from_utf8(golden.clone()).expect("utf8 fixture");
     assert!(
-        !golden_text.contains("output_level"),
-        "the base output level is the omitted default"
+        golden_text.contains("output_level"),
+        "the output level is required, base included"
     );
     assert!(
-        !golden_text.contains("run_ordinal"),
-        "zero run ordinals are the omitted default"
+        golden_text.contains("run_ordinal"),
+        "run ordinals are required, zero included"
     );
     let decoded = IndexGramsFeature::from_value(
         &serde_json::from_slice(&golden).expect("parse golden feature value"),
