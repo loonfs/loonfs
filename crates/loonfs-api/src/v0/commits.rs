@@ -220,6 +220,9 @@ pub struct CommittedChange {
     pub seq: ChangeSeq,
     /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
+    /// Wall-clock stamp of the commit, in Unix milliseconds.
+    /// Observational: `seq` is the order.
+    pub committed_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Materialized metadata deltas.

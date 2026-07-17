@@ -19,6 +19,7 @@ pub(crate) fn wal_payload_from_materialized_commit(
         seq: prepared.plan.assigned_seq,
         commit_id: prepared.plan.commit_id.clone(),
         semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
+        committed_at_ms: commit.committed_at_ms,
         message: prepared.request.message.clone(),
         deltas: commit
             .deltas
@@ -73,12 +74,33 @@ mod tests {
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        let materialized = materialize_commit(prepared);
+        let materialized = materialize_commit(prepared, 4_200);
 
         let payload =
             wal_payload_from_materialized_commit(&materialized).expect("build wal payload");
 
         assert_eq!(payload.seq, ChangeSeq(1));
+        assert_eq!(payload.committed_at_ms, 4_200);
         assert_eq!(payload.deltas.len(), 2);
+
+        // The stamp is observational: two materializations of one prepared
+        // commit under different clocks share a semantic fingerprint, so
+        // replay identity is untouched by wall time. Only the stamp differs
+        // in the durable payload.
+        let restamped = materialize_commit(materialized.prepared.clone(), 9_900);
+        assert_eq!(
+            restamped.prepared.semantic_identity,
+            materialized.prepared.semantic_identity
+        );
+        let restamped_payload =
+            wal_payload_from_materialized_commit(&restamped).expect("build wal payload");
+        assert_eq!(restamped_payload.committed_at_ms, 9_900);
+        assert_eq!(
+            restamped_payload.semantic_commit_fingerprint,
+            payload.semantic_commit_fingerprint
+        );
+        let mut normalized = restamped_payload.clone();
+        normalized.committed_at_ms = payload.committed_at_ms;
+        assert_eq!(normalized, payload);
     }
 }

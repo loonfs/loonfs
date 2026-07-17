@@ -136,13 +136,13 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let replace_file = append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2"));
 
     let core_state = core_state
-        .apply_committed_wal_deltas(ChangeSeq(1), &create_directory)
+        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &create_directory)
         .expect("core applies create-dir delta")
         .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
+        .apply_committed_wal_deltas(ChangeSeq(2), 4_200, &create_file)
         .expect("core applies create-file deltas")
         .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
+        .apply_committed_wal_deltas(ChangeSeq(3), 4_200, &replace_file)
         .expect("core applies replace-file delta")
         .metadata_state;
 
@@ -231,6 +231,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
+            4_200,
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
@@ -252,7 +253,7 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
     for (index, deltas) in sequences.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
         core_state = core_state
-            .apply_committed_wal_deltas(seq, deltas)
+            .apply_committed_wal_deltas(seq, 4_200, deltas)
             .expect("core apply")
             .metadata_state;
         model_state = model_state

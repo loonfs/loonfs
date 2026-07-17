@@ -577,9 +577,15 @@ the durable naming rules (`format.md`, "Durable naming conventions").
     "kind": "whole_file_v0",
     "digest": "sha256:42d...",
     "size_bytes": 19482
-  }
+  },
+  "committed_at_ms": 1752624000000
 }
 ```
+
+File entries carry `committed_at_ms`: the wall-clock stamp of the commit that
+created the current revision, in Unix milliseconds. It is observational —
+sequences are the order, and no validity rule reads it. Directory entries
+carry no modification time in v0.
 
 ### 6.5 `GET /filesystem/list`
 
@@ -659,6 +665,7 @@ revision listing is stable across later renames. Responses include
       "inode_id": 42,
       "revision_no": 7,
       "committed_seq": 418,
+      "committed_at_ms": 1752624000000,
       "content_ref": {
         "kind": "whole_file_v0",
         "digest": "sha256:42d...",
@@ -899,6 +906,7 @@ Representative response:
     {
       "seq": 419,
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+      "committed_at_ms": 1752624000000,
       "message": "replace report bytes",
       "deltas": [
         {

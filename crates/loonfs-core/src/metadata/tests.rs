@@ -12,6 +12,7 @@ fn bind_direntry_replay_uses_persisted_name_key() {
     let applied = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(1),
+            4_200,
             &[WalDelta::BindDirentry {
                 delta_index: 7,
                 parent_inode_id: InodeId(1),
@@ -130,6 +131,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     let metadata_state = metadata_state
         .apply_committed_wal_deltas(
             ChangeSeq(3),
+            4_200,
             &[WalDelta::UnbindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
@@ -151,6 +153,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     let metadata_state = metadata_state
         .apply_committed_wal_deltas(
             ChangeSeq(4),
+            4_200,
             &[WalDelta::BindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
@@ -175,6 +178,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     let metadata_state = metadata_state
         .apply_committed_wal_deltas(
             ChangeSeq(5),
+            4_200,
             &[WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
@@ -409,18 +413,21 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
                 commit_id: commit_id.clone(),
                 semantic_commit_fingerprint: "old".to_owned(),
                 committed_seq: ChangeSeq(1),
+                committed_at_ms: 4_200,
                 message: Some("old message".to_owned()),
             },
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
                 semantic_commit_fingerprint: "other".to_owned(),
                 committed_seq: ChangeSeq(3),
+                committed_at_ms: 4_200,
                 message: None,
             },
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
                 semantic_commit_fingerprint: "new".to_owned(),
                 committed_seq: ChangeSeq(2),
+                committed_at_ms: 4_200,
                 message: Some("new message".to_owned()),
             },
         ],
@@ -459,6 +466,7 @@ fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
         inode_id: InodeId(7),
         revision_no: RevisionNo(1),
         committed_seq: ChangeSeq(2),
+        committed_at_ms: 4_200,
         revision_delta_index: 0,
         content_ref: content_ref.clone(),
     });
@@ -466,6 +474,7 @@ fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
         inode_id: InodeId(7),
         revision_no: RevisionNo(2),
         committed_seq: ChangeSeq(3),
+        committed_at_ms: 4_200,
         revision_delta_index: 0,
         content_ref: replacement_ref.clone(),
     });
@@ -473,6 +482,7 @@ fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
         commit_id: commit_id.clone(),
         semantic_commit_fingerprint: "fingerprint".to_owned(),
         committed_seq: ChangeSeq(3),
+        committed_at_ms: 4_200,
         message: Some("replace indexed file".to_owned()),
     });
     let metadata_state = builder.finish();
@@ -532,6 +542,7 @@ fn churned_binding_state() -> MetadataState {
     state
         .apply_committed_wal_deltas_mut(
             ChangeSeq(0),
+            4_200,
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
@@ -542,6 +553,7 @@ fn churned_binding_state() -> MetadataState {
     state
         .apply_committed_wal_deltas_mut(
             ChangeSeq(1),
+            4_200,
             &[
                 WalDelta::CreateInode {
                     delta_index: 0,
@@ -573,6 +585,7 @@ fn churned_binding_state() -> MetadataState {
     state
         .apply_committed_wal_deltas_mut(
             ChangeSeq(2),
+            4_200,
             &[
                 WalDelta::UnbindDirentry {
                     delta_index: 0,
@@ -603,6 +616,7 @@ fn churned_binding_state() -> MetadataState {
     state
         .apply_committed_wal_deltas_mut(
             ChangeSeq(3),
+            4_200,
             &[
                 WalDelta::CreateInode {
                     delta_index: 0,

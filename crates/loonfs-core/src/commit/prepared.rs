@@ -170,8 +170,10 @@ mod tests {
 
     #[test]
     fn materialize_commit_outputs_wal_ops_and_results_once() {
-        let materialized =
-            materialize_commit(PreparedCommit::new(request(), plan()).expect("prepare commit"));
+        let materialized = materialize_commit(
+            PreparedCommit::new(request(), plan()).expect("prepare commit"),
+            4_200,
+        );
 
         assert_eq!(materialized.deltas.len(), 2);
         assert!(matches!(

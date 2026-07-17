@@ -89,6 +89,11 @@ pub struct WalCommitPayload {
     pub seq: ChangeSeq,
     pub commit_id: CommitId,
     pub semantic_commit_fingerprint: String,
+    /// Wall-clock stamp from the publishing writer's request context, in
+    /// Unix milliseconds. Observational only: never a validity or ordering
+    /// input — `seq` is the order — and excluded from the semantic commit
+    /// fingerprint, so replay identity is untouched by clocks.
+    pub committed_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     pub deltas: Vec<WalCommitDelta>,

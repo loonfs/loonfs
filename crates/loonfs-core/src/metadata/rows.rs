@@ -118,6 +118,9 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
+    /// Observational wall-clock stamp of the owning commit; never a
+    /// validity input — `committed_seq` is the order.
+    pub committed_at_ms: u64,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
@@ -179,6 +182,9 @@ pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
     pub semantic_commit_fingerprint: String,
     pub committed_seq: ChangeSeq,
+    /// Observational wall-clock stamp of the commit; never a validity
+    /// input — `committed_seq` is the order.
+    pub committed_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

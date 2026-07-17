@@ -87,7 +87,12 @@ pub(super) trait CommitValidationView {
         new_parent_inode_id: InodeId,
     ) -> Result<bool, Self::Error>;
 
-    fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp);
+    fn apply_validated_op_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        committed_at_ms: u64,
+        op: &ValidatedOp,
+    );
 }
 
 /// Bridges the shared [`MetadataView`] error surface into the plain
@@ -235,8 +240,14 @@ impl CommitValidationView for InMemoryValidationView<'_> {
             .map_err(commit_validation_from_core)
     }
 
-    fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp) {
-        self.overlay.apply_validated_op_mut(committed_seq, op);
+    fn apply_validated_op_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        committed_at_ms: u64,
+        op: &ValidatedOp,
+    ) {
+        self.overlay
+            .apply_validated_op_mut(committed_seq, committed_at_ms, op);
     }
 }
 
@@ -343,7 +354,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationView for PublishValidationView<'_,
             .await
     }
 
-    fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp) {
-        self.overlay.apply_validated_op_mut(committed_seq, op);
+    fn apply_validated_op_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        committed_at_ms: u64,
+        op: &ValidatedOp,
+    ) {
+        self.overlay
+            .apply_validated_op_mut(committed_seq, committed_at_ms, op);
     }
 }

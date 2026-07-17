@@ -163,6 +163,10 @@ pub enum MetadataRow {
         inode_id: InodeId,
         revision_no: RevisionNo,
         committed_seq: ChangeSeq,
+        /// The owning commit's observational wall-clock stamp, denormalized
+        /// onto the row so revision reads answer times without a receipt
+        /// join. Never a validity input; `committed_seq` is the order.
+        committed_at_ms: u64,
         revision_delta_index: u32,
         content_ref: ContentRef,
     },
@@ -178,6 +182,11 @@ pub enum MetadataRow {
         commit_id: CommitId,
         semantic_commit_fingerprint: String,
         committed_seq: ChangeSeq,
+        /// The commit's observational wall-clock stamp. Receipts are the
+        /// durable per-commit record once WAL history drops below the
+        /// retention floor, so the stamp lives here for every commit,
+        /// revision-bearing or not.
+        committed_at_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
@@ -865,6 +874,7 @@ mod tests {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
             committed_seq: ChangeSeq(12),
+            committed_at_ms: 12_000,
             revision_delta_index: 3,
             content_ref: crate::ContentRef {
                 kind: crate::ContentRefKind::WholeFileV0,

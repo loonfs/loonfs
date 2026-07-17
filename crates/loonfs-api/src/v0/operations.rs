@@ -281,6 +281,9 @@ pub struct FileRevision {
     pub revision_no: RevisionNo,
     /// Namespace sequence that created this revision.
     pub committed_seq: ChangeSeq,
+    /// Wall-clock stamp of the commit that created this revision, in Unix
+    /// milliseconds. Observational: `committed_seq` is the order.
+    pub committed_at_ms: u64,
     /// Content stored for this revision.
     pub content_ref: ContentRef,
 }

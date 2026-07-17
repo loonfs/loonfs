@@ -81,6 +81,7 @@ pub(super) fn manifest_rows_for_family(
                     inode_id: revision.inode_id,
                     revision_no: revision.revision_no,
                     committed_seq: revision.committed_seq,
+                    committed_at_ms: revision.committed_at_ms,
                     revision_delta_index: revision.revision_delta_index,
                     content_ref: revision.content_ref.clone(),
                 })
@@ -103,6 +104,7 @@ pub(super) fn manifest_rows_for_family(
                 commit_id: record.commit_id.clone(),
                 semantic_commit_fingerprint: record.semantic_commit_fingerprint.clone(),
                 committed_seq: record.committed_seq,
+                committed_at_ms: record.committed_at_ms,
                 message: record.message.clone(),
             })
             .collect::<Vec<_>>(),

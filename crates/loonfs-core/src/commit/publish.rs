@@ -257,6 +257,7 @@ mod tests {
                     commit_id: CommitId::parse(format!("publish-record-{index}"))
                         .expect("valid commit id"),
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
+                    committed_at_ms: 4_200,
                     message: None,
                     deltas: Vec::new(),
                 }

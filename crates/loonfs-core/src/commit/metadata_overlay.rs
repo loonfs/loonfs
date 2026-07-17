@@ -37,11 +37,19 @@ impl CommitOverlayRows {
     /// `materialize_commit` after validation; reusing these deltas there
     /// would mean carrying them inside the serialized [`ValidatedOp`]s,
     /// which is not worth the wire churn for a few small per-op clones.
-    pub(super) fn apply_validated_op_mut(&mut self, committed_seq: ChangeSeq, op: &ValidatedOp) {
+    pub(super) fn apply_validated_op_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        committed_at_ms: u64,
+        op: &ValidatedOp,
+    ) {
         let (deltas, _result) = materialize_validated_op(op);
         for delta in &deltas {
-            self.rows
-                .apply_committed_wal_delta_mut(committed_seq, &delta.wal_delta);
+            self.rows.apply_committed_wal_delta_mut(
+                committed_seq,
+                committed_at_ms,
+                &delta.wal_delta,
+            );
         }
     }
 }
@@ -64,7 +72,7 @@ mod tests {
         let overlay = overlay_rows(committed_seq, ops);
         let mut replayed = MetadataState::default();
         replayed
-            .apply_committed_wal_deltas_mut(committed_seq, &materialized_wal_deltas(ops))
+            .apply_committed_wal_deltas_mut(committed_seq, 4_200, &materialized_wal_deltas(ops))
             .expect("replaying materialized deltas is infallible");
 
         assert!(
@@ -77,7 +85,7 @@ mod tests {
     fn overlay_rows(committed_seq: ChangeSeq, ops: &[ValidatedOp]) -> MetadataState {
         let mut overlay = CommitOverlayRows::new();
         for op in ops {
-            overlay.apply_validated_op_mut(committed_seq, op);
+            overlay.apply_validated_op_mut(committed_seq, 4_200, op);
         }
         overlay.rows
     }
@@ -414,10 +422,14 @@ mod tests {
 
         let mut replayed = MetadataState::default();
         replayed
-            .apply_committed_wal_deltas_mut(first_seq, &materialized_wal_deltas(&first_ops))
+            .apply_committed_wal_deltas_mut(first_seq, 4_200, &materialized_wal_deltas(&first_ops))
             .expect("replaying first commit deltas is infallible");
         replayed
-            .apply_committed_wal_deltas_mut(second_seq, &materialized_wal_deltas(&second_ops))
+            .apply_committed_wal_deltas_mut(
+                second_seq,
+                4_200,
+                &materialized_wal_deltas(&second_ops),
+            )
             .expect("replaying second commit deltas is infallible");
 
         assert_eq!(
