@@ -764,10 +764,21 @@ async fn create_checkpoint_revives_a_dead_record_for_a_verified_basis() {
     .await
     .expect("mark dead");
 
-    let revived = create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("recreate checkpoint");
+    // Revival goes through renewal: the re-create's expiry (here a real
+    // one, where the original had none) is what the revived record carries.
+    let revived = super::create::create_checkpoint(
+        &store,
+        &namespace_id,
+        loonfs_api::wire::control::CheckpointOwner::User {
+            name: "test-pin".to_owned(),
+        },
+        Some(90_000),
+        &context,
+    )
+    .await
+    .expect("recreate checkpoint");
     assert_eq!(revived.checkpoint_id, first.checkpoint_id);
+    assert_eq!(revived.expires_at_ms, Some(90_000));
     let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect("read checkpoint record")
@@ -777,6 +788,68 @@ async fn create_checkpoint_revives_a_dead_record_for_a_verified_basis() {
         record.state,
         loonfs_api::wire::control::CheckpointRecordLifecycle::Active
     );
+    assert_eq!(record.expires_at_ms, Some(90_000));
+}
+
+#[tokio::test]
+async fn re_creating_a_checkpoint_renews_its_expiry_last_write_wins() {
+    // Same basis + owner on an idle namespace hashes to the same record;
+    // each re-create sets the durable expiry to exactly what it asked —
+    // extend, shrink, and clear — while created_at_ms keeps the original
+    // creation instant and the response echoes the durable state.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let owner = || loonfs_api::wire::control::CheckpointOwner::User {
+        name: "test-pin".to_owned(),
+    };
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+
+    let first =
+        super::create::create_checkpoint(&store, &namespace_id, owner(), Some(10_000), &context)
+            .await
+            .expect("create checkpoint");
+    assert_eq!(first.expires_at_ms, Some(10_000));
+
+    let mut renew_context = test_context();
+    renew_context.now_ms = 2_000;
+    for renewed_expiry in [Some(99_000), Some(5_000), None] {
+        let renewed = super::create::create_checkpoint(
+            &store,
+            &namespace_id,
+            owner(),
+            renewed_expiry,
+            &renew_context,
+        )
+        .await
+        .expect("renew checkpoint");
+        assert_eq!(renewed.checkpoint_id, first.checkpoint_id);
+        assert_eq!(renewed.expires_at_ms, renewed_expiry);
+        let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect("read checkpoint record")
+            .expect("record exists")
+            .state;
+        assert_eq!(record.expires_at_ms, renewed_expiry);
+        assert_eq!(record.created_at_ms, 1_000, "creation instant is history");
+        assert_eq!(
+            record.state,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+        );
+    }
 }
 
 #[tokio::test]
