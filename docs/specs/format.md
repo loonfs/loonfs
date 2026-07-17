@@ -419,6 +419,15 @@ file bytes.
 A path is produced by walking visible directory bindings from the root inode.
 A path can change even when the underlying item has not.
 
+Display names are stored as given and validated at admission. A display name
+must be non-empty, must not contain `/` or any Unicode control character
+(general category `Cc`, which covers NUL, C0, and C1), must not be `.` or
+`..`, and must not exceed 255 UTF-8 bytes as stored. Name keys obey the same
+character rules with a 768-byte cap: case folding expands at most threefold
+in bytes, so every key derivable from a valid display name is admissible.
+Requests carrying a name or key outside this grammar fail validation; nothing
+is truncated or normalized on the caller's behalf.
+
 #### 2.3.1 NamePolicy
 
 Sibling-name comparison is governed by a versioned `NamePolicy`. A namespace

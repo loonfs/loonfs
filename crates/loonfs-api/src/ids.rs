@@ -307,6 +307,12 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
     validate_id_grammar(value).map_err(|reason| commit_id_error(value, reason))
 }
 
+/// Maximum name-key length in UTF-8 bytes. Keys are derived from display
+/// names capped at [`crate::path::MAX_DISPLAY_NAME_BYTES`]; case folding
+/// expands at most threefold in bytes, so 768 admits every key derivable
+/// from a valid name while bounding row keys, filter keys, and cursors.
+pub const MAX_NAME_KEY_BYTES: usize = 768;
+
 fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
     if value.is_empty() {
         return Err(name_key_error(value, "must not be empty"));
@@ -316,6 +322,15 @@ fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
     }
     if matches!(value, "." | "..") {
         return Err(name_key_error(value, "must not be `.` or `..`"));
+    }
+    if value.chars().any(|character| character.is_control()) {
+        return Err(name_key_error(value, "must not contain control characters"));
+    }
+    if value.len() > MAX_NAME_KEY_BYTES {
+        return Err(name_key_error(
+            "",
+            "exceeds the maximum name key length of 768 bytes",
+        ));
     }
     Ok(())
 }
@@ -927,6 +942,17 @@ mod tests {
         assert_eq!(
             NameKey::parse(".").expect_err("dot").reason(),
             "must not be `.` or `..`"
+        );
+        assert_eq!(
+            NameKey::parse("a\u{0}b").expect_err("control").reason(),
+            "must not contain control characters"
+        );
+        NameKey::parse("k".repeat(super::MAX_NAME_KEY_BYTES)).expect("cap is inclusive");
+        assert_eq!(
+            NameKey::parse("k".repeat(super::MAX_NAME_KEY_BYTES + 1))
+                .expect_err("over cap")
+                .reason(),
+            "exceeds the maximum name key length of 768 bytes"
         );
     }
 

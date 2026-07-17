@@ -3344,7 +3344,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
     assert!(matches!(
         create_error,
         CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
-            display_name
+            display_name, ..
         }) if display_name == "a/b"
     ));
 
@@ -3379,7 +3379,7 @@ async fn explicit_commit_rejects_invalid_display_names() {
     assert!(matches!(
         rename_error,
         CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
-            display_name
+            display_name, ..
         }) if display_name == "."
     ));
 }

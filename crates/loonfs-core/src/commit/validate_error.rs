@@ -62,8 +62,11 @@ pub enum CommitValidationError {
         name_key: String,
         child_inode_id: InodeId,
     },
-    #[error("invalid display name `{display_name}`")]
-    InvalidDisplayName { display_name: String },
+    #[error("invalid display name: {reason}")]
+    InvalidDisplayName {
+        display_name: String,
+        reason: String,
+    },
     #[error(
         "create under parent inode `{parent_inode_id}` conflicts with subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
     )]
