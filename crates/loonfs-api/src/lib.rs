@@ -125,6 +125,7 @@ mod tests {
             root_inode_id: InodeId(1),
             tombstone_seq: ChangeSeq(1),
             tombstone_delta_index: 0,
+            action: wire::manifest::TombstoneRowAction::Set,
         };
     }
 }

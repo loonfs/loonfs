@@ -80,6 +80,19 @@ pub(crate) enum ValidatedOp {
         unbind_delta_index: u32,
         tombstone_delta_index: u32,
     },
+    Undelete {
+        op_index: u32,
+        inode_id: InodeId,
+        parent_inode_id: InodeId,
+        display_name: String,
+        name_key: String,
+        /// The exact deletion generation validation resolved and pinned:
+        /// the active tombstone's own event coordinates.
+        target_seq: ChangeSeq,
+        target_delta_index: u32,
+        revoke_tombstone_delta_index: u32,
+        bind_delta_index: u32,
+    },
 }
 
 #[derive(Debug, Clone)]

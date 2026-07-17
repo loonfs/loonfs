@@ -7,13 +7,13 @@ use crate::fs::FsCore;
 use crate::publish::NamespaceMutationCandidate;
 use crate::{
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse,
-    CapabilityDocument, CommitRequest, CommitResponse, CompleteUploadRequest,
+    CapabilityDocument, ChangeSeq, CommitRequest, CommitResponse, CompleteUploadRequest,
     CompleteUploadResponse, ContentRef, CopyOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     GramIndexBuildPolicy, InodeId, MoveOptions, NamespaceId, NamespaceSummary,
     ObjectStoreMetricsRecorder, PutFileOptions, RestoreRevisionOptions, Result, RevisionNo,
     RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind, UploadContentResponse, UploadId,
+    TraceStoreKind, UndeleteOptions, UploadContentResponse, UploadId,
 };
 use std::sync::Arc;
 
@@ -222,6 +222,29 @@ impl FsWriter {
     ) -> Result<CommitResponse> {
         self.core
             .restore_file_revision(namespace_id, absolute_path, source_revision_no, options)
+            .await
+    }
+
+    /// Recovers a deleted file or subtree: clears the tombstone rooted at
+    /// `inode_id` (the id the delete reported, also visible in the change
+    /// feed) and binds it at `absolute_path`. Fails with `not_deleted`
+    /// when the inode is not the root of a live deletion.
+    pub async fn undelete(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        absolute_path: &str,
+        options: UndeleteOptions,
+    ) -> Result<CommitResponse> {
+        self.core
+            .undelete(
+                namespace_id,
+                inode_id,
+                deleted_at_seq,
+                absolute_path,
+                options,
+            )
             .await
     }
 

@@ -898,6 +898,122 @@ key_prefix = "../bad"
 }
 
 #[test]
+fn rm_reports_the_inode_and_undelete_recovers_it() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload_one = harness.temp_dir.path().join("one.txt");
+    let payload_two = harness.temp_dir.path().join("two.txt");
+    fs::write(&payload_one, b"draft one").expect("payload one");
+    fs::write(&payload_two, b"draft two").expect("payload two");
+    assert_success(&harness.run(&["put", payload_one.to_str().unwrap(), "/docs/report.txt"]));
+    assert_success(&harness.run(&[
+        "put",
+        payload_two.to_str().unwrap(),
+        "/docs/report.txt",
+        "--force",
+    ]));
+
+    // rm reports the inode id and the deletion's sequence — together the
+    // recovery handle undelete needs.
+    let removed = harness.run(&["--json", "rm", "/docs/report.txt"]);
+    assert_success(&removed);
+    let inode_id = json_data(&removed)["inode_id"]
+        .as_u64()
+        .expect("rm reports the deleted inode id");
+    let deleted_at = json_data(&removed)["committed_seq"]
+        .as_u64()
+        .expect("rm reports the deletion sequence");
+    let gone = harness.run(&["--json", "revisions", "/docs/report.txt"]);
+    assert_failure(&gone);
+    assert_eq!(json_error(&gone)["code"], "path_not_found");
+
+    // Undelete brings back identity, content, and revision history.
+    let recovered = harness.run(&[
+        "--json",
+        "undelete",
+        "/docs/report.txt",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
+    ]);
+    assert_success(&recovered);
+    assert_eq!(json_data(&recovered)["target"], "demo:/docs/report.txt");
+    let cat = harness.run(&["cat", "/docs/report.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"draft two");
+    let revisions = harness.run(&["--json", "revisions", "/docs/report.txt"]);
+    assert_success(&revisions);
+    assert_eq!(
+        json_data(&revisions)["revisions"].as_array().unwrap().len(),
+        2
+    );
+
+    // A recovered inode is no longer deleted; the stale handle conflicts.
+    let again = harness.run(&[
+        "--json",
+        "undelete",
+        "/docs/report-copy.txt",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
+    ]);
+    assert_failure(&again);
+    assert_eq!(json_error(&again)["code"], "not_deleted");
+}
+
+#[test]
+fn remote_undelete_recovers_through_http() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "remote-undelete"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("wire.txt");
+    fs::write(&payload, b"over the wire").expect("payload");
+    assert_success(&harness.run(&["put", payload.to_str().unwrap(), "/wire.txt"]));
+    let removed = harness.run(&["--json", "rm", "/wire.txt"]);
+    assert_success(&removed);
+    let inode_id = json_data(&removed)["inode_id"]
+        .as_u64()
+        .expect("rm reports the deleted inode id");
+    let deleted_at = json_data(&removed)["committed_seq"]
+        .as_u64()
+        .expect("rm reports the deletion sequence");
+
+    let recovered = harness.run(&[
+        "--json",
+        "undelete",
+        "/wire.txt",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
+    ]);
+    assert_success(&recovered);
+    let cat = harness.run(&["cat", "/wire.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"over the wire");
+}
+
+#[test]
 fn mkdir_parents_get_noclobber_and_version_metadata() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

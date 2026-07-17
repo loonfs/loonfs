@@ -496,10 +496,15 @@ pub(super) async fn filesystem_operation(
             content_ref,
             behavior,
         },
-        FilesystemOperation::DeletePath { path, behavior } => PathMutationIntent::DeletePath {
+        FilesystemOperation::DeletePath {
+            path,
+            behavior,
+            expected_inode_id,
+        } => PathMutationIntent::DeletePath {
             commit_id,
             absolute_path: parse_path(&path)?,
             behavior,
+            expected_inode_id,
         },
         FilesystemOperation::MovePath {
             from_path,
@@ -528,6 +533,16 @@ pub(super) async fn filesystem_operation(
             commit_id,
             absolute_path: parse_path(&path)?,
             source_revision_no,
+        },
+        FilesystemOperation::Undelete {
+            inode_id,
+            deleted_at_seq,
+            path,
+        } => PathMutationIntent::Undelete {
+            commit_id,
+            inode_id,
+            deleted_at_seq,
+            absolute_path: parse_path(&path)?,
         },
     };
     let response_result = if let Some(payload_class) = put_payload_class {

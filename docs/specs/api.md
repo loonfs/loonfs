@@ -192,6 +192,7 @@ The codes that populate it:
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
 | `commit_id_reuse_conflict` | `commit_id` |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
+| `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
 | any failed mutation | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 
 One code exists specifically so capability handling is uniform from day one:
@@ -221,6 +222,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
+| `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
@@ -729,6 +731,30 @@ and path revision restore:
   }
 }
 ```
+
+and undelete, which recovers a deleted file or subtree by re-binding the
+deletion's root inode at a destination path — the inode's identity and
+retained revision history come back with it. The request names both halves
+of the recovery handle the delete reported (and the change feed carries):
+the inode id and the deletion's committed sequence.
+
+```json
+{
+  "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
+  "operation": {
+    "kind": "undelete",
+    "inode_id": 42,
+    "deleted_at_seq": 17,
+    "path": "/docs/report.txt"
+  }
+}
+```
+
+Only the root of a deletion can be undeleted, and only the exact deletion
+generation named by `deleted_at_seq` — anything else answers `not_deleted`
+with the requested and active generations in the details, so a stale
+recovery request can never cancel a later deletion. The destination parent
+must exist and be visible, and the destination name must be free.
 
 Inode-based restore is available when a caller already has stable inode
 identity and the expected current base revision:

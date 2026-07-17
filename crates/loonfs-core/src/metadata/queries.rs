@@ -207,13 +207,13 @@ impl MetadataState {
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
-        self.subtree_tombstones
-            .iter()
-            .filter(|tombstone| {
-                tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
-            })
-            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
-            .cloned()
+        super::rows::active_tombstone_from_records(
+            self.subtree_tombstones
+                .iter()
+                .filter(|tombstone| tombstone.root_inode_id == root_inode_id)
+                .cloned(),
+            base_seq,
+        )
     }
 
     pub fn covering_subtree_tombstone(

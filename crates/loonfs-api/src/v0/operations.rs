@@ -78,6 +78,12 @@ pub struct ErrorDetails {
     /// Oldest sequence still promised for incremental replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_floor_seq: Option<ChangeSeq>,
+    /// Deletion generation an undelete asked to recover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_deletion_seq: Option<ChangeSeq>,
+    /// Deletion generation actually active for the inode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_deletion_seq: Option<ChangeSeq>,
 }
 
 /// Request to create a namespace.
@@ -211,6 +217,11 @@ pub enum FilesystemOperation {
         path: String,
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
+        /// When set, the delete applies only if the path still resolves to
+        /// this inode; a raced rebinding fails the request instead of
+        /// deleting (and reporting a recovery handle for) the wrong inode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_inode_id: Option<InodeId>,
     },
     /// Move one path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
@@ -229,6 +240,17 @@ pub enum FilesystemOperation {
         behavior: CopyBehavior,
     },
     /// Restore an older revision as the current revision for a path.
+    /// Recover a deleted file or subtree: revoke the deletion of
+    /// `inode_id` recorded at `deleted_at_seq` (both reported by the
+    /// delete and by the change feed) and re-bind it at `path`. Answers
+    /// `not_deleted` when that generation is not the live one, so a stale
+    /// request never cancels a later delete.
+    #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
+    Undelete {
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        path: String,
+    },
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
         path: String,
@@ -539,6 +561,7 @@ mod tests {
         let delete = FilesystemOperation::DeletePath {
             path: "/docs".to_owned(),
             behavior: DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
         };
         assert_eq!(
             serde_json::to_value(&delete).expect("delete op json"),
@@ -610,6 +633,7 @@ mod tests {
             FilesystemOperation::DeletePath {
                 path: "/docs".to_owned(),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
             }
         );
 

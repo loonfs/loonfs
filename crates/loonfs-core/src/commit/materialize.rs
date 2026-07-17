@@ -58,6 +58,10 @@ pub enum CommitOpResult {
         op_index: u32,
         root_inode_id: InodeId,
     },
+    Undelete {
+        op_index: u32,
+        inode_id: InodeId,
+    },
 }
 
 pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
@@ -282,6 +286,46 @@ pub(super) fn materialize_validated_op(
                 root_inode_id: *root_inode_id,
             }
         }
+        ValidatedOp::Undelete {
+            op_index,
+            inode_id,
+            parent_inode_id,
+            display_name,
+            name_key,
+            target_seq,
+            target_delta_index,
+            revoke_tombstone_delta_index,
+            bind_delta_index,
+        } => {
+            // The mirror of delete's unbind-plus-tombstone: revoke the
+            // exact deletion generation validation resolved, then bind the
+            // recovered inode at its new home.
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::RevokeSubtreeTombstone {
+                    delta_index: *revoke_tombstone_delta_index,
+                    root_inode_id: *inode_id,
+                    target_seq: *target_seq,
+                    target_delta_index: *target_delta_index,
+                },
+            );
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::BindDirentry {
+                    delta_index: *bind_delta_index,
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    display_name: display_name.clone(),
+                    child_inode_id: *inode_id,
+                },
+            );
+            CommitOpResult::Undelete {
+                op_index: *op_index,
+                inode_id: *inode_id,
+            }
+        }
     };
 
     (deltas, result)
@@ -326,6 +370,7 @@ fn wal_delta_index(wal_delta: &WalDelta) -> u32 {
         | WalDelta::BindDirentry { delta_index, .. }
         | WalDelta::UnbindDirentry { delta_index, .. }
         | WalDelta::AppendFileRevision { delta_index, .. }
-        | WalDelta::TombstoneSubtree { delta_index, .. } => *delta_index,
+        | WalDelta::TombstoneSubtree { delta_index, .. }
+        | WalDelta::RevokeSubtreeTombstone { delta_index, .. } => *delta_index,
     }
 }

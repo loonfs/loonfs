@@ -69,6 +69,19 @@ pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    /// What this event did, mirroring the core row semantics: the newest
+    /// event per root wins, and a revoke as the newest means no active
+    /// tombstone.
+    pub action: SubtreeTombstoneAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubtreeTombstoneAction {
+    Set,
+    Revoke {
+        target_seq: ChangeSeq,
+        target_delta_index: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,10 +183,33 @@ impl MetadataState {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
+                            action: SubtreeTombstoneAction::Set,
                         });
                     push_unique_invariant(
                         &mut checked_invariants,
                         "tombstone_subtree_writes_tombstone_row",
+                    );
+                }
+                WalDelta::RevokeSubtreeTombstone {
+                    delta_index,
+                    root_inode_id,
+                    target_seq,
+                    target_delta_index,
+                } => {
+                    metadata_state
+                        .subtree_tombstones
+                        .push(SubtreeTombstoneRecord {
+                            root_inode_id: *root_inode_id,
+                            tombstone_seq: committed_seq,
+                            tombstone_delta_index: *delta_index,
+                            action: SubtreeTombstoneAction::Revoke {
+                                target_seq: *target_seq,
+                                target_delta_index: *target_delta_index,
+                            },
+                        });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "revoke_subtree_tombstone_writes_revoke_row",
                     );
                 }
             }

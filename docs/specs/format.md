@@ -489,6 +489,23 @@ becomes visible as part of normal namespace history.
 Physical reclamation is separate maintenance work (see section 6). It may
 happen only when retention and reference-safety rules allow it.
 
+Because deletion is logical, it is also revocable: the `undelete` operation
+records a *revoke* event in the tombstone family for the deletion's root
+inode and re-binds that inode under a visible parent. Tombstone rows carry
+a typed action — `set` (the subtree is deleted) or `revoke` naming the
+exact `(target_seq, target_delta_index)` deletion it cancels — and rows
+for one root are ordered by `(tombstone_seq, tombstone_delta_index)` with
+the newest event winning: a `revoke` newest means no tombstone is active,
+and a later delete of the same root supersedes the revoke with a newer
+`set`. Newest-event-wins is the authoritative reduction; the revoke's
+recorded target is guaranteed by commit validation to be the generation
+that was active, so consumers that reduce target-aware reach the same
+answer and may treat a target mismatch as corruption. Undelete is generation-scoped: the request names the deletion's
+committed sequence, and validation refuses (`not_deleted`) unless that
+exact generation is the active one, so a stale recovery request can never
+cancel a later deletion. Only the root of a deletion can be undeleted —
+descendants are covered by the root's tombstone, not their own.
+
 A namespace's lifecycle has two recorded states, carried in the head's
 `state` field: `active` (the default; an absent field reads as active) and
 the terminal `deleted`. Initialization progress is deliberately *not*
@@ -959,6 +976,7 @@ The first standard lower-level mutation set includes:
 - `delete_file(inode_id)`
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
+- `undelete(inode_id, deleted_at_seq, parent_inode_id, display_name)`
 
 The path-oriented filesystem surface may compile higher-level operations into
 these lower-level mutations.
@@ -969,9 +987,9 @@ new behaviors arrive as additive enum variants (see "Evolution rules").
 
 These are semantic commit operations. Durable WAL payloads store normalized
 metadata deltas derived from the semantic operations: `create_inode`,
-`bind_direntry`, `unbind_direntry`, `append_file_revision`, and
-`tombstone_subtree`. Raw bind/unbind/create-inode deltas are not standard
-client-facing commit operations.
+`bind_direntry`, `unbind_direntry`, `append_file_revision`,
+`tombstone_subtree`, and `revoke_subtree_tombstone`. Raw bind/unbind/
+create-inode deltas are not standard client-facing commit operations.
 
 ### 3.6 Preconditions
 
@@ -1382,8 +1400,9 @@ superseded at or below the retention floor, bindings superseded or unbound at
 or below the floor, spent unbind markers, and commit receipts below the
 floor. The floor is the single retention policy: history below it — including
 file revision history — is reclaimed, except where an active checkpoint record
-still pins an older manifest that can serve it. Tombstone and inode rows are always
-retained for now; reachability-based dropping for them is future work.
+still pins an older manifest that can serve it. Tombstone rows — set and
+revoke events alike — and inode rows are always retained for now;
+reachability-based dropping for them is future work.
 
 Invariants:
 

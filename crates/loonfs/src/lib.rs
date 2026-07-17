@@ -106,7 +106,7 @@ pub use options::{
     gc_config_from_request, gc_response_from_report, CopyOptions, CreateCheckpointOptions,
     CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions,
+    PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

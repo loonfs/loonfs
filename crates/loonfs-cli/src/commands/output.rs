@@ -95,6 +95,11 @@ pub(crate) enum CommandData {
         target: String,
         committed_seq: u64,
         commit_id: String,
+        /// Inode the mutation acted on, when the command resolved one —
+        /// `rm` reports it so the deletion stays recoverable via
+        /// `loon undelete`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        inode_id: Option<u64>,
     },
     PathMove {
         from: String,

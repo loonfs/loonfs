@@ -9,7 +9,6 @@ use crate::metadata::MetadataState;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::helpers::{ensure_mutation_path, final_component};
 use loonfs_api::wire::control::HeadState;
-#[cfg(test)]
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
@@ -71,6 +70,12 @@ enum PathFingerprintInput {
         absolute_path: String,
         source_revision_no: RevisionNo,
     },
+    Undelete {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        absolute_path: String,
+    },
 }
 
 fn path_intent_fingerprint(
@@ -115,6 +120,10 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             behavior: *behavior,
             content_ref: content_ref.clone(),
         },
+        // `expected_inode_id` is deliberately outside the preimage: it is
+        // a precondition on current state, not part of the mutation's
+        // semantic identity (same stance as explicit commit preconditions
+        // vs the path-op vocabulary).
         PathMutationIntent::DeletePath {
             absolute_path,
             behavior,
@@ -154,6 +163,17 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             namespace_id: namespace_id.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
             source_revision_no: *source_revision_no,
+        },
+        PathMutationIntent::Undelete {
+            inode_id,
+            deleted_at_seq,
+            absolute_path,
+            ..
+        } => PathFingerprintInput::Undelete {
+            namespace_id: namespace_id.clone(),
+            inode_id: *inode_id,
+            deleted_at_seq: *deleted_at_seq,
+            absolute_path: absolute_path.as_str().to_owned(),
         },
     };
     path_intent_fingerprint(&identity)
@@ -202,8 +222,18 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
         PathMutationIntent::DeletePath {
             absolute_path,
             behavior,
+            expected_inode_id,
             ..
-        } => plan_publish_delete_path(absolute_path, *behavior, &commit_id, &view).await?,
+        } => {
+            plan_publish_delete_path(
+                absolute_path,
+                *behavior,
+                *expected_inode_id,
+                &commit_id,
+                &view,
+            )
+            .await?
+        }
         PathMutationIntent::MovePath {
             from_path,
             to_path,
@@ -222,6 +252,15 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
             ..
         } => {
             plan_publish_restore_revision(absolute_path, *source_revision_no, &commit_id, &view)
+                .await?
+        }
+        PathMutationIntent::Undelete {
+            inode_id,
+            deleted_at_seq,
+            absolute_path,
+            ..
+        } => {
+            plan_publish_undelete(*inode_id, *deleted_at_seq, absolute_path, &commit_id, &view)
                 .await?
         }
     };
@@ -388,6 +427,51 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     })
 }
 
+async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
+    inode_id: InodeId,
+    deleted_at_seq: ChangeSeq,
+    absolute_path: &AbsolutePath,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<ApiCommitRequest, CoreError> {
+    ensure_mutation_path(absolute_path)?;
+    publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
+    match view
+        .metadata_state
+        .resolve_visible_path(absolute_path)
+        .await
+    {
+        Ok(_) => {
+            return Err(CoreError::DestinationExists(
+                absolute_path.as_str().to_owned(),
+            ));
+        }
+        Err(error) if is_missing_visible_path(&error) => {}
+        Err(error) => return Err(error),
+    }
+    // The destination parent must already exist: recovery targets a place
+    // the caller can see, and commit validation re-checks the tombstone
+    // root, the parent, and the name under the publish lock.
+    let parent_inode_id = publish_resolve_parent_directory(view, absolute_path).await?;
+    let display_name = final_component(absolute_path)?;
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::Undelete {
+            inode_id,
+            deleted_at_seq,
+            parent_inode_id,
+            display_name: display_name.clone(),
+        }],
+        preconditions: vec![
+            publish_child_name_absent_precondition(view, parent_inode_id, &display_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: parent_inode_id,
+            },
+        ],
+        message: None,
+    })
+}
+
 async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     content_ref: ContentRef,
@@ -478,6 +562,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
 async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     behavior: DeleteDirectoryBehavior,
+    expected_inode_id: Option<InodeId>,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -486,6 +571,27 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
         .metadata_state
         .resolve_visible_path(absolute_path)
         .await?;
+    // Planning happens under the publish lock, so this check is race-free:
+    // a caller that resolved the path earlier (a stat) either deletes that
+    // exact inode or fails, never a raced rebinding.
+    if let Some(expected) = expected_inode_id {
+        if resolved.inode_id != expected {
+            return Err(
+                crate::commit::CommitValidationError::BindingPreconditionMismatch {
+                    // Root cannot be deleted, so a resolved delete target
+                    // always has a parent.
+                    parent_inode_id: resolved.parent_inode_id.unwrap_or(InodeId(1)),
+                    name_key: loonfs_api::name_key_for_display_name(
+                        view.metadata_state.name_policy(),
+                        &resolved.display_name,
+                    ),
+                    expected_child_inode_id: expected,
+                    actual_child_inode_id: Some(resolved.inode_id),
+                }
+                .into(),
+            );
+        }
+    }
     let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let op = match resolved.inode_kind {
         InodeKind::File => ApiCommitOp::DeleteFile {

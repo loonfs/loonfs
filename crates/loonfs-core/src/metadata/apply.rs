@@ -3,7 +3,7 @@
 
 use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RevisionRecord, SubtreeTombstoneRecord,
+    RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 use crate::invariants::InvariantId;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
@@ -136,8 +136,26 @@ impl MetadataState {
                     root_inode_id: *root_inode_id,
                     tombstone_seq: committed_seq,
                     tombstone_delta_index: *delta_index,
+                    action: SubtreeTombstoneAction::Set,
                 });
                 InvariantId::TombstoneSubtreeWritesTombstoneRow
+            }
+            WalDelta::RevokeSubtreeTombstone {
+                delta_index,
+                root_inode_id,
+                target_seq,
+                target_delta_index,
+            } => {
+                self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
+                    root_inode_id: *root_inode_id,
+                    tombstone_seq: committed_seq,
+                    tombstone_delta_index: *delta_index,
+                    action: SubtreeTombstoneAction::Revoke {
+                        target_seq: *target_seq,
+                        target_delta_index: *target_delta_index,
+                    },
+                });
+                InvariantId::RevokeSubtreeTombstoneWritesRevokeRow
             }
         }
     }

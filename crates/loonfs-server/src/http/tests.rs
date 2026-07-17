@@ -1386,6 +1386,7 @@ async fn delete_path_recursive(
         DeleteOptions {
             behavior: DeleteDirectoryBehavior::Recursive,
             commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+            expected_inode_id: None,
         },
     )
     .await

@@ -125,8 +125,53 @@ pub struct RevisionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
+    /// The recording event's sequence: the delete's committed seq for a
+    /// `Set`, the undelete's committed seq for a `Revoke`.
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    /// What this event did. Newest-by-(seq, delta) wins at every read
+    /// site: a `Set` newest means that deletion is active, a `Revoke`
+    /// newest means none is, and a later re-delete supersedes the revoke.
+    pub action: SubtreeTombstoneAction,
+}
+
+/// The tombstone family's event vocabulary — an explicit state machine
+/// instead of a boolean, so every reader matches exhaustively and a revoke
+/// names the exact deletion generation it cancels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubtreeTombstoneAction {
+    /// The subtree rooted here is deleted.
+    Set,
+    /// The deletion recorded at `(target_seq, target_delta_index)` is
+    /// revoked. Validation guarantees the target was the active generation
+    /// when the revoke committed.
+    Revoke {
+        target_seq: ChangeSeq,
+        target_delta_index: u32,
+    },
+}
+
+/// The newest-event-wins active-tombstone rule, shared by every aggregation
+/// site: among records at or below `visible_seq`, the newest by
+/// `(tombstone_seq, tombstone_delta_index)` speaks for the root — a `Set`
+/// newest means that deletion is active, a `Revoke` newest means none is.
+/// The newest event is authoritative WITHOUT consulting the revoke's
+/// target: commit validation guarantees a revoke only ever lands against
+/// the generation that was active, so for valid histories the two rules
+/// agree, and the recorded target serves as audit metadata and the
+/// projection contract (change-feed consumers reduce with it and can flag
+/// a mismatch as corruption). Keep every reader on this helper — a site
+/// with its own copy of the rule is how visibility splits from the durable
+/// truth.
+pub(crate) fn active_tombstone_from_records(
+    records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
+    visible_seq: ChangeSeq,
+) -> Option<SubtreeTombstoneRecord> {
+    records
+        .into_iter()
+        .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
+        .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
+        .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

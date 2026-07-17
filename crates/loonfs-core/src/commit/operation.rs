@@ -1,6 +1,6 @@
 //! [`CommitOp`]: the core form of one semantic commit operation.
 
-use loonfs_api::{ContentRef, InodeId, RevisionNo};
+use loonfs_api::{ChangeSeq, ContentRef, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 /// Core form of a semantic commit operation.
@@ -42,5 +42,11 @@ pub enum CommitOp {
     },
     DeleteSubtree {
         root_inode_id: InodeId,
+    },
+    Undelete {
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        parent_inode_id: InodeId,
+        display_name: String,
     },
 }

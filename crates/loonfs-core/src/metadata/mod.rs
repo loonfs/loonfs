@@ -36,7 +36,7 @@ pub use self::apply::{AppliedMetadataState, MetadataApplyError};
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RevisionRecord, SubtreeTombstoneRecord,
+    RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 
 pub(crate) use self::rows::record_name_key;

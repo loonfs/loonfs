@@ -2987,6 +2987,48 @@
                 "minimum": 0
               }
             }
+          },
+          {
+            "type": "object",
+            "title": "CommitDeltaRevokeSubtreeTombstone",
+            "required": [
+              "semantic_op_index",
+              "delta_index",
+              "root_inode_id",
+              "target_seq",
+              "target_delta_index",
+              "kind"
+            ],
+            "properties": {
+              "delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "revoke_subtree_tombstone"
+                ]
+              },
+              "root_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "semantic_op_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "target_delta_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "target_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "The exact deletion generation this revoke cancels. Projections\nmust reduce with the target, never \"whatever is newest\"."
+              }
+            }
           }
         ],
         "description": "Durable metadata fact exposed through the change feed.\n\nSync and projection clients can apply deltas directly."
@@ -3169,6 +3211,38 @@
                 ]
               },
               "root_inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "CommitOpUndelete",
+            "description": "Recover a deleted file or subtree: revoke the deletion recorded at\n`deleted_at_seq` (the delete's committed sequence, reported by the\ndelete and by the change feed) and re-bind the inode under a visible\nparent directory. Scoping recovery to the observed generation keeps\na stale request from cancelling a later deletion of the same inode.",
+            "required": [
+              "inode_id",
+              "deleted_at_seq",
+              "parent_inode_id",
+              "display_name",
+              "kind"
+            ],
+            "properties": {
+              "deleted_at_seq": {
+                "$ref": "#/components/schemas/ChangeSeq"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undelete"
+                ]
+              },
+              "parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
               }
             }
@@ -3642,6 +3716,17 @@
         "type": "object",
         "description": "Structured, machine-readable context accompanying an [`ApiError`].\n\nEvery field is optional: a code populates the fields that apply to it\n(API spec, \"Standard error contract\"), and clients must tolerate absent\nfields exactly as they tolerate unknown codes. Retry decisions still key\noff the code; these fields carry the identity a caller needs to act —\nwhich commit to resubmit, which epoch displaced it, which revision the\nprecondition saw.",
         "properties": {
+          "active_deletion_seq": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Deletion generation actually active for the inode."
+              }
+            ]
+          },
           "active_writer": {
             "type": [
               "string",
@@ -3723,6 +3808,17 @@
               {
                 "$ref": "#/components/schemas/InodeId",
                 "description": "Inode the failed precondition or operation targeted."
+              }
+            ]
+          },
+          "requested_deletion_seq": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Deletion generation an undelete asked to recover."
               }
             ]
           },
@@ -3832,6 +3928,17 @@
               "behavior": {
                 "$ref": "#/components/schemas/DeleteDirectoryBehavior"
               },
+              "expected_inode_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InodeId",
+                    "description": "When set, the delete applies only if the path still resolves to\nthis inode; a raced rebinding fails the request instead of\ndeleting (and reporting a recovery handle for) the wrong inode."
+                  }
+                ]
+              },
               "kind": {
                 "type": "string",
                 "enum": [
@@ -3899,8 +4006,35 @@
           },
           {
             "type": "object",
+            "title": "FsOpUndelete",
+            "description": "Restore an older revision as the current revision for a path.\nRecover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it at `path`. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
+            "required": [
+              "inode_id",
+              "deleted_at_seq",
+              "path",
+              "kind"
+            ],
+            "properties": {
+              "deleted_at_seq": {
+                "$ref": "#/components/schemas/ChangeSeq"
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undelete"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
             "title": "FsOpRestoreRevision",
-            "description": "Restore an older revision as the current revision for a path.",
             "required": [
               "path",
               "source_revision_no",

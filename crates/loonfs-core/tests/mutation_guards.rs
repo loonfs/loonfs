@@ -361,6 +361,7 @@ fn delete_path<S: ObjectStore + ?Sized>(
             commit_id: test_commit_id(commit_id),
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
         },
         context,
     )
@@ -380,6 +381,7 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
             commit_id: test_commit_id(commit_id),
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: None,
         },
         context,
     )
@@ -1976,6 +1978,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                 commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
@@ -2940,6 +2943,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
             }),
             // Accepted into the batch.
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
@@ -2961,6 +2965,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
             }),
         ]
     };
@@ -3028,6 +3033,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
@@ -3441,6 +3447,7 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("delete-path").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: None,
         },
         &context,
     )
@@ -3495,6 +3502,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: None,
         },
         &context,
     )

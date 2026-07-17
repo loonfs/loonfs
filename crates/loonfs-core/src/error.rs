@@ -431,6 +431,29 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             active_writer_epoch: Some(*active),
             ..ErrorDetails::default()
         }),
+        CommitValidationError::UndeleteInodeMissing { inode_id }
+        | CommitValidationError::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            ..ErrorDetails::default()
+        }),
+        CommitValidationError::UndeleteTargetsCurrentCommit {
+            inode_id,
+            requested_seq,
+        } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            requested_deletion_seq: Some(*requested_seq),
+            ..ErrorDetails::default()
+        }),
+        CommitValidationError::UndeleteGenerationMismatch {
+            inode_id,
+            requested_seq,
+            active_seq,
+        } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            requested_deletion_seq: Some(*requested_seq),
+            active_deletion_seq: Some(*active_seq),
+            ..ErrorDetails::default()
+        }),
         _ => None,
     }
 }
@@ -602,6 +625,13 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::DirectoryEmptyPreconditionInodeMissing { .. } => {
             ErrorCode::PathNotFound
         }
+        CommitValidationError::UndeleteInodeMissing { .. } => ErrorCode::PathNotFound,
+        // Both are "the deletion you named is not the live one": absent
+        // entirely, or superseded by a newer generation. One code, with the
+        // generations in the structured details.
+        CommitValidationError::UndeleteTargetNotDeleted { .. }
+        | CommitValidationError::UndeleteTargetsCurrentCommit { .. }
+        | CommitValidationError::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
         CommitValidationError::StaleWriterEpoch { .. } => ErrorCode::WriterFenced,

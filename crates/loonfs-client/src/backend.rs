@@ -22,7 +22,7 @@ use loonfs_api::{
     v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
     CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
-    ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse,
+    ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
     NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RevisionNo,
 };
@@ -215,9 +215,13 @@ pub trait Backend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Deletes a file or empty directory.
+    /// Deletes a file or empty directory. With `expected_inode_id`, the
+    /// delete applies only while the path still resolves to that inode, so
+    /// callers reporting a recovery handle never report a raced rebinding.
     async fn delete_path(
         &self,
         spec: &NamespacePath,
+        expected_inode_id: Option<InodeId>,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Moves a path within a namespace; `behavior` selects create-only or
@@ -243,6 +247,16 @@ pub trait Backend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError>;
+    /// Recovers a deleted file or subtree to the spec's path; `inode_id`
+    /// and `deleted_at_seq` are the identity and committed sequence the
+    /// delete reported.
+    async fn undelete(
+        &self,
+        spec: &NamespacePath,
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
 
@@ -473,12 +487,16 @@ impl Backend for RemoteBackend {
     async fn delete_path(
         &self,
         spec: &NamespacePath,
+        expected_inode_id: Option<InodeId>,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.delete_path(&spec, &options))
-            .await
+        self.wire(move |client| match expected_inode_id {
+            Some(expected) => client.delete_path_expecting(&spec, expected, &options),
+            None => client.delete_path(&spec, &options),
+        })
+        .await
     }
 
     async fn move_path(
@@ -518,6 +536,19 @@ impl Backend for RemoteBackend {
         let spec = spec.clone();
         let options = mutation_options(commit_id);
         self.wire(move |client| client.restore_file_revision(&spec, source_revision_no, &options))
+            .await
+    }
+
+    async fn undelete(
+        &self,
+        spec: &NamespacePath,
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        commit_id: Option<CommitId>,
+    ) -> Result<CommitResponse, BackendError> {
+        let spec = spec.clone();
+        let options = mutation_options(commit_id);
+        self.wire(move |client| client.undelete(&spec, inode_id, deleted_at_seq, &options))
             .await
     }
 

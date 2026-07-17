@@ -61,6 +61,8 @@ pub(crate) enum Command {
     Revisions(FilesystemRevisionsArgs),
     /// Write a prior revision's content as the file's next revision.
     Restore(FilesystemRestoreArgs),
+    /// Recover a deleted file or directory at a destination path.
+    Undelete(FilesystemUndeleteArgs),
     /// Create a directory.
     Mkdir(FilesystemMkdirArgs),
     /// Delete a file or empty directory.
@@ -432,6 +434,27 @@ pub(crate) struct FilesystemRestoreArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FilesystemUndeleteArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Destination path for the recovered file or directory.
+    pub path: String,
+    /// Inode id of the deleted item, as reported by `rm` and the change
+    /// feed.
+    #[arg(long)]
+    pub inode: u64,
+    /// Committed sequence of the delete being recovered, as reported by
+    /// `rm` and the change feed. Scopes recovery to that exact deletion,
+    /// so a stale command cannot cancel a later delete.
+    #[arg(long)]
+    pub deleted_at: u64,
+    /// Idempotency key for the commit; resubmit with the same id to retry
+    /// safely. Generated when absent and returned in the output.
+    #[arg(long)]
+    pub commit_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ChangesArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -569,6 +592,7 @@ pub(crate) enum CommandKind {
     FilesystemPut,
     FilesystemRevisions,
     FilesystemRestore,
+    FilesystemUndelete,
     FilesystemMkdir,
     FilesystemRm,
     FilesystemMv,
@@ -610,6 +634,7 @@ impl CommandKind {
             CommandKind::FilesystemPut => "filesystem_put",
             CommandKind::FilesystemRevisions => "filesystem_revisions",
             CommandKind::FilesystemRestore => "filesystem_restore",
+            CommandKind::FilesystemUndelete => "filesystem_undelete",
             CommandKind::FilesystemMkdir => "filesystem_mkdir",
             CommandKind::FilesystemRm => "filesystem_rm",
             CommandKind::FilesystemMv => "filesystem_mv",
@@ -661,6 +686,7 @@ impl Cli {
             Command::Put(_) => CommandKind::FilesystemPut,
             Command::Revisions(_) => CommandKind::FilesystemRevisions,
             Command::Restore(_) => CommandKind::FilesystemRestore,
+            Command::Undelete(_) => CommandKind::FilesystemUndelete,
             Command::Mkdir(_) => CommandKind::FilesystemMkdir,
             Command::Rm(_) => CommandKind::FilesystemRm,
             Command::Mv(_) => CommandKind::FilesystemMv,

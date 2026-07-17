@@ -1,8 +1,8 @@
 //! [`PathMutationIntent`]: a user-facing path mutation before planning.
 
 use loonfs_api::{
-    AbsolutePath, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, MoveBehavior,
-    PutBehavior, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, InodeId,
+    MoveBehavior, PutBehavior, RevisionNo,
 };
 
 /// User-facing path mutation before it is planned against namespace state.
@@ -34,6 +34,10 @@ pub enum PathMutationIntent {
         commit_id: CommitId,
         absolute_path: AbsolutePath,
         behavior: DeleteDirectoryBehavior,
+        /// When set, the delete applies only while the path still resolves
+        /// to this inode; a raced rebinding fails the plan instead of
+        /// deleting the wrong inode.
+        expected_inode_id: Option<InodeId>,
     },
     /// Move one path to another path.
     MovePath {
@@ -55,6 +59,13 @@ pub enum PathMutationIntent {
         absolute_path: AbsolutePath,
         source_revision_no: RevisionNo,
     },
+    /// Recover a deleted subtree to a destination path.
+    Undelete {
+        commit_id: CommitId,
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        absolute_path: AbsolutePath,
+    },
 }
 
 impl PathMutationIntent {
@@ -66,7 +77,8 @@ impl PathMutationIntent {
             | Self::DeletePath { commit_id, .. }
             | Self::MovePath { commit_id, .. }
             | Self::CopyFilePath { commit_id, .. }
-            | Self::RestoreRevision { commit_id, .. } => commit_id,
+            | Self::RestoreRevision { commit_id, .. }
+            | Self::Undelete { commit_id, .. } => commit_id,
         }
     }
 }

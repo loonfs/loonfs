@@ -497,10 +497,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
         let tombstones = self.tombstones_for_root(root_inode_id).await?;
-        Ok(tombstones
-            .into_iter()
-            .filter(|tombstone| tombstone.tombstone_seq <= self.visible_seq())
-            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index)))
+        Ok(super::rows::active_tombstone_from_records(
+            tombstones,
+            self.visible_seq(),
+        ))
     }
 
     async fn direntry_binds_for_parent(
@@ -1203,10 +1203,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             }
             self.latest_parent_binding_cache
                 .insert(child_inode_id, latest_binding);
-            let active_tombstone = tombstones
-                .into_iter()
-                .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
-                .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index));
+            let active_tombstone =
+                super::rows::active_tombstone_from_records(tombstones, visible_seq);
             self.active_tombstone_cache
                 .insert(child_inode_id, active_tombstone);
         }
@@ -1345,12 +1343,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 self.inode_at_seq_cache.insert(current_inode_id, inode);
             }
             if let Some(tombstones) = tombstones {
-                let active = tombstones
-                    .into_iter()
-                    .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
-                    .max_by_key(|tombstone| {
-                        (tombstone.tombstone_seq, tombstone.tombstone_delta_index)
-                    });
+                let active = super::rows::active_tombstone_from_records(tombstones, visible_seq);
                 self.active_tombstone_cache.insert(current_inode_id, active);
             }
             if let Some(bindings) = child_bindings {
@@ -1561,10 +1554,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let tombstones = self.base.tombstones_for_root(root_inode_id).await?;
-        let tombstone = tombstones
-            .into_iter()
-            .filter(|tombstone| tombstone.tombstone_seq <= self.base.visible_seq())
-            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index));
+        let tombstone =
+            super::rows::active_tombstone_from_records(tombstones, self.base.visible_seq());
         self.active_tombstone_cache
             .insert(root_inode_id, tombstone.clone());
         Ok(tombstone)

@@ -135,6 +135,7 @@ error_codes! {
     StaleHead => "stale_head",
     StaleRevision => "stale_revision",
     TombstoneConflict => "tombstone_conflict",
+    NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
     CommitIdReuseConflict => "commit_id_reuse_conflict",
@@ -197,6 +198,9 @@ impl ErrorCode {
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
             | ErrorCode::TombstoneConflict
+            // Undelete's target is not the root of a live deletion: a
+            // state conflict, resolved by re-reading namespace state.
+            | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict

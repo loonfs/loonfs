@@ -5,7 +5,7 @@
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
     ChangeSeq, CommitId, CopyBehavior, DeleteDirectoryBehavior, EffectiveLimit, GcConfig, GcReport,
-    ManifestId, MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
+    InodeId, ManifestId, MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
 };
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, GcResponse,
@@ -204,6 +204,10 @@ pub struct DeleteOptions {
     pub behavior: DeleteDirectoryBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// When set, the delete applies only while the path still resolves to
+    /// this inode, so a raced rebinding fails instead of deleting the
+    /// wrong inode.
+    pub expected_inode_id: Option<InodeId>,
 }
 
 impl Default for DeleteOptions {
@@ -211,6 +215,7 @@ impl Default for DeleteOptions {
         Self {
             behavior: DeleteDirectoryBehavior::NonRecursive,
             commit_id: None,
+            expected_inode_id: None,
         }
     }
 }
@@ -236,6 +241,13 @@ pub struct CopyOptions {
 /// Options for restoring a file revision by path.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RestoreRevisionOptions {
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+}
+
+/// Options for recovering a deleted file or subtree.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UndeleteOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
