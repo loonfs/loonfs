@@ -704,21 +704,51 @@ async fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
         .await
         .expect("create wal object");
 
+    let bounded = |start_inclusive, end_exclusive| {
+        Some(ByteRange {
+            start_inclusive,
+            end_exclusive,
+        })
+    };
+
     let range = store
-        .get(
-            &key,
-            Some(ByteRange {
-                start_inclusive: 1,
-                end_exclusive: 4,
-            }),
-        )
+        .get(&key, bounded(1, 4))
         .await
         .expect("range read")
         .expect("range body should exist");
-
     assert_eq!(range, Bytes::from_static(b"bcd"));
 
+    // The bounded-read contract, uniform across providers: an end past the
+    // object clamps, reading at the exact end is empty, a start past the
+    // end is an invalid range, and a missing object answers `None` however
+    // the request was shaped.
+    assert_eq!(
+        store
+            .get(&key, bounded(4, 99))
+            .await
+            .expect("clamped range read"),
+        Some(Bytes::from_static(b"ef"))
+    );
+    assert_eq!(
+        store
+            .get(&key, bounded(6, 8))
+            .await
+            .expect("range at the exact end"),
+        Some(Bytes::new())
+    );
+    assert!(matches!(
+        store.get(&key, bounded(7, 8)).await,
+        Err(ObjectStoreError::InvalidRange { .. })
+    ));
+
     store.delete(&key).await.expect("cleanup range object");
+    assert_eq!(
+        store
+            .get(&key, bounded(0, 4))
+            .await
+            .expect("ranged read of a missing object"),
+        None
+    );
 }
 
 async fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
