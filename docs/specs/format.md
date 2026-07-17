@@ -536,10 +536,12 @@ and re-creation of the same id — fails with `namespace_deleted`.
 
 Namespace deletion does not imply content-store deletion. In v0, content-store
 deletion and destructive content garbage collection are unsupported
-operator-only work, and deletion does not physically reclaim metadata
-objects; reclamation is future maintenance work bound by the invariants in
-section 6 (notably: objects protected by fork-owned checkpoint records
-survive, so clones of a deleted source stay readable).
+operator-only work. Metadata is reclaimed by garbage collection: on a
+terminally deleted namespace a GC pass reaps the WAL chain, metadata tables,
+index segments, manifests, and non-protecting checkpoint records under the
+usual windows, leaving the head, descriptor, root, and floor objects as the
+id-retiring tombstone (section 6, rule 4). Objects protected by fork-owned
+checkpoint records survive, so clones of a deleted source stay readable.
 
 ### 2.6 Forks
 
@@ -1503,7 +1505,12 @@ publishing CAS) — under these rules:
 4. Roots: `metadata/root.json`; active, non-expired checkpoint records whose
    owner still stands (a fork-owned record stops rooting once its target is
    provably gone); and the visible chain from
-   `wal/head.json.visible_wal_tip` down to the floor.
+   `wal/head.json.visible_wal_tip` down to the floor. On a terminally
+   deleted namespace the root set shrinks to fork-owned records protecting
+   a live target (and their bases): reads are impossible and the tombstone
+   is immutable, so user pins, the final replay chain, and the last
+   manifest protect nothing and age out. The head, descriptor, root, and
+   floor objects survive as the id-retiring tombstone.
 5. Missing, corrupt, or ambiguous roots cause retention, not deletion — an
    unreadable checkpoint record suppresses manifest and table deletion for
    the whole pass.
