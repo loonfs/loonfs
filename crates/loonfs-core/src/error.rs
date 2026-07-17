@@ -568,6 +568,7 @@ impl From<crate::control_update::ControlUpdateError> for CoreError {
 fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> ErrorCode {
     match error {
         WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),
+        WriterEpochAcquireError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
         WriterEpochAcquireError::EmptyWriterId
         | WriterEpochAcquireError::EmptyWriterSessionId
         | WriterEpochAcquireError::MissingHeadEtag { .. }
