@@ -16,6 +16,11 @@ pub struct MaterializedCommitDelta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterializedCommit {
     pub prepared: PreparedCommit,
+    /// Observational wall-clock stamp from the publishing request context,
+    /// carried into the durable WAL payload. Not part of the semantic
+    /// identity: two materializations of one prepared commit under
+    /// different clocks share a fingerprint.
+    pub committed_at_ms: u64,
     pub deltas: Vec<MaterializedCommitDelta>,
     pub results: Vec<CommitOpResult>,
 }
@@ -64,7 +69,7 @@ pub enum CommitOpResult {
     },
 }
 
-pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
+pub fn materialize_commit(prepared: PreparedCommit, committed_at_ms: u64) -> MaterializedCommit {
     let mut deltas = Vec::new();
     let mut results = Vec::with_capacity(prepared.plan.validated_ops.len());
     for op in &prepared.plan.validated_ops {
@@ -75,6 +80,7 @@ pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
 
     MaterializedCommit {
         prepared,
+        committed_at_ms,
         deltas,
         results,
     }

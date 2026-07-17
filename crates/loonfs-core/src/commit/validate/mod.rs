@@ -102,6 +102,7 @@ pub(crate) async fn resolve_restore_content_refs_for_publish<S: ObjectStore + ?S
 
 pub async fn build_commit_plan(
     request: &CommitRequest,
+    committed_at_ms: u64,
     context: &CommitValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     let shape = compute_commit_shape(request, &context.head)?;
@@ -110,17 +111,27 @@ pub async fn build_commit_plan(
         shape.assigned_seq,
         context.name_policy,
     );
-    build_commit_plan_with_view(request, &context.head, context.name_policy, shape, view).await
+    build_commit_plan_with_view(
+        request,
+        committed_at_ms,
+        &context.head,
+        context.name_policy,
+        shape,
+        view,
+    )
+    .await
 }
 
 pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     request: &CommitRequest,
+    committed_at_ms: u64,
     context: &PublishCommitValidationContext<'_, S>,
 ) -> Result<CommitPlan, CoreError> {
     let shape = compute_commit_shape(request, context.head)?;
     let committed_seq = shape.assigned_seq;
     build_commit_plan_with_view(
         request,
+        committed_at_ms,
         context.head,
         context.metadata_view.name_policy(),
         shape,
@@ -134,6 +145,7 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
 /// the error surface) differs between the two entry points.
 async fn build_commit_plan_with_view<V: CommitValidationView>(
     request: &CommitRequest,
+    committed_at_ms: u64,
     head: &HeadState,
     name_policy: NamePolicy,
     shape: CommitShape,
@@ -149,6 +161,7 @@ async fn build_commit_plan_with_view<V: CommitValidationView>(
         request,
         metadata_state,
         shape.assigned_seq,
+        committed_at_ms,
         &shape.allocated_inode_ids,
         name_policy,
         &mut checked_invariants,

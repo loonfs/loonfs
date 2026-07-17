@@ -935,7 +935,8 @@ exactly the order shown) of:
 
 where `ops` and `preconditions` appear in request order using their v0 wire
 encoding, and `message` is `null` when absent. The preimage deliberately
-excludes `commit_id`, writer identity, and writer epoch: a retry of the same
+excludes `commit_id`, writer identity, writer epoch, and `committed_at_ms`: a
+retry of the same
 logical commit must fingerprint identically no matter who retries it or when.
 
 Path-level mutations fingerprint the same way with domain
@@ -1566,6 +1567,11 @@ resource, not to the commit. They should move with the inode when the path
 changes.
 
 The semantic creation marker in the core model is the create commit in
-namespace history, not a wall-clock field. An implementation may expose
-wall-clock timestamps such as `committed_at` or `created_at`, but these are
-optional and non-semantic.
+namespace history, not a wall-clock field. Every WAL commit record, commit
+receipt row, and revision row carries a required `committed_at_ms`: the
+wall-clock stamp of the publishing writer's request context, in Unix
+milliseconds. The stamp is observational and non-semantic — sequences are
+the only ordering and validity inputs, the fingerprint preimage excludes
+it, and correctness never depends on clocks being aligned. Surfaces expose
+it as modification metadata (a file's modified time is the stamp of the
+commit that created its current revision).

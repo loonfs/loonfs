@@ -49,7 +49,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         checked_invariants: Vec::new(),
     };
     let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-    let record = materialize_commit(prepared);
+    let record = materialize_commit(prepared, 4_200);
 
     let segment = prepare_wal_segment(
         namespace_id,
@@ -168,6 +168,7 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
             seq: record.seq,
             writer_epoch: segment.envelope.payload.writer_epoch,
             commit_id: &record.commit_id,
+            committed_at_ms: record.committed_at_ms,
             semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
             message: record.message.as_deref(),
             deltas: Cow::Borrowed(&record.deltas),
@@ -224,6 +225,7 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
             seq: record.seq,
             writer_epoch: segment.envelope.payload.writer_epoch,
             commit_id: &record.commit_id,
+            committed_at_ms: record.committed_at_ms,
             semantic_commit_fingerprint: &record.semantic_commit_fingerprint,
             message: record.message.as_deref(),
             deltas: Cow::Borrowed(&record.deltas),
@@ -396,7 +398,7 @@ fn materialized_create_directory(
         checked_invariants: Vec::new(),
     };
     let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-    materialize_commit(prepared)
+    materialize_commit(prepared, 4_200)
 }
 
 async fn assert_wal_chain_corruption_rejected(

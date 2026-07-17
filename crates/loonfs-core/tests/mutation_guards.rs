@@ -739,7 +739,7 @@ async fn stale_revision_precondition_is_rejected() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context)
+    let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("stale revision");
     assert!(matches!(
@@ -782,7 +782,7 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context)
+    let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("late op fails");
     assert!(matches!(
@@ -826,6 +826,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             preconditions: Vec::new(),
             message: None,
         },
+        4_200,
         &context,
     )
     .await
@@ -853,6 +854,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             preconditions: Vec::new(),
             message: None,
         },
+        4_200,
         &context,
     )
     .await
@@ -890,7 +892,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context)
+    let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("restore missing inode");
     assert!(matches!(
@@ -925,7 +927,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context)
+    let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("restore non-file");
     assert!(matches!(
@@ -967,6 +969,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             preconditions: Vec::new(),
             message: None,
         },
+        4_200,
         &context,
     )
     .await
@@ -995,6 +998,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
             preconditions: Vec::new(),
             message: None,
         },
+        4_200,
         &context,
     )
     .await
@@ -1043,11 +1047,13 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
         preconditions: Vec::new(),
         message: None,
     };
-    let plan = build_commit_plan(&request, &context)
+    let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("replace then restore in same request should validate");
-    let materialized =
-        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"));
+    let materialized = materialize_commit(
+        PreparedCommit::new(request, plan).expect("prepare commit"),
+        4_200,
+    );
     let expected = content_ref("content-2");
     assert!(matches!(
         &materialized.results[1],
@@ -1094,11 +1100,13 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         preconditions: Vec::new(),
         message: None,
     };
-    let plan = build_commit_plan(&request, &context)
+    let plan = build_commit_plan(&request, 4_200, &context)
         .await
         .expect("restore then restore in same request should validate");
-    let materialized =
-        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"));
+    let materialized = materialize_commit(
+        PreparedCommit::new(request, plan).expect("prepare commit"),
+        4_200,
+    );
     let expected = content_ref("content-1");
     assert!(matches!(
         &materialized.results[0],
@@ -1146,6 +1154,7 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             preconditions: Vec::new(),
             message: None,
         },
+        4_200,
         &context,
     )
     .await
@@ -1177,6 +1186,7 @@ async fn restore_revision_overflow_is_rejected() {
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
+            4_200,
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
@@ -1185,7 +1195,7 @@ async fn restore_revision_overflow_is_rejected() {
         )
         .expect("bootstrap root")
         .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(1), &deltas)
+        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas)
         .expect("create max revision")
         .metadata_state;
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
@@ -1204,7 +1214,7 @@ async fn restore_revision_overflow_is_rejected() {
         message: None,
     };
 
-    let error = build_commit_plan(&request, &context)
+    let error = build_commit_plan(&request, 4_200, &context)
         .await
         .expect_err("restore overflow");
     assert!(matches!(
@@ -5119,6 +5129,7 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     let mut state = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
+            4_200,
             &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
@@ -5130,7 +5141,11 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
 
     for (index, deltas) in sequences.iter().enumerate() {
         state = state
-            .apply_committed_wal_deltas(ChangeSeq(u64::try_from(index + 1).expect("seq")), deltas)
+            .apply_committed_wal_deltas(
+                ChangeSeq(u64::try_from(index + 1).expect("seq")),
+                4_200,
+                deltas,
+            )
             .expect("apply deltas")
             .metadata_state;
     }

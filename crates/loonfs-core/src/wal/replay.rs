@@ -53,6 +53,7 @@ where
         let apply_invariants = current_metadata_state
             .apply_committed_wal_record_parts_mut(
                 record.seq,
+                record.committed_at_ms,
                 record.commit_id,
                 record.semantic_commit_fingerprint,
                 record.message,

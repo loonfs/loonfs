@@ -169,7 +169,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             }
             let plan = {
                 let span = tracing::info_span!("loon.phase", phase = "build_commit_plan");
-                match build_commit_plan_for_publish(&request, &validation)
+                match build_commit_plan_for_publish(&request, context.now_ms, &validation)
                     .instrument(span)
                     .await
                 {
@@ -200,7 +200,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             let materialized = {
                 let _span =
                     tracing::info_span!("loon.phase", phase = "materialize_commit").entered();
-                materialize_commit(prepared)
+                materialize_commit(prepared, context.now_ms)
             };
             let preview = {
                 let _span = tracing::info_span!(

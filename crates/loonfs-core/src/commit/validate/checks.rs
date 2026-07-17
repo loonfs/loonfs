@@ -23,6 +23,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
     request: &CommitRequest,
     mut metadata_state: V,
     committed_seq: ChangeSeq,
+    committed_at_ms: u64,
     allocated_inode_ids: &[InodeId],
     name_policy: NamePolicy,
     checked_invariants: &mut Vec<InvariantId>,
@@ -350,7 +351,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 }
             }
         };
-        metadata_state.apply_validated_op_mut(committed_seq, &validated_op);
+        metadata_state.apply_validated_op_mut(committed_seq, committed_at_ms, &validated_op);
         validated_ops.push(validated_op);
     }
 

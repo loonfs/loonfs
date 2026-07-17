@@ -32,6 +32,11 @@ pub struct AuthoritativePathEntry {
     pub size_bytes: Option<u64>,
     /// Current content reference, for files.
     pub content_ref: Option<ContentRef>,
+    /// Wall-clock stamp of the commit that created the current revision,
+    /// for files; directories carry no modification time in v0.
+    /// Observational: `head_seq` and revision sequences are the order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_at_ms: Option<u64>,
 }
 
 /// One directory listing and the namespace head it was answered at.

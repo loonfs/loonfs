@@ -821,6 +821,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
+                committed_at_ms: revision.committed_at_ms,
                 content_ref: revision.content_ref,
             })
             .collect();
@@ -1069,6 +1070,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             revision_no: revision.as_ref().map(|revision| revision.revision_no),
             size_bytes,
             content_ref,
+            committed_at_ms: revision.as_ref().map(|revision| revision.committed_at_ms),
         })
     }
 

@@ -2577,6 +2577,15 @@
             "type": "string",
             "description": "Absolute path as rendered from stored display names."
           },
+          "committed_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Wall-clock stamp of the commit that created the current revision,\nfor files; directories carry no modification time in v0.\nObservational: `head_seq` and revision sequences are the order.",
+            "minimum": 0
+          },
           "content_ref": {
             "oneOf": [
               {
@@ -3445,12 +3454,19 @@
         "required": [
           "seq",
           "commit_id",
+          "committed_at_ms",
           "deltas"
         ],
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
             "description": "Client idempotency key for this logical commit."
+          },
+          "committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `seq` is the order.",
+            "minimum": 0
           },
           "deltas": {
             "type": "array",
@@ -3842,9 +3858,16 @@
           "inode_id",
           "revision_no",
           "committed_seq",
+          "committed_at_ms",
           "content_ref"
         ],
         "properties": {
+          "committed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock stamp of the commit that created this revision, in Unix\nmilliseconds. Observational: `committed_seq` is the order.",
+            "minimum": 0
+          },
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Namespace sequence that created this revision."

@@ -24,11 +24,15 @@ impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
+        committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> Result<AppliedMetadataState, MetadataApplyError> {
         let mut metadata_state = self.clone();
-        let checked_invariants =
-            metadata_state.apply_committed_wal_deltas_mut(committed_seq, deltas)?;
+        let checked_invariants = metadata_state.apply_committed_wal_deltas_mut(
+            committed_seq,
+            committed_at_ms,
+            deltas,
+        )?;
 
         Ok(AppliedMetadataState {
             metadata_state,
@@ -39,12 +43,14 @@ impl MetadataState {
     pub fn apply_committed_wal_deltas_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> Result<Vec<InvariantId>, MetadataApplyError> {
         let mut checked_invariants = Vec::new();
 
         for delta in deltas {
-            let checked_invariant = self.apply_committed_wal_delta_mut(committed_seq, delta);
+            let checked_invariant =
+                self.apply_committed_wal_delta_mut(committed_seq, committed_at_ms, delta);
             push_unique_invariant(&mut checked_invariants, checked_invariant);
         }
 
@@ -62,6 +68,7 @@ impl MetadataState {
     pub(crate) fn apply_committed_wal_delta_mut(
         &mut self,
         committed_seq: ChangeSeq,
+        committed_at_ms: u64,
         delta: &WalDelta,
     ) -> InvariantId {
         match delta {
@@ -123,6 +130,7 @@ impl MetadataState {
                     inode_id: *inode_id,
                     revision_no: *revision_no,
                     committed_seq,
+                    committed_at_ms,
                     revision_delta_index: *delta_index,
                     content_ref: content_ref.clone(),
                 });
@@ -166,6 +174,7 @@ impl MetadataState {
     ) -> Result<Vec<InvariantId>, MetadataApplyError> {
         self.apply_committed_wal_record_parts_mut(
             record.seq,
+            record.committed_at_ms,
             &record.commit_id,
             &record.semantic_commit_fingerprint,
             record.message.as_deref(),
@@ -176,6 +185,7 @@ impl MetadataState {
     pub(crate) fn apply_committed_wal_record_parts_mut(
         &mut self,
         seq: ChangeSeq,
+        committed_at_ms: u64,
         commit_id: &CommitId,
         semantic_commit_fingerprint: &str,
         message: Option<&str>,
@@ -183,13 +193,15 @@ impl MetadataState {
     ) -> Result<Vec<InvariantId>, MetadataApplyError> {
         let mut checked_invariants = Vec::new();
         for delta in deltas {
-            let checked_invariant = self.apply_committed_wal_delta_mut(seq, &delta.delta);
+            let checked_invariant =
+                self.apply_committed_wal_delta_mut(seq, committed_at_ms, &delta.delta);
             push_unique_invariant(&mut checked_invariants, checked_invariant);
         }
         self.push_commit_receipt_record(CommitReceiptRecord {
             commit_id: commit_id.clone(),
             semantic_commit_fingerprint: semantic_commit_fingerprint.to_owned(),
             committed_seq: seq,
+            committed_at_ms,
             message: message.map(str::to_owned),
         });
         push_unique_invariant(

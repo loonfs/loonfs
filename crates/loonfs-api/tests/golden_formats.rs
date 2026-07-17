@@ -209,6 +209,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                 semantic_commit_fingerprint:
                     "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
                         .to_owned(),
+                committed_at_ms: 4_000,
                 message: Some("golden commit".to_owned()),
                 deltas,
             }],
@@ -840,6 +841,7 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             commit_id: commit_id(),
             semantic_commit_fingerprint: "fp:golden".to_owned(),
             committed_seq: ChangeSeq(9),
+            committed_at_ms: 9_000,
             message: None,
         },
         MetadataRow::DirentryBind {
@@ -881,6 +883,7 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             inode_id: InodeId(2),
             revision_no: RevisionNo(1),
             committed_seq: ChangeSeq(3),
+            committed_at_ms: 3_000,
             revision_delta_index: 0,
             content_ref: sample_content_ref(),
         },
