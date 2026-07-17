@@ -132,7 +132,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "CommitDeltaUnbindDirentry",
                 "CommitDeltaAppendFileRevision",
                 "CommitDeltaTombstoneSubtree",
-                "CommitDeltaClearSubtreeTombstone",
+                "CommitDeltaRevokeSubtreeTombstone",
             ][..],
         ),
         (
