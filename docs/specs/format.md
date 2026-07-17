@@ -1455,7 +1455,11 @@ v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
 `metadata/tables/`, `metadata/indexes/`, `checkpoints/`, and `wal/segments/`
 collections. A live manifest roots every object key its `metadata_files`
-and `index_files` lists name, whatever their family.
+and `index_files` lists name, whatever their family. The pass also sweeps
+`uploads/`: sessions root nothing and nothing durable references them, so a
+session whose provider age exceeds the reap window is deleted whatever its
+state — the abort-incomplete-upload convention. A `complete` after the
+window answers session-not-found.
 Because floor, root, and checkpoint publication no longer serialize through
 one head CAS, two cross-object races must be closed explicitly —
 create-vs-collect (a record written while GC concludes its basis is
@@ -1533,9 +1537,10 @@ backstop.
 
 ### 6.5 Control-object cleanup
 
-Implementations may clean up expired sessions, uploads, intents, or other
-control-plane objects. This is control-plane maintenance, not namespace
-history.
+Upload sessions are cleaned by the GC pass after the reap window
+("Garbage collection"). Implementations may additionally clean up other
+expired control-plane objects. This is control-plane maintenance, not
+namespace history.
 
 ### 6.6 Derived work
 
