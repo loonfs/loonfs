@@ -167,7 +167,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
                 },
             ),
         )),
-        Ok(NamespaceInitializationState::Partial) => {
+        Ok(NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris) => {
             Err(CoreError::NamespacePartiallyInitialized {
                 namespace_id: namespace_id.clone(),
             })
@@ -196,6 +196,10 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
             message,
         }
         | NamespaceInitializationError::InspectNamespaceHead {
+            object_key,
+            message,
+        }
+        | NamespaceInitializationError::InspectNamespaceControl {
             object_key,
             message,
         } => CoreError::Store {

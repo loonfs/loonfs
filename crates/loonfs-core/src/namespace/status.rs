@@ -48,7 +48,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
                 ),
             ));
         }
-        Ok(NamespaceInitializationState::Partial) => {
+        Ok(NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris) => {
             return Err(CoreError::NamespacePartiallyInitialized {
                 namespace_id: expected_namespace_id.clone(),
             });
@@ -137,6 +137,13 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
                 error,
             ))
         }
+        NamespaceInitializationError::InspectNamespaceControl {
+            object_key,
+            message,
+        } => CoreError::Store {
+            object_key,
+            message,
+        },
         NamespaceInitializationError::InspectNamespaceDescriptor {
             object_key,
             message,

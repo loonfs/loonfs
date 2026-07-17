@@ -123,6 +123,17 @@ The namespace tree's lifecycle can be read off its grammar:
 - **`namespace.json` is the existence marker**: written last at creation as
   the completion marker, kept forever after deletion as half of the
   tombstone pair that retires the namespace id.
+- **Creation and forking are crash-resumable.** The head write is the
+  linearization point. A retry that finds pre-head debris (a metadata root
+  or WAL floor with no head) cleans it once the debris is older than the
+  derived grace floor — nothing published within the floor can still be in
+  flight — re-checking head absence immediately before every delete;
+  younger debris answers `namespace_partial`, never a race. A retry that
+  finds a head without a descriptor finishes the create or fork by writing
+  the missing descriptor, guarded by the tree itself: a genesis head with a
+  fork-free root manifest completes as a create, a root manifest whose fork
+  block names the requested source completes as that fork, and anything
+  else answers `namespace_partial`.
 
 Names are never authority anywhere — recovery follows the head and its
 references.

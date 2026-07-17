@@ -6,7 +6,7 @@ use crate::namespace::control::{
 };
 use loonfs_api::wire::control::NamespaceConfigState;
 use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
-use loonfs_objectstore::keys::{namespace_config, wal_head};
+use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_floor, wal_head};
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
@@ -38,6 +38,13 @@ impl VerifiedNamespaceCatalogEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NamespaceInitializationState {
     Absent,
+    /// Head and descriptor are both absent but pre-head control objects
+    /// (metadata root or WAL floor) exist: a create or fork crashed before
+    /// its head write, or one is in flight right now. Age decides which.
+    PreHeadDebris,
+    /// The head exists but the descriptor does not: a create or fork
+    /// crashed after its linearization point. Completable by a retry whose
+    /// derivable descriptor matches the tree.
     Partial,
     Complete,
 }
@@ -52,6 +59,8 @@ pub(crate) enum NamespaceInitializationError {
     InspectNamespaceDescriptor { object_key: String, message: String },
     #[error("failed to inspect namespace head object `{object_key}`: {message}")]
     InspectNamespaceHead { object_key: String, message: String },
+    #[error("failed to inspect namespace control object `{object_key}`: {message}")]
+    InspectNamespaceControl { object_key: String, message: String },
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
@@ -122,7 +131,32 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
         .is_some();
 
     match (descriptor_exists, head_exists) {
-        (false, false) => Ok(NamespaceInitializationState::Absent),
+        (false, false) => {
+            // Nothing is visible yet, but a crashed create or fork may have
+            // left pre-head control objects that block a fresh attempt's
+            // put-if-absent writes. Probe the two fixed-key ones; a stray
+            // manifest object alone blocks nothing (random id) and ages out
+            // through ordinary GC.
+            for probe_key in [
+                metadata_root(namespace_id.as_str()),
+                wal_floor(namespace_id.as_str()),
+            ] {
+                let exists = store
+                    .head(&probe_key)
+                    .await
+                    .map_err(
+                        |err| NamespaceInitializationError::InspectNamespaceControl {
+                            object_key: probe_key.clone(),
+                            message: err.message(),
+                        },
+                    )?
+                    .is_some();
+                if exists {
+                    return Ok(NamespaceInitializationState::PreHeadDebris);
+                }
+            }
+            Ok(NamespaceInitializationState::Absent)
+        }
         (true, true) => {
             let descriptor = read_namespace_descriptor_object(store, namespace_id)
                 .await
