@@ -427,8 +427,8 @@ mod tests {
     use crate::namespace::control::read_head_object;
     use futures::StreamExt;
     use loonfs_api::{ChangeSeq, InodeId, WriterEpoch};
-    use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_segment_prefix;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;

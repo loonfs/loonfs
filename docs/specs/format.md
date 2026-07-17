@@ -971,7 +971,7 @@ The first standard lower-level mutation set includes:
 - `create_directory(parent_inode_id, display_name)`
 - `create_file(parent_inode_id, display_name, content_ref)`
 - `replace_file(inode_id, base_revision_no, content_ref)`
-- `rename(inode_id, new_parent_inode_id, new_display_name, behavior = no_replace)`
+- `rename(inode_id, new_parent_inode_id, new_display_name)`
 - `delete_file(inode_id)`
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
@@ -980,9 +980,11 @@ The first standard lower-level mutation set includes:
 The path-oriented filesystem surface may compile higher-level operations into
 these lower-level mutations.
 
-`rename` carries an explicit move behavior enum for forward compatibility;
-v0 defines only `no_replace`. Unknown behaviors fail request validation, and
-new behaviors arrive as additive enum variants (see "Evolution rules").
+`rename` is always no-replace: a destination binding that already exists
+fails validation. Replacing moves exist on the path-oriented surface
+(`move_path` with its behavior enum); if commit-level replace-rename is ever
+needed it arrives as a new capability-gated field, not a silently tolerated
+one.
 
 These are semantic commit operations. Durable WAL payloads store normalized
 metadata deltas derived from the semantic operations: `create_inode`,

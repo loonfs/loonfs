@@ -225,8 +225,8 @@ mod tests {
     use futures::stream::{self, BoxStream};
     use loonfs_api::wire::control::{ControlObjectKind, HeadStateEnvelope};
     use loonfs_api::NamespaceId;
-    use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_head;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectBody, PutMode};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;

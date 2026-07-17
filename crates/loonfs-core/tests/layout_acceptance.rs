@@ -19,8 +19,8 @@ use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::gc::{gc_namespace, GcConfig};
 use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, RuntimeReadContext};
-use loonfs_objectstore::fs::LocalFsStore;
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
