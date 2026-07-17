@@ -7,7 +7,8 @@
 //! grace window, delete-time re-verification, and retain-on-ambiguity
 //! defaults close those races. When in doubt, this module retains.
 
-use crate::checkpoint::load_namespace_manifest_envelope;
+use crate::checkpoint::load_namespace_manifest_envelope_if_present;
+use crate::checkpoint::record::set_checkpoint_record_state;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
@@ -22,12 +23,12 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, index_segment_prefix, metadata_manifest_prefix, metadata_table_prefix,
-    namespace_config, upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, index_segment_prefix, metadata_manifest_object, metadata_manifest_prefix,
+    metadata_table_prefix, namespace_config, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Grace and reap windows for the sweep (format spec, "Garbage collection",
 /// rules 1 and 9). Both are wall-clock cleanup policy, never validity
@@ -88,6 +89,11 @@ pub struct GcReport {
     /// Upload-session control objects deleted after the reap window.
     #[serde(default)]
     pub deleted_upload_sessions: u64,
+    /// Active checkpoint records released because their basis manifest is
+    /// verifiably gone (the record-write-then-crash window skipped the
+    /// creator's own release).
+    #[serde(default)]
+    pub released_missing_basis_checkpoints: u64,
     /// Candidates dropped at delete time: still inside the grace window,
     /// missing a provider timestamp, or reachable from the fresh root set.
     pub retained_candidates: u64,
@@ -106,6 +112,10 @@ struct LiveSet {
     index_segments: BTreeSet<String>,
     wal_segments: BTreeSet<String>,
     checkpoint_keys: BTreeSet<String>,
+    /// Still-active records whose basis manifest is verifiably absent —
+    /// the crash window between record write and verification. The pass
+    /// releases them; they never degrade sweeping.
+    missing_basis_records: Vec<String>,
     /// Record resolution failed somewhere: manifest/table deletion must not
     /// proceed on this pass.
     degraded: bool,
@@ -185,11 +195,11 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         .collect();
 
     // Sweep: every deletion is decided against a fresh live set (rule 3:
-    // candidate selection may be stale, deletion may not). The set is
-    // re-collected every `reverify_chunk` candidates so a large sweep never
-    // runs far ahead of its verification snapshot.
-    let mut sweep =
-        SweepVerifier::collect(store, namespace_id, config, context, reverify_chunk).await?;
+    // candidate selection may be stale, deletion may not). Zero decisions
+    // separate the mark from the first sweep step, so the mark set seeds
+    // the verifier directly; it is re-collected every `reverify_chunk`
+    // candidates so a large sweep never runs far ahead of its snapshot.
+    let mut sweep = SweepVerifier::seeded(mark, reverify_chunk);
 
     // Delete data before records. Every readable checkpoint record roots
     // its basis in the live set, so the pass that deletes a record can
@@ -288,6 +298,20 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             report.deleted_checkpoint_records += 1;
         }
     }
+    // Zombie release: an active record whose basis manifest is verifiably
+    // gone can never serve a read — the crash window between the record
+    // write and its verification skipped the release the creator would
+    // have performed. The release is the same compare-and-swap create runs
+    // on verification failure, decided against fresh reads and gated by
+    // the grace window so an in-flight create is never raced.
+    for key in sweep.live.missing_basis_records.clone() {
+        if release_missing_basis_checkpoint(store, namespace_id, &key, config, context).await? {
+            report.released_missing_basis_checkpoints += 1;
+        } else {
+            report.retained_candidates += 1;
+        }
+    }
+
     // Upload sessions root nothing and nothing durable references them, so
     // provider age past the reap window is the whole decision — the
     // AbortIncompleteMultipartUpload convention. A session that old is dead
@@ -319,6 +343,67 @@ enum ForkCheckpointSweep {
 /// and releases the record by compare-and-swap on the just-observed etag.
 /// The etag check means a concurrent fork freshen either wins the swap
 /// outright or observes the release — the two can never both succeed.
+/// Releases a still-active record whose basis manifest is verifiably gone.
+/// Every check runs against fresh reads at decision time: the record must
+/// still be active and unexpired, older than the grace window (an in-flight
+/// create is never raced), and the basis manifest must still be absent.
+/// The release is the compare-and-swap the creator's own verification
+/// failure would have performed; the released record then ages out through
+/// the normal delete path on a later pass.
+async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    key: &str,
+    config: &GcConfig,
+    context: &MutationContext,
+) -> Result<bool, CoreError> {
+    let Some(body) = store
+        .get_with_metadata(key)
+        .await
+        .map_err(|error| CoreError::store(key, &error))?
+    else {
+        return Ok(false);
+    };
+    let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
+        &body.bytes,
+        ControlObjectKind::CheckpointRecord,
+    ) else {
+        // Unreadable records are ambiguous; never mutate one here.
+        return Ok(false);
+    };
+    let record = envelope.state;
+    let expired = record
+        .expires_at_ms
+        .is_some_and(|expires_at_ms| expires_at_ms <= context.now_ms);
+    if record.state != CheckpointRecordLifecycle::Active || expired {
+        return Ok(false);
+    }
+    let Some(last_modified_ms) = body.metadata.last_modified_ms else {
+        return Ok(false);
+    };
+    if context.now_ms.saturating_sub(last_modified_ms) < config.grace_window_ms {
+        return Ok(false);
+    }
+    let manifest_key = metadata_manifest_object(namespace_id.as_str(), &record.manifest_object_id);
+    if store
+        .head(&manifest_key)
+        .await
+        .map_err(|error| CoreError::store(&manifest_key, &error))?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    set_checkpoint_record_state(
+        store,
+        namespace_id,
+        &record.checkpoint_id,
+        CheckpointRecordLifecycle::Released,
+        &context.writer_version,
+    )
+    .await?;
+    Ok(true)
+}
+
 async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
@@ -440,20 +525,13 @@ struct SweepVerifier {
 }
 
 impl SweepVerifier {
-    async fn collect<S: ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &NamespaceId,
-        config: &GcConfig,
-        context: &MutationContext,
-        reverify_chunk: usize,
-    ) -> Result<Self, CoreError> {
-        let live = collect_live_set(store, namespace_id, config, context).await?;
-        Ok(Self {
+    fn seeded(live: LiveSet, reverify_chunk: usize) -> Self {
+        Self {
             degraded: live.degraded,
             live,
             reverify_chunk,
             decided_since_collect: 0,
-        })
+        }
     }
 
     async fn refresh_if_due<S: ObjectStore + ?Sized>(
@@ -502,9 +580,11 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         index_segments: BTreeSet::new(),
         wal_segments: BTreeSet::new(),
         checkpoint_keys: BTreeSet::new(),
+        missing_basis_records: Vec::new(),
         degraded: false,
     };
-    live.manifests.insert(root.manifest_object_id);
+    live.manifests.insert(root.manifest_object_id.clone());
+    let mut active_record_bases: BTreeMap<ManifestObjectId, Vec<String>> = BTreeMap::new();
 
     // Every readable checkpoint record roots its basis, no matter its
     // lifecycle, expiry, or owner: a record must never outlive its
@@ -558,6 +638,10 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
                         }
                     }
                 }
+                active_record_bases
+                    .entry(record.manifest_object_id)
+                    .or_default()
+                    .push(key.clone());
                 live.checkpoint_keys.insert(key);
             }
             // Unreadable records are ambiguous roots: retain them and keep
@@ -573,13 +657,34 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
     // are trusted to protect data — the envelope loader checks the payload
     // checksum).
     for manifest_object_id in live.manifests.clone() {
-        match load_namespace_manifest_envelope(store, namespace_id, &manifest_object_id).await {
-            Ok(manifest) => {
+        let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
+        match load_namespace_manifest_envelope_if_present(
+            store,
+            namespace_id,
+            &manifest_object_id,
+            &manifest_key,
+        )
+        .await
+        {
+            Ok(Some(manifest)) => {
                 for file in &manifest.payload.metadata_files {
                     live.tables.insert(file.object_key.clone());
                 }
                 for file in &manifest.payload.index_files {
                     live.index_segments.insert(file.object_key.clone());
+                }
+            }
+            // Absent is not ambiguous. The root's manifest missing is real
+            // corruption and degrades the pass; a record-rooted basis that
+            // is verifiably gone marks the still-active records above it as
+            // zombies — the crash window between record write and verify —
+            // and the pass releases them below instead of degrading forever.
+            Ok(None) => {
+                if manifest_object_id == root.manifest_object_id {
+                    live.degraded = true;
+                } else if let Some(record_keys) = active_record_bases.get(&manifest_object_id) {
+                    live.missing_basis_records
+                        .extend(record_keys.iter().cloned());
                 }
             }
             Err(_) => {
@@ -727,7 +832,6 @@ fn load_error(error: ControlObjectLoadError) -> CoreError {
 mod tests {
     use super::*;
     use crate::checkpoint::advance_retention_floor;
-    use crate::checkpoint::record::set_checkpoint_record_state;
     use loonfs_api::wire::control::CheckpointOwner;
 
     /// GC lifecycle tests pin as one user owner; owner-specific release
@@ -991,6 +1095,89 @@ mod tests {
             .await
             .expect("write session");
         key
+    }
+
+    #[tokio::test]
+    async fn active_record_with_a_missing_basis_is_released_not_degrading() {
+        // The crash window between record write and verification can leave
+        // an active record pinning a basis an earlier pass already deleted.
+        // Such a record can never serve a read; the pass releases it with
+        // the same compare-and-swap the creator's verification failure
+        // would have run — and the absent basis never degrades sweeping.
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        let pinned = create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("first checkpoint");
+
+        // Advance the root past the pinned basis so deleting the basis
+        // object leaves the namespace itself healthy.
+        write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+        let moved_on = crate::checkpoint::create_checkpoint(
+            &store,
+            &namespace_id,
+            CheckpointOwner::User {
+                name: "other-pin".to_owned(),
+            },
+            None,
+            &setup,
+        )
+        .await
+        .expect("second checkpoint");
+        assert_ne!(moved_on.manifest_id, pinned.manifest_id);
+
+        // Simulate the crash residue: the pinned record stays active while
+        // its basis manifest object vanishes.
+        let record = crate::checkpoint::record::read_checkpoint_record(
+            &store,
+            &namespace_id,
+            &pinned.checkpoint_id,
+        )
+        .await
+        .expect("read record")
+        .expect("record exists")
+        .state;
+        let basis_key = metadata_manifest_object(namespace_id.as_str(), &record.manifest_object_id);
+        store.delete(&basis_key).await.expect("drop basis manifest");
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass");
+        assert_eq!(report.released_missing_basis_checkpoints, 1);
+        assert!(
+            !report.degraded_retention,
+            "a verifiably absent basis is not ambiguity"
+        );
+        let released = crate::checkpoint::record::read_checkpoint_record(
+            &store,
+            &namespace_id,
+            &pinned.checkpoint_id,
+        )
+        .await
+        .expect("read record")
+        .expect("record still present")
+        .state;
+        assert_eq!(
+            released.state,
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Released
+        );
+
+        // Idempotent: the released record is no longer a zombie, and the
+        // namespace still reads (the live pin and root are untouched).
+        let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &again)
+            .await
+            .expect("second gc pass");
+        assert_eq!(report.released_missing_basis_checkpoints, 0);
+        assert!(!report.degraded_retention);
+        stat_root(&store, &namespace_id).await;
     }
 
     #[tokio::test]
