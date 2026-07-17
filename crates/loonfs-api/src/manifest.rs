@@ -28,7 +28,7 @@ pub enum NamespaceManifestKind {
 impl NamespaceManifestKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NamespaceManifest => "metadata_manifest",
+            Self::NamespaceManifest => "namespace_manifest",
         }
     }
 }
@@ -711,6 +711,13 @@ mod tests {
         NameKey, NamespaceId, WriterEpoch,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn namespace_manifest_kind_string_matches_serde() {
+        let kind = super::NamespaceManifestKind::NamespaceManifest;
+        let serialized = serde_json::to_value(kind).expect("serialize kind");
+        assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
+    }
 
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {

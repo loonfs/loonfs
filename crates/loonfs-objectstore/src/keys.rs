@@ -176,7 +176,7 @@ mod tests {
                 wal_segment("ns-1", &format!("{:020}-{}", 42, "0123456789abcdef")),
             ),
             (
-                "Metadata manifests",
+                "Namespace manifests",
                 metadata_manifest_object(
                     "ns-1",
                     &ManifestObjectId::parse("00000000000000000400-0123456789abcdef")

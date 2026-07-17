@@ -330,12 +330,12 @@ fn wal_segment_golden_decodes_to_sample() {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("metadata_manifest.v1.json", &encoded);
+    assert_matches_golden("namespace_manifest.v1.json", &encoded);
 }
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("metadata_manifest.v1.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -1153,13 +1153,13 @@ fn index_segment_data_payload_matches_golden_bytes() {
 fn namespace_manifest_with_index_matches_golden_bytes() {
     let encoded =
         encode_namespace_manifest_json(&sample_manifest_with_index_envelope()).expect("encode");
-    assert_matches_golden("metadata_manifest_index_grams.v1.json", &encoded);
+    assert_matches_golden("namespace_manifest_index_grams.v1.json", &encoded);
 }
 
 #[test]
 fn namespace_manifest_with_index_golden_decodes_to_sample() {
     let decoded =
-        decode_namespace_manifest_json(&read_golden("metadata_manifest_index_grams.v1.json"))
+        decode_namespace_manifest_json(&read_golden("namespace_manifest_index_grams.v1.json"))
             .expect("decode golden manifest with index");
     assert_eq!(decoded, sample_manifest_with_index_envelope());
     let feature = IndexGramsFeature::from_value(
