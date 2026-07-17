@@ -5,7 +5,7 @@
 //! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
 //! provider adapters for S3, Cloudflare R2, Google Cloud Storage, Azure Blob
 //! Storage, and the local filesystem, the durable key layout in [`keys`] and
-//! [`layout`], and the conformance [`probes`] that keep provider assumptions
+//! [`layout`], and the conformance suite that keeps provider assumptions
 //! honest.
 
 pub mod abs;
@@ -18,7 +18,6 @@ pub mod local_fs_store;
 pub mod metrics;
 pub mod object_store;
 pub mod presign;
-pub mod probes;
 pub mod provider;
 mod provider_object_store;
 pub mod r2;

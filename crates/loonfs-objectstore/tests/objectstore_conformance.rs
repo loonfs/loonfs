@@ -1,6 +1,7 @@
 mod provider_env;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use loonfs_api::ManifestObjectId;
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
@@ -9,7 +10,6 @@ use loonfs_objectstore::keys::{
     namespace_config, upload_session, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::probes::run_contract_probes;
 use loonfs_objectstore::provider::{
     Expectation, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS,
 };
@@ -311,27 +311,6 @@ async fn local_fs_compare_and_swap_missing_object_rejects_writer() {
 }
 
 #[tokio::test]
-async fn local_fs_contract_probes_match_doctor_surface() {
-    let temp_dir = TestDir::new("doctor-probes");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    let report = run_contract_probes(&store, "local-fs-doctor")
-        .await
-        .expect("run doctor probes");
-    assert_eq!(
-        report.checks,
-        vec![
-            "create_if_absent",
-            "compare_and_swap",
-            "get_with_metadata",
-            "visibility_after_write",
-            "visibility_after_delete",
-            "sorted_listing",
-            "scoped_prefix_behavior",
-        ]
-    );
-}
-
-#[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_real_provider_conformance() {
     let config = AwsS3ConformanceConfig::from_env()
@@ -459,9 +438,6 @@ async fn azure_abs_real_provider_conformance() {
 }
 
 async fn assert_provider_conformance<S: ObjectStore>(store: &S) {
-    run_contract_probes(store, "provider-conformance")
-        .await
-        .expect("run shared contract probes");
     assert_create_if_absent_is_enforced(store).await;
     assert_compare_and_swap_rejects_stale_writer(store).await;
     assert_compare_and_swap_missing_object_rejects_writer(store).await;
@@ -682,12 +658,23 @@ async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
         .await
         .expect("seed first sort key");
 
+    // Assert on the raw provider stream, not `list_prefix` — the trait
+    // default sorts client-side, so asserting on it can never fail. No
+    // protocol depends on listing order; this pins the documented
+    // convenience that `list_prefix` answers sorted regardless.
+    let mut streamed = Vec::new();
+    let mut stream = store.list_prefix_stream("namespaces/ns-sort/");
+    while let Some(key) = stream.next().await {
+        streamed.push(key.expect("stream sorted keys"));
+    }
+    streamed.sort();
     let listed = store
         .list_prefix("namespaces/ns-sort/")
         .await
         .expect("list sorted keys");
     let mut expected = keys.clone();
     expected.sort();
+    assert_eq!(streamed, expected);
     assert_eq!(listed, expected);
 
     for key in &keys {
