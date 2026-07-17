@@ -4228,6 +4228,12 @@
             "description": "Unreferenced metadata tables deleted.",
             "minimum": 0
           },
+          "deleted_upload_sessions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Upload-session control objects deleted after the reap window.",
+            "minimum": 0
+          },
           "deleted_wal_segments": {
             "type": "integer",
             "format": "int64",

@@ -429,6 +429,9 @@ pub struct GcResponse {
     pub released_fork_checkpoints: u64,
     /// Objects removed while reaping an abandoned bootstrap tree.
     pub reaped_abandoned_objects: u64,
+    /// Upload-session control objects deleted after the reap window.
+    #[serde(default)]
+    pub deleted_upload_sessions: u64,
     /// Candidates retained at delete time (grace window, missing
     /// timestamps, or reachable from the fresh root set).
     pub retained_candidates: u64,

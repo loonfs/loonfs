@@ -23,7 +23,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, index_segment_prefix, metadata_manifest_prefix, metadata_table_prefix,
-    namespace_config, wal_segment_prefix,
+    namespace_config, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,9 @@ pub struct GcReport {
     pub released_fork_checkpoints: u64,
     /// Objects removed while reaping an abandoned bootstrap tree (rule 9).
     pub reaped_abandoned_objects: u64,
+    /// Upload-session control objects deleted after the reap window.
+    #[serde(default)]
+    pub deleted_upload_sessions: u64,
     /// Candidates dropped at delete time: still inside the grace window,
     /// missing a provider timestamp, or reachable from the fresh root set.
     pub retained_candidates: u64,
@@ -157,6 +160,8 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         list_prefix(store, &metadata_manifest_prefix(namespace_id.as_str())).await?;
     let candidate_checkpoints =
         list_prefix(store, &checkpoint_prefix(namespace_id.as_str())).await?;
+    let candidate_upload_sessions =
+        list_prefix(store, &upload_session_prefix(namespace_id.as_str())).await?;
 
     let segment_candidates: Vec<String> = candidate_segments
         .into_iter()
@@ -281,6 +286,17 @@ async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         }
         if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
             report.deleted_checkpoint_records += 1;
+        }
+    }
+    // Upload sessions root nothing and nothing durable references them, so
+    // provider age past the reap window is the whole decision — the
+    // AbortIncompleteMultipartUpload convention. A session that old is dead
+    // whatever its state: presigned grants expired long ago, and a
+    // `complete` after the window answers session-not-found by design.
+    // Writer clocks are never consulted (rule 1: provider timestamps only).
+    for key in candidate_upload_sessions {
+        if delete_if_aged(store, &key, config.reap_window_ms, context, &mut report).await? {
+            report.deleted_upload_sessions += 1;
         }
     }
     report.degraded_retention = sweep.degraded;
@@ -946,6 +962,81 @@ mod tests {
         assert_eq!(report.deleted_wal_segments, 1);
         assert!(!report.degraded_retention);
         stat_root(&store, &namespace_id).await;
+    }
+
+    async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
+        let upload_id = loonfs_api::UploadId::parse("upl_0123456789abcdef0123456789abcdef")
+            .expect("valid upload id");
+        let state = loonfs_api::wire::control::UploadSessionState {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            direct_put_content_ref: None,
+            staged_content_ref: None,
+            completed: None,
+            created_at_ms: 1_000,
+        };
+        let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
+            loonfs_api::wire::control::ControlObjectKind::UploadSession,
+            "gc-test/0.1.0",
+            state,
+        )
+        .expect("session envelope");
+        let bytes =
+            loonfs_api::wire::control::encode_control_object(&envelope).expect("encode session");
+        let key =
+            loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+        store
+            .put_if_absent(&key, bytes::Bytes::from(bytes))
+            .await
+            .expect("write session");
+        key
+    }
+
+    #[tokio::test]
+    async fn upload_sessions_reap_after_the_window_and_survive_inside_it() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        let session_key = write_upload_session(&store, &namespace_id).await;
+
+        // Past the grace window but inside the reap window: sessions are
+        // aged on the reap window, so this pass retains the session.
+        let inside = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &inside)
+            .await
+            .expect("gc pass inside the reap window");
+        assert_eq!(report.deleted_upload_sessions, 0);
+        assert!(store
+            .head(&session_key)
+            .await
+            .expect("head session")
+            .is_some());
+
+        // Past the reap window the session is dead whatever its state:
+        // age is the whole decision, and the pass counts the deletion.
+        let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass past the reap window");
+        assert_eq!(report.deleted_upload_sessions, 1);
+        assert!(store
+            .head(&session_key)
+            .await
+            .expect("head session")
+            .is_none());
+
+        // The pass is idempotent: nothing left to count.
+        let again = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &again)
+            .await
+            .expect("gc pass after the sweep");
+        assert_eq!(report.deleted_upload_sessions, 0);
     }
 
     #[tokio::test]
