@@ -299,17 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn commit_rename_tolerates_legacy_behavior_key() {
-        // Renames are always no-replace; old clients may still send the
-        // retired `behavior` key and the tolerant wire ignores it.
+    fn commit_ops_tolerate_unknown_fields() {
+        // Tolerant wire: decoders ignore unknown fields so additive
+        // evolution never breaks an older reader.
         let op: CommitOp = serde_json::from_value(serde_json::json!({
             "kind": "rename",
             "inode_id": 2,
             "new_parent_inode_id": 1,
             "new_display_name": "renamed.txt",
-            "behavior": "no_replace"
+            "unknown_future_field": true
         }))
-        .expect("rename tolerates legacy behavior key");
+        .expect("unknown fields are ignored");
 
         assert_eq!(
             op,

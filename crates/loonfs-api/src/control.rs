@@ -78,8 +78,8 @@ pub struct NamespaceConfigState {
     pub namespace_id: NamespaceId,
     pub content_store_id: ContentStoreId,
     /// Immutable per namespace, chosen at creation: the single authority for
-    /// name-key computation on both the write and read paths.
-    #[serde(default)]
+    /// name-key computation on both the write and read paths. Required — a
+    /// descriptor without a policy is malformed, never guessed.
     pub name_policy: NamePolicy,
 }
 
@@ -491,6 +491,18 @@ mod tests {
             assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
         }
         assert_eq!(ControlObjectKind::parse("not_a_kind"), None);
+    }
+
+    #[test]
+    fn namespace_config_without_name_policy_is_rejected() {
+        // The name policy is the collision-semantics authority; a
+        // descriptor that omits it is malformed, never defaulted.
+        let missing = serde_json::json!({
+            "namespace_id": "demo",
+            "content_store_id": "cs_0123456789abcdef"
+        });
+        serde_json::from_value::<NamespaceConfigState>(missing)
+            .expect_err("descriptor without name_policy must be rejected");
     }
 
     #[test]

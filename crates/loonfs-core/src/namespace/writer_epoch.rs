@@ -169,8 +169,8 @@ mod tests {
         NamespaceState,
     };
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId};
-    use loonfs_objectstore::fs::LocalFsStore;
     use loonfs_objectstore::keys::wal_head;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };

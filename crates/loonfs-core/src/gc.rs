@@ -743,7 +743,7 @@ mod tests {
     use bytes::Bytes;
     use futures::stream::BoxStream;
     use loonfs_api::{AbsolutePath, CommitId, PutBehavior};
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
     use tempfile::tempdir;
 

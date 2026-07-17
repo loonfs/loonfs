@@ -275,7 +275,7 @@ fn init_creates_embedded_profile_and_current_reports_namespace_unset() {
 }
 
 #[test]
-fn legacy_local_mode_is_rejected() {
+fn invalid_profile_mode_is_rejected() {
     let harness = Harness::new();
 
     let result = harness.run(&[
@@ -284,7 +284,7 @@ fn legacy_local_mode_is_rejected() {
         "create",
         "default",
         "--mode",
-        "local",
+        "not-a-mode",
         "--store-kind",
         "local-fs",
         "--root",
@@ -1094,20 +1094,7 @@ fn index_enable_runs_a_tick_when_the_index_is_already_enabled() {
 }
 
 #[test]
-fn legacy_commands_are_rejected() {
-    let harness = Harness::new();
-
-    let add = harness.run(&["profile", "add"]);
-    assert_failure(&add);
-    assert!(stderr_string(&add).contains("unrecognized"));
-
-    let filesystem = harness.run(&["filesystem", "ls"]);
-    assert_failure(&filesystem);
-    assert!(stderr_string(&filesystem).contains("unrecognized"));
-}
-
-#[test]
-fn help_omits_legacy_commands_and_config_flag() {
+fn help_lists_the_context_commands() {
     let harness = Harness::new();
     let output = Command::new(loon_binary_path())
         .env("HOME", &harness.home_dir)
@@ -1116,8 +1103,6 @@ fn help_omits_legacy_commands_and_config_flag() {
         .expect("run help");
     assert_success(&output);
     let stdout = stdout_string(&output);
-    assert!(!stdout.contains("--config"));
-    assert!(!stdout.contains("filesystem"));
     assert!(stdout.contains("current"));
     assert!(stdout.contains("use"));
 }
