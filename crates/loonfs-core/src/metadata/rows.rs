@@ -151,12 +151,18 @@ pub enum SubtreeTombstoneAction {
     },
 }
 
-/// The newest-wins active-tombstone rule, shared by every aggregation site:
-/// among records at or below `visible_seq`, the newest by
-/// `(tombstone_seq, tombstone_delta_index)` speaks for the root, and a
-/// cleared newest record means no tombstone is active. Keep every reader on
-/// this helper — a site with its own copy of the rule is how visibility
-/// splits from the durable truth.
+/// The newest-event-wins active-tombstone rule, shared by every aggregation
+/// site: among records at or below `visible_seq`, the newest by
+/// `(tombstone_seq, tombstone_delta_index)` speaks for the root — a `Set`
+/// newest means that deletion is active, a `Revoke` newest means none is.
+/// The newest event is authoritative WITHOUT consulting the revoke's
+/// target: commit validation guarantees a revoke only ever lands against
+/// the generation that was active, so for valid histories the two rules
+/// agree, and the recorded target serves as audit metadata and the
+/// projection contract (change-feed consumers reduce with it and can flag
+/// a mismatch as corruption). Keep every reader on this helper — a site
+/// with its own copy of the rule is how visibility splits from the durable
+/// truth.
 pub(crate) fn active_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
     visible_seq: ChangeSeq,

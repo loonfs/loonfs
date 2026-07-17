@@ -497,7 +497,10 @@ exact `(target_seq, target_delta_index)` deletion it cancels — and rows
 for one root are ordered by `(tombstone_seq, tombstone_delta_index)` with
 the newest event winning: a `revoke` newest means no tombstone is active,
 and a later delete of the same root supersedes the revoke with a newer
-`set`. Undelete is generation-scoped: the request names the deletion's
+`set`. Newest-event-wins is the authoritative reduction; the revoke's
+recorded target is guaranteed by commit validation to be the generation
+that was active, so consumers that reduce target-aware reach the same
+answer and may treat a target mismatch as corruption. Undelete is generation-scoped: the request names the deletion's
 committed sequence, and validation refuses (`not_deleted`) unless that
 exact generation is the active one, so a stale recovery request can never
 cancel a later deletion. Only the root of a deletion can be undeleted —

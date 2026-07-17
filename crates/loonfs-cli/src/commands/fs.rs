@@ -525,19 +525,28 @@ pub(crate) async fn run_filesystem_rm(
             error,
         )
     })?;
-    // Resolve the inode before deleting: the delete unbinds the path, and
-    // the id is what `loon undelete` needs to recover it.
+    // Resolve the inode before deleting: the id is half of the recovery
+    // handle `loon undelete` needs. The delete then carries it as an
+    // expectation, so a rebinding racing this command fails the delete
+    // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
         .target
         .backend()
         .stat_path(&spec)
         .await
-        .ok()
-        .map(|entry| entry.inode_id.0);
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?
+        .inode_id;
     let result = context
         .target
         .backend()
-        .delete_path(&spec, commit_id)
+        .delete_path(&spec, Some(deleted_inode), commit_id)
         .await
         .map_err(|error| {
             fail(
@@ -556,7 +565,7 @@ pub(crate) async fn run_filesystem_rm(
             target: render_target(&context.namespace, &spec.absolute_path),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
-            inode_id: deleted_inode,
+            inode_id: Some(deleted_inode.0),
         },
     })
 }

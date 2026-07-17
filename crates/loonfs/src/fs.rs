@@ -1146,6 +1146,7 @@ impl FsCore {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 behavior: options.behavior,
+                expected_inode_id: options.expected_inode_id,
             },
         )
         .await

@@ -217,6 +217,11 @@ pub enum FilesystemOperation {
         path: String,
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
+        /// When set, the delete applies only if the path still resolves to
+        /// this inode; a raced rebinding fails the request instead of
+        /// deleting (and reporting a recovery handle for) the wrong inode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_inode_id: Option<InodeId>,
     },
     /// Move one path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
@@ -556,6 +561,7 @@ mod tests {
         let delete = FilesystemOperation::DeletePath {
             path: "/docs".to_owned(),
             behavior: DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
         };
         assert_eq!(
             serde_json::to_value(&delete).expect("delete op json"),
@@ -627,6 +633,7 @@ mod tests {
             FilesystemOperation::DeletePath {
                 path: "/docs".to_owned(),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
             }
         );
 

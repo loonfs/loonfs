@@ -34,6 +34,10 @@ pub enum PathMutationIntent {
         commit_id: CommitId,
         absolute_path: AbsolutePath,
         behavior: DeleteDirectoryBehavior,
+        /// When set, the delete applies only while the path still resolves
+        /// to this inode; a raced rebinding fails the plan instead of
+        /// deleting the wrong inode.
+        expected_inode_id: Option<InodeId>,
     },
     /// Move one path to another path.
     MovePath {

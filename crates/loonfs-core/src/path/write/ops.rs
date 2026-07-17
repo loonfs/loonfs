@@ -136,6 +136,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
             commit_id,
             absolute_path: parse_mutation_path(absolute_path)?,
             behavior,
+            expected_inode_id: None,
         },
         context,
     )

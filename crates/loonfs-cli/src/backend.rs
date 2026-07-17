@@ -293,6 +293,7 @@ impl Backend for EmbeddedBackend {
     async fn delete_path(
         &self,
         spec: &NamespacePath,
+        expected_inode_id: Option<InodeId>,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
@@ -303,6 +304,7 @@ impl Backend for EmbeddedBackend {
                 DeleteOptions {
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     commit_id: commit_id.clone(),
+                    expected_inode_id,
                 },
             )
         })

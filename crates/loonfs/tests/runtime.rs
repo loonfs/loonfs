@@ -1113,6 +1113,7 @@ fn delete_options_select_recursive_behavior() {
         DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::Recursive,
             commit_id: None,
+            expected_inode_id: None,
         },
     )
     .expect("recursive delete");
@@ -1282,6 +1283,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
                 commit_id: None,
+                expected_inode_id: None,
             },
         )
         .expect("recursive delete")
@@ -1358,6 +1360,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
                 commit_id: None,
+                expected_inode_id: None,
             },
         )
         .expect("recursive delete of the ancestor")
@@ -1421,8 +1424,26 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             loonfs::UndeleteOptions::default(),
         ))
         .expect("undelete before checkpoint");
-        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default())
+        // The default threshold (32 segments) would answer NotNeeded for
+        // this short history; force the flush so reopen reads Set and
+        // Revoke rows out of durable tables, not WAL replay.
+        let tick = fs
+            .maintenance_tick_namespace_blocking(
+                &namespace_id,
+                MaintenanceTickOptions {
+                    max_wal_tail_segments: 1,
+                    gc: None,
+                },
+            )
             .expect("checkpoint the revoke into durable tables");
+        assert!(
+            matches!(
+                tick.outcome,
+                loonfs::MaintenanceTickOutcome::WalFlushed { .. }
+            ),
+            "tick must materialize the tail, got {:?}",
+            tick.outcome
+        );
         deletion
     };
     {
@@ -1446,8 +1467,23 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("delete again")
             .committed_seq;
         assert!(second_deletion > deletion);
-        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default())
+        let tick = fs
+            .maintenance_tick_namespace_blocking(
+                &namespace_id,
+                MaintenanceTickOptions {
+                    max_wal_tail_segments: 1,
+                    gc: None,
+                },
+            )
             .expect("checkpoint the deletion");
+        assert!(
+            matches!(
+                tick.outcome,
+                loonfs::MaintenanceTickOutcome::WalFlushed { .. }
+            ),
+            "tick must materialize the tail, got {:?}",
+            tick.outcome
+        );
         let fs = open_runtime(object_store.clone(), "undelete-persist-c");
         block_on(fs.writer.undelete(
             &namespace_id,
@@ -1457,8 +1493,23 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             loonfs::UndeleteOptions::default(),
         ))
         .expect("undelete a checkpointed deletion after reopen");
-        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default())
+        let tick = fs
+            .maintenance_tick_namespace_blocking(
+                &namespace_id,
+                MaintenanceTickOptions {
+                    max_wal_tail_segments: 1,
+                    gc: None,
+                },
+            )
             .expect("checkpoint the second revoke");
+        assert!(
+            matches!(
+                tick.outcome,
+                loonfs::MaintenanceTickOutcome::WalFlushed { .. }
+            ),
+            "tick must materialize the tail, got {:?}",
+            tick.outcome
+        );
     }
     let fs = open_runtime(object_store, "undelete-persist-d");
     assert_eq!(
@@ -1535,6 +1586,119 @@ fn change_feed_carries_the_exact_revoked_generation() {
     let tombstone_target = tombstone_target.expect("delete emitted a tombstone delta");
     assert_eq!(tombstone_target.0, deletion);
     assert_eq!(revoke_target, Some(tombstone_target));
+}
+
+#[test]
+fn undelete_rejects_deletions_from_the_same_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "undelete-same-commit-test");
+    let namespace_id = namespace_id();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"cycled",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+    let entry = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect("stat");
+
+    // Assigned sequences are head + 1 and therefore guessable: without the
+    // earlier-commit bound, one commit could delete, undelete, and
+    // re-delete the inode, minting two deletion generations that share a
+    // sequence. The undelete must refuse a target in its own commit.
+    let guessed_seq = ChangeSeq(entry.head_seq.0 + 1);
+    let error = fs
+        .commit_operations_blocking(
+            &namespace_id,
+            CommitRequest {
+                commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![
+                    CommitOp::DeleteFile {
+                        inode_id: entry.inode_id,
+                    },
+                    CommitOp::Undelete {
+                        inode_id: entry.inode_id,
+                        deleted_at_seq: guessed_seq,
+                        parent_inode_id: InodeId(1),
+                        display_name: "resurrected.txt".to_owned(),
+                    },
+                ],
+                message: None,
+            },
+        )
+        .expect_err("same-commit delete/undelete cycling must be rejected");
+    assert!(matches!(
+        &error,
+        RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
+    ));
+    // The rejected commit changed nothing.
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+            .expect("file untouched")
+            .bytes,
+        b"cycled"
+    );
+}
+
+#[test]
+fn delete_with_expected_inode_refuses_a_raced_rebinding() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "delete-expectation-test");
+    let namespace_id = namespace_id();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"original",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+    let inode_id = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect("stat")
+        .inode_id;
+
+    // Stand-in for a rebinding that raced the caller's stat: the path now
+    // holds a different inode than the one the caller resolved.
+    let error = fs
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs/report.txt",
+            DeleteOptions {
+                behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
+                commit_id: None,
+                expected_inode_id: Some(InodeId(inode_id.0 + 1)),
+            },
+        )
+        .expect_err("a mismatched expectation must fail the delete");
+    assert!(matches!(
+        &error,
+        RuntimeError::Core(error) if error.code() == ErrorCode::PathConflict
+    ));
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+            .expect("file untouched")
+            .bytes,
+        b"original"
+    );
+
+    // The matching expectation deletes exactly that inode.
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        DeleteOptions {
+            behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
+            commit_id: None,
+            expected_inode_id: Some(inode_id),
+        },
+    )
+    .expect("matching expectation deletes");
 }
 
 #[test]

@@ -280,6 +280,7 @@ mod tests {
                     commit_id: CommitId::parse("delete-doomed").expect("valid commit id"),
                     absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
                 }),
             ],
             &context,

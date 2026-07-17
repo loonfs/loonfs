@@ -436,6 +436,14 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             inode_id: Some(*inode_id),
             ..ErrorDetails::default()
         }),
+        CommitValidationError::UndeleteTargetsCurrentCommit {
+            inode_id,
+            requested_seq,
+        } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            requested_deletion_seq: Some(*requested_seq),
+            ..ErrorDetails::default()
+        }),
         CommitValidationError::UndeleteGenerationMismatch {
             inode_id,
             requested_seq,
@@ -622,6 +630,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         // entirely, or superseded by a newer generation. One code, with the
         // generations in the structured details.
         CommitValidationError::UndeleteTargetNotDeleted { .. }
+        | CommitValidationError::UndeleteTargetsCurrentCommit { .. }
         | CommitValidationError::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,

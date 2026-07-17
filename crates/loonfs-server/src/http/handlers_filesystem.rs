@@ -496,10 +496,15 @@ pub(super) async fn filesystem_operation(
             content_ref,
             behavior,
         },
-        FilesystemOperation::DeletePath { path, behavior } => PathMutationIntent::DeletePath {
+        FilesystemOperation::DeletePath {
+            path,
+            behavior,
+            expected_inode_id,
+        } => PathMutationIntent::DeletePath {
             commit_id,
             absolute_path: parse_path(&path)?,
             behavior,
+            expected_inode_id,
         },
         FilesystemOperation::MovePath {
             from_path,

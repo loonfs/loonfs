@@ -287,6 +287,20 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     }
                     .into());
                 }
+                // Only a deletion from a strictly earlier commit is
+                // recoverable. Assigned sequences are guessable (head + 1),
+                // so without this bound one multi-op commit could delete,
+                // undelete, and re-delete an inode — minting two deletion
+                // generations that share a sequence and making the public
+                // `(inode, deleted_at_seq)` handle ambiguous. With it, two
+                // live deletions of one root can never share a sequence.
+                if *deleted_at_seq >= committed_seq {
+                    return Err(CommitValidationError::UndeleteTargetsCurrentCommit {
+                        inode_id: *inode_id,
+                        requested_seq: *deleted_at_seq,
+                    }
+                    .into());
+                }
                 let Some(active) = metadata_state.active_subtree_tombstone(*inode_id).await? else {
                     return Err(CommitValidationError::UndeleteTargetNotDeleted {
                         inode_id: *inode_id,

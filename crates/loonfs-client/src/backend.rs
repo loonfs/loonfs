@@ -215,9 +215,13 @@ pub trait Backend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Deletes a file or empty directory.
+    /// Deletes a file or empty directory. With `expected_inode_id`, the
+    /// delete applies only while the path still resolves to that inode, so
+    /// callers reporting a recovery handle never report a raced rebinding.
     async fn delete_path(
         &self,
         spec: &NamespacePath,
+        expected_inode_id: Option<InodeId>,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
     /// Moves a path within a namespace; `behavior` selects create-only or
@@ -483,12 +487,16 @@ impl Backend for RemoteBackend {
     async fn delete_path(
         &self,
         spec: &NamespacePath,
+        expected_inode_id: Option<InodeId>,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.delete_path(&spec, &options))
-            .await
+        self.wire(move |client| match expected_inode_id {
+            Some(expected) => client.delete_path_expecting(&spec, expected, &options),
+            None => client.delete_path(&spec, &options),
+        })
+        .await
     }
 
     async fn move_path(

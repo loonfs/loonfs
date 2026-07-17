@@ -873,7 +873,24 @@ impl Client {
         spec: &NamespacePath,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
-        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::NonRecursive, options)
+        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::NonRecursive, None, options)
+    }
+
+    /// Like [`Self::delete_path`], but the delete applies only while the
+    /// path still resolves to `expected_inode_id` — a raced rebinding
+    /// fails instead of deleting the wrong inode.
+    pub fn delete_path_expecting(
+        &self,
+        spec: &NamespacePath,
+        expected_inode_id: InodeId,
+        options: &MutationOptions,
+    ) -> Result<ApiCommitResponse, ClientError> {
+        self.delete_path_with_behavior(
+            spec,
+            DeleteDirectoryBehavior::NonRecursive,
+            Some(expected_inode_id),
+            options,
+        )
     }
 
     pub fn delete_path_recursive(
@@ -881,13 +898,14 @@ impl Client {
         spec: &NamespacePath,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
-        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::Recursive, options)
+        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::Recursive, None, options)
     }
 
     fn delete_path_with_behavior(
         &self,
         spec: &NamespacePath,
         behavior: DeleteDirectoryBehavior,
+        expected_inode_id: Option<InodeId>,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
@@ -899,6 +917,7 @@ impl Client {
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path.clone(),
                     behavior,
+                    expected_inode_id,
                 },
             },
         )?;
