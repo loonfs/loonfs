@@ -81,18 +81,12 @@ const INLINE_INDEX_FILTER_MAX_BYTES: u32 = 1024;
 
 /// Level of the delta segments build steps write, the metadata L0 level.
 pub(super) const INDEX_GRAMS_DELTA_LEVEL: u32 = CHECKPOINT_L0_RUN_LEVEL;
-/// Level of a completed delta fold's outputs. Deliberately equal to
-/// [`CHECKPOINT_BASE_RUN_LEVEL`], the level pre-tiering folds stamped on
-/// their whole-set outputs: a legacy base counts as one mid run under
-/// this policy (its segments decode to run ordinal zero), keeps serving
-/// reads unchanged, and once real mid runs accumulate past the threshold
-/// the base fold rewrites it into the level-2 base — a self-healing
-/// migration with no `index.grams` version bump.
+/// Level of a completed delta fold's outputs, one tier above the delta
+/// level so fold triggers can count mid runs separately from the deltas
+/// they consumed.
 pub(super) const INDEX_GRAMS_MID_LEVEL: u32 = CHECKPOINT_BASE_RUN_LEVEL;
-/// Level of a completed mid-plus-base fold's outputs. A serialized
-/// [`GramIndexFoldState`] without an `output_level` decodes to this level
-/// (the codec's `default_fold_output_level`), because pre-tiering states
-/// always described a whole-set fold.
+/// Level of a completed mid-plus-base fold's outputs: the single base run
+/// the whole index folds down to.
 pub(super) const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 
 /// Writer-side budgets for one build step. Work stops at a commit boundary
@@ -1039,11 +1033,7 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
             // segments, collapsing the base-rewrite amortization. The
             // ordinal, not `run_seq`, is the run identity because
             // backfill units all share the unchanged enable-time
-            // watermark as their `run_seq`. Legacy migration: pre-ordinal
-            // segments all decode to ordinal zero and therefore count as
-            // one run at their level; folds sweep them up as real runs
-            // accumulate. Pre-release, with no deployed indexes, that
-            // undercount is acceptable.
+            // watermark as their `run_seq`.
             let l0_runs = distinct_run_ordinals_at_level(&grams_segments, INDEX_GRAMS_DELTA_LEVEL);
             let mid_runs = distinct_run_ordinals_at_level(&grams_segments, INDEX_GRAMS_MID_LEVEL);
             let (snapshot, output_level) = if l0_runs >= policy.max_l0_runs {
@@ -1058,9 +1048,8 @@ pub(crate) async fn fold_grams_index_step<S: ObjectStore + ?Sized>(
                 (deltas, INDEX_GRAMS_MID_LEVEL)
             } else if mid_runs >= policy.max_mid_runs {
                 // Base fold: consume everything already folded once — the
-                // mid runs, the base, and any legacy pre-tiering base
-                // (also at the mid level) — and rewrite it as a fresh
-                // base. The rare expensive step.
+                // mid runs and the base — and rewrite it as a fresh base.
+                // The rare expensive step.
                 let folded = grams_segments
                     .iter()
                     .filter(|descriptor| descriptor.level != INDEX_GRAMS_DELTA_LEVEL)
@@ -1565,18 +1554,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fold_state_codec_default_matches_the_base_level() {
-        // The decode default for a legacy fold state lives in `loonfs-api`
-        // while the level scheme lives here; this pin keeps the two from
-        // drifting apart. A state without an output level described a
-        // whole-set fold and must complete at the base.
-        let legacy: GramIndexFoldState = serde_json::from_value(serde_json::json!({
-            "snapshot": [],
-            "outputs": [],
-            "cursor": ""
-        }))
-        .expect("decode legacy fold state");
-        assert_eq!(legacy.output_level, INDEX_GRAMS_BASE_LEVEL);
+    fn fold_levels_are_distinct() {
         assert_ne!(INDEX_GRAMS_DELTA_LEVEL, INDEX_GRAMS_MID_LEVEL);
         assert_ne!(INDEX_GRAMS_MID_LEVEL, INDEX_GRAMS_BASE_LEVEL);
     }

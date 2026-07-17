@@ -355,43 +355,15 @@ pub struct GramIndexFoldState {
     /// of the keyspace.
     pub cursor: String,
     /// Manifest level stamped on the fold's output segments: the mid tier
-    /// for a delta fold, the base tier for a mid-plus-base fold. Absent at
-    /// the base level, so states serialized before tiered folds existed —
-    /// which always snapshotted every live segment — complete as the
-    /// whole-set base rewrites their writer intended.
-    #[serde(
-        default = "default_fold_output_level",
-        skip_serializing_if = "fold_output_level_is_base"
-    )]
+    /// for a delta fold, the base tier for a mid-plus-base fold. The
+    /// writer's full level scheme (delta, mid, base) lives with the fold
+    /// trigger in `loonfs-core`; this codec carries the chosen value.
     pub output_level: u32,
     /// Run ordinal stamped on every output segment of this fold, allocated
     /// from [`IndexGramsFeature::next_run_ordinal`] when the fold starts and
     /// carried here so a resumed fold keeps its identity: one fold's outputs
     /// are one logical run, however many steps and segments they span.
-    /// Absent means zero, so in-flight states serialized before ordinals
-    /// existed complete as part of the legacy ordinal-zero run.
-    #[serde(default, skip_serializing_if = "run_ordinal_is_zero")]
     pub run_ordinal: u64,
-}
-
-/// The base level tiered fold outputs are stamped with, and therefore the
-/// [`GramIndexFoldState::output_level`] a state that predates the field
-/// decodes to. The writer's full level scheme (delta, mid, base) lives
-/// with the fold trigger in `loonfs-core`; this codec only needs the value
-/// the wire form omits.
-fn default_fold_output_level() -> u32 {
-    2
-}
-
-fn fold_output_level_is_base(output_level: &u32) -> bool {
-    *output_level == default_fold_output_level()
-}
-
-/// Zero run ordinals are omitted from the wire form: absent means zero, so
-/// values written before ordinals existed keep decoding, and re-encoding
-/// them stays byte-identical.
-fn run_ordinal_is_zero(run_ordinal: &u64) -> bool {
-    *run_ordinal == 0
 }
 
 /// The `index.grams` value in the namespace features map: the format
@@ -416,9 +388,7 @@ pub struct IndexGramsFeature {
     /// segments — a build unit or a fold — stamps this value on the whole
     /// batch (the descriptors' `run_ordinal`) and increments the counter in
     /// the same manifest, so distinct ordinals at a level count logical
-    /// runs regardless of how many segments a batch was split into. Absent
-    /// means zero, the pre-ordinal wire form.
-    #[serde(default, skip_serializing_if = "run_ordinal_is_zero")]
+    /// runs regardless of how many segments a batch was split into.
     pub next_run_ordinal: u64,
 }
 
@@ -443,19 +413,29 @@ impl IndexGramsFeature {
         serde_json::to_value(self).expect("feature value serialization cannot fail")
     }
 
-    /// Decodes and version-gates a features-map value. Unknown payload
-    /// fields are tolerated (additive evolution); an unsupported `version`
-    /// is hard-rejected with no fallback.
+    /// Decodes and version-gates a features-map value. The `version` field
+    /// is probed before the full decode — a future version's shape is not
+    /// required to decode under this one — then unknown payload fields are
+    /// tolerated (additive evolution); an unsupported `version` is
+    /// hard-rejected with no fallback.
     pub fn from_value(value: &serde_json::Value) -> Result<Self, IndexGramsCodecError> {
-        let feature: Self = serde_json::from_value(value.clone())
-            .map_err(|error| IndexGramsCodecError::FeatureDecode(error.to_string()))?;
-        if feature.version != INDEX_GRAMS_FORMAT_VERSION {
+        let version = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
+            .ok_or_else(|| {
+                IndexGramsCodecError::FeatureDecode(
+                    "feature value is missing a numeric `version`".to_owned(),
+                )
+            })?;
+        if version != INDEX_GRAMS_FORMAT_VERSION {
             return Err(IndexGramsCodecError::UnsupportedFeatureVersion {
-                found: feature.version,
+                found: version,
                 supported: INDEX_GRAMS_FORMAT_VERSION,
             });
         }
-        Ok(feature)
+        serde_json::from_value(value.clone())
+            .map_err(|error| IndexGramsCodecError::FeatureDecode(error.to_string()))
     }
 }
 
@@ -630,6 +610,7 @@ mod tests {
         let additive = serde_json::json!({
             "version": 1,
             "built_through_seq": 3,
+            "next_run_ordinal": 0,
             "field_from_the_future": true
         });
         let decoded = IndexGramsFeature::from_value(&additive).expect("decode additive");
@@ -637,77 +618,80 @@ mod tests {
     }
 
     #[test]
-    fn fold_state_output_level_round_trips_and_is_omitted_at_the_base() {
-        let mid_fold = IndexGramsFeature {
-            version: INDEX_GRAMS_FORMAT_VERSION,
-            built_through_seq: ChangeSeq(7),
-            backfill_cursor: None,
-            fold: Some(GramIndexFoldState {
-                snapshot: vec!["idx_a".to_owned(), "idx_b".to_owned()],
-                outputs: vec!["idx_c".to_owned()],
-                cursor: "gram-616263-00000000000000000002".to_owned(),
-                output_level: 1,
-                run_ordinal: 5,
-            }),
-            next_run_ordinal: 6,
-        };
-        let value = mid_fold.to_value();
-        assert_eq!(value["fold"]["output_level"], 1);
-        assert_eq!(value["fold"]["run_ordinal"], 5);
-        assert_eq!(value["next_run_ordinal"], 6);
-        assert_eq!(
-            IndexGramsFeature::from_value(&value).expect("decode mid fold"),
-            mid_fold
-        );
-
-        // A base fold serializes without the field, byte-identical to the
-        // pre-tiering wire form, so the omitted level must be the base.
-        let mut base_fold = mid_fold.clone();
-        base_fold.fold.as_mut().expect("fold state").output_level = 2;
-        let value = base_fold.to_value();
-        assert!(value["fold"].get("output_level").is_none());
-        assert_eq!(
-            IndexGramsFeature::from_value(&value).expect("decode base fold"),
-            base_fold
-        );
+    fn fold_state_fields_round_trip_at_every_level() {
+        for output_level in [0, 1, 2] {
+            let fold = IndexGramsFeature {
+                version: INDEX_GRAMS_FORMAT_VERSION,
+                built_through_seq: ChangeSeq(7),
+                backfill_cursor: None,
+                fold: Some(GramIndexFoldState {
+                    snapshot: vec!["idx_a".to_owned(), "idx_b".to_owned()],
+                    outputs: vec!["idx_c".to_owned()],
+                    cursor: "gram-616263-00000000000000000002".to_owned(),
+                    output_level,
+                    run_ordinal: 5,
+                }),
+                next_run_ordinal: 6,
+            };
+            let value = fold.to_value();
+            assert_eq!(value["fold"]["output_level"], output_level);
+            assert_eq!(value["fold"]["run_ordinal"], 5);
+            assert_eq!(value["next_run_ordinal"], 6);
+            assert_eq!(
+                IndexGramsFeature::from_value(&value).expect("decode fold"),
+                fold
+            );
+        }
     }
 
     #[test]
-    fn fold_state_without_output_level_decodes_at_the_base() {
-        // The exact shape pre-tiering writers persisted: snapshot, outputs,
-        // cursor, and no output level. Those folds snapshot every live
-        // segment, so completing them at the base level is what their
-        // writer meant.
-        let legacy = serde_json::json!({
+    fn fold_state_missing_required_fields_is_rejected() {
+        // output_level and run_ordinal are required: no writer omits them,
+        // so an absent field is a malformed value, not a default.
+        let missing_output_level = serde_json::json!({
             "version": 1,
             "built_through_seq": 5,
+            "next_run_ordinal": 1,
             "fold": {
                 "snapshot": ["idx_a"],
                 "outputs": [],
-                "cursor": ""
+                "cursor": "",
+                "run_ordinal": 0
             }
         });
-        let decoded = IndexGramsFeature::from_value(&legacy).expect("decode legacy fold");
-        assert_eq!(decoded.next_run_ordinal, 0);
-        let fold = decoded.fold.expect("fold state");
-        assert_eq!(fold.output_level, 2);
-        assert_eq!(fold.snapshot, vec!["idx_a".to_owned()]);
-        // Pre-ordinal states decode to the legacy ordinal-zero run.
-        assert_eq!(fold.run_ordinal, 0);
+        IndexGramsFeature::from_value(&missing_output_level)
+            .expect_err("fold without output_level must be rejected");
+
+        let missing_run_ordinal = serde_json::json!({
+            "version": 1,
+            "built_through_seq": 5,
+            "next_run_ordinal": 1,
+            "fold": {
+                "snapshot": ["idx_a"],
+                "outputs": [],
+                "cursor": "",
+                "output_level": 2
+            }
+        });
+        IndexGramsFeature::from_value(&missing_run_ordinal)
+            .expect_err("fold without run_ordinal must be rejected");
     }
 
     #[test]
-    fn run_ordinals_default_to_zero_and_zero_is_omitted_from_the_wire() {
-        // Absent-means-zero in both directions: a fresh feature serializes
-        // without either ordinal field (the pre-ordinal wire form), and
-        // pre-ordinal values keep decoding as ordinal zero.
+    fn feature_missing_next_run_ordinal_is_rejected() {
         let feature = IndexGramsFeature::new(ChangeSeq(1));
-        assert_eq!(feature.next_run_ordinal, 0);
         let value = feature.to_value();
-        assert!(value.get("next_run_ordinal").is_none());
+        assert_eq!(value["next_run_ordinal"], 0);
         assert_eq!(
             IndexGramsFeature::from_value(&value).expect("round trip"),
             feature
         );
+
+        let missing = serde_json::json!({
+            "version": 1,
+            "built_through_seq": 1
+        });
+        IndexGramsFeature::from_value(&missing)
+            .expect_err("feature without next_run_ordinal must be rejected");
     }
 }
