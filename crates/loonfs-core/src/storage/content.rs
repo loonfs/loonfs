@@ -96,9 +96,7 @@ pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_ref: &ContentRef,
 ) -> Result<ValidatedDurableContent, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    if let Some(validated) = validate_content_metadata(store, &object_key, content_ref).await? {
-        return Ok(validated);
-    }
+    validate_content_size(store, &object_key, content_ref).await?;
 
     let bytes = load_required_object(store, &object_key).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
@@ -171,12 +169,16 @@ fn validate_loaded_content_bytes(
     })
 }
 
-async fn validate_content_metadata<S: ObjectStore + ?Sized>(
+/// Cheap prevalidation before the authoritative read-and-hash: existence
+/// and size come from one HEAD, so a wrong-sized object fails fast without
+/// downloading it. Digest verification always reads the bytes — provider
+/// checksums are not part of the read contract anywhere in the fleet.
+async fn validate_content_size<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     content_ref: &ContentRef,
-) -> Result<Option<ValidatedDurableContent>, DurableContentValidationError> {
-    let metadata = match store.head_with_checksum(object_key).await {
+) -> Result<(), DurableContentValidationError> {
+    let metadata = match store.head(object_key).await {
         Ok(Some(metadata)) => metadata,
         Ok(None) => {
             return Err(DurableContentValidationError::MissingContentObject {
@@ -198,31 +200,7 @@ async fn validate_content_metadata<S: ObjectStore + ?Sized>(
             actual: metadata.size_bytes,
         });
     }
-
-    let Some(actual_digest) = metadata.checksum_sha256 else {
-        return Ok(None);
-    };
-
-    if actual_digest != content_ref.digest {
-        return Err(DurableContentValidationError::ContentDigestMismatch {
-            object_key: object_key.to_owned(),
-            expected: content_ref.digest.clone(),
-            actual: actual_digest,
-        });
-    }
-
-    Ok(Some(ValidatedDurableContent {
-        content_ref: content_ref.clone(),
-        object_key: object_key.to_owned(),
-        file_size_bytes: metadata.size_bytes,
-        file_digest_sha256: actual_digest,
-        checked_invariants: vec![
-            InvariantId::WholeFileContentRefKindIsSupported,
-            InvariantId::WholeFileContentObjectKeyMatchesDigest,
-            InvariantId::WholeFileContentSizeMatchesRef,
-            InvariantId::WholeFileContentDigestMatchesRef,
-        ],
-    }))
+    Ok(())
 }
 
 #[tracing::instrument(
@@ -327,18 +305,17 @@ async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
     expected_bytes: &[u8],
 ) -> Result<bool, ImmutableObjectWriteError> {
     let expected_size = expected_bytes.len() as u64;
-    let expected_digest = sha256_digest(expected_bytes);
-    if let Some(metadata) = store.head_with_checksum(object_key).await.map_err(|err| {
-        ImmutableObjectWriteError::Store {
-            object_key: object_key.to_owned(),
-            message: err.message(),
-        }
-    })? {
+    if let Some(metadata) =
+        store
+            .head(object_key)
+            .await
+            .map_err(|err| ImmutableObjectWriteError::Store {
+                object_key: object_key.to_owned(),
+                message: err.message(),
+            })?
+    {
         if metadata.size_bytes != expected_size {
             return Ok(false);
-        }
-        if let Some(digest) = metadata.checksum_sha256.as_deref() {
-            return Ok(digest == expected_digest);
         }
     }
 
@@ -407,9 +384,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_falls_back_to_get_when_checksum_metadata_is_absent() {
+    async fn validate_whole_file_content_ref_reads_and_hashes_the_bytes() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = NoChecksumStore::new(inner);
+        let store = GetCountingStore::new(inner);
         let bytes = b"whole file bytes";
         let content_ref = ContentRef::whole_file_v0(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
@@ -751,12 +728,12 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct NoChecksumStore {
+    struct GetCountingStore {
         inner: LocalFsStore,
         content_blob_gets: AtomicUsize,
     }
 
-    impl NoChecksumStore {
+    impl GetCountingStore {
         fn new(inner: LocalFsStore) -> Self {
             Self {
                 inner,
@@ -774,13 +751,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl ObjectStore for NoChecksumStore {
+    impl ObjectStore for GetCountingStore {
         async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            let mut metadata = self.inner.head(key).await?;
-            if let Some(metadata) = &mut metadata {
-                metadata.checksum_sha256 = None;
-            }
-            Ok(metadata)
+            self.inner.head(key).await
         }
 
         async fn get(
@@ -801,11 +774,7 @@ mod tests {
             if key.starts_with("content-stores/") && key.contains("/blobs/") {
                 self.content_blob_gets.fetch_add(1, Ordering::Relaxed);
             }
-            let mut body = self.inner.get_with_metadata(key).await?;
-            if let Some(body) = &mut body {
-                body.metadata.checksum_sha256 = None;
-            }
-            Ok(body)
+            self.inner.get_with_metadata(key).await
         }
 
         async fn put(

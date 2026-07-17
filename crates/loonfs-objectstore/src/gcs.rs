@@ -62,7 +62,6 @@ impl GcpGcsStore {
             Some(provider),
             ProviderObjectStoreConfig {
                 key_prefix: config.key_prefix,
-                sha256_checksum_metadata: false,
             },
         )?;
 

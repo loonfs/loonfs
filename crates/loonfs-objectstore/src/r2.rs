@@ -46,7 +46,13 @@ impl CloudflareR2Store {
                 // hosting would use the endpoint verbatim and address keys
                 // as buckets.
                 force_path_style: true,
-                sha256_checksum_metadata: false,
+                // Left off pending a live verification: R2 historically
+                // rejected aws-chunked checksummed uploads, yet its
+                // presigner requires `x-amz-checksum-sha256` on direct
+                // puts — so R2 provably accepts the checksum and this is
+                // likely stale caution. Verify single-part and multipart
+                // against live R2 before enabling.
+                sha256_upload_checksum: false,
             })?,
         })
     }

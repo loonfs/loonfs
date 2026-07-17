@@ -209,21 +209,6 @@ where
         result
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let start = Instant::now();
-        let result = self.inner.head_with_checksum(key).await;
-        self.record_head_like(
-            ObjectStoreOperation::HeadWithChecksum,
-            key,
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
     async fn get(
         &self,
         key: &str,

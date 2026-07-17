@@ -209,10 +209,12 @@ The content model has five rules.
 3. Immutable content objects are written with create-if-absent semantics.
 4. A metadata commit may reference a `content_ref` only after the referenced
    object is already durable.
-5. When provider-verified full-object SHA-256 metadata is available, the
-   object-store layer may expose it as `sha256:<64hex>`. If SHA-256 metadata
-   is absent, readers and writers must fall back to reading and hashing bytes
-   before treating a `content_ref` as verified.
+5. Content verification is read-and-hash: a `content_ref` is verified only
+   by reading the object bytes and computing the digest. Provider checksum
+   metadata is not part of the read contract — checksum semantics diverge
+   across providers, so it is used (where a provider supports it) purely as
+   upload transport integrity, never consulted on reads. A HEAD may
+   prevalidate existence and size so a wrong-sized object fails fast.
 
 In v0, file content is stored as one whole-file object whose
 `content_ref.kind` is `whole_file_v0`. The digest remains serialized as
@@ -735,10 +737,11 @@ The server validates each commit request against the reconstructed state:
 1. Resolve any operation-local references needed to identify referenced
    content.
 2. Verify that all referenced content objects are already durable in object
-   storage, and that `content_ref.kind`, digest, and size match. When
-   provider-verified SHA-256 metadata is present, this validation may use
-   metadata instead of downloading the whole object; otherwise it must read
-   and hash the object bytes.
+   storage, and that `content_ref.kind`, digest, and size match. Existence
+   and size prevalidate from a HEAD; the digest is verified by reading and
+   hashing the object bytes (or skipped entirely under a valid content
+   admission token, which proves this server already validated the staged
+   bytes).
 3. Evaluate preconditions in order (see section 3.6 for the precondition
    catalogue).
 4. Resolve inode references and allocate new inode ids monotonically from the

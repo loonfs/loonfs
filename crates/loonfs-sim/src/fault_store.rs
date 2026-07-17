@@ -222,16 +222,6 @@ where
         result
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOpKind::HeadWithChecksum, key);
-        let result = self.inner.head_with_checksum(key).await;
-        self.push_trace(op, "head_with_checksum", None, result_class(&result));
-        result
-    }
-
     async fn get(
         &self,
         key: &str,
