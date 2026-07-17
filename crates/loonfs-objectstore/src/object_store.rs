@@ -79,6 +79,11 @@ pub enum ObjectStoreError {
     PreconditionFailed { object_key: String },
     #[error("conflict for `{object_key}`")]
     Conflict { object_key: String },
+    /// The provider rejected the caller's identity or authorization —
+    /// wrong, expired, or insufficient credentials. Configuration-shaped
+    /// and never transient: retrying cannot help, an operator can.
+    #[error("permission denied for `{object_key}`: {message}")]
+    PermissionDenied { object_key: String, message: String },
     /// Not object-scoped: the store lacks a required capability.
     #[error("unsupported capability: {0}")]
     Unsupported(&'static str),
@@ -108,6 +113,7 @@ impl ObjectStoreError {
             | Self::InvalidRange { object_key }
             | Self::PreconditionFailed { object_key }
             | Self::Conflict { object_key }
+            | Self::PermissionDenied { object_key, .. }
             | Self::Transport { object_key, .. } => Some(object_key),
             Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
         }
@@ -123,6 +129,9 @@ impl ObjectStoreError {
             Self::InvalidRange { .. } => "invalid byte range".to_owned(),
             Self::PreconditionFailed { .. } => "precondition failed".to_owned(),
             Self::Conflict { .. } => "conflict".to_owned(),
+            Self::PermissionDenied { message, .. } => {
+                format!("permission denied: {message}")
+            }
             Self::Unsupported(capability) => format!("unsupported capability: {capability}"),
             Self::Configuration(message) => {
                 format!("invalid object store configuration: {message}")

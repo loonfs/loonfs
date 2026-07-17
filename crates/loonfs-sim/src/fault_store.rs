@@ -541,6 +541,9 @@ fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventResult {
         Err(ObjectStoreError::PreconditionFailed { .. }) => SimEventResult::Error {
             class: "precondition_failed".to_owned(),
         },
+        Err(ObjectStoreError::PermissionDenied { .. }) => SimEventResult::Error {
+            class: "permission_denied".to_owned(),
+        },
         Err(ObjectStoreError::Conflict { .. }) => SimEventResult::Error {
             class: "conflict".to_owned(),
         },

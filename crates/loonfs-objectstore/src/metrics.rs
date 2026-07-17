@@ -54,6 +54,7 @@ pub enum ObjectStoreResultClass {
     InvalidRange,
     PreconditionFailed,
     Conflict,
+    PermissionDenied,
     Unsupported,
     Transport,
     OtherError,
@@ -508,6 +509,7 @@ fn classify_error(error: &ObjectStoreError) -> ObjectStoreResultClass {
         ObjectStoreError::InvalidRange { .. } => ObjectStoreResultClass::InvalidRange,
         ObjectStoreError::PreconditionFailed { .. } => ObjectStoreResultClass::PreconditionFailed,
         ObjectStoreError::Conflict { .. } => ObjectStoreResultClass::Conflict,
+        ObjectStoreError::PermissionDenied { .. } => ObjectStoreResultClass::PermissionDenied,
         ObjectStoreError::Unsupported(_) => ObjectStoreResultClass::Unsupported,
         // Configuration failures happen at store construction, before any
         // metered operation; classify defensively as transport.
