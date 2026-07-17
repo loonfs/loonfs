@@ -7,7 +7,7 @@ use crate::error::MetadataProjectionLoadError;
 use crate::namespace::control::{read_metadata_root_object, read_wal_floor_object};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, WalFloorBasis, WalFloorEnvelope, WalFloorState,
+    encode_control_object, ControlObjectKind, WalFloorEnvelope, WalFloorState,
 };
 use loonfs_api::wire::index_grams::{IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY};
 use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
@@ -120,7 +120,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         futures::future::try_join_all(probes).await?;
     }
 
-    // Monotonic floor CAS: never decrease, record the verified basis.
+    // Monotonic floor CAS: never decrease.
     for _attempt in 0..FLOOR_CAS_RETRY_LIMIT {
         let loaded = read_wal_floor_object(store, namespace_id)
             .await
@@ -136,12 +136,6 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let next = WalFloorState {
             namespace_id: namespace_id.clone(),
             floor_seq: target_floor,
-            basis: WalFloorBasis {
-                manifest_id: root.manifest_id,
-                manifest_object_id: root.manifest_object_id.clone(),
-                manifest_head_seq: root.manifest_head_seq,
-                manifest_payload_checksum: root.manifest_payload_checksum.clone(),
-            },
             verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         };
