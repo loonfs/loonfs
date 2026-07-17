@@ -4256,6 +4256,12 @@
             "description": "Fork-owned checkpoint records released because their target namespace\nis provably gone.",
             "minimum": 0
           },
+          "released_missing_basis_checkpoints": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active checkpoint records released because their basis manifest is\nverifiably gone.",
+            "minimum": 0
+          },
           "retained_candidates": {
             "type": "integer",
             "format": "int64",

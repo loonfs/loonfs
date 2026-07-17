@@ -432,6 +432,10 @@ pub struct GcResponse {
     /// Upload-session control objects deleted after the reap window.
     #[serde(default)]
     pub deleted_upload_sessions: u64,
+    /// Active checkpoint records released because their basis manifest is
+    /// verifiably gone.
+    #[serde(default)]
+    pub released_missing_basis_checkpoints: u64,
     /// Candidates retained at delete time (grace window, missing
     /// timestamps, or reachable from the fresh root set).
     pub retained_candidates: u64,

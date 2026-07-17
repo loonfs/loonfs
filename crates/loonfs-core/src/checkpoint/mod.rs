@@ -71,7 +71,8 @@ pub(crate) use self::index_read::{
     load_index_segment_index_block,
 };
 pub(crate) use self::load::{
-    head_from_manifest, load_namespace_manifest_envelope, load_verified_manifest_tables,
+    head_from_manifest, load_namespace_manifest_envelope,
+    load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
     load_verified_manifest_tables_with_cache,
 };
 pub(crate) use self::publish::write_namespace_manifest;

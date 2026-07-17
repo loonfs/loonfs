@@ -67,6 +67,7 @@ pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> G
         released_fork_checkpoints: report.released_fork_checkpoints,
         reaped_abandoned_objects: report.reaped_abandoned_objects,
         deleted_upload_sessions: report.deleted_upload_sessions,
+        released_missing_basis_checkpoints: report.released_missing_basis_checkpoints,
         retained_candidates: report.retained_candidates,
         degraded_retention: report.degraded_retention,
     }

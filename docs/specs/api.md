@@ -77,6 +77,7 @@ therefore identical for both backends.
     "query.grep": true
   },
   "limits": {
+    "maintenance.gc.min_grace_window_ms": 1230000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.default_limit": 100,
@@ -117,6 +118,7 @@ Registered limit keys:
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
 | `commit.max_body_bytes` | Largest JSON body accepted by `POST .../commits`. Commit bodies are metadata only — file bytes ride uploads — so over-limit commits should be split into smaller batches, not routed through `direct_put`. |
+| `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
 | `query.grep.scan_budget_files` | Files a plan-less `allow_scan` grep will scan before refusing with `query_unindexable`. |
