@@ -1360,7 +1360,11 @@ async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
             .is_empty(),
         "content-store descriptor must not be allocated before namespace head reservation"
     );
-    assert_namespace_partial(&store, &namespace_id, &context);
+    // The injected failure wrote the head before reporting the lost ack —
+    // the crash window creation is now resumable from: a retry completes
+    // the genesis tree instead of wedging on namespace_partial.
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .expect("retry completes the ack-lost create");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
