@@ -83,15 +83,6 @@ pub struct NamespaceConfigState {
     pub name_policy: NamePolicy,
 }
 
-/// Manifest basis whose material was verified when the floor advanced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WalFloorBasis {
-    pub manifest_id: ManifestId,
-    pub manifest_object_id: ManifestObjectId,
-    pub manifest_head_seq: ChangeSeq,
-    pub manifest_payload_checksum: String,
-}
-
 /// Lower bound of retained WAL/change history: the symmetrical pair to
 /// `wal/head.json`.
 ///
@@ -105,7 +96,6 @@ pub struct WalFloorBasis {
 pub struct WalFloorState {
     pub namespace_id: NamespaceId,
     pub floor_seq: ChangeSeq,
-    pub basis: WalFloorBasis,
     pub verified_at_ms: u64,
     pub updated_at_ms: u64,
 }

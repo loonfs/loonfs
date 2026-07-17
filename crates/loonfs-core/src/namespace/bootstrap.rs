@@ -14,8 +14,7 @@ use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
     encode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
-    NamespaceConfigEnvelope, NamespaceConfigState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
-    WriterBlock,
+    NamespaceConfigEnvelope, NamespaceConfigState, WalFloorEnvelope, WalFloorState, WriterBlock,
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeId, InodeKind, NamePolicy, NamespaceId,
@@ -194,12 +193,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         WalFloorState {
             namespace_id: namespace_id.clone(),
             floor_seq: initial_head.seq,
-            basis: WalFloorBasis {
-                manifest_id: initial_manifest.payload.manifest_id,
-                manifest_object_id: initial_manifest.payload.manifest_object_id.clone(),
-                manifest_head_seq: initial_head.seq,
-                manifest_payload_checksum: initial_manifest.payload_checksum.clone(),
-            },
             verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         },

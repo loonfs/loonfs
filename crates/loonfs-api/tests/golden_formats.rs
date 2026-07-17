@@ -22,8 +22,7 @@ use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
     CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlCodecError,
     ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState,
-    NamespaceState, UploadSessionState, WalFloorBasis, WalFloorState, WalSegmentPointer,
-    WriterBlock,
+    NamespaceState, UploadSessionState, WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::index_grams::{
     decode_gram_postings, encode_gram_postings, Gram, GramIndexFoldState, GramPosting,
@@ -231,8 +230,6 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             writer_epoch: WriterEpoch(3),
             next_inode_id: InodeId(10),
             retention_floor_seq: ChangeSeq(0),
-            initialized: true,
-            verified: true,
             fork: Some(NamespaceManifestFork {
                 source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 fork_seq: ChangeSeq(2),
@@ -404,14 +401,6 @@ fn control_objects_match_golden_bytes() {
         WalFloorState {
             namespace_id: namespace_id(),
             floor_seq: ChangeSeq(1),
-            basis: WalFloorBasis {
-                manifest_id: ManifestId(2),
-                manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
-                manifest_head_seq: ChangeSeq(2),
-                manifest_payload_checksum:
-                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                        .to_owned(),
-            },
             verified_at_ms: 3_000,
             updated_at_ms: 3_000,
         },

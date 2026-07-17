@@ -49,17 +49,6 @@ pub(super) fn validate_namespace_manifest(
             actual: manifest.payload.manifest_object_id.clone(),
         });
     }
-    if !manifest.payload.verified {
-        return Err(ManifestLoadError::ManifestNotVerified {
-            object_key: object_key.to_owned(),
-        });
-    }
-    if !manifest.payload.initialized {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: "namespace manifest is not initialized".to_owned(),
-        });
-    }
     Ok(())
 }
 

@@ -56,8 +56,6 @@ pub enum ManifestLoadError {
         expected_payload_checksum: String,
         actual_payload_checksum: String,
     },
-    #[error("namespace manifest `{object_key}` is not verified")]
-    ManifestNotVerified { object_key: String },
     #[error("namespace manifest `{object_key}` is missing table family `{family:?}`")]
     MissingTableFamily {
         object_key: String,

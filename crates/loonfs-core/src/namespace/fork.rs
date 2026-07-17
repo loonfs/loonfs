@@ -19,8 +19,7 @@ use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind, HeadState,
     HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope,
-    NamespaceConfigState, NamespaceState, WalFloorBasis, WalFloorEnvelope, WalFloorState,
-    WriterBlock,
+    NamespaceConfigState, NamespaceState, WalFloorEnvelope, WalFloorState, WriterBlock,
 };
 use loonfs_api::wire::index_grams::{
     IndexGramsCodecError, IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY,
@@ -192,12 +191,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         WalFloorState {
             namespace_id: new_namespace_id.clone(),
             floor_seq: fork_seq,
-            basis: WalFloorBasis {
-                manifest_id: target_manifest_id,
-                manifest_object_id: target_manifest.payload.manifest_object_id.clone(),
-                manifest_head_seq: fork_seq,
-                manifest_payload_checksum: target_manifest.payload_checksum.clone(),
-            },
             verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         },
@@ -302,8 +295,6 @@ fn fork_target_manifest_payload(
         writer_epoch: WriterEpoch(0),
         next_inode_id: source_manifest.payload.next_inode_id,
         retention_floor_seq: fork_seq,
-        initialized: true,
-        verified: true,
         fork: Some(NamespaceManifestFork {
             source_namespace_id: source_namespace_id.clone(),
             fork_seq,
@@ -421,8 +412,6 @@ mod tests {
                 writer_epoch: WriterEpoch(1),
                 next_inode_id: InodeId(2),
                 retention_floor_seq: head_seq,
-                initialized: true,
-                verified: true,
                 fork: None,
                 features: BTreeMap::new(),
                 metadata_files: Vec::new(),

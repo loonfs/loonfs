@@ -600,9 +600,8 @@ at minimum:
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
 
 `wal/floor.json` is the symmetrical pair to the head — the earliest retained
-commit boundary next to the latest visible one. It records `floor_seq`, the
-verified manifest basis (id, head seq, payload checksum), and verification
-and update stamps. It is updated only by monotonic compare-and-swap on its
+commit boundary next to the latest visible one. It records `floor_seq` and
+verification and update stamps. It is updated only by monotonic compare-and-swap on its
 own etag by floor advancement, which is a GC-family operation: it never
 touches the WAL head, so the head changes only when commits land. A missing,
 stale, or unverifiable floor means "retain more history", never less, and the
@@ -1052,7 +1051,7 @@ while replay can still rebuild the lost state. Corruption discovered after
 advancement is caught by read-path checksum validation.
 
 Advancement then CASes only `wal/floor.json`, recording the new `floor_seq`
-together with the verified basis and its verification stamp. Floor updates
+together with its verification stamp. Floor updates
 are monotonic: a replacement never decreases `floor_seq`, and
 `floor_seq <= metadata/root.manifest_head_seq` holds. The floor is necessary
 but not sufficient for deletion — being below it makes an object a deletion
