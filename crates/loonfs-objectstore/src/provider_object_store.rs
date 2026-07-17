@@ -10,7 +10,6 @@ use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
-use loonfs_api::sha256_digest;
 use object_store as provider_store;
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
@@ -25,7 +24,6 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderObjectStoreConfig {
     pub key_prefix: Option<String>,
-    pub sha256_checksum_metadata: bool,
 }
 
 /// Bound for one control-plane HTTP attempt's request phase, and the
@@ -223,7 +221,6 @@ pub struct ProviderObjectStore {
     multipart: Option<Arc<dyn MultipartStore>>,
     multipart_geometry: MultipartGeometry,
     key_prefix: Option<String>,
-    sha256_checksum_metadata: bool,
     transport_retry: TransportRetryPolicy,
     timer: Arc<dyn MonotonicTimer>,
 }
@@ -232,7 +229,6 @@ impl fmt::Debug for ProviderObjectStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderObjectStore")
             .field("key_prefix", &self.key_prefix)
-            .field("sha256_checksum_metadata", &self.sha256_checksum_metadata)
             .field("multipart_upload", &self.multipart.is_some())
             .finish_non_exhaustive()
     }
@@ -249,7 +245,6 @@ impl ProviderObjectStore {
             multipart,
             multipart_geometry: MultipartGeometry::DEFAULT,
             key_prefix: normalize_key_prefix(config.key_prefix.as_deref())?,
-            sha256_checksum_metadata: config.sha256_checksum_metadata,
             transport_retry: TransportRetryPolicy::DEFAULT,
             timer: Arc::new(StdMonotonicTimer::default()),
         })
@@ -301,26 +296,20 @@ impl ProviderObjectStore {
             })
     }
 
-    fn from_meta(meta: ObjectMeta, checksum_sha256: Option<String>) -> ObjectMetadata {
+    fn from_meta(meta: ObjectMeta) -> ObjectMetadata {
         ObjectMetadata {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
-            checksum_sha256,
             last_modified_ms: u64::try_from(meta.last_modified.timestamp_millis()).ok(),
         }
     }
 
-    fn from_put_result(
-        result: PutResult,
-        size_bytes: u64,
-        checksum_sha256: Option<String>,
-    ) -> ObjectMetadata {
+    fn from_put_result(result: PutResult, size_bytes: u64) -> ObjectMetadata {
         ObjectMetadata {
             etag: result.e_tag,
             version: result.version,
             size_bytes,
-            checksum_sha256,
             last_modified_ms: None,
         }
     }
@@ -359,7 +348,6 @@ impl ProviderObjectStore {
         key: &str,
         path: &Path,
         bytes: Bytes,
-        checksum_sha256: Option<String>,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let size_bytes = bytes.len() as u64;
         let upload = MultipartWrite {
@@ -372,10 +360,7 @@ impl ProviderObjectStore {
         let upload_id = upload.create(size_bytes).await?;
         let result = upload.upload_parts_and_complete(&upload_id, &bytes).await;
         match result {
-            Ok(mut metadata) => {
-                metadata.checksum_sha256 = checksum_sha256;
-                Ok(metadata)
-            }
+            Ok(metadata) => Ok(metadata),
             Err(err) => {
                 // Best effort, and harmless when the failure raced a landed
                 // completion: the upload id no longer exists then, and the
@@ -572,11 +557,7 @@ impl MultipartWrite<'_> {
                 .complete_multipart(self.path, upload_id, parts.clone())
                 .await
             {
-                Ok(result) => {
-                    return Ok(ProviderObjectStore::from_put_result(
-                        result, size_bytes, None,
-                    ))
-                }
+                Ok(result) => return Ok(ProviderObjectStore::from_put_result(result, size_bytes)),
                 Err(err) => err,
             };
             if !provider_transport_retryable(&err) {
@@ -625,24 +606,17 @@ impl ObjectStore for ProviderObjectStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let path = self.to_path(key)?;
         match self.inner.head(&path).await {
-            Ok(meta) => Ok(Some(Self::from_meta(meta, None))),
+            Ok(meta) => Ok(Some(Self::from_meta(meta))),
             Err(err) if provider_not_found(&err) => Ok(None),
             Err(err) => Err(map_provider_error(key, err)),
         }
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.head(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
-                let metadata = Self::from_meta(result.meta.clone(), None);
+                let metadata = Self::from_meta(result.meta.clone());
                 let bytes = result
                     .bytes()
                     .await
@@ -743,7 +717,6 @@ impl ObjectStore for ProviderObjectStore {
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let path = self.to_path(key)?;
-        let checksum_sha256 = self.sha256_checksum_metadata.then(|| sha256_digest(&bytes));
         let size_bytes = bytes.len() as u64;
 
         if matches!(mode, PutMode::CompareAndSwap { .. }) {
@@ -761,7 +734,7 @@ impl ObjectStore for ProviderObjectStore {
                 .put_opts(&path, PutPayload::from(bytes), options)
                 .await
             {
-                Ok(result) => Ok(Self::from_put_result(result, size_bytes, checksum_sha256)),
+                Ok(result) => Ok(Self::from_put_result(result, size_bytes)),
                 Err(err) if provider_not_found(&err) => Err(ObjectStoreError::PreconditionFailed {
                     object_key: key.to_owned(),
                 }),
@@ -775,7 +748,7 @@ impl ObjectStore for ProviderObjectStore {
         {
             if let Some(multipart) = self.multipart.clone() {
                 return self
-                    .put_large_multipart(multipart.as_ref(), key, &path, bytes, checksum_sha256)
+                    .put_large_multipart(multipart.as_ref(), key, &path, bytes)
                     .await;
             }
         }
@@ -795,9 +768,7 @@ impl ObjectStore for ProviderObjectStore {
                 .put_opts(&path, PutPayload::from(bytes.clone()), options)
                 .await
             {
-                Ok(result) => {
-                    return Ok(Self::from_put_result(result, size_bytes, checksum_sha256))
-                }
+                Ok(result) => return Ok(Self::from_put_result(result, size_bytes)),
                 Err(err) => err,
             };
 
@@ -806,9 +777,7 @@ impl ObjectStore for ProviderObjectStore {
                     Some(body) if body.bytes.as_slice() == bytes.as_ref() => {
                         // Our earlier attempt landed: report it as the
                         // successful write it was, not a conflict.
-                        let mut metadata = body.metadata;
-                        metadata.checksum_sha256 = checksum_sha256;
-                        return Ok(metadata);
+                        return Ok(body.metadata);
                     }
                     Some(_) => {
                         return Err(ObjectStoreError::PreconditionFailed {
@@ -995,7 +964,6 @@ mod tests {
             Some(inner),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
-                sha256_checksum_metadata: true,
             },
         )
         .expect("provider store")
@@ -1012,7 +980,6 @@ mod tests {
             .expect("put");
         assert_eq!(metadata.size_bytes, 4);
         assert!(metadata.etag.is_some());
-        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(b"head")));
 
         let head = store.head(key).await.expect("head").expect("head exists");
         assert_eq!(head.size_bytes, 4);
@@ -1489,7 +1456,6 @@ mod tests {
             Some(flaky),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
-                sha256_checksum_metadata: true,
             },
         )
         .expect("provider store")
@@ -1590,10 +1556,6 @@ mod tests {
 
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            metadata.checksum_sha256,
-            Some(sha256_digest(b"upload session"))
-        );
         let head = store.head(key).await.expect("head").expect("object exists");
         assert_eq!(metadata.etag, head.etag);
     }
@@ -1912,7 +1874,6 @@ mod tests {
         assert_eq!(part_attempts(&flaky, 1), 1);
         assert_eq!(part_attempts(&flaky, 2), 1);
         assert_eq!(metadata.size_bytes, 1300);
-        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
@@ -1954,13 +1915,12 @@ mod tests {
         let store = multipart_test_store(Arc::clone(&flaky));
         let payload = multipart_payload(1300);
 
-        let metadata = store
+        store
             .put_if_absent(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
             .expect("create absent large object");
         assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
-        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
 
         let error = store
             .put_if_absent(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
@@ -2064,7 +2024,6 @@ mod tests {
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
         assert_eq!(metadata.size_bytes, 1300);
-        assert_eq!(metadata.checksum_sha256, Some(sha256_digest(&payload)));
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))

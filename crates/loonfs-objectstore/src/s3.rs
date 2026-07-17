@@ -38,7 +38,7 @@ impl AwsS3Store {
                 session_token: config.session_token,
                 key_prefix: config.key_prefix,
                 force_path_style: config.force_path_style,
-                sha256_checksum_metadata: true,
+                sha256_upload_checksum: true,
             })?,
         })
     }

@@ -2,9 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::ManifestObjectId;
-use loonfs_objectstore::keys::{
-    metadata_manifest_object, metadata_table, namespace_config, wal_head, wal_segment,
-};
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table, wal_head, wal_segment};
 use loonfs_objectstore::layout::ObjectLayout;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
@@ -109,36 +107,6 @@ async fn records_get_success_bytes_out() {
     assert_eq!(sample.bytes_out, Some(3));
     assert_eq!(sample.key_class, KeyClass::Content);
     assert_eq!(sample.range_class, Some(RangeClass::Bounded));
-}
-
-#[tokio::test]
-async fn records_head_and_head_with_checksum_as_distinct_operations() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
-    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let object_key = namespace_config("ns-1");
-
-    store
-        .put_overwrite(&object_key, bytes(b"descriptor"))
-        .await
-        .expect("put object");
-    store.head(&object_key).await.expect("head");
-    store
-        .head_with_checksum(&object_key)
-        .await
-        .expect("head with checksum");
-    store
-        .get_with_metadata(&object_key)
-        .await
-        .expect("get with metadata");
-
-    let samples = recorder.samples();
-    assert_eq!(samples[1].operation, ObjectStoreOperation::Head);
-    assert_eq!(samples[2].operation, ObjectStoreOperation::HeadWithChecksum);
-    assert_eq!(samples[3].operation, ObjectStoreOperation::GetWithMetadata);
-    assert_eq!(samples[1].key_class, KeyClass::Metadata);
-    assert_eq!(samples[2].key_class, KeyClass::Metadata);
-    assert_eq!(samples[3].key_class, KeyClass::Metadata);
 }
 
 #[tokio::test]
@@ -359,7 +327,6 @@ impl DelegatingWriteStore {
             etag: Some(format!("{call}-etag")),
             version: None,
             size_bytes: 0,
-            checksum_sha256: None,
             last_modified_ms: None,
         }
     }

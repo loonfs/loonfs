@@ -22,11 +22,6 @@ pub struct ObjectMetadata {
     /// Provider version identifier when available.
     pub version: Option<String>,
     pub size_bytes: u64,
-    /// Provider-verified full-object SHA-256 when available, normalized as `sha256:<64hex>`.
-    ///
-    /// This is part of the object-store contract only when present. Callers must fall back to
-    /// reading and hashing object bytes if this field is absent.
-    pub checksum_sha256: Option<String>,
     /// Provider last-modified time in unix milliseconds, when available.
     ///
     /// Advisory: garbage collection uses it for grace/reap age checks and
@@ -141,13 +136,6 @@ impl ObjectStoreError {
 pub trait ObjectStore: Send + Sync + Debug {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.head(key).await
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError>;
 
     async fn get(
@@ -215,13 +203,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().head(key).await
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.as_ref().head_with_checksum(key).await
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         self.as_ref().get_with_metadata(key).await
     }
@@ -259,13 +240,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
 impl<T: ObjectStore + ?Sized> ObjectStore for &T {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         (*self).head(key).await
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        (*self).head_with_checksum(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

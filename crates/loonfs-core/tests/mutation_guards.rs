@@ -1567,7 +1567,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_file_uses_checksum_metadata_for_content_validation() {
+async fn path_put_file_validates_content_by_reading_it_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1594,11 +1594,13 @@ async fn path_put_file_uses_checksum_metadata_for_content_validation() {
     );
 
     assert!(responses[0].is_ok());
-    assert_eq!(store.content_blob_get_count(), 0);
+    // Durable validation is read-and-hash: one content GET, no provider
+    // checksum shortcut anywhere in the fleet.
+    assert_eq!(store.content_blob_get_count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
+async fn path_batch_validates_a_repeated_content_ref_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1631,7 +1633,9 @@ async fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     );
 
     assert!(responses.iter().all(Result::is_ok));
-    assert_eq!(store.content_blob_get_count(), 0);
+    // Two puts share one content ref: the batch tracker validates it once
+    // (one read-and-hash), and the second candidate reuses the verdict.
+    assert_eq!(store.content_blob_get_count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1680,8 +1684,8 @@ async fn valid_content_admission_skips_durable_content_validation() {
     );
 
     assert!(responses[0].is_ok());
+    // A live admission is the fast path: no content read at all.
     assert_eq!(store.content_blob_get_count(), 0);
-    assert_eq!(store.content_blob_checksum_head_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1732,8 +1736,9 @@ async fn expired_content_admission_falls_back_to_durable_validation() {
     );
 
     assert!(responses[0].is_ok());
-    assert_eq!(store.content_blob_get_count(), 0);
-    assert_eq!(store.content_blob_checksum_head_count(), 1);
+    // An expired admission falls back to durable validation, which reads
+    // the bytes.
+    assert_eq!(store.content_blob_get_count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5290,7 +5295,6 @@ impl ObjectStore for ReplayReadGuardStore {
 struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
-    content_blob_checksum_heads: AtomicUsize,
 }
 
 impl ContentBlobGetCountingStore {
@@ -5298,7 +5302,6 @@ impl ContentBlobGetCountingStore {
         Self {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
             content_blob_gets: AtomicUsize::new(0),
-            content_blob_checksum_heads: AtomicUsize::new(0),
         }
     }
 
@@ -5306,13 +5309,8 @@ impl ContentBlobGetCountingStore {
         self.content_blob_gets.load(Ordering::SeqCst)
     }
 
-    fn content_blob_checksum_head_count(&self) -> usize {
-        self.content_blob_checksum_heads.load(Ordering::SeqCst)
-    }
-
     fn reset_content_blob_counters(&self) {
         self.content_blob_gets.store(0, Ordering::SeqCst);
-        self.content_blob_checksum_heads.store(0, Ordering::SeqCst);
     }
 
     fn reset_content_blob_get_count(&self) {
@@ -5330,17 +5328,6 @@ impl ContentBlobGetCountingStore {
 impl ObjectStore for ContentBlobGetCountingStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        if key.starts_with("content-stores/") && key.contains("/blobs/") {
-            self.content_blob_checksum_heads
-                .fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.head_with_checksum(key).await
     }
 
     async fn get(
@@ -5411,13 +5398,6 @@ impl MetadataSstGetCountingStore {
 impl ObjectStore for MetadataSstGetCountingStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head_with_checksum(key).await
     }
 
     async fn get(
@@ -5594,13 +5574,6 @@ impl StaleHeadGetStore {
 impl ObjectStore for StaleHeadGetStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head_with_checksum(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

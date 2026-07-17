@@ -156,23 +156,6 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
-                store
-                    .head_with_checksum(&scope_object_key(key_prefix.as_deref(), key)?)
-                    .await
-            }
-            ConfiguredObjectStoreInner::AwsS3(store) => store.head_with_checksum(key).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head_with_checksum(key).await,
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.head_with_checksum(key).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.head_with_checksum(key).await,
-        }
-    }
-
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {

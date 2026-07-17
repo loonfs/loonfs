@@ -87,7 +87,6 @@ impl LocalFsStore {
     async fn metadata_for_path(
         key: &str,
         path: &Path,
-        include_checksum: bool,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let metadata = match fs::metadata(path).await {
             Ok(metadata) => metadata,
@@ -96,16 +95,13 @@ impl LocalFsStore {
         };
         let content_digest =
             sha256_digest(&fs::read(path).await.map_err(|err| io_error(key, err))?);
-        let checksum_sha256 = include_checksum.then_some(content_digest.clone());
-        Self::metadata_from_fs_metadata(key, &metadata, &content_digest, checksum_sha256, path)
-            .map(Some)
+        Self::metadata_from_fs_metadata(key, &metadata, &content_digest, path).map(Some)
     }
 
     fn metadata_from_fs_metadata(
         key: &str,
         metadata: &std::fs::Metadata,
         content_digest: &str,
-        checksum_sha256: Option<String>,
         path: &Path,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         if !metadata.is_file() {
@@ -124,7 +120,6 @@ impl LocalFsStore {
             etag: Some(format!("local-fs-v1:{content_digest}")),
             version: None,
             size_bytes: metadata.len(),
-            checksum_sha256,
             last_modified_ms,
         })
     }
@@ -221,13 +216,9 @@ impl LocalFsStore {
 }
 
 impl LocalFsStore {
-    async fn head_object(
-        &self,
-        key: &str,
-        include_checksum: bool,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head_object(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let path = self.resolve_key(key)?;
-        Self::metadata_for_path(key, &path, include_checksum).await
+        Self::metadata_for_path(key, &path).await
     }
 
     async fn get_with_metadata_object(
@@ -248,13 +239,7 @@ impl LocalFsStore {
             .map_err(|err| io_error(key, err))?;
 
         let content_digest = sha256_digest(&bytes);
-        let metadata = Self::metadata_from_fs_metadata(
-            key,
-            &fs_metadata,
-            &content_digest,
-            Some(content_digest.clone()),
-            &path,
-        )?;
+        let metadata = Self::metadata_from_fs_metadata(key, &fs_metadata, &content_digest, &path)?;
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
@@ -319,7 +304,7 @@ impl LocalFsStore {
                 Self::create_new_object(key, &self.root, &path, bytes).await?;
             }
             PutMode::CompareAndSwap { expected_etag } => {
-                let current = Self::metadata_for_path(key, &path, false)
+                let current = Self::metadata_for_path(key, &path)
                     .await?
                     .ok_or_else(precondition_failed)?;
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
@@ -329,7 +314,7 @@ impl LocalFsStore {
             }
         }
 
-        Self::metadata_for_path(key, &path, true)
+        Self::metadata_for_path(key, &path)
             .await?
             .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
     }
@@ -354,14 +339,7 @@ impl LocalFsStore {
 #[async_trait]
 impl ObjectStore for LocalFsStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.head_object(key, false).await
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.head_object(key, true).await
+        self.head_object(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

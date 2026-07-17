@@ -2159,7 +2159,6 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.latest_metadata_view_reads, 2);
     assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2254,7 +2253,6 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     // validation issues no probe for content the put itself is writing.
     assert_eq!(raw_store.content_blob_put_count(), 1);
     assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 
     // A replace put rides the same overlapped path: new blob, no probe.
     raw_store.reset_content_blob_counters();
@@ -2271,7 +2269,6 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
 
     assert_eq!(raw_store.content_blob_put_count(), 1);
     assert_eq!(raw_store.content_blob_get_count(), 0);
-    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
 #[test]
@@ -3488,7 +3485,6 @@ impl ObjectStore for HeadCasFailureStore {
 struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
-    content_blob_checksum_heads: AtomicUsize,
     content_blob_puts: AtomicUsize,
 }
 
@@ -3497,23 +3493,17 @@ impl ContentBlobGetCountingStore {
         Self {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             content_blob_gets: AtomicUsize::new(0),
-            content_blob_checksum_heads: AtomicUsize::new(0),
             content_blob_puts: AtomicUsize::new(0),
         }
     }
 
     fn reset_content_blob_counters(&self) {
         self.content_blob_gets.store(0, Ordering::SeqCst);
-        self.content_blob_checksum_heads.store(0, Ordering::SeqCst);
         self.content_blob_puts.store(0, Ordering::SeqCst);
     }
 
     fn content_blob_get_count(&self) -> usize {
         self.content_blob_gets.load(Ordering::SeqCst)
-    }
-
-    fn content_blob_checksum_head_count(&self) -> usize {
-        self.content_blob_checksum_heads.load(Ordering::SeqCst)
     }
 
     fn content_blob_put_count(&self) -> usize {
@@ -3525,17 +3515,6 @@ impl ContentBlobGetCountingStore {
 impl ObjectStore for ContentBlobGetCountingStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
-    }
-
-    async fn head_with_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        if key.starts_with("content-stores/") && key.contains("/blobs/") {
-            self.content_blob_checksum_heads
-                .fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.head_with_checksum(key).await
     }
 
     async fn get(

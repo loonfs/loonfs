@@ -25,7 +25,10 @@ pub(crate) struct S3CompatibleConfig {
     pub session_token: Option<SecretString>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
-    pub sha256_checksum_metadata: bool,
+    /// Attach a client-computed SHA-256 to every upload so the provider
+    /// verifies the bytes on PUT (`x-amz-checksum-sha256`). Upload transport
+    /// integrity only; nothing reads checksums back.
+    pub sha256_upload_checksum: bool,
 }
 
 #[derive(Clone)]
@@ -76,7 +79,7 @@ impl S3CompatibleStore {
         if let Some(session_token) = &config.session_token {
             builder = builder.with_token(session_token.expose());
         }
-        if config.sha256_checksum_metadata {
+        if config.sha256_upload_checksum {
             builder = builder.with_checksum_algorithm(Checksum::SHA256);
         }
 
@@ -90,7 +93,6 @@ impl S3CompatibleStore {
             Some(provider),
             ProviderObjectStoreConfig {
                 key_prefix: config.key_prefix,
-                sha256_checksum_metadata: config.sha256_checksum_metadata,
             },
         )?;
 
@@ -233,7 +235,7 @@ mod tests {
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
-            sha256_checksum_metadata: true,
+            sha256_upload_checksum: true,
         }
     }
 
