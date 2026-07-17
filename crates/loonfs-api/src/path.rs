@@ -29,6 +29,12 @@ string_id! {
     validate = validate_display_name
 }
 
+/// Maximum stored display-name length in UTF-8 bytes: the 255-byte
+/// component cap of mainstream filesystems (ext4, APFS, NTFS components)
+/// and drives. Names are stored as given, so the cap applies to the bytes
+/// as given.
+pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PathError {
     #[error("absolute path must not be empty")]
@@ -45,6 +51,16 @@ pub enum PathError {
     DisplayNameContainsSeparator { display_name: String },
     #[error("display name `{display_name}` is reserved")]
     ReservedDisplayName { display_name: String },
+    #[error("display name contains control character U+{code_point:04X}")]
+    DisplayNameContainsControlCharacter { code_point: u32 },
+    #[error("display name is {byte_length} bytes; the maximum is {MAX_DISPLAY_NAME_BYTES} bytes")]
+    DisplayNameTooLong { byte_length: usize },
+    #[error(
+        "display name folds to a {byte_length}-byte name key; the maximum is \
+         {max} bytes",
+        max = crate::ids::MAX_NAME_KEY_BYTES
+    )]
+    FoldedNameKeyTooLong { byte_length: usize },
 }
 
 impl AbsolutePath {
@@ -74,6 +90,10 @@ impl AbsolutePath {
                     path: value.to_owned(),
                 });
             }
+            // Every component must satisfy the display-name grammar: path
+            // parsing is the other door components enter through, and
+            // [`PathComponent::to_display_name`] converts without re-parsing.
+            validate_display_name(component)?;
             components.push(PathComponent(component.to_owned()));
         }
 
@@ -194,6 +214,29 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
             display_name: value.to_owned(),
         });
     }
+    if let Some(control) = value.chars().find(|character| character.is_control()) {
+        return Err(PathError::DisplayNameContainsControlCharacter {
+            code_point: control as u32,
+        });
+    }
+    if value.len() > MAX_DISPLAY_NAME_BYTES {
+        return Err(PathError::DisplayNameTooLong {
+            byte_length: value.len(),
+        });
+    }
+    // Every stored name key is derived from an admitted display name, and
+    // the derivation site treats an invalid derived key as an invariant
+    // violation — so admission must guarantee the derived key stays within
+    // the name-key grammar. v0 has exactly one policy; when a second policy
+    // arrives this check moves to the boundary that knows the namespace.
+    let folded_length =
+        crate::name_policy::name_key_for_display_name(crate::NamePolicy::NfcCasefoldV0, value)
+            .len();
+    if folded_length > crate::ids::MAX_NAME_KEY_BYTES {
+        return Err(PathError::FoldedNameKeyTooLong {
+            byte_length: folded_length,
+        });
+    }
     Ok(())
 }
 
@@ -207,6 +250,12 @@ impl PathError {
             Self::EmptyDisplayName => "",
             Self::DisplayNameContainsSeparator { display_name }
             | Self::ReservedDisplayName { display_name } => display_name,
+            // Length and control failures do not carry the offending name:
+            // an oversized or hostile name must not ride along in error
+            // payloads that serialize onto the wire.
+            Self::DisplayNameContainsControlCharacter { .. }
+            | Self::DisplayNameTooLong { .. }
+            | Self::FoldedNameKeyTooLong { .. } => "",
         }
     }
 }
@@ -288,6 +337,64 @@ mod tests {
         assert!(matches!(
             DisplayName::parse("."),
             Err(PathError::ReservedDisplayName { .. })
+        ));
+    }
+
+    #[test]
+    fn display_name_rejects_control_characters() {
+        assert_eq!(
+            DisplayName::parse("a\u{0}b"),
+            Err(PathError::DisplayNameContainsControlCharacter { code_point: 0 })
+        );
+        assert_eq!(
+            DisplayName::parse("line\nbreak"),
+            Err(PathError::DisplayNameContainsControlCharacter { code_point: 0x0A })
+        );
+        assert_eq!(
+            DisplayName::parse("c1\u{85}"),
+            Err(PathError::DisplayNameContainsControlCharacter { code_point: 0x85 })
+        );
+        // Format characters are not controls; names keep them as given.
+        DisplayName::parse("bidi\u{202E}name").expect("format characters are allowed");
+    }
+
+    #[test]
+    fn display_name_enforces_the_byte_cap_as_stored() {
+        DisplayName::parse("a".repeat(super::MAX_DISPLAY_NAME_BYTES))
+            .expect("255 bytes is the maximum, inclusive");
+        assert_eq!(
+            DisplayName::parse("a".repeat(super::MAX_DISPLAY_NAME_BYTES + 1)),
+            Err(PathError::DisplayNameTooLong { byte_length: 256 })
+        );
+        // The cap counts bytes, not characters: 128 two-byte characters
+        // exceed it.
+        assert_eq!(
+            DisplayName::parse("é".repeat(128)),
+            Err(PathError::DisplayNameTooLong { byte_length: 256 })
+        );
+    }
+
+    #[test]
+    fn maximal_casefold_expansion_stays_within_the_name_key_cap() {
+        // U+0390 case-folds to three code points (six bytes from two): the
+        // worst byte expansion in the fold tables. A maximum-length name of
+        // it folds to 762 bytes, inside the 768-byte key cap — the
+        // headroom [`crate::ids::MAX_NAME_KEY_BYTES`] documents.
+        let display_name =
+            DisplayName::parse("\u{0390}".repeat(127)).expect("maximal expander parses");
+        let key = NameKey::for_display_name(NamePolicy::NfcCasefoldV0, &display_name);
+        assert!(key.as_str().len() <= crate::ids::MAX_NAME_KEY_BYTES);
+    }
+
+    #[test]
+    fn absolute_path_components_satisfy_the_display_name_grammar() {
+        assert!(matches!(
+            AbsolutePath::parse("/docs/bad\u{0}name"),
+            Err(PathError::DisplayNameContainsControlCharacter { code_point: 0 })
+        ));
+        assert!(matches!(
+            AbsolutePath::parse(format!("/docs/{}", "a".repeat(256))),
+            Err(PathError::DisplayNameTooLong { .. })
         ));
     }
 

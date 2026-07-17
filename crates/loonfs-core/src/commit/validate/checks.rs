@@ -860,9 +860,10 @@ async fn validate_rename_does_not_cycle<V: CommitValidationView>(
 }
 
 fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError> {
-    DisplayName::parse(display_name).map(|_| ()).map_err(|_| {
-        CommitValidationError::InvalidDisplayName {
-            display_name: display_name.to_owned(),
-        }
-    })
+    DisplayName::parse(display_name)
+        .map(|_| ())
+        .map_err(|error| CommitValidationError::InvalidDisplayName {
+            display_name: error.invalid_path_input().to_owned(),
+            reason: error.to_string(),
+        })
 }

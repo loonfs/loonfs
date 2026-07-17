@@ -66,7 +66,7 @@ pub use ids::{
     CheckpointId, CommitId, CommitIdValidationError, ContentStoreId, GeneratedIdValidationError,
     IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
     NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId,
-    WalSegmentId, WriterEpoch,
+    WalSegmentId, WriterEpoch, MAX_NAME_KEY_BYTES,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{
@@ -76,7 +76,7 @@ pub use pagination::{
     PageRequest, PaginationPolicy, PaginationPolicyError, DEFAULT_MAX_PAGE_LIMIT,
     DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, PAGE_CURSOR_VERSION,
 };
-pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
+pub use path::{AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES};
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.
