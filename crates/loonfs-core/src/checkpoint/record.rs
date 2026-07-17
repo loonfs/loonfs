@@ -70,7 +70,9 @@ pub(crate) fn deterministic_checkpoint_id(
 
 pub(crate) enum CheckpointRecordWrite {
     Created,
-    Existing(Box<CheckpointRecordState>),
+    /// The record already exists. The caller renews it — the renew path
+    /// re-reads and validates the record, so no state rides along here.
+    Existing,
 }
 
 pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
@@ -93,15 +95,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
         Ok(_) => Ok(CheckpointRecordWrite::Created),
         Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            let existing =
-                read_checkpoint_record(store, &record.namespace_id, &record.checkpoint_id)
-                    .await?
-                    .ok_or_else(|| {
-                        CoreError::Internal(format!(
-                            "checkpoint record `{object_key}` conflicted but cannot be read back"
-                        ))
-                    })?;
-            Ok(CheckpointRecordWrite::Existing(Box::new(existing.state)))
+            Ok(CheckpointRecordWrite::Existing)
         }
         Err(error) => Err(CoreError::store(&object_key, &error)),
     }
@@ -149,6 +143,50 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     target: CheckpointRecordLifecycle,
     writer_version: &str,
 ) -> Result<(), CoreError> {
+    cas_checkpoint_record(store, namespace_id, checkpoint_id, writer_version, |next| {
+        if next.state == target {
+            return false;
+        }
+        next.state = target;
+        true
+    })
+    .await
+}
+
+/// Renews a record: `active` with exactly the requested expiry, last write
+/// wins. Re-creating an existing checkpoint routes here, so the durable
+/// expiry always matches what the latest create acknowledged — extended,
+/// shortened, or cleared — and a released record is revived. `created_at_ms`
+/// keeps the original creation instant. Returns `Ok` without writing when
+/// the record already matches.
+pub(crate) async fn renew_checkpoint_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+    expires_at_ms: Option<u64>,
+    writer_version: &str,
+) -> Result<(), CoreError> {
+    cas_checkpoint_record(store, namespace_id, checkpoint_id, writer_version, |next| {
+        if next.state == CheckpointRecordLifecycle::Active && next.expires_at_ms == expires_at_ms {
+            return false;
+        }
+        next.state = CheckpointRecordLifecycle::Active;
+        next.expires_at_ms = expires_at_ms;
+        true
+    })
+    .await
+}
+
+/// The compare-and-swap loop behind the record mutators: `apply` edits the
+/// loaded state and returns `false` when the record already matches, in
+/// which case nothing is written.
+async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+    writer_version: &str,
+    apply: impl Fn(&mut CheckpointRecordState) -> bool,
+) -> Result<(), CoreError> {
     const STATE_CAS_ATTEMPTS: usize = 4;
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
     for _attempt in 0..STATE_CAS_ATTEMPTS {
@@ -157,11 +195,10 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
                 "checkpoint record `{object_key}` disappeared during a state change"
             )));
         };
-        if loaded.state.state == target {
+        let mut next = loaded.state;
+        if !apply(&mut next) {
             return Ok(());
         }
-        let mut next = loaded.state;
-        next.state = target;
         let envelope = CheckpointRecordEnvelope::from_state(
             ControlObjectKind::CheckpointRecord,
             writer_version,

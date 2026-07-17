@@ -4,8 +4,8 @@
 use super::build::{build_manifest_tables, debug_assert_manifest_table_segments_do_not_overlap};
 use super::flush::{try_flush_wal, TryFlushWal};
 use super::record::{
-    deterministic_checkpoint_id, set_checkpoint_record_state, verify_checkpoint_basis,
-    write_checkpoint_record, CheckpointRecordWrite,
+    deterministic_checkpoint_id, renew_checkpoint_record, set_checkpoint_record_state,
+    verify_checkpoint_basis, write_checkpoint_record, CheckpointRecordWrite,
 };
 #[cfg(test)]
 use super::row::manifest_rows_for_family;
@@ -100,20 +100,21 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verified && within_budget {
-            if let CheckpointRecordWrite::Existing(existing) = written {
-                // Deterministic ids make re-creation idempotent; a released
+            if let CheckpointRecordWrite::Existing = written {
+                // Deterministic ids make re-creation a renewal: the durable
+                // expiry becomes exactly what this create requested (last
+                // write wins, shrink and clear included), and a released
                 // record for the same verified basis and owner is revived
-                // rather than duplicated.
-                if existing.state == CheckpointRecordLifecycle::Released {
-                    set_checkpoint_record_state(
-                        store,
-                        namespace_id,
-                        &checkpoint_id,
-                        CheckpointRecordLifecycle::Active,
-                        &context.writer_version,
-                    )
-                    .await?;
-                }
+                // rather than duplicated — so the response below always
+                // echoes the durable state.
+                renew_checkpoint_record(
+                    store,
+                    namespace_id,
+                    &checkpoint_id,
+                    expires_at_ms,
+                    &context.writer_version,
+                )
+                .await?;
             }
             return Ok(CreateCheckpointResponse {
                 namespace_id: namespace_id.clone(),

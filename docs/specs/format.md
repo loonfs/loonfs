@@ -645,9 +645,13 @@ this closes the create-vs-collect race: within the grace window any record is
 protected unconditionally by age.
 
 Record ids derive deterministically from the basis identity plus the owner
-identity: repeating creation for the same pinned manifest and owner returns
+identity: repeating creation for the same pinned manifest and owner renews
 the existing record (reviving a released one after re-verification) without
-listing, while distinct owners of one basis hold distinct records with
+listing. Renewal is last-write-wins on the expiry: the record's
+`expires_at_ms` becomes exactly what the latest create requested — extended,
+shortened, or cleared — while `created_at_ms` keeps the original creation
+instant, and the response always reports the durable state. Distinct owners
+of one basis hold distinct records with
 independent lifecycles. Explicit release flips a user-owned record
 `active -> released` by compare-and-swap and is idempotent; the record itself
 is reaped by a later garbage-collection pass, and its basis becomes
