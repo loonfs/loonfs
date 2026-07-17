@@ -598,6 +598,12 @@ fn map_create_error(key: &str, err: std::io::Error) -> ObjectStoreError {
 }
 
 fn io_error(key: &str, err: std::io::Error) -> ObjectStoreError {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        return ObjectStoreError::PermissionDenied {
+            object_key: key.to_owned(),
+            message: err.to_string(),
+        };
+    }
     ObjectStoreError::transport(key, err.to_string())
 }
 

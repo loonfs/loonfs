@@ -945,7 +945,10 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
         }
         provider_store::Error::PermissionDenied { source, .. }
         | provider_store::Error::Unauthenticated { source, .. } => {
-            ObjectStoreError::transport(object_key, source.to_string())
+            ObjectStoreError::PermissionDenied {
+                object_key: object_key.to_owned(),
+                message: source.to_string(),
+            }
         }
         other => ObjectStoreError::transport(object_key, other.to_string()),
     }
@@ -1750,7 +1753,7 @@ mod tests {
             .await
             .expect_err("auth rejection surfaces immediately");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
@@ -2000,7 +2003,9 @@ mod tests {
             .await
             .expect_err("auth rejection surfaces immediately");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        // Auth failures carry their own classification — never mistaken
+        // for network weather, and never retried.
+        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
         assert_eq!(part_attempts(&flaky, 0), 1);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }

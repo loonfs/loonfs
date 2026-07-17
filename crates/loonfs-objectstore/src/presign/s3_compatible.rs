@@ -124,16 +124,17 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         request: PresignedPutRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl, ObjectStoreError> {
+        // Expiry comes from deployment configuration, not the transport:
+        // a bad value is a config bug and must not look like network
+        // weather.
         if request.expires_in.is_zero() {
-            return Err(ObjectStoreError::transport(
-                request.object_key,
-                "presigned URL expiry must be greater than zero",
+            return Err(ObjectStoreError::Configuration(
+                "presigned URL expiry must be greater than zero".to_owned(),
             ));
         }
         if request.expires_in.as_secs() > 604_800 {
-            return Err(ObjectStoreError::transport(
-                request.object_key,
-                "presigned URL expiry must not exceed seven days",
+            return Err(ObjectStoreError::Configuration(
+                "presigned URL expiry must not exceed seven days".to_owned(),
             ));
         }
 
