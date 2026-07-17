@@ -4,7 +4,7 @@
 use crate::context::MutationContext;
 use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
 use crate::namespace::control::ControlObjectLoadError;
-use loonfs_api::wire::control::{AcquiredWriter, HeadState, WriterBlock};
+use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
 use loonfs_api::{NamespaceId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,8 @@ const MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS: usize = 8;
 pub enum WriterEpochAcquireError {
     #[error(transparent)]
     LoadHead(ControlObjectLoadError),
+    #[error("namespace `{namespace_id}` is deleted")]
+    NamespaceDeleted { namespace_id: NamespaceId },
     #[error("empty writer id")]
     EmptyWriterId,
     #[error("empty writer session id")]
@@ -37,13 +39,18 @@ pub enum WriterEpochAcquireError {
 /// the non-authoritative `writer` block, which fences every other session at
 /// its next publish. There is no lease and no expiry: nothing arbitrates
 /// between two live writers except the epoch itself, so acquisition never
-/// refuses a caller and contention resolves as deterministic
+/// refuses a live caller and contention resolves as deterministic
 /// last-writer-wins. A session that has been fenced must not call this again
 /// on its own; reacquisition is an explicit caller decision.
 ///
-/// The only non-bumping path is idempotent retry: when the head's writer
-/// block already names this exact session, its current epoch is returned
-/// without a CAS.
+/// The one refusal is terminal state: a deleted namespace's head is an
+/// immutable tombstone, so acquisition fails with `NamespaceDeleted` before
+/// any CAS — no attempt may rewrite the tombstone, inflate its epoch, or
+/// name a "current writer" for a dead namespace.
+///
+/// The only non-bumping success path is idempotent retry: when the head's
+/// writer block already names this exact session, its current epoch is
+/// returned without a CAS.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -63,6 +70,14 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
             let head = &loaded_head.envelope.state;
+            // Terminal-state guard before the idempotent-retry path: even
+            // the session named in the tombstone's writer block must not get
+            // an epoch back for a deleted namespace.
+            if head.state == NamespaceState::Deleted {
+                return Err(WriterEpochAcquireError::NamespaceDeleted {
+                    namespace_id: head.namespace_id.clone(),
+                });
+            }
             if let Some(writer) = head.writer.as_ref() {
                 if writer.writer_id == params.writer_id
                     && writer.writer_session_id == params.writer_session_id
@@ -284,6 +299,78 @@ mod tests {
             head.writer.expect("writer block").writer_session_id,
             "session-b"
         );
+    }
+
+    #[tokio::test]
+    async fn acquire_on_deleted_namespace_is_rejected_and_leaves_the_tombstone_unchanged() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        // The tombstone names the deleting session in its writer block: even
+        // that exact session must be refused, so the guard precedes the
+        // idempotent-retry path.
+        let mut tombstone = head_with_session(&namespace_id, "writer", "session-a", WriterEpoch(7));
+        tombstone.state = NamespaceState::Deleted;
+        write_head(&store, &namespace_id, tombstone).await;
+        let etag_before = head_etag(&store, &namespace_id).await;
+
+        for session in ["session-a", "session-b"] {
+            let error =
+                acquire_writer_epoch(&store, &namespace_id, &context("writer", session, 1_000))
+                    .await
+                    .expect_err("acquire on a deleted namespace must be refused");
+            assert!(matches!(
+                &error,
+                WriterEpochAcquireError::NamespaceDeleted { namespace_id: deleted_id }
+                    if *deleted_id == namespace_id
+            ));
+            assert_eq!(
+                crate::error::CoreError::from(error).code(),
+                ErrorCode::NamespaceDeleted
+            );
+        }
+
+        // The tombstone is byte-identical after every attempt: no epoch
+        // inflation, no new writer block, no churn on a terminal object.
+        assert_eq!(head_etag(&store, &namespace_id).await, etag_before);
+        let head = read_head_object(&store, &namespace_id)
+            .await
+            .expect("read head")
+            .envelope
+            .state;
+        assert_eq!(head.state, NamespaceState::Deleted);
+        assert_eq!(head.writer_epoch, WriterEpoch(7));
+    }
+
+    #[tokio::test]
+    async fn deleting_an_already_deleted_namespace_still_answers_namespace_deleted() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = context("writer-a", "session-a", 1_000);
+        bootstrap_namespace(&store, &namespace_id, &writer, false)
+            .await
+            .expect("bootstrap");
+        delete_namespace(
+            &store,
+            &namespace_id,
+            DeleteNamespaceOptions::default(),
+            &writer,
+        )
+        .await
+        .expect("first delete");
+
+        // The refusal now surfaces at epoch acquire instead of inside the
+        // delete loop; the public code is unchanged.
+        let error = delete_namespace(
+            &store,
+            &namespace_id,
+            DeleteNamespaceOptions::default(),
+            &context("writer-a", "session-b", 2_000),
+        )
+        .await
+        .expect_err("second delete must be refused");
+        assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
     }
 
     #[tokio::test]
