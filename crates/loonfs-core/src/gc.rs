@@ -7,8 +7,8 @@
 //! grace window, delete-time re-verification, and retain-on-ambiguity
 //! defaults close those races. When in doubt, this module retains.
 
-use crate::checkpoint::record::set_checkpoint_record_state;
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
+use crate::checkpoint::record::set_checkpoint_record_state;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
@@ -583,7 +583,16 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         missing_basis_records: Vec::new(),
         degraded: false,
     };
-    live.manifests.insert(root.manifest_object_id.clone());
+    // Terminal namespaces forget (format spec, rule 4): the tombstone pair
+    // and the root/floor pointers survive as non-candidates, but nothing
+    // else is a root except fork-owned records protecting a live target —
+    // reads are impossible (`namespace_deleted` at every surface, and epoch
+    // acquire refuses the tombstone), so user pins and the final replay
+    // chain protect nothing.
+    let namespace_deleted = head.state == NamespaceState::Deleted;
+    if !namespace_deleted {
+        live.manifests.insert(root.manifest_object_id.clone());
+    }
     let mut active_record_bases: BTreeMap<ManifestObjectId, Vec<String>> = BTreeMap::new();
 
     // Every readable checkpoint record roots its basis, no matter its
@@ -609,10 +618,46 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
         ) {
             Ok(envelope) => {
                 let record = envelope.state;
-                live.manifests.insert(record.manifest_object_id.clone());
                 let expired = record
                     .expires_at_ms
                     .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);
+                if namespace_deleted {
+                    // On a terminal namespace only a still-active fork
+                    // record with a live target roots anything; every
+                    // other record is an ordinary age-gated candidate,
+                    // and its basis is not rooted (revival is impossible
+                    // once epoch acquire refuses the tombstone).
+                    if record.state != CheckpointRecordLifecycle::Active || expired {
+                        continue;
+                    }
+                    let CheckpointOwner::Fork {
+                        target_namespace_id,
+                    } = &record.owner
+                    else {
+                        continue;
+                    };
+                    if let Some(last_modified_ms) = body.metadata.last_modified_ms {
+                        if fork_target_proven_gone(
+                            store,
+                            target_namespace_id,
+                            last_modified_ms,
+                            config,
+                            context,
+                        )
+                        .await?
+                        {
+                            continue;
+                        }
+                    }
+                    live.manifests.insert(record.manifest_object_id.clone());
+                    active_record_bases
+                        .entry(record.manifest_object_id)
+                        .or_default()
+                        .push(key.clone());
+                    live.checkpoint_keys.insert(key);
+                    continue;
+                }
+                live.manifests.insert(record.manifest_object_id.clone());
                 if record.state != CheckpointRecordLifecycle::Active || expired {
                     continue;
                 }
@@ -695,8 +740,9 @@ async fn collect_live_set<S: ObjectStore + ?Sized>(
 
     // Keep every WAL segment needed to replay from the floor through the
     // head. The floor never passes the root's basis, so this also covers
-    // root-to-head replay (rule 7).
-    if head.seq > floor_seq {
+    // root-to-head replay (rule 7). A terminal namespace has no replay
+    // future: its chain ages out.
+    if !namespace_deleted && head.seq > floor_seq {
         let chain = load_validated_wal_chain(
             store,
             WalChainLoadRequest {
@@ -1178,6 +1224,144 @@ mod tests {
         assert_eq!(report.released_missing_basis_checkpoints, 0);
         assert!(!report.degraded_retention);
         stat_root(&store, &namespace_id).await;
+    }
+
+    #[tokio::test]
+    async fn deleted_namespace_reclaims_down_to_its_tombstone() {
+        // A terminal namespace forgets: user pins, the final replay chain,
+        // manifests, and tables all age out; only the id-retiring tombstone
+        // objects survive. The user checkpoint here would have made the
+        // tree immortal under the live rules.
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+        write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+        create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("user pin");
+        delete_namespace(
+            &store,
+            &namespace_id,
+            DeleteNamespaceOptions::default(),
+            &setup,
+        )
+        .await
+        .expect("delete namespace");
+
+        let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+            .await
+            .expect("gc pass");
+        assert!(report.deleted_wal_segments >= 1);
+        assert!(report.deleted_metadata_tables >= 1);
+        assert!(report.deleted_manifests >= 1);
+        assert!(report.deleted_checkpoint_records >= 1);
+        assert!(!report.degraded_retention);
+
+        for prefix in [
+            wal_segment_prefix(namespace_id.as_str()),
+            metadata_table_prefix(namespace_id.as_str()),
+            metadata_manifest_prefix(namespace_id.as_str()),
+            checkpoint_prefix(namespace_id.as_str()),
+        ] {
+            assert!(
+                store.list_prefix(&prefix).await.expect("list").is_empty(),
+                "prefix `{prefix}` must be empty after reclamation"
+            );
+        }
+        for key in [
+            loonfs_objectstore::keys::wal_head(namespace_id.as_str()),
+            namespace_config(namespace_id.as_str()),
+            loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+            loonfs_objectstore::keys::wal_floor(namespace_id.as_str()),
+        ] {
+            assert!(
+                store.head(&key).await.expect("head").is_some(),
+                "tombstone object `{key}` must survive"
+            );
+        }
+
+        // Idempotent, and never degraded by its own reclamation.
+        let again = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &namespace_id, &config(), &again)
+            .await
+            .expect("second gc pass");
+        assert_eq!(report.deleted_wal_segments, 0);
+        assert_eq!(report.deleted_manifests, 0);
+        assert!(!report.degraded_retention);
+    }
+
+    #[tokio::test]
+    async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let source = NamespaceId::parse("source").expect("namespace id");
+        let clone = NamespaceId::parse("clone").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &source, &setup, false)
+            .await
+            .expect("bootstrap");
+        write_file(&store, &source, "/docs/shared.txt", "gc-shared", &setup).await;
+        fork_namespace(&store, &source, &clone, &setup)
+            .await
+            .expect("fork");
+        delete_namespace(&store, &source, DeleteNamespaceOptions::default(), &setup)
+            .await
+            .expect("delete source");
+
+        // The deleted source keeps exactly what the living clone needs.
+        let fork_record = read_fork_record(&store, &source).await;
+        let basis_key = metadata_manifest_object(source.as_str(), &fork_record.manifest_object_id);
+        let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &source, &config(), &aged)
+            .await
+            .expect("gc pass with live clone");
+        assert_eq!(report.released_fork_checkpoints, 0);
+        assert!(!report.degraded_retention);
+        assert!(
+            store.head(&basis_key).await.expect("head basis").is_some(),
+            "fork basis must survive while the clone lives"
+        );
+        let clone_view = load_metadata_view(&store, &clone, ReadLoadContext::latest())
+            .await
+            .expect("load clone view");
+        clone_view
+            .resolve_path("/docs/shared.txt")
+            .await
+            .expect("clone reads through the deleted source");
+
+        // Once the clone is terminally deleted too, the record stops
+        // rooting at collection time (its target is provably gone and both
+        // namespaces are immutable tombstones, so revival is impossible):
+        // one pass reclaims the basis and releases the record.
+        delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
+            .await
+            .expect("delete clone");
+        let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &source, &config(), &aged)
+            .await
+            .expect("gc pass after clone delete");
+        assert_eq!(report.released_fork_checkpoints, 1);
+        assert!(report.deleted_manifests >= 1);
+        assert!(
+            store.head(&basis_key).await.expect("head basis").is_none(),
+            "the basis ages out once no living target needs it"
+        );
+
+        // Idempotent: the released record ages out on later passes and
+        // nothing resurrects.
+        let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
+        let report = gc_namespace(&store, &source, &config(), &again)
+            .await
+            .expect("idempotent pass");
+        assert_eq!(report.released_fork_checkpoints, 0);
+        assert_eq!(report.deleted_manifests, 0);
+        assert!(!report.degraded_retention);
     }
 
     #[tokio::test]
