@@ -78,6 +78,12 @@ pub struct ErrorDetails {
     /// Oldest sequence still promised for incremental replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_floor_seq: Option<ChangeSeq>,
+    /// Deletion generation an undelete asked to recover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_deletion_seq: Option<ChangeSeq>,
+    /// Deletion generation actually active for the inode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_deletion_seq: Option<ChangeSeq>,
 }
 
 /// Request to create a namespace.
@@ -229,10 +235,17 @@ pub enum FilesystemOperation {
         behavior: CopyBehavior,
     },
     /// Restore an older revision as the current revision for a path.
-    /// Recover a deleted file or subtree: clear the tombstone rooted at
-    /// `inode_id` (the id the delete reported) and re-bind it at `path`.
+    /// Recover a deleted file or subtree: revoke the deletion of
+    /// `inode_id` recorded at `deleted_at_seq` (both reported by the
+    /// delete and by the change feed) and re-bind it at `path`. Answers
+    /// `not_deleted` when that generation is not the live one, so a stale
+    /// request never cancels a later delete.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
-    Undelete { inode_id: InodeId, path: String },
+    Undelete {
+        inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
+        path: String,
+    },
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
         path: String,

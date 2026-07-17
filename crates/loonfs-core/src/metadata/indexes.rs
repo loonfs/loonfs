@@ -4,7 +4,7 @@
 use super::visibility::unbind_matches_binding;
 use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -169,11 +169,11 @@ impl MetadataIndexes {
         &self,
         root_inode_id: InodeId,
     ) -> Option<SubtreeTombstoneRecord> {
-        // The index keeps the newest record per root, cleared or not; a
-        // cleared newest record means no tombstone is active.
+        // The index keeps the newest record per root, whatever its action;
+        // a revoke as the newest record means no tombstone is active.
         self.tombstone_by_root
             .get(&root_inode_id)
-            .filter(|tombstone| !tombstone.cleared)
+            .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set))
             .cloned()
     }
 

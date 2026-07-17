@@ -390,7 +390,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             CommandKind::FilesystemRm => match inode_id {
                 Some(inode_id) => format!(
                     "removed {target} @ seq {committed_seq} (commit {commit_id}); \
-                     recover with `loon undelete <path> --inode {inode_id}`"
+                     recover with `loon undelete <path> --inode {inode_id} \
+                     --deleted-at {committed_seq}`"
                 ),
                 None => format!("removed {target} @ seq {committed_seq} (commit {commit_id})"),
             },

@@ -443,6 +443,11 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// feed.
     #[arg(long)]
     pub inode: u64,
+    /// Committed sequence of the delete being recovered, as reported by
+    /// `rm` and the change feed. Scopes recovery to that exact deletion,
+    /// so a stale command cannot cancel a later delete.
+    #[arg(long)]
+    pub deleted_at: u64,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
     #[arg(long)]

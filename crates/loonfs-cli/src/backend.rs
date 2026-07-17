@@ -397,18 +397,22 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.writer
-            .undelete(
+        self.publish_with_maintenance_recovery(&spec.namespace, || {
+            self.writer.undelete(
                 &namespace_id,
                 inode_id,
+                deleted_at_seq,
                 &spec.absolute_path,
-                UndeleteOptions { commit_id },
+                UndeleteOptions {
+                    commit_id: commit_id.clone(),
+                },
             )
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+        })
+        .await
     }
 
     // The admin methods mirror the server handlers' error scoping exactly:

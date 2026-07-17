@@ -292,17 +292,22 @@ pub(super) fn materialize_validated_op(
             parent_inode_id,
             display_name,
             name_key,
-            clear_tombstone_delta_index,
+            target_seq,
+            target_delta_index,
+            revoke_tombstone_delta_index,
             bind_delta_index,
         } => {
             // The mirror of delete's unbind-plus-tombstone: revoke the
-            // tombstone, then bind the recovered inode at its new home.
+            // exact deletion generation validation resolved, then bind the
+            // recovered inode at its new home.
             push_delta(
                 &mut deltas,
                 *op_index,
-                WalDelta::ClearSubtreeTombstone {
-                    delta_index: *clear_tombstone_delta_index,
+                WalDelta::RevokeSubtreeTombstone {
+                    delta_index: *revoke_tombstone_delta_index,
                     root_inode_id: *inode_id,
+                    target_seq: *target_seq,
+                    target_delta_index: *target_delta_index,
                 },
             );
             push_delta(
@@ -366,6 +371,6 @@ fn wal_delta_index(wal_delta: &WalDelta) -> u32 {
         | WalDelta::UnbindDirentry { delta_index, .. }
         | WalDelta::AppendFileRevision { delta_index, .. }
         | WalDelta::TombstoneSubtree { delta_index, .. }
-        | WalDelta::ClearSubtreeTombstone { delta_index, .. } => *delta_index,
+        | WalDelta::RevokeSubtreeTombstone { delta_index, .. } => *delta_index,
     }
 }

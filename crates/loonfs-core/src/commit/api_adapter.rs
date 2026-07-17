@@ -82,10 +82,12 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
         }
         api_v0::CommitOp::Undelete {
             inode_id,
+            deleted_at_seq,
             parent_inode_id,
             display_name,
         } => CommitOp::Undelete {
             inode_id,
+            deleted_at_seq,
             parent_inode_id,
             display_name,
         },

@@ -218,7 +218,7 @@ fn replay_next_inode_id(current_next_inode_id: InodeId, deltas: &[WalDelta]) -> 
             | WalDelta::UnbindDirentry { .. }
             | WalDelta::AppendFileRevision { .. }
             | WalDelta::TombstoneSubtree { .. }
-            | WalDelta::ClearSubtreeTombstone { .. } => next_inode_id,
+            | WalDelta::RevokeSubtreeTombstone { .. } => next_inode_id,
         })
 }
 

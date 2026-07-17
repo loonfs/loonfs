@@ -7,7 +7,7 @@ use crate::fs::FsCore;
 use crate::publish::NamespaceMutationCandidate;
 use crate::{
     BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse,
-    CapabilityDocument, CommitRequest, CommitResponse, CompleteUploadRequest,
+    CapabilityDocument, ChangeSeq, CommitRequest, CommitResponse, CompleteUploadRequest,
     CompleteUploadResponse, ContentRef, CopyOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     GramIndexBuildPolicy, InodeId, MoveOptions, NamespaceId, NamespaceSummary,
@@ -233,11 +233,18 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         absolute_path: &str,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
         self.core
-            .undelete(namespace_id, inode_id, absolute_path, options)
+            .undelete(
+                namespace_id,
+                inode_id,
+                deleted_at_seq,
+                absolute_path,
+                options,
+            )
             .await
     }
 

@@ -90,11 +90,15 @@ pub enum CommitOp {
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
     DeleteSubtree { root_inode_id: InodeId },
-    /// Recover a deleted file or subtree: clear the tombstone rooted at
-    /// the inode and re-bind it under a visible parent directory.
+    /// Recover a deleted file or subtree: revoke the deletion recorded at
+    /// `deleted_at_seq` (the delete's committed sequence, reported by the
+    /// delete and by the change feed) and re-bind the inode under a visible
+    /// parent directory. Scoping recovery to the observed generation keeps
+    /// a stale request from cancelling a later deletion of the same inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpUndelete"))]
     Undelete {
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         parent_inode_id: InodeId,
         display_name: String,
     },
@@ -195,12 +199,16 @@ pub enum CommitDelta {
     },
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "CommitDeltaClearSubtreeTombstone")
+        schema(title = "CommitDeltaRevokeSubtreeTombstone")
     )]
-    ClearSubtreeTombstone {
+    RevokeSubtreeTombstone {
         semantic_op_index: u32,
         delta_index: u32,
         root_inode_id: InodeId,
+        /// The exact deletion generation this revoke cancels. Projections
+        /// must reduce with the target, never "whatever is newest".
+        target_seq: ChangeSeq,
+        target_delta_index: u32,
     },
 }
 

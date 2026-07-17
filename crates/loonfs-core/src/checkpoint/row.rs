@@ -15,6 +15,23 @@ pub(super) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataS
     })
 }
 
+fn tombstone_row_action(
+    action: &crate::metadata::SubtreeTombstoneAction,
+) -> loonfs_api::wire::manifest::TombstoneRowAction {
+    use crate::metadata::SubtreeTombstoneAction;
+    use loonfs_api::wire::manifest::TombstoneRowAction;
+    match action {
+        SubtreeTombstoneAction::Set => TombstoneRowAction::Set,
+        SubtreeTombstoneAction::Revoke {
+            target_seq,
+            target_delta_index,
+        } => TombstoneRowAction::Revoke {
+            target_seq: *target_seq,
+            target_delta_index: *target_delta_index,
+        },
+    }
+}
+
 pub(super) fn manifest_rows_for_family(
     metadata_state: &MetadataState,
     family: MetadataTableFamily,
@@ -76,7 +93,7 @@ pub(super) fn manifest_rows_for_family(
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
-                cleared: tombstone.cleared,
+                action: tombstone_row_action(&tombstone.action),
             })
             .collect::<Vec<_>>(),
         MetadataTableFamily::CommitReceipts => metadata_state

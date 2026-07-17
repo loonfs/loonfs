@@ -9,7 +9,6 @@ use crate::metadata::MetadataState;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::helpers::{ensure_mutation_path, final_component};
 use loonfs_api::wire::control::HeadState;
-#[cfg(test)]
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
@@ -74,6 +73,7 @@ enum PathFingerprintInput {
     Undelete {
         namespace_id: NamespaceId,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         absolute_path: String,
     },
 }
@@ -162,11 +162,13 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
         },
         PathMutationIntent::Undelete {
             inode_id,
+            deleted_at_seq,
             absolute_path,
             ..
         } => PathFingerprintInput::Undelete {
             namespace_id: namespace_id.clone(),
             inode_id: *inode_id,
+            deleted_at_seq: *deleted_at_seq,
             absolute_path: absolute_path.as_str().to_owned(),
         },
     };
@@ -240,9 +242,13 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
         }
         PathMutationIntent::Undelete {
             inode_id,
+            deleted_at_seq,
             absolute_path,
             ..
-        } => plan_publish_undelete(*inode_id, absolute_path, &commit_id, &view).await?,
+        } => {
+            plan_publish_undelete(*inode_id, *deleted_at_seq, absolute_path, &commit_id, &view)
+                .await?
+        }
     };
     Ok(PlannedPathMutation {
         commit_id,
@@ -409,6 +415,7 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
 
 async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
+    deleted_at_seq: ChangeSeq,
     absolute_path: &AbsolutePath,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
@@ -437,6 +444,7 @@ async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::Undelete {
             inode_id,
+            deleted_at_seq,
             parent_inode_id,
             display_name: display_name.clone(),
         }],

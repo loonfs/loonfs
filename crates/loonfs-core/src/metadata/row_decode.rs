@@ -84,18 +84,35 @@ pub(super) fn revision_from_manifest_row(row: MetadataRow) -> Option<RevisionRec
     }
 }
 
+fn subtree_tombstone_action(
+    action: &loonfs_api::wire::manifest::TombstoneRowAction,
+) -> super::rows::SubtreeTombstoneAction {
+    use super::rows::SubtreeTombstoneAction;
+    use loonfs_api::wire::manifest::TombstoneRowAction;
+    match action {
+        TombstoneRowAction::Set => SubtreeTombstoneAction::Set,
+        TombstoneRowAction::Revoke {
+            target_seq,
+            target_delta_index,
+        } => SubtreeTombstoneAction::Revoke {
+            target_seq: *target_seq,
+            target_delta_index: *target_delta_index,
+        },
+    }
+}
+
 pub(super) fn tombstone_from_manifest_row(row: MetadataRow) -> Option<SubtreeTombstoneRecord> {
     match row {
         MetadataRow::Tombstone {
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,
-            cleared,
+            action,
         } => Some(SubtreeTombstoneRecord {
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,
-            cleared,
+            action: subtree_tombstone_action(&action),
         }),
         _ => None,
     }

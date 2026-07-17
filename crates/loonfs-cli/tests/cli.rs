@@ -916,12 +916,16 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "--force",
     ]));
 
-    // rm reports the inode id — the recovery handle undelete needs.
+    // rm reports the inode id and the deletion's sequence — together the
+    // recovery handle undelete needs.
     let removed = harness.run(&["--json", "rm", "/docs/report.txt"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
         .as_u64()
         .expect("rm reports the deleted inode id");
+    let deleted_at = json_data(&removed)["committed_seq"]
+        .as_u64()
+        .expect("rm reports the deletion sequence");
     let gone = harness.run(&["--json", "revisions", "/docs/report.txt"]);
     assert_failure(&gone);
     assert_eq!(json_error(&gone)["code"], "path_not_found");
@@ -933,6 +937,8 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         "/docs/report.txt",
         "--inode",
         &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
     ]);
     assert_success(&recovered);
     assert_eq!(json_data(&recovered)["target"], "demo:/docs/report.txt");
@@ -946,13 +952,15 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         2
     );
 
-    // A recovered inode is no longer deleted.
+    // A recovered inode is no longer deleted; the stale handle conflicts.
     let again = harness.run(&[
         "--json",
         "undelete",
         "/docs/report-copy.txt",
         "--inode",
         &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
     ]);
     assert_failure(&again);
     assert_eq!(json_error(&again)["code"], "not_deleted");
@@ -986,6 +994,9 @@ fn remote_undelete_recovers_through_http() {
     let inode_id = json_data(&removed)["inode_id"]
         .as_u64()
         .expect("rm reports the deleted inode id");
+    let deleted_at = json_data(&removed)["committed_seq"]
+        .as_u64()
+        .expect("rm reports the deletion sequence");
 
     let recovered = harness.run(&[
         "--json",
@@ -993,6 +1004,8 @@ fn remote_undelete_recovers_through_http() {
         "/wire.txt",
         "--inode",
         &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
     ]);
     assert_success(&recovered);
     let cat = harness.run(&["cat", "/wire.txt"]);

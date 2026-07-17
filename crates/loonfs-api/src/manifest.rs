@@ -179,10 +179,9 @@ pub enum MetadataRow {
         root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
         tombstone_delta_index: u32,
-        /// A cleared row revokes every older tombstone for the same root;
-        /// readers take the newest row per root and treat a cleared newest
-        /// row as "no active tombstone".
-        cleared: bool,
+        /// What this event did; readers take the newest row per root and
+        /// treat a `revoke` newest row as "no active tombstone".
+        action: TombstoneRowAction,
     },
     CommitReceipt {
         commit_id: CommitId,
@@ -190,6 +189,20 @@ pub enum MetadataRow {
         committed_seq: ChangeSeq,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+    },
+}
+
+/// Tombstone-row event vocabulary (format spec, "Tombstones and deletion").
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TombstoneRowAction {
+    /// The subtree rooted at the row's inode is deleted.
+    Set,
+    /// The deletion recorded at `(target_seq, target_delta_index)` is
+    /// revoked.
+    Revoke {
+        target_seq: ChangeSeq,
+        target_delta_index: u32,
     },
 }
 
@@ -277,10 +290,10 @@ impl MetadataRow {
                 root_inode_id,
                 tombstone_seq,
                 tombstone_delta_index,
-                // The clear state lives in the value: cleared rows sort
-                // exactly like the tombstones they revoke, so newest-per-
-                // root scans see them in one prefix pass.
-                cleared: _,
+                // The action lives in the value: revoke rows sort exactly
+                // like the deletions they cancel, so newest-per-root scans
+                // see them in one prefix pass.
+                action: _,
             } => {
                 format!(
                     "tombstone-{:020}-{:020}-{:010}",

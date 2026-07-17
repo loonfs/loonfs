@@ -436,6 +436,16 @@ fn commit_validation_details(error: &CommitValidationError) -> Option<ErrorDetai
             inode_id: Some(*inode_id),
             ..ErrorDetails::default()
         }),
+        CommitValidationError::UndeleteGenerationMismatch {
+            inode_id,
+            requested_seq,
+            active_seq,
+        } => Some(ErrorDetails {
+            inode_id: Some(*inode_id),
+            requested_deletion_seq: Some(*requested_seq),
+            active_deletion_seq: Some(*active_seq),
+            ..ErrorDetails::default()
+        }),
         _ => None,
     }
 }
@@ -608,7 +618,11 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
             ErrorCode::PathNotFound
         }
         CommitValidationError::UndeleteInodeMissing { .. } => ErrorCode::PathNotFound,
-        CommitValidationError::UndeleteTargetNotDeleted { .. } => ErrorCode::NotDeleted,
+        // Both are "the deletion you named is not the live one": absent
+        // entirely, or superseded by a newer generation. One code, with the
+        // generations in the structured details.
+        CommitValidationError::UndeleteTargetNotDeleted { .. }
+        | CommitValidationError::UndeleteGenerationMismatch { .. } => ErrorCode::NotDeleted,
         CommitValidationError::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
         CommitValidationError::InvalidDisplayName { .. } => ErrorCode::InvalidRequest,
         CommitValidationError::StaleWriterEpoch { .. } => ErrorCode::WriterFenced,

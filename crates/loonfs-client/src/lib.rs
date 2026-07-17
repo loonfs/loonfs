@@ -970,6 +970,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
@@ -980,6 +981,7 @@ impl Client {
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::Undelete {
                     inode_id,
+                    deleted_at_seq,
                     path: spec.absolute_path.clone(),
                 },
             },

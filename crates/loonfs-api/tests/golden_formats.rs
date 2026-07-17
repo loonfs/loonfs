@@ -32,7 +32,7 @@ use loonfs_api::wire::index_grams::{
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, IndexFileRef, MetadataFileRef,
     MetadataRow, MetadataTableFamily, NamespaceManifestCodecError, NamespaceManifestEnvelope,
-    NamespaceManifestFork, NamespaceManifestPayload,
+    NamespaceManifestFork, NamespaceManifestPayload, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCodecError,
@@ -822,11 +822,13 @@ fn wal_delta_wire_tags_match_spec_names() {
             "tombstone_subtree",
         ),
         (
-            serde_json::to_value(WalDelta::ClearSubtreeTombstone {
+            serde_json::to_value(WalDelta::RevokeSubtreeTombstone {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
+                target_seq: ChangeSeq(1),
+                target_delta_index: 1,
             }),
-            "clear_subtree_tombstone",
+            "revoke_subtree_tombstone",
         ),
     ];
     for (value, expected_tag) in cases {
@@ -897,13 +899,16 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             root_inode_id: InodeId(5),
             tombstone_seq: ChangeSeq(8),
             tombstone_delta_index: 0,
-            cleared: false,
+            action: TombstoneRowAction::Set,
         },
         MetadataRow::Tombstone {
             root_inode_id: InodeId(5),
             tombstone_seq: ChangeSeq(9),
             tombstone_delta_index: 0,
-            cleared: true,
+            action: TombstoneRowAction::Revoke {
+                target_seq: ChangeSeq(8),
+                target_delta_index: 0,
+            },
         },
     ];
     for row in &rows {

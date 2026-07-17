@@ -273,6 +273,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
             }
             CommitOp::Undelete {
                 inode_id,
+                deleted_at_seq,
                 parent_inode_id,
                 display_name,
             } => {
@@ -286,13 +287,22 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     }
                     .into());
                 }
-                if metadata_state
-                    .active_subtree_tombstone(*inode_id)
-                    .await?
-                    .is_none()
-                {
+                let Some(active) = metadata_state.active_subtree_tombstone(*inode_id).await? else {
                     return Err(CommitValidationError::UndeleteTargetNotDeleted {
                         inode_id: *inode_id,
+                    }
+                    .into());
+                };
+                // Recovery is scoped to the deletion the caller observed,
+                // never "whatever is active now": a stale handle must not
+                // cancel a later delete of the same inode. The rule
+                // re-applies unchanged on every stale-head revalidation
+                // because the requested generation rides in the op.
+                if active.tombstone_seq != *deleted_at_seq {
+                    return Err(CommitValidationError::UndeleteGenerationMismatch {
+                        inode_id: *inode_id,
+                        requested_seq: *deleted_at_seq,
+                        active_seq: active.tombstone_seq,
                     }
                     .into());
                 }
@@ -319,7 +329,9 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
-                    clear_tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    target_seq: active.tombstone_seq,
+                    target_delta_index: active.tombstone_delta_index,
+                    revoke_tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
                     bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
                 }
             }

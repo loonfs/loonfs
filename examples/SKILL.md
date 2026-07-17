@@ -125,7 +125,15 @@ loon rm        <path>   --namespace <ns>
 
 **Safe retries.** Every write accepts `--commit-id <id>`. When a write fails in an uncertain way (timeout, `server_busy`, killed process), retry it with the same commit id and identical arguments: a retry of a commit that already landed returns the original result instead of writing twice, and a reused id with different content fails with `commit_id_reuse_conflict`. Generate one id per logical write (for example `c-$(uuidgen)`) and hold it across attempts.
 
-**Before any destructive operation** (`put` over an existing path, `mv`, `cp`, `rm`, `restore`): run `loon stat` first, show the user the current size and revision, and ask before proceeding. `--force` requires explicit user confirmation. Treat `rm` — and `mv --force` over an existing file — as permanent: the deleted or replaced file's revision history stops being reachable from its path, and there is no undelete.
+**Before any destructive operation** (`put` over an existing path, `mv`, `cp`, `rm`, `restore`): run `loon stat` first, show the user the current size and revision, and ask before proceeding. `--force` requires explicit user confirmation.
+
+**Recovering a delete.** `rm` reports a recovery handle — the deleted item's inode id and the deletion's sequence. Keep both from the `rm` output (or read them from `loon changes`) and recover with:
+
+```bash
+loon undelete <path> --namespace <ns> --inode <inode_id> --deleted-at <seq>
+```
+
+Recovery restores the same file with its full revision history, at the original path or a new one. It is scoped to that exact deletion: if the item was deleted again since, the command fails with `not_deleted` instead of undoing the newer delete. Only the root of a deletion can be recovered — for a deleted directory, undelete the directory, not a file inside it. The file replaced by `mv --force` gets the same treatment: its inode id and the move's sequence are its recovery handle.
 
 For generated artifacts, prefer clear paths:
 

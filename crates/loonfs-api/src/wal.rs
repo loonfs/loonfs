@@ -65,12 +65,16 @@ pub enum WalDelta {
         delta_index: u32,
         root_inode_id: InodeId,
     },
-    /// Revokes the newest subtree tombstone rooted at this inode, making
-    /// the subtree eligible for visibility again once re-bound. A later
-    /// `TombstoneSubtree` for the same root supersedes the clear.
-    ClearSubtreeTombstone {
+    /// Revokes exactly one subtree tombstone — the one recorded at
+    /// `(target_seq, target_delta_index)` — making the subtree eligible for
+    /// visibility again once re-bound. An immutable compensating event, not
+    /// an in-place row deletion: a later `TombstoneSubtree` for the same
+    /// root supersedes the revoke.
+    RevokeSubtreeTombstone {
         delta_index: u32,
         root_inode_id: InodeId,
+        target_seq: ChangeSeq,
+        target_delta_index: u32,
     },
 }
 

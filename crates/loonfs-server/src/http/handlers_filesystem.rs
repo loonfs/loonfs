@@ -529,9 +529,14 @@ pub(super) async fn filesystem_operation(
             absolute_path: parse_path(&path)?,
             source_revision_no,
         },
-        FilesystemOperation::Undelete { inode_id, path } => PathMutationIntent::Undelete {
+        FilesystemOperation::Undelete {
+            inode_id,
+            deleted_at_seq,
+            path,
+        } => PathMutationIntent::Undelete {
             commit_id,
             inode_id,
+            deleted_at_seq,
             absolute_path: parse_path(&path)?,
         },
     };

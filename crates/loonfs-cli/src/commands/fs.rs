@@ -633,7 +633,12 @@ pub(crate) async fn run_filesystem_undelete(
     let result = context
         .target
         .backend()
-        .undelete(&spec, loonfs_api::InodeId(args.inode), commit_id)
+        .undelete(
+            &spec,
+            loonfs_api::InodeId(args.inode),
+            loonfs_api::ChangeSeq(args.deleted_at),
+            commit_id,
+        )
         .await
         .map_err(|error| {
             fail(

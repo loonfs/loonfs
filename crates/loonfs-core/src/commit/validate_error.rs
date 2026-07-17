@@ -206,6 +206,14 @@ pub enum CommitValidationError {
     #[error("undelete target inode `{inode_id}` is not the root of a live deletion")]
     UndeleteTargetNotDeleted { inode_id: InodeId },
     #[error(
+        "undelete of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the active deletion is at seq `{active_seq}`"
+    )]
+    UndeleteGenerationMismatch {
+        inode_id: InodeId,
+        requested_seq: ChangeSeq,
+        active_seq: ChangeSeq,
+    },
+    #[error(
         "revision counter overflow restoring inode `{inode_id}` at base revision `{base_revision_no}`"
     )]
     RestoreRevisionOverflow {

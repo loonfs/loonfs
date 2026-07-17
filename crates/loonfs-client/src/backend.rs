@@ -245,12 +245,14 @@ pub trait Backend {
         source_revision_no: RevisionNo,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
-    /// Recovers a deleted file or subtree to the spec's path; `inode_id` is
-    /// the id the delete reported.
+    /// Recovers a deleted file or subtree to the spec's path; `inode_id`
+    /// and `deleted_at_seq` are the identity and committed sequence the
+    /// delete reported.
     async fn undelete(
         &self,
         spec: &NamespacePath,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError>;
 
@@ -533,11 +535,12 @@ impl Backend for RemoteBackend {
         &self,
         spec: &NamespacePath,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let options = mutation_options(commit_id);
-        self.wire(move |client| client.undelete(&spec, inode_id, &options))
+        self.wire(move |client| client.undelete(&spec, inode_id, deleted_at_seq, &options))
             .await
     }
 

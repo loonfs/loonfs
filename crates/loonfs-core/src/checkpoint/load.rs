@@ -1326,13 +1326,24 @@ pub(super) fn append_rows_to_metadata(
                     root_inode_id,
                     tombstone_seq,
                     tombstone_delta_index,
-                    cleared,
+                    action,
                 },
             ) => metadata_state.push_subtree_tombstone(SubtreeTombstoneRecord {
                 root_inode_id: *root_inode_id,
                 tombstone_seq: *tombstone_seq,
                 tombstone_delta_index: *tombstone_delta_index,
-                cleared: *cleared,
+                action: match action {
+                    loonfs_api::wire::manifest::TombstoneRowAction::Set => {
+                        crate::metadata::SubtreeTombstoneAction::Set
+                    }
+                    loonfs_api::wire::manifest::TombstoneRowAction::Revoke {
+                        target_seq,
+                        target_delta_index,
+                    } => crate::metadata::SubtreeTombstoneAction::Revoke {
+                        target_seq: *target_seq,
+                        target_delta_index: *target_delta_index,
+                    },
+                },
             }),
             (
                 MetadataTableFamily::CommitReceipts,

@@ -1126,7 +1126,7 @@ fn delete_options_select_recursive_behavior() {
 }
 
 #[test]
-fn undelete_recovers_a_deleted_file_with_its_history() {
+fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-test");
     let namespace_id = namespace_id();
@@ -1154,14 +1154,17 @@ fn undelete_recovers_a_deleted_file_with_its_history() {
         .expect("stat before delete")
         .inode_id;
 
-    fs.delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
-        .expect("delete file");
+    let first_deletion = fs
+        .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+        .expect("delete file")
+        .committed_seq;
 
     // Recovery re-attaches the same inode — identity, content, and the full
     // revision history come back, even at a new path.
     block_on(fs.writer.undelete(
         &namespace_id,
         inode_id,
+        first_deletion,
         "/docs/recovered.txt",
         loonfs::UndeleteOptions::default(),
     ))
@@ -1187,34 +1190,60 @@ fn undelete_recovers_a_deleted_file_with_its_history() {
         b"draft one"
     );
 
-    // The recovered inode is no longer deleted: a second undelete conflicts.
+    // The recovered inode is no longer deleted: replaying the handle
+    // conflicts.
     let error = block_on(fs.writer.undelete(
         &namespace_id,
         inode_id,
+        first_deletion,
         "/docs/again.txt",
         loonfs::UndeleteOptions::default(),
     ))
     .expect_err("double undelete should conflict");
     assert!(matches!(
-        error,
+        &error,
         RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
-    // A later delete supersedes the clear, and recovery works again — this
-    // time back to the original path.
-    fs.delete_path_blocking(
+    // Delete again: the old generation handle must not cancel the new
+    // deletion, and the failure names both generations.
+    let second_deletion = fs
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs/recovered.txt",
+            DeleteOptions::default(),
+        )
+        .expect("delete recovered file again")
+        .committed_seq;
+    let error = block_on(fs.writer.undelete(
         &namespace_id,
-        "/docs/recovered.txt",
-        DeleteOptions::default(),
-    )
-    .expect("delete recovered file again");
+        inode_id,
+        first_deletion,
+        "/docs/stale.txt",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect_err("stale generation handle must not clear the newer deletion");
+    match &error {
+        RuntimeError::Core(error) => {
+            assert_eq!(error.code(), ErrorCode::NotDeleted);
+            let details = error.details().expect("generation mismatch details");
+            assert_eq!(details.requested_deletion_seq, Some(first_deletion));
+            assert_eq!(details.active_deletion_seq, Some(second_deletion));
+        }
+        other => panic!("expected core error, got {other:?}"),
+    }
+    let still_gone = fs.stat_path_blocking(&namespace_id, "/docs/stale.txt");
+    assert!(still_gone.is_err(), "stale undelete must not bind anything");
+
+    // The current generation's handle recovers to the original path.
     block_on(fs.writer.undelete(
         &namespace_id,
         inode_id,
+        second_deletion,
         "/docs/report.txt",
         loonfs::UndeleteOptions::default(),
     ))
-    .expect("undelete after re-delete");
+    .expect("undelete the active generation");
     assert_eq!(
         fs.stat_path_blocking(&namespace_id, "/docs/report.txt")
             .expect("stat restored original path")
@@ -1246,33 +1275,37 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         .expect("stat child")
         .inode_id;
 
-    fs.delete_path_blocking(
-        &namespace_id,
-        "/docs/notes",
-        DeleteOptions {
-            behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-            commit_id: None,
-        },
-    )
-    .expect("recursive delete");
+    let deletion = fs
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs/notes",
+            DeleteOptions {
+                behavior: loonfs::DeleteDirectoryBehavior::Recursive,
+                commit_id: None,
+            },
+        )
+        .expect("recursive delete")
+        .committed_seq;
 
     // A child is covered by the subtree root's tombstone, not its own:
     // recovery targets the root.
     let error = block_on(fs.writer.undelete(
         &namespace_id,
         child_inode,
+        deletion,
         "/docs/a-alone.txt",
         loonfs::UndeleteOptions::default(),
     ))
     .expect_err("child of a deleted directory is not the deletion root");
     assert!(matches!(
-        error,
+        &error,
         RuntimeError::Core(error) if error.code() == ErrorCode::NotDeleted
     ));
 
     block_on(fs.writer.undelete(
         &namespace_id,
         directory_inode,
+        deletion,
         "/docs/notes",
         loonfs::UndeleteOptions::default(),
     ))
@@ -1283,6 +1316,225 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
             .bytes,
         b"alpha"
     );
+}
+
+#[test]
+fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "undelete-nested-test");
+    let namespace_id = namespace_id();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/notes/secret.txt",
+        b"independently deleted",
+        PutFileOptions::default(),
+    )
+    .expect("put nested file");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/notes/kept.txt",
+        b"kept",
+        PutFileOptions::default(),
+    )
+    .expect("put sibling file");
+    let directory_inode = fs
+        .stat_path_blocking(&namespace_id, "/docs/notes")
+        .expect("stat directory")
+        .inode_id;
+
+    // Delete the child on its own, then the whole ancestor directory.
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs/notes/secret.txt",
+        DeleteOptions::default(),
+    )
+    .expect("delete child independently");
+    let ancestor_deletion = fs
+        .delete_path_blocking(
+            &namespace_id,
+            "/docs/notes",
+            DeleteOptions {
+                behavior: loonfs::DeleteDirectoryBehavior::Recursive,
+                commit_id: None,
+            },
+        )
+        .expect("recursive delete of the ancestor")
+        .committed_seq;
+
+    // Recovering the ancestor revokes exactly its own deletion: the
+    // independently deleted child stays hidden behind its own tombstone.
+    block_on(fs.writer.undelete(
+        &namespace_id,
+        directory_inode,
+        ancestor_deletion,
+        "/docs/notes",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect("undelete the ancestor");
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/notes/kept.txt")
+            .expect("sibling is visible again")
+            .bytes,
+        b"kept"
+    );
+    let hidden = fs.stat_path_blocking(&namespace_id, "/docs/notes/secret.txt");
+    assert!(matches!(
+        hidden,
+        Err(RuntimeError::Core(error)) if error.code() == ErrorCode::PathNotFound
+    ));
+}
+
+#[test]
+fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
+    let temp_dir = tempdir().expect("tempdir");
+    let object_store = store(temp_dir.path());
+    let namespace_id = namespace_id();
+
+    // Order one: delete + undelete in the WAL tail, then checkpoint,
+    // then reopen cold from object storage.
+    let deletion = {
+        let fs = open_runtime(object_store.clone(), "undelete-persist-a");
+        fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+            .expect("create namespace");
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            "/docs/report.txt",
+            b"persisted",
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+        let inode_id = fs
+            .stat_path_blocking(&namespace_id, "/docs/report.txt")
+            .expect("stat")
+            .inode_id;
+        let deletion = fs
+            .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+            .expect("delete")
+            .committed_seq;
+        block_on(fs.writer.undelete(
+            &namespace_id,
+            inode_id,
+            deletion,
+            "/docs/report.txt",
+            loonfs::UndeleteOptions::default(),
+        ))
+        .expect("undelete before checkpoint");
+        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default())
+            .expect("checkpoint the revoke into durable tables");
+        deletion
+    };
+    {
+        let fs = open_runtime(object_store.clone(), "undelete-persist-b");
+        assert_eq!(
+            fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+                .expect("recovered file survives checkpoint and reopen")
+                .bytes,
+            b"persisted"
+        );
+
+        // Order two: delete, checkpoint, reopen, THEN undelete — the
+        // revoke must resolve a deletion that lives in durable tables,
+        // not the WAL tail.
+        let inode_id = fs
+            .stat_path_blocking(&namespace_id, "/docs/report.txt")
+            .expect("stat")
+            .inode_id;
+        let second_deletion = fs
+            .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+            .expect("delete again")
+            .committed_seq;
+        assert!(second_deletion > deletion);
+        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default())
+            .expect("checkpoint the deletion");
+        let fs = open_runtime(object_store.clone(), "undelete-persist-c");
+        block_on(fs.writer.undelete(
+            &namespace_id,
+            inode_id,
+            second_deletion,
+            "/docs/report.txt",
+            loonfs::UndeleteOptions::default(),
+        ))
+        .expect("undelete a checkpointed deletion after reopen");
+        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default())
+            .expect("checkpoint the second revoke");
+    }
+    let fs = open_runtime(object_store, "undelete-persist-d");
+    assert_eq!(
+        fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+            .expect("recovered file survives the second cycle")
+            .bytes,
+        b"persisted"
+    );
+}
+
+#[test]
+fn change_feed_carries_the_exact_revoked_generation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "undelete-feed-test");
+    let namespace_id = namespace_id();
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"feed",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+    let inode_id = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect("stat")
+        .inode_id;
+    let deletion = fs
+        .delete_path_blocking(&namespace_id, "/docs/report.txt", DeleteOptions::default())
+        .expect("delete")
+        .committed_seq;
+    block_on(fs.writer.undelete(
+        &namespace_id,
+        inode_id,
+        deletion,
+        "/docs/report.txt",
+        loonfs::UndeleteOptions::default(),
+    ))
+    .expect("undelete");
+
+    let changes = block_on(fs.reader.list_changes_after(
+        &namespace_id,
+        ChangeSeq(0),
+        ListChangesOptions::default(),
+    ))
+    .expect("list changes");
+    let mut tombstone_target = None;
+    let mut revoke_target = None;
+    for change in &changes.changes {
+        for delta in &change.deltas {
+            match delta {
+                loonfs::CommitDelta::TombstoneSubtree {
+                    delta_index,
+                    root_inode_id,
+                    ..
+                } if *root_inode_id == inode_id => {
+                    tombstone_target = Some((change.seq, *delta_index));
+                }
+                loonfs::CommitDelta::RevokeSubtreeTombstone {
+                    root_inode_id,
+                    target_seq,
+                    target_delta_index,
+                    ..
+                } if *root_inode_id == inode_id => {
+                    revoke_target = Some((*target_seq, *target_delta_index));
+                }
+                _ => {}
+            }
+        }
+    }
+    // The revoke names the exact deletion event it cancels, so a
+    // projection can reduce state without guessing at "newest".
+    let tombstone_target = tombstone_target.expect("delete emitted a tombstone delta");
+    assert_eq!(tombstone_target.0, deletion);
+    assert_eq!(revoke_target, Some(tombstone_target));
 }
 
 #[test]

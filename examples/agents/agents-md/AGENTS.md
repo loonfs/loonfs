@@ -94,7 +94,7 @@ Before `put` over an existing path, or before `rm`, `mv`, `cp`, `restore`:
 1. `loon stat <path> --namespace <ns> --json` to see size and revision.
 2. Show the user; ask before overwriting / deleting / moving.
 3. Only pass `--force` after explicit user confirmation.
-4. Treat `rm` — and `mv --force` over an existing file — as permanent: the deleted or replaced file's revision history stops being reachable from its path. There is no undelete.
+4. `rm` reports a recovery handle (inode id + deletion sequence). Accidental deletes are recoverable with `loon undelete <path> --namespace <ns> --inode <id> --deleted-at <seq>`, which restores the same file and its full revision history; recovery targets that exact deletion, so it can never undo a later delete. For a deleted directory, undelete the directory root, not a file inside it.
 
 ## Safe retries
 

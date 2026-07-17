@@ -1218,6 +1218,7 @@ impl FsCore {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         absolute_path: &str,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
@@ -1226,6 +1227,7 @@ impl FsCore {
             PathMutationIntent::Undelete {
                 commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                 inode_id,
+                deleted_at_seq,
                 absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
             },
         )

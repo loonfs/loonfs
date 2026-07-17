@@ -243,6 +243,7 @@ mod tests {
             },
             api_v0::CommitOp::Undelete {
                 inode_id: InodeId(9),
+                deleted_at_seq: loonfs_api::ChangeSeq(11),
                 parent_inode_id: InodeId(1),
                 display_name: "restored".to_owned(),
             },

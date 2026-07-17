@@ -1,7 +1,7 @@
 //! [`PathMutationIntent`]: a user-facing path mutation before planning.
 
 use loonfs_api::{
-    AbsolutePath, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, InodeId,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, InodeId,
     MoveBehavior, PutBehavior, RevisionNo,
 };
 
@@ -59,6 +59,7 @@ pub enum PathMutationIntent {
     Undelete {
         commit_id: CommitId,
         inode_id: InodeId,
+        deleted_at_seq: ChangeSeq,
         absolute_path: AbsolutePath,
     },
 }
