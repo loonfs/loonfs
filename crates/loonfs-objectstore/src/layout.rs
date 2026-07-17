@@ -322,7 +322,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "metadata", "tables", table] if table.ends_with(".sst.zst") => {
             parsed(DurableObjectFamily::MetadataTable, Some(namespace))
         }
-        ["namespaces", namespace, "metadata", "index", segment]
+        ["namespaces", namespace, "metadata", "indexes", segment]
             if segment.ends_with(".idx.zst") =>
         {
             parsed(DurableObjectFamily::IndexSegment, Some(namespace))
@@ -534,6 +534,10 @@ mod tests {
             (
                 layout.metadata_table("ns-1", "tbl_abc").into_string(),
                 DurableObjectFamily::MetadataTable,
+            ),
+            (
+                layout.index_segment("ns-1", "idx_abc").into_string(),
+                DurableObjectFamily::IndexSegment,
             ),
             (
                 layout
