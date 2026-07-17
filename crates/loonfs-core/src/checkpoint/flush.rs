@@ -435,8 +435,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             writer_epoch: projection.head.writer_epoch,
             next_inode_id: projection.head.next_inode_id,
             retention_floor_seq: projection.floor_seq,
-            initialized: true,
-            verified: true,
             fork: None,
             // A checkpoint appends one delta run; it never changes what is
             // materialized on the namespace, so feature declarations and

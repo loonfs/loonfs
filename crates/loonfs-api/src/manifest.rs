@@ -532,8 +532,6 @@ pub struct NamespaceManifestPayload {
     pub writer_epoch: WriterEpoch,
     pub next_inode_id: InodeId,
     pub retention_floor_seq: ChangeSeq,
-    pub initialized: bool,
-    pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<NamespaceManifestFork>,
     /// Per-namespace capabilities materialized on this file-set version,
@@ -737,8 +735,6 @@ mod tests {
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
-                initialized: true,
-                verified: true,
                 fork: None,
                 features: BTreeMap::new(),
                 metadata_files: vec![metadata_file_ref(
@@ -780,8 +776,6 @@ mod tests {
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
-                initialized: true,
-                verified: true,
                 fork: Some(NamespaceManifestFork {
                     source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                     fork_seq: ChangeSeq(12),

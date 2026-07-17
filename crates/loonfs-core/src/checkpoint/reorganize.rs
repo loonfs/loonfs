@@ -358,8 +358,6 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
                 writer_epoch: previous.payload.writer_epoch,
                 next_inode_id: previous.payload.next_inode_id,
                 retention_floor_seq,
-                initialized: previous.payload.initialized,
-                verified: previous.payload.verified,
                 fork: previous.payload.fork.clone(),
                 features: previous.payload.features.clone(),
                 metadata_files: metadata_files.clone(),

@@ -235,8 +235,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             // Bootstrap precedes the floor object; nothing is retained
             // below the genesis seq.
             retention_floor_seq: ChangeSeq(0),
-            initialized: true,
-            verified: true,
             fork: None,
             features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(run_tables),
