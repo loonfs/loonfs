@@ -278,7 +278,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
     }))
 }
 
-pub(super) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_object_id: &ManifestObjectId,

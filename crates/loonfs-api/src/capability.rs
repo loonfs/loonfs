@@ -43,6 +43,10 @@ pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
 /// Advisory limit: the largest JSON body the commits endpoint accepts.
 /// Metadata-only; file bytes ride uploads, not commit bodies.
 pub const LIMIT_COMMIT_MAX_BODY_BYTES: &str = "commit.max_body_bytes";
+/// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
+/// request; smaller values answer `invalid_request`. Derived from the
+/// publication budgets, not tuned.
+pub const LIMIT_GC_MIN_GRACE_WINDOW_MS: &str = "maintenance.gc.min_grace_window_ms";
 /// Advisory limit: matches per grep page when the request omits `limit`.
 pub const LIMIT_QUERY_GREP_DEFAULT: &str = "query.grep.default_limit";
 /// Advisory limit: the largest accepted grep page limit. Distinct from the
