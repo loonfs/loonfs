@@ -69,11 +69,11 @@ use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
 use futures::stream::BoxStream;
-use loonfs::ErrorCode;
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsWriter, MaintenanceTickOptions,
     PutFileOptions, TraceMode, TraceStoreKind,
 };
+use loonfs_api::ErrorCode;
 use loonfs_api::MoveBehavior;
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
@@ -590,6 +590,79 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
                 Some("missing or invalid bearer token"),
             );
         }
+    })
+    .await
+    .expect("join blocking task");
+
+    server.abort();
+}
+
+/// Malformed query strings, path parameters, and JSON bodies answer inside
+/// the JSON error envelope as `invalid_request` — never as a framework
+/// plain-text rejection — and authorization is checked first, so the same
+/// malformed request without credentials answers 401.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let config = test_config(temp_dir.path(), "server-writer");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let router = app_with_store(config, store).await.expect("build app");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let expect_enveloped = |error: ureq::Error, status: u16, code: &str| {
+            let ureq::Error::Status(actual_status, response) = error else {
+                panic!("expected a status error, got {error:?}");
+            };
+            assert_eq!(actual_status, status);
+            assert!(response.header("x-request-id").is_some());
+            let body = response.into_string().expect("read error body");
+            let body: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
+            assert_eq!(body["code"], code);
+        };
+
+        // A query value that fails its field type: enveloped invalid_request.
+        let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
+        let error = ureq::get(&changes_url)
+            .set("authorization", "Bearer test-token")
+            .call()
+            .expect_err("malformed after_seq should answer 400");
+        expect_enveloped(error, 400, "invalid_request");
+
+        // The same malformed query without credentials: 401 wins.
+        let error = ureq::get(&changes_url)
+            .call()
+            .expect_err("unauthorized should answer 401");
+        expect_enveloped(error, 401, "unauthorized");
+
+        // A missing required query parameter: enveloped invalid_request.
+        let error = ureq::get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
+            .set("authorization", "Bearer test-token")
+            .call()
+            .expect_err("missing path parameter should answer 400");
+        expect_enveloped(error, 400, "invalid_request");
+
+        // A malformed JSON body: enveloped invalid_request with credentials,
+        // 401 without — the body is not read before authorization.
+        let create_url = format!("http://{addr}/v0/namespaces");
+        let error = ureq::post(&create_url)
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string("{not json")
+            .expect_err("malformed body should answer 400");
+        expect_enveloped(error, 400, "invalid_request");
+        let error = ureq::post(&create_url)
+            .set("content-type", "application/json")
+            .send_string("{not json")
+            .expect_err("unauthorized malformed body should answer 401");
+        expect_enveloped(error, 401, "unauthorized");
     })
     .await
     .expect("join blocking task");

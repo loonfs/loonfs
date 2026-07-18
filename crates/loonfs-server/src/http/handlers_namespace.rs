@@ -2,13 +2,17 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::{authorize, parse_namespace_id, AppJson, AppState, NamespaceIdPath, OptionalAppJson};
-use axum::extract::{Path as AxumPath, Query, State};
+use super::{
+    authorize, parse_namespace_id, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath,
+    OptionalAppJson,
+};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs::{ChangeSeq, CreateNamespaceOptions, DeleteNamespaceOptions};
+use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
+use loonfs_api::ChangeSeq;
 use loonfs_api::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
@@ -162,11 +166,12 @@ pub(super) async fn namespace_status(
 pub(super) async fn delete_namespace(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    Query(query): Query<DeleteNamespaceQuery>,
+    query: AppQuery<DeleteNamespaceQuery>,
     headers: HeaderMap,
-) -> Result<Json<loonfs::DeleteNamespaceResponse>, ApiResponseError> {
+) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
     let options = DeleteNamespaceOptions {
         expected_head_seq: query.expected_head_seq.map(ChangeSeq),
     };
@@ -277,11 +282,12 @@ pub(super) async fn create_checkpoint(
 pub(super) async fn release_checkpoint(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AxumPath(CheckpointPathParams { checkpoint_id }): AxumPath<CheckpointPathParams>,
+    path: AppPath<CheckpointPathParams>,
     headers: HeaderMap,
 ) -> Result<Json<ReleaseCheckpointResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let CheckpointPathParams { checkpoint_id } = path.into_params()?;
     let checkpoint_id = parse_checkpoint_id(&checkpoint_id)?;
     let response = state
         .admin
