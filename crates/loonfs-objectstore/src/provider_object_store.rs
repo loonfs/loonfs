@@ -337,7 +337,10 @@ impl ProviderObjectStore {
     /// upload: fixed-size parts uploaded through a bounded window, each part
     /// retried in place on transient failures (part indices are stable, so a
     /// retry re-sends the same part), and a best-effort abort so a failed
-    /// upload does not strand parts.
+    /// upload does not strand parts. An ambiguous completion — a transport
+    /// failure whose attempt may have landed — is resolved by reading the
+    /// object back and comparing bytes
+    /// ([`MultipartWrite::resolve_ambiguous_completion`]).
     ///
     /// There is deliberately no whole-operation clock: every part attempt is
     /// individually bounded and every retry loop is count-bounded, so a
@@ -503,7 +506,7 @@ impl MultipartWrite<'_> {
             .into_iter()
             .map(|part_id| part_id.expect("every part completed before the window drained"))
             .collect();
-        self.complete(upload_id, parts, bytes.len() as u64).await
+        self.complete(upload_id, parts, bytes).await
     }
 
     async fn upload_part(
@@ -549,9 +552,13 @@ impl MultipartWrite<'_> {
         &self,
         upload_id: &provider_store::MultipartId,
         parts: Vec<PartId>,
-        size_bytes: u64,
+        bytes: &Bytes,
     ) -> Result<ObjectMetadata> {
+        let size_bytes = bytes.len() as u64;
         let mut retries: u32 = 0;
+        // True once an attempt failed after possibly reaching the store, so
+        // no later failure can rule out that this completion landed.
+        let mut ambiguous_outcome = false;
         loop {
             let err = match self
                 .multipart
@@ -562,17 +569,19 @@ impl MultipartWrite<'_> {
                 Err(err) => err,
             };
             if !provider_transport_retryable(&err) {
-                return Err(map_provider_error(self.key, err));
-            }
-            // Ambiguous outcome: the completion may have landed before the
-            // transport failure. The payload is too large to read back, so
-            // landed-write detection is by size identity, which the caller's
-            // content addressing makes sufficient.
-            if let Ok(Some(metadata)) = self.store.head(self.key).await {
-                if metadata.size_bytes == size_bytes {
-                    return Ok(metadata);
+                if !ambiguous_outcome {
+                    return Err(map_provider_error(self.key, err));
                 }
+                // A definite refusal after an ambiguous attempt is not a
+                // definite failure: the ambiguous attempt may have landed
+                // and taken the upload id with it, in which case the
+                // provider reports the completed upload as gone. Only the
+                // object can say which happened.
+                return self
+                    .resolve_ambiguous_completion(upload_id, bytes, err)
+                    .await;
             }
+            ambiguous_outcome = true;
             let Some(backoff) = self.store.next_write_backoff(
                 self.key,
                 "complete_multipart",
@@ -581,23 +590,92 @@ impl MultipartWrite<'_> {
                 None,
                 &err,
             ) else {
-                return Err(map_provider_error(self.key, err));
+                return self
+                    .resolve_ambiguous_completion(upload_id, bytes, err)
+                    .await;
             };
             transport_retry_pause(backoff).await;
+        }
+    }
+
+    /// Decides an ambiguous completion by reading the object back: byte
+    /// equality with the payload is the only accepted proof that the write
+    /// landed. Size or etag agreement is never identity — this store serves
+    /// generic overwrite keys, so a stale object of the same length must
+    /// not pass as the new write. The payload is still in memory, so the
+    /// read-back costs one GET on this failure path and proves the put's
+    /// postcondition itself.
+    ///
+    /// A proven completion still aborts the upload id: when this upload's
+    /// completion landed the id is already gone and the abort is a no-op,
+    /// and when the proof came from an identical object some earlier writer
+    /// committed, the abort reclaims this upload's stranded parts.
+    async fn resolve_ambiguous_completion(
+        &self,
+        upload_id: &provider_store::MultipartId,
+        bytes: &Bytes,
+        final_err: provider_store::Error,
+    ) -> Result<ObjectMetadata> {
+        match self.store.get_with_metadata(self.key).await {
+            Ok(Some(body)) if body.bytes.as_slice() == bytes.as_ref() => {
+                self.abort(upload_id).await;
+                Ok(body.metadata)
+            }
+            Ok(readback) => {
+                let outcome = match readback {
+                    Some(_) => "the object at the key does not hold the payload bytes",
+                    None => "no object exists at the key",
+                };
+                tracing::warn!(
+                    object_key = self.key,
+                    operation = "complete_multipart",
+                    outcome,
+                    "ambiguous multipart completion did not land",
+                );
+                // An upload-gone rejection maps to `NotFound`, which would
+                // misreport this write failure as a missing object; it
+                // surfaces as transport instead, so callers classify the
+                // unproven outcome as safe to retry. Every other final
+                // error keeps its own classification.
+                Err(match map_provider_error(self.key, final_err) {
+                    ObjectStoreError::NotFound { .. } => ObjectStoreError::transport(
+                        self.key,
+                        format!(
+                            "multipart upload is gone without a provable completion: {outcome}"
+                        ),
+                    ),
+                    other => other,
+                })
+            }
+            Err(verify_err) => {
+                let original = map_provider_error(self.key, final_err).message();
+                Err(ObjectStoreError::transport(
+                    self.key,
+                    format!(
+                        "{original}; failed to verify multipart completion outcome: {verify_err}"
+                    ),
+                ))
+            }
         }
     }
 
     async fn abort(&self, upload_id: &provider_store::MultipartId) {
         // Best effort: an unaborted upload only strands parts until the
         // bucket's lifecycle rule for incomplete multipart uploads collects
-        // them, so an abort failure is logged rather than surfaced.
-        if let Err(err) = self.multipart.abort_multipart(self.path, upload_id).await {
-            tracing::warn!(
-                object_key = self.key,
-                operation = "abort_multipart",
-                error = %err,
-                "failed to abort multipart upload after a write failure",
-            );
+        // them, so an abort failure is logged rather than surfaced. An
+        // already-gone upload is the no-op success it reads as — typically
+        // its completion landed.
+        match self.multipart.abort_multipart(self.path, upload_id).await {
+            Ok(()) => {}
+            Err(err) if provider_not_found(&err) => {}
+            Err(err) => {
+                tracing::warn!(
+                    object_key = self.key,
+                    operation = "abort_multipart",
+                    error = %err,
+                    "failed to abort multipart upload; parts remain until the bucket lifecycle rule collects them",
+                );
+            }
         }
     }
 }
@@ -1154,11 +1232,16 @@ mod tests {
         FailWithoutLanding,
         LandThenFail,
         FailAuth,
+        /// The upload vanishes (as a lifecycle rule reaping it would make
+        /// it) and the attempt reports a transport failure. Only meaningful
+        /// as a completion script.
+        VanishThenFail,
     }
 
     #[derive(Debug)]
     enum ReadScript {
         NotFound,
+        Transport,
     }
 
     /// Provider double that fails scripted attempts before delegating to an
@@ -1230,6 +1313,9 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
+                Some(WriteScript::VanishThenFail) => {
+                    unreachable!("VanishThenFail is a completion script")
+                }
                 None => self.inner.put_opts(location, payload, opts).await,
             }
         }
@@ -1254,6 +1340,7 @@ mod tests {
                     path: location.to_string(),
                     source: "scripted not found".into(),
                 }),
+                Some(ReadScript::Transport) => Err(transport_glitch()),
                 None => self.inner.get_opts(location, options).await,
             }
         }
@@ -1272,6 +1359,9 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
+                Some(WriteScript::VanishThenFail) => {
+                    unreachable!("VanishThenFail is a completion script")
+                }
                 None => self.inner.delete(location).await,
             }
         }
@@ -1396,6 +1486,9 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
+                Some(WriteScript::VanishThenFail) => {
+                    unreachable!("VanishThenFail is a completion script")
+                }
                 None => {
                     self.store_part(id, part_idx, data)?;
                     Ok(PartId {
@@ -1424,6 +1517,13 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
+                Some(WriteScript::VanishThenFail) => {
+                    self.multipart_uploads
+                        .lock()
+                        .expect("uploads")
+                        .remove(id.as_str());
+                    Err(transport_glitch())
+                }
                 None => self.land_completion(path, id, &parts).await,
             }
         }
@@ -1842,6 +1942,27 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn script_complete(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
+        flaky
+            .complete_script
+            .lock()
+            .expect("complete script")
+            .extend(script);
+    }
+
+    /// Places an object at `key` directly on the inner store, bypassing the
+    /// scripted transport and its counters.
+    async fn seed_scoped_object(flaky: &FlakyStore, key: &str, bytes: Bytes) {
+        provider_store::ObjectStore::put_opts(
+            &flaky.inner,
+            &Path::from(format!("tenant-a/{key}")),
+            bytes.into(),
+            PutOptions::default(),
+        )
+        .await
+        .expect("seed object");
+    }
+
     #[tokio::test]
     async fn large_put_routes_through_multipart_and_preserves_bytes() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2003,11 +2124,7 @@ mod tests {
     async fn multipart_complete_transport_failure_resolves_landed_completion() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        flaky
-            .complete_script
-            .lock()
-            .expect("complete script")
-            .push_back(WriteScript::LandThenFail);
+        script_complete(&flaky, [WriteScript::LandThenFail]);
         let payload = multipart_payload(1300);
 
         let metadata = store
@@ -2015,9 +2132,31 @@ mod tests {
             .await
             .expect("landed completion reported as the success it was");
 
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.multipart_completes.load(Ordering::SeqCst),
+            2,
+            "the retry finds the landed completion's upload gone"
+        );
+        assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            1,
+            "one read-back proves the landed write by byte identity"
+        );
+        assert_eq!(
+            flaky.multipart_aborts.load(Ordering::SeqCst),
+            1,
+            "the proven completion still aborts the gone upload id best-effort"
+        );
         assert_eq!(metadata.size_bytes, 1300);
+        let head = store
+            .head(MULTIPART_KEY)
+            .await
+            .expect("head")
+            .expect("object exists");
+        assert_eq!(
+            metadata.etag, head.etag,
+            "resolution reports the landed object's own metadata"
+        );
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
@@ -2028,11 +2167,7 @@ mod tests {
     async fn multipart_complete_failure_without_landing_retries_the_completion() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        flaky
-            .complete_script
-            .lock()
-            .expect("complete script")
-            .push_back(WriteScript::FailWithoutLanding);
+        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
         let payload = multipart_payload(1300);
 
         store
@@ -2043,9 +2178,194 @@ mod tests {
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
         assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            0,
+            "a completion that succeeds on retry needs no read-back"
+        );
+        assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
         );
+    }
+
+    /// The regression this fix exists for: an unproven completion must
+    /// never adopt a pre-existing object of the same size. The pre-fix code
+    /// reconciled by size identity and reported success for bytes that were
+    /// never written.
+    #[tokio::test]
+    async fn multipart_complete_exhaustion_rejects_stale_same_size_object() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let stale = Bytes::from(vec![0xAA_u8; 1300]);
+        seed_scoped_object(&flaky, MULTIPART_KEY, stale.clone()).await;
+        script_complete(&flaky, (0..5).map(|_| WriteScript::FailWithoutLanding));
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("an unproven completion fails instead of adopting the stale object");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(
+            flaky.multipart_completes.load(Ordering::SeqCst),
+            5,
+            "1 attempt + max_retries"
+        );
+        assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            1,
+            "one read-back tested the outcome"
+        );
+        assert_eq!(
+            flaky.multipart_aborts.load(Ordering::SeqCst),
+            1,
+            "the failed upload is aborted so no parts are stranded"
+        );
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(stale),
+            "the stale object is untouched"
+        );
+    }
+
+    /// The content-addressed re-put shape: when the object already holds
+    /// exactly the payload bytes, byte identity proves the put's
+    /// postcondition even though this upload's completion never landed —
+    /// and the dangling upload is reclaimed rather than stranded.
+    #[tokio::test]
+    async fn multipart_complete_exhaustion_accepts_identical_object_and_aborts() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let payload = multipart_payload(1300);
+        seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(payload.clone())).await;
+        script_complete(&flaky, (0..5).map(|_| WriteScript::FailWithoutLanding));
+
+        let metadata = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(payload))
+            .await
+            .expect("byte-identical object proves the outcome");
+
+        assert_eq!(metadata.size_bytes, 1300);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            flaky.multipart_aborts.load(Ordering::SeqCst),
+            1,
+            "the dangling upload is aborted on proven success"
+        );
+        assert!(
+            flaky.multipart_uploads.lock().expect("uploads").is_empty(),
+            "no parts remain stranded"
+        );
+    }
+
+    /// The lifecycle-abort race: the upload vanishes while the completion's
+    /// outcome is ambiguous and a stale object sits at the key. The gone
+    /// upload maps to not-found, which must surface as a retry-safe
+    /// transport failure about this write — not as a missing object, and
+    /// never as success.
+    #[tokio::test]
+    async fn multipart_complete_gone_upload_with_stale_object_fails_as_transport() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let stale = Bytes::from(vec![0xAA_u8; 1300]);
+        seed_scoped_object(&flaky, MULTIPART_KEY, stale.clone()).await;
+        script_complete(&flaky, [WriteScript::VanishThenFail]);
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("a vanished upload with a stale object is a failed write");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        let message = error.message();
+        assert!(
+            message.contains("without a provable completion"),
+            "message names the unproven outcome: {message}"
+        );
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(stale),
+            "the stale object is untouched"
+        );
+    }
+
+    /// A definite refusal that follows an ambiguous attempt verifies before
+    /// failing, and a disproven completion surfaces the refusal under its
+    /// own classification instead of as network weather.
+    #[tokio::test]
+    async fn multipart_complete_definite_rejection_after_ambiguity_keeps_its_class() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(vec![0xAA_u8; 1300])).await;
+        script_complete(
+            &flaky,
+            [WriteScript::FailWithoutLanding, WriteScript::FailAuth],
+        );
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("auth rejection surfaces after the outcome is disproven");
+
+        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            1,
+            "the ambiguous prior attempt forces a read-back first"
+        );
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A first-attempt refusal is definite: nothing can have landed, so no
+    /// read-back runs and the refusal surfaces directly.
+    #[tokio::test]
+    async fn multipart_complete_first_attempt_rejection_skips_verification() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        script_complete(&flaky, [WriteScript::FailAuth]);
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("auth rejection surfaces immediately");
+
+        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+    }
+
+    /// When the read-back itself fails, the outcome stays unknown and
+    /// surfaces as a transport error carrying both failures — never as a
+    /// success the store cannot prove.
+    #[tokio::test]
+    async fn multipart_complete_unverifiable_outcome_surfaces_both_failures() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        script_complete(&flaky, (0..5).map(|_| WriteScript::FailWithoutLanding));
+        flaky
+            .get_script
+            .lock()
+            .expect("get script")
+            .push_back(ReadScript::Transport);
+
+        let error = store
+            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
+            .await
+            .expect_err("an unverifiable outcome is an error, not a success");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        let message = error.message();
+        assert!(
+            message.contains("failed to verify multipart completion outcome"),
+            "message names the verification failure: {message}"
+        );
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
 
     /// Multipart transfers carry no whole-operation clock: with a stepping
