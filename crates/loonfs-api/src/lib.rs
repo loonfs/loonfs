@@ -40,6 +40,10 @@ pub mod wire {
         pub use crate::control::*;
     }
 
+    pub mod envelope {
+        pub use crate::envelope::EnvelopeCodecError;
+    }
+
     pub mod sst_blocks {
         pub use crate::sst_blocks::*;
     }
