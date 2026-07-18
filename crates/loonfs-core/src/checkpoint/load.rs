@@ -25,10 +25,7 @@ use super::validate::{
     validate_namespace_manifest,
 };
 #[cfg(test)]
-use crate::metadata::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    MetadataStateBuilder, RevisionRecord, SubtreeTombstoneRecord,
-};
+use crate::metadata::{MetadataState, MetadataStateBuilder};
 #[cfg(test)]
 use futures::future::try_join_all;
 #[cfg(test)]
@@ -1243,6 +1240,10 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
     }
 }
 
+/// Projects rows into a metadata-state builder through the same decoders the
+/// lookup path uses, re-attributing a foreign-kind row to the object that
+/// carried it. Index-only families are kind-checked but not projected; their
+/// contents are validated against the canonical family separately.
 #[cfg(test)]
 pub(super) fn append_rows_to_metadata(
     metadata_state: &mut MetadataStateBuilder,
@@ -1250,126 +1251,37 @@ pub(super) fn append_rows_to_metadata(
     object_key: &str,
     rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
+    use crate::metadata::row_decode;
     for row in rows {
-        match (family, row) {
-            (
-                MetadataTableFamily::Inodes,
-                MetadataRow::Inode {
-                    inode_id,
-                    inode_kind,
-                    created_seq,
-                },
-            ) => metadata_state.push_inode(InodeRecord {
-                inode_id: *inode_id,
-                inode_kind: *inode_kind,
-                created_seq: *created_seq,
-            }),
-            (
-                MetadataTableFamily::DirentryBinds,
-                MetadataRow::DirentryBind {
-                    parent_inode_id,
-                    name_key,
-                    display_name,
-                    child_inode_id,
-                    bind_seq,
-                    bind_delta_index,
-                },
-            ) => metadata_state.push_direntry_bind(DirentryBindRecord {
-                parent_inode_id: *parent_inode_id,
-                name_key: name_key.as_str().to_owned(),
-                display_name: display_name.clone(),
-                child_inode_id: *child_inode_id,
-                bind_seq: *bind_seq,
-                bind_delta_index: *bind_delta_index,
-            }),
-            (MetadataTableFamily::DirentryChildBinds, MetadataRow::DirentryBind { .. }) => {}
-            (
-                MetadataTableFamily::DirentryUnbinds,
-                MetadataRow::DirentryUnbind {
-                    parent_inode_id,
-                    name_key,
-                    child_inode_id,
-                    bind_seq,
-                    bind_delta_index,
-                    unbind_seq,
-                    unbind_delta_index,
-                },
-            ) => metadata_state.push_direntry_unbind(DirentryUnbindRecord {
-                parent_inode_id: *parent_inode_id,
-                name_key: name_key.as_str().to_owned(),
-                child_inode_id: *child_inode_id,
-                bind_seq: *bind_seq,
-                bind_delta_index: *bind_delta_index,
-                unbind_seq: *unbind_seq,
-                unbind_delta_index: *unbind_delta_index,
-            }),
-            (
-                MetadataTableFamily::Revisions,
-                MetadataRow::Revision {
-                    inode_id,
-                    revision_no,
-                    committed_seq,
-                    committed_at_ms,
-                    revision_delta_index,
-                    content_ref,
-                },
-            ) => metadata_state.push_revision(RevisionRecord {
-                inode_id: *inode_id,
-                revision_no: *revision_no,
-                committed_seq: *committed_seq,
-                committed_at_ms: *committed_at_ms,
-                revision_delta_index: *revision_delta_index,
-                content_ref: content_ref.clone(),
-            }),
-            (MetadataTableFamily::RevisionsByInodeDesc, MetadataRow::Revision { .. }) => {}
-            (
-                MetadataTableFamily::Tombstones,
-                MetadataRow::Tombstone {
-                    root_inode_id,
-                    tombstone_seq,
-                    tombstone_delta_index,
-                    action,
-                },
-            ) => metadata_state.push_subtree_tombstone(SubtreeTombstoneRecord {
-                root_inode_id: *root_inode_id,
-                tombstone_seq: *tombstone_seq,
-                tombstone_delta_index: *tombstone_delta_index,
-                action: match action {
-                    loonfs_api::wire::manifest::TombstoneRowAction::Set => {
-                        crate::metadata::SubtreeTombstoneAction::Set
-                    }
-                    loonfs_api::wire::manifest::TombstoneRowAction::Revoke {
-                        target_seq,
-                        target_delta_index,
-                    } => crate::metadata::SubtreeTombstoneAction::Revoke {
-                        target_seq: *target_seq,
-                        target_delta_index: *target_delta_index,
-                    },
-                },
-            }),
-            (
-                MetadataTableFamily::CommitReceipts,
-                MetadataRow::CommitReceipt {
-                    commit_id,
-                    semantic_commit_fingerprint,
-                    committed_seq,
-                    committed_at_ms,
-                    message,
-                },
-            ) => metadata_state.push_commit_receipt(CommitReceiptRecord {
-                commit_id: commit_id.clone(),
-                semantic_commit_fingerprint: semantic_commit_fingerprint.clone(),
-                committed_seq: *committed_seq,
-                committed_at_ms: *committed_at_ms,
-                message: message.clone(),
-            }),
-            _ => {
-                return Err(ManifestLoadError::TableRowKindMismatch {
-                    object_key: object_key.to_owned(),
-                    family,
-                    row_kind: manifest_row_kind(row).to_owned(),
-                });
+        let mismatch = |_: crate::error::CoreError| ManifestLoadError::TableRowKindMismatch {
+            object_key: object_key.to_owned(),
+            family,
+            row_kind: manifest_row_kind(row).to_owned(),
+        };
+        match family {
+            MetadataTableFamily::Inodes => metadata_state
+                .push_inode(row_decode::inode_from_manifest_row(row.clone()).map_err(mismatch)?),
+            MetadataTableFamily::DirentryBinds => metadata_state.push_direntry_bind(
+                row_decode::direntry_bind_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
+            MetadataTableFamily::DirentryChildBinds => {
+                row_decode::direntry_bind_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
+            MetadataTableFamily::DirentryUnbinds => metadata_state.push_direntry_unbind(
+                row_decode::direntry_unbind_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
+            MetadataTableFamily::Revisions => metadata_state.push_revision(
+                row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
+            MetadataTableFamily::RevisionsByInodeDesc => {
+                row_decode::revision_from_manifest_row(row.clone()).map_err(mismatch)?;
+            }
+            MetadataTableFamily::Tombstones => metadata_state.push_subtree_tombstone(
+                row_decode::tombstone_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
+            MetadataTableFamily::CommitReceipts => metadata_state.push_commit_receipt(
+                row_decode::commit_receipt_from_manifest_row(row.clone()).map_err(mismatch)?,
+            ),
         }
     }
     Ok(())
