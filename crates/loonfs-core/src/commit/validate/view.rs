@@ -47,10 +47,10 @@ pub(super) trait CommitValidationView {
         name_key: &str,
     ) -> Result<Option<DirentryBindRecord>, Self::Error>;
 
-    async fn visible_children(
-        &self,
-        parent_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, Self::Error>;
+    /// Whether the directory has at least one visible child — the
+    /// directory-empty checks need only existence, so implementations answer
+    /// with a bounded probe instead of materializing the child list.
+    async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool, Self::Error>;
 
     async fn latest_revision_record(
         &self,
@@ -168,12 +168,9 @@ impl CommitValidationView for InMemoryValidationView<'_> {
             .map_err(commit_validation_from_core)
     }
 
-    async fn visible_children(
-        &self,
-        parent_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, Self::Error> {
+    async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool, Self::Error> {
         self.view()
-            .visible_children(parent_inode_id)
+            .has_visible_children(parent_inode_id)
             .await
             .map_err(commit_validation_from_core)
     }
@@ -299,11 +296,8 @@ impl<S: ObjectStore + ?Sized> CommitValidationView for PublishValidationView<'_,
         self.view().visible_child(parent_inode_id, name_key).await
     }
 
-    async fn visible_children(
-        &self,
-        parent_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, Self::Error> {
-        self.view().visible_children(parent_inode_id).await
+    async fn has_visible_children(&self, parent_inode_id: InodeId) -> Result<bool, Self::Error> {
+        self.view().has_visible_children(parent_inode_id).await
     }
 
     async fn latest_revision_record(
