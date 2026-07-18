@@ -882,20 +882,6 @@ impl FsCore {
         Ok(response)
     }
 
-    /// Lists the revision history of a file path.
-    pub(crate) async fn list_file_revisions(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<ListFileRevisionsResponse> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
-        let revisions = engine
-            .list_file_revisions_with_runtime_context(absolute_path, &read_context)
-            .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
-        Ok(revisions)
-    }
-
     /// Lists one page of a file path's revision history.
     pub(crate) async fn list_file_revisions_page(
         &self,
@@ -915,21 +901,6 @@ impl FsCore {
             page,
             fallback_inode_id,
         )?)
-    }
-
-    /// Lists a file's revision history by inode id, independent of its
-    /// current path.
-    pub(crate) async fn list_file_revisions_for_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-    ) -> Result<ListFileRevisionsResponse> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
-        let revisions = engine
-            .list_file_revisions_for_inode_with_runtime_context(inode_id, &read_context)
-            .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
-        Ok(revisions)
     }
 
     /// Lists one page of a file inode's revision history.

@@ -35,8 +35,7 @@ use loonfs_api::{
     decode_grep_cursor, encode_grep_cursor, AbsolutePath, AuthoritativeFileBytes,
     AuthoritativePathEntry, ContentStoreId, DirectoryPageCursor, DisplayName, FileRevision,
     FileRevisionsPageCursor, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId,
-    InodeKind, ListFileRevisionsResponse, ManifestId, NamePolicy, NamespaceId, Page, PageRequest,
-    PaginationPolicy, RevisionNo,
+    InodeKind, ManifestId, NamePolicy, NamespaceId, Page, PageRequest, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -741,20 +740,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(inodes)
     }
 
-    pub(crate) async fn list_file_revisions(
-        &self,
-        absolute_path: &str,
-    ) -> Result<ListFileRevisionsResponse, CoreError> {
-        let entry = self.resolve_path(absolute_path).await?;
-        if entry.inode_kind != InodeKind::File {
-            return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path,
-                kind: entry.inode_kind,
-            });
-        }
-        self.list_file_revisions_for_inode(entry.inode_id).await
-    }
-
     pub(crate) async fn list_file_revisions_page(
         &self,
         absolute_path: &str,
@@ -769,39 +754,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         self.list_file_revisions_for_inode_page(entry.inode_id, request)
             .await
-    }
-
-    pub(crate) async fn list_file_revisions_for_inode(
-        &self,
-        inode_id: InodeId,
-    ) -> Result<ListFileRevisionsResponse, CoreError> {
-        let limit = PaginationPolicy::default()
-            .resolve_limit(None)
-            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
-        let mut cursor = None;
-        let mut revisions = Vec::new();
-        loop {
-            let page = self
-                .list_file_revisions_for_inode_page(
-                    inode_id,
-                    PageRequest {
-                        limit,
-                        cursor: cursor.clone(),
-                    },
-                )
-                .await?;
-            revisions.extend(page.items);
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                return Ok(ListFileRevisionsResponse {
-                    namespace_id: self.namespace_id.clone(),
-                    inode_id,
-                    head_seq: self.head.seq,
-                    revisions,
-                    next_cursor: None,
-                });
-            }
-        }
     }
 
     pub(crate) async fn list_file_revisions_for_inode_page(

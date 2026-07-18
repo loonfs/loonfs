@@ -19,9 +19,9 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
-    FileRevisionsPageCursor, FlushWalResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, Page,
-    PageRequest, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    FileRevisionsPageCursor, FlushWalResponse, GrepRequest, GrepResponse, InodeId, ManifestId,
+    ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse,
+    RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -212,16 +212,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     #[doc(hidden)]
-    pub async fn list_file_revisions_with_runtime_context(
-        &self,
-        path: impl AsRef<str>,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        self.list_file_revisions_with_context(path.as_ref(), runtime_read_load_context(options))
-            .await
-    }
-
-    #[doc(hidden)]
     pub async fn list_file_revisions_page_with_runtime_context(
         &self,
         path: impl AsRef<str>,
@@ -231,19 +221,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         self.list_file_revisions_page_with_context(
             path.as_ref(),
             request,
-            runtime_read_load_context(options),
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn list_file_revisions_for_inode_with_runtime_context(
-        &self,
-        inode_id: InodeId,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        self.list_file_revisions_for_inode_with_context(
-            inode_id,
             runtime_read_load_context(options),
         )
         .await
@@ -335,15 +312,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    async fn list_file_revisions_with_context(
-        &self,
-        path: &str,
-        context: ReadLoadContext<'_>,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        let view = self.load_read_view(context).await?;
-        view.list_file_revisions(path).await
-    }
-
     async fn list_file_revisions_page_with_context(
         &self,
         path: &str,
@@ -352,15 +320,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_file_revisions_page(path, request).await
-    }
-
-    async fn list_file_revisions_for_inode_with_context(
-        &self,
-        inode_id: InodeId,
-        context: ReadLoadContext<'_>,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        let view = self.load_read_view(context).await?;
-        view.list_file_revisions_for_inode(inode_id).await
     }
 
     async fn list_file_revisions_for_inode_page_with_context(

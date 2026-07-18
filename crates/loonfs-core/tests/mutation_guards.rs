@@ -527,16 +527,15 @@ fn read_file_bytes<S: ObjectStore + ?Sized>(
     )
 }
 
+/// Drains the paged revision listing — the only revision-listing operation
+/// the stack exposes — so guards can assert over a file's full history.
 fn list_file_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
-    let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .list_file_revisions_with_runtime_context(absolute_path, &context),
-    )
+    let entry = resolve_path(store, namespace_id, absolute_path)?;
+    list_file_revisions_for_inode(store, namespace_id, entry.inode_id)
 }
 
 fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
@@ -545,10 +544,32 @@ fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
     let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .list_file_revisions_for_inode_with_runtime_context(inode_id, &context),
-    )
+    let engine = namespace_engine(store, namespace_id, &mutation_context());
+    let mut revisions = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = block_on(
+            engine.list_file_revisions_for_inode_page_with_runtime_context(
+                inode_id,
+                PageRequest {
+                    limit: page_limit(2),
+                    cursor: cursor.clone(),
+                },
+                &context,
+            ),
+        )?;
+        revisions.extend(page.items);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok(loonfs_api::ListFileRevisionsResponse {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                head_seq: context.head.seq,
+                revisions,
+                next_cursor: None,
+            });
+        }
+    }
 }
 
 fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
