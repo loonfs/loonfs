@@ -21,7 +21,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 
@@ -399,10 +399,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         commit_id: &CommitId,
     ) -> Result<Option<CommitReceiptRecord>, CoreError> {
+        // Each row state answers from its receipt index (newest per commit
+        // id) instead of a scan over every receipt row; the seq guard stays
+        // as written even though composed states never hold rows past the
+        // visible seq.
         let row_receipt = self
             .row_states()
-            .flat_map(|state| state.commit_receipts())
-            .filter(|receipt| receipt.commit_id == *commit_id)
+            .filter_map(|state| state.find_commit_receipt(commit_id))
             .filter(|receipt| receipt.committed_seq <= self.visible_seq())
             .max_by_key(|receipt| receipt.committed_seq)
             .cloned();
@@ -433,10 +436,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         let bindings = self.direntry_binds_for_child(child_inode_id).await?;
-        Ok(bindings
-            .into_iter()
+        let latest = bindings
+            .iter()
             .filter(|direntry| direntry.bind_seq <= self.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned();
+        Ok(latest)
     }
 
     pub(crate) async fn covering_subtree_tombstone(
@@ -463,10 +468,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let bindings = self
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
-        Ok(bindings
-            .into_iter()
+        let latest = bindings
+            .iter()
             .filter(|direntry| direntry.bind_seq <= self.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index)))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned();
+        Ok(latest)
     }
 
     pub(crate) async fn is_direntry_unbound(
@@ -474,9 +481,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         direntry: &DirentryBindRecord,
     ) -> Result<bool, CoreError> {
         let unbinds = self.direntry_unbinds_for_binding(direntry).await?;
-        Ok(unbinds
-            .into_iter()
-            .any(|unbind| unbind.unbind_seq <= self.visible_seq()))
+        let unbound = unbinds
+            .iter()
+            .any(|unbind| unbind.unbind_seq <= self.visible_seq());
+        Ok(unbound)
     }
 
     pub(crate) async fn active_subtree_tombstone(
@@ -484,17 +492,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
         let tombstones = self.tombstones_for_root(root_inode_id).await?;
-        Ok(super::rows::active_tombstone_from_records(
-            tombstones,
+        let active = super::rows::active_tombstone_from_records(
+            tombstones.iter().cloned(),
             self.visible_seq(),
-        ))
+        );
+        Ok(active)
     }
 
     async fn direntry_binds_for_parent_name(
         &self,
         parent_inode_id: InodeId,
         name_key: &str,
-    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryBindRecord>, CoreError> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
             name_key: name_key.to_owned(),
@@ -522,33 +531,37 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     })
                     .cloned()
             }));
+            let durable = Arc::new(durable);
             if let Some(cache) = self.sources.durable_cache {
                 cache.insert(
                     |inner| &mut inner.binds_for_parent_name,
                     cache_key,
-                    durable.clone(),
+                    Arc::clone(&durable),
                 );
             }
             durable
         };
-        let mut bindings = durable;
-        bindings.extend(self.overlay_state().into_iter().flat_map(|state| {
-            state
-                .direntry_binds()
-                .iter()
-                .filter(move |direntry| {
-                    direntry.parent_inode_id == parent_inode_id
-                        && direntry.name_key.as_str() == name_key
-                })
-                .cloned()
-        }));
-        Ok(bindings)
+        let overlay = self
+            .overlay_state()
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .direntry_binds()
+                    .iter()
+                    .filter(move |direntry| {
+                        direntry.parent_inode_id == parent_inode_id
+                            && direntry.name_key.as_str() == name_key
+                    })
+                    .cloned()
+            })
+            .collect();
+        Ok(SharedRows { durable, overlay })
     }
 
     async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryBindRecord>, CoreError> {
         let durable = if let Some(cached) = self
             .sources
             .durable_cache
@@ -568,30 +581,34 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .filter(move |direntry| direntry.child_inode_id == child_inode_id)
                     .cloned()
             }));
+            let durable = Arc::new(durable);
             if let Some(cache) = self.sources.durable_cache {
                 cache.insert(
                     |inner| &mut inner.binds_for_child,
                     child_inode_id,
-                    durable.clone(),
+                    Arc::clone(&durable),
                 );
             }
             durable
         };
-        let mut bindings = durable;
-        bindings.extend(self.overlay_state().into_iter().flat_map(|state| {
-            state
-                .direntry_binds()
-                .iter()
-                .filter(move |direntry| direntry.child_inode_id == child_inode_id)
-                .cloned()
-        }));
-        Ok(bindings)
+        let overlay = self
+            .overlay_state()
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .direntry_binds()
+                    .iter()
+                    .filter(move |direntry| direntry.child_inode_id == child_inode_id)
+                    .cloned()
+            })
+            .collect();
+        Ok(SharedRows { durable, overlay })
     }
 
     async fn direntry_unbinds_for_binding(
         &self,
         direntry: &DirentryBindRecord,
-    ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
+    ) -> Result<SharedRows<DirentryUnbindRecord>, CoreError> {
         let cache_key = BindingCacheKey::from(direntry);
         let durable = if let Some(cached) = self
             .sources
@@ -612,24 +629,28 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .filter(move |unbind| unbind_matches_binding(unbind, direntry))
                     .cloned()
             }));
+            let durable = Arc::new(durable);
             if let Some(cache) = self.sources.durable_cache {
                 cache.insert(
                     |inner| &mut inner.unbinds_for_binding,
                     cache_key,
-                    durable.clone(),
+                    Arc::clone(&durable),
                 );
             }
             durable
         };
-        let mut unbinds = durable;
-        unbinds.extend(self.overlay_state().into_iter().flat_map(|state| {
-            state
-                .direntry_unbinds()
-                .iter()
-                .filter(move |unbind| unbind_matches_binding(unbind, direntry))
-                .cloned()
-        }));
-        Ok(unbinds)
+        let overlay = self
+            .overlay_state()
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .direntry_unbinds()
+                    .iter()
+                    .filter(move |unbind| unbind_matches_binding(unbind, direntry))
+                    .cloned()
+            })
+            .collect();
+        Ok(SharedRows { durable, overlay })
     }
 
     fn row_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
@@ -682,7 +703,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     async fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,
-    ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
+    ) -> Result<SharedRows<SubtreeTombstoneRecord>, CoreError> {
         let durable = if let Some(cached) = self
             .sources
             .durable_cache
@@ -702,24 +723,28 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
                     .cloned()
             }));
+            let durable = Arc::new(durable);
             if let Some(cache) = self.sources.durable_cache {
                 cache.insert(
                     |inner| &mut inner.tombstones_for_root,
                     root_inode_id,
-                    durable.clone(),
+                    Arc::clone(&durable),
                 );
             }
             durable
         };
-        let mut tombstones = durable;
-        tombstones.extend(self.overlay_state().into_iter().flat_map(|state| {
-            state
-                .subtree_tombstones()
-                .iter()
-                .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
-                .cloned()
-        }));
-        Ok(tombstones)
+        let overlay = self
+            .overlay_state()
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .subtree_tombstones()
+                    .iter()
+                    .filter(move |tombstone| tombstone.root_inode_id == root_inode_id)
+                    .cloned()
+            })
+            .collect();
+        Ok(SharedRows { durable, overlay })
     }
 
     /// Every unbind for `parent_inode_id` with a name key in
@@ -1131,9 +1156,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         for (child_inode_id, inode, bindings, tombstones) in lookups {
             self.inode_at_seq_cache.insert(child_inode_id, inode);
             let latest_binding = bindings
-                .into_iter()
+                .iter()
                 .filter(|direntry| direntry.bind_seq <= visible_seq)
-                .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+                .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+                .cloned();
             if let Some(latest_binding) = &latest_binding {
                 // A child bound in this directory within the preloaded name
                 // range gets its unbind fact from the range scan; bindings
@@ -1150,7 +1176,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             self.latest_parent_binding_cache
                 .insert(child_inode_id, latest_binding);
             let active_tombstone =
-                super::rows::active_tombstone_from_records(tombstones, visible_seq);
+                super::rows::active_tombstone_from_records(tombstones.iter().cloned(), visible_seq);
             self.active_tombstone_cache
                 .insert(child_inode_id, active_tombstone);
         }
@@ -1289,14 +1315,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 self.inode_at_seq_cache.insert(current_inode_id, inode);
             }
             if let Some(tombstones) = tombstones {
-                let active = super::rows::active_tombstone_from_records(tombstones, visible_seq);
+                let active = super::rows::active_tombstone_from_records(
+                    tombstones.iter().cloned(),
+                    visible_seq,
+                );
                 self.active_tombstone_cache.insert(current_inode_id, active);
             }
             if let Some(bindings) = child_bindings {
                 let latest = bindings
-                    .into_iter()
+                    .iter()
                     .filter(|direntry| direntry.bind_seq <= visible_seq)
-                    .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+                    .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+                    .cloned();
                 self.latest_parent_binding_cache
                     .insert(current_inode_id, latest);
             }
@@ -1308,9 +1338,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 let cache_key = BindingCacheKey::from(binding);
                 let unbound = match unbinds {
                     Some(rows) => {
-                        let unbound = rows
-                            .into_iter()
-                            .any(|unbind| unbind.unbind_seq <= visible_seq);
+                        let unbound = rows.iter().any(|unbind| unbind.unbind_seq <= visible_seq);
                         self.unbind_cache.insert(cache_key, unbound);
                         unbound
                     }
@@ -1329,9 +1357,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             let bound = match bound_rows {
                 Some(rows) => {
                     let latest = rows
-                        .into_iter()
+                        .iter()
                         .filter(|direntry| direntry.bind_seq <= visible_seq)
-                        .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+                        .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+                        .cloned();
                     self.bound_child_cache.insert(
                         ParentNameCacheKey {
                             parent_inode_id: current_inode_id,
@@ -1467,9 +1496,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let bindings = self.base.direntry_binds_for_child(child_inode_id).await?;
         let latest = bindings
-            .into_iter()
+            .iter()
             .filter(|direntry| direntry.bind_seq <= self.base.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned();
         self.latest_parent_binding_cache
             .insert(child_inode_id, latest.clone());
         Ok(latest)
@@ -1500,8 +1530,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let tombstones = self.base.tombstones_for_root(root_inode_id).await?;
-        let tombstone =
-            super::rows::active_tombstone_from_records(tombstones, self.base.visible_seq());
+        let tombstone = super::rows::active_tombstone_from_records(
+            tombstones.iter().cloned(),
+            self.base.visible_seq(),
+        );
         self.active_tombstone_cache
             .insert(root_inode_id, tombstone.clone());
         Ok(tombstone)
@@ -1525,9 +1557,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
             .await?;
         let binding = bindings
-            .into_iter()
+            .iter()
             .filter(|direntry| direntry.bind_seq <= self.base.visible_seq())
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index));
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned();
         self.bound_child_cache.insert(cache_key, binding.clone());
         Ok(binding)
     }
@@ -1543,7 +1576,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let unbinds = self.base.direntry_unbinds_for_binding(direntry).await?;
         let unbound = unbinds
-            .into_iter()
+            .iter()
             .any(|unbind| unbind.unbind_seq <= self.base.visible_seq());
         self.unbind_cache.insert(cache_key, unbound);
         Ok(unbound)
@@ -1630,12 +1663,27 @@ pub(crate) struct DurableVisibilityCache {
 #[derive(Debug, Default)]
 struct DurableVisibilityCacheInner {
     inodes: HashMap<InodeId, Option<InodeRecord>>,
-    binds_for_parent_name: HashMap<ParentNameCacheKey, Vec<DirentryBindRecord>>,
-    binds_for_child: HashMap<InodeId, Vec<DirentryBindRecord>>,
-    unbinds_for_binding: HashMap<BindingCacheKey, Vec<DirentryUnbindRecord>>,
-    tombstones_for_root: HashMap<InodeId, Vec<SubtreeTombstoneRecord>>,
+    binds_for_parent_name: HashMap<ParentNameCacheKey, Arc<Vec<DirentryBindRecord>>>,
+    binds_for_child: HashMap<InodeId, Arc<Vec<DirentryBindRecord>>>,
+    unbinds_for_binding: HashMap<BindingCacheKey, Arc<Vec<DirentryUnbindRecord>>>,
+    tombstones_for_root: HashMap<InodeId, Arc<Vec<SubtreeTombstoneRecord>>>,
     hits: u64,
     misses: u64,
+}
+
+/// A durable row set handed out of the shared cache plus the composed
+/// view's overlay rows for the same key. Iteration chains the two, so a
+/// cache hit never copies the cached vector — only the overlay rows (empty
+/// outside commit validation) are owned per lookup.
+pub(crate) struct SharedRows<T> {
+    durable: Arc<Vec<T>>,
+    overlay: Vec<T>,
+}
+
+impl<T> SharedRows<T> {
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.durable.iter().chain(self.overlay.iter())
+    }
 }
 
 /// Hit/miss counts, pinning cache engagement in tests.
