@@ -22,6 +22,7 @@
 //!   through.
 
 mod apply;
+mod durable_cache;
 mod indexes;
 pub(crate) mod manifest_index;
 mod queries;
@@ -30,6 +31,7 @@ mod rows;
 #[cfg(test)]
 mod tests;
 mod view;
+mod view_session;
 mod visibility;
 
 pub use self::apply::AppliedMetadataState;
@@ -39,10 +41,9 @@ pub use self::rows::{
     RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 
-pub(crate) use self::view::{
-    DurableVisibilityCache, InMemoryMetadataView, MetadataView, MetadataViewSession,
-    VisibleChildEntry,
-};
+pub(crate) use self::durable_cache::DurableVisibilityCache;
+pub(crate) use self::view::{InMemoryMetadataView, MetadataView};
+pub(crate) use self::view_session::{MetadataViewSession, VisibleChildEntry};
 pub(crate) use self::visibility::{unbind_matches_binding, BindingIdentity};
 
 #[cfg(test)]
