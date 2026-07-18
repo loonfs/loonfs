@@ -131,17 +131,6 @@ impl FsReader {
         self.core.grep(namespace_id, request).await
     }
 
-    /// Lists the revision history of a file path.
-    pub async fn list_file_revisions(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<ListFileRevisionsResponse> {
-        self.core
-            .list_file_revisions(namespace_id, absolute_path)
-            .await
-    }
-
     /// Lists one page of a file path's revision history.
     pub async fn list_file_revisions_page(
         &self,
@@ -151,18 +140,6 @@ impl FsReader {
     ) -> Result<ListFileRevisionsResponse> {
         self.core
             .list_file_revisions_page(namespace_id, absolute_path, request)
-            .await
-    }
-
-    /// Lists a file's revision history by inode id, independent of its
-    /// current path.
-    pub async fn list_file_revisions_for_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-    ) -> Result<ListFileRevisionsResponse> {
-        self.core
-            .list_file_revisions_for_inode(namespace_id, inode_id)
             .await
     }
 
