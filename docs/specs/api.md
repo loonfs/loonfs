@@ -456,13 +456,19 @@ The response includes only a short-lived transfer capability, never raw object-s
 The signed headers are part of the transfer capability. In the S3-compatible
 example, `if-none-match: *` keeps the immutable object create-only, and
 `x-amz-checksum-sha256` binds the object-store write to the SHA-256 digest in
-`content_ref`. Other providers may use different headers or decline
-`direct_put` support.
+`content_ref`. Because both requirements ride the signature, the provider —
+not the server — proves digest integrity at write time; a deployment only
+advertises `core.uploads.direct_put` when its provider can enforce this, and
+otherwise reports the mode as unsupported. Other providers may use different
+headers or decline `direct_put` support.
 
 After the client uploads bytes to the presigned URL, it calls complete with the
-same `content_ref`. Completion validates that the durable object exists and
-matches. A server may return a short-lived `validated_content_token` for the
-completed content ref; the token is opaque to clients.
+same `content_ref`. Completion proves the durable object exists and carries the
+declared size from object metadata alone; the digest needs no re-proof because
+the provider enforced it during the upload, so completion never reads the
+content back through the server. A server may return a short-lived
+`validated_content_token` for the completed content ref; the token is opaque to
+clients.
 
 ```json
 {

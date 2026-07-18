@@ -2111,6 +2111,77 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 }
 
 #[test]
+fn direct_put_completion_proves_upload_without_reading_content() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = open_runtime(object_store, "direct-put-probe-test");
+    let bytes = b"direct uploaded, provider verified";
+    let content_ref = ContentRef::whole_file_v0(bytes);
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
+        .expect("begin direct put");
+
+    // Stands in for the provider-verified presigned upload.
+    let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
+    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+        .expect("write direct object");
+
+    raw_store.reset_content_blob_counters();
+    let completed = fs
+        .complete_upload_blocking(
+            &namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest {
+                content_ref: content_ref.clone(),
+            },
+        )
+        .expect("complete direct put");
+    assert_eq!(completed.content_ref, content_ref);
+    assert_eq!(
+        raw_store.content_blob_get_count(),
+        0,
+        "completion proves the upload from object metadata alone"
+    );
+}
+
+#[test]
+fn direct_put_completion_rejects_a_mis_declared_size() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "direct-put-size-test");
+    let namespace_id = namespace_id();
+    let bytes = b"direct put bytes with a lying size";
+    // The digest names the object; the declared size rides the reference
+    // unchecked by the provider, so completion's size check must catch it.
+    let mut content_ref = ContentRef::whole_file_v0(bytes);
+    content_ref.size_bytes += 1;
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
+        .expect("begin direct put");
+
+    let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
+    block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
+        .expect("write direct object");
+
+    let error = fs
+        .complete_upload_blocking(
+            &namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest { content_ref },
+        )
+        .expect_err("mis-declared size must fail completion");
+    assert!(
+        error.to_string().contains("content length mismatch"),
+        "completion names the size mismatch: {error}"
+    );
+}
+
+#[test]
 fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();

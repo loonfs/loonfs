@@ -14,7 +14,7 @@ use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
     load_namespace_head_control,
 };
-use crate::storage::content::{validate_durable_content_reference, write_immutable_object};
+use crate::storage::content::{probe_durable_content_reference, write_immutable_object};
 use bytes::Bytes;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
@@ -362,10 +362,15 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
         ));
     }
 
-    // Bytes bypassed the LoonFS server; completion is the authority point where
-    // the server proves the object is durable and matches the signed content ref.
+    // Bytes bypassed the LoonFS server; completion is the authority point
+    // where the server proves the upload actually happened. Digest
+    // integrity needs no re-proof: the transfer capability signed the
+    // digest into the provider write and the key derives from it, so no
+    // object can exist at this key with bytes that do not hash to the
+    // content ref. One HEAD proves existence and the declared size without
+    // pulling the payload back through the server.
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    validate_durable_content_reference(store, &content_store_id, &request.content_ref)
+    probe_durable_content_reference(store, &content_store_id, &request.content_ref)
         .await
         .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
     Ok(request.content_ref.clone())
