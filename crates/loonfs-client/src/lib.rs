@@ -9,8 +9,10 @@
 //! [`backend::Backend`] trait instead of [`Client`] directly.
 
 pub mod backend;
+mod config;
+mod error;
+mod transport;
 
-use http::Uri;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
@@ -18,66 +20,21 @@ use loonfs_api::{
         CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
         UploadMode, ValidatedContentToken,
     },
-    AdvanceRetentionResponse, ApiError, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
-    CommitId, ContentRef, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
+    AdvanceRetentionResponse, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId,
+    ContentRef, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, ErrorDetails, ErrorKind,
-    FilesystemOperation, FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest,
-    GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FilesystemOperation,
+    FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
+    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
     RestoreFileRevisionRequest, RevisionNo,
 };
-use serde::Deserialize;
-use std::fs;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
-use thiserror::Error;
 
-/// Client configuration loaded from TOML or built by the caller.
-///
-/// Strict like every config struct in the workspace: an unknown key is a
-/// decode error, so a typo (`auth_tokn`) fails loudly instead of silently
-/// producing an unauthenticated client.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientConfig {
-    /// Base URL for the LoonFS server.
-    pub server_url: String,
-    /// Optional bearer token.
-    pub auth_token: Option<String>,
-    /// Optional overall per-request deadline in milliseconds. Unset means no
-    /// whole-request deadline: requests are bounded only by the built-in
-    /// 60-second socket inactivity timeouts, so slow-but-progressing large
-    /// transfers are not cut off while a stalled connection still fails.
-    #[serde(default)]
-    pub request_timeout_ms: Option<u64>,
-    /// Disables the bounded automatic retry of quick-clearing transient
-    /// failures: the retryable-unavailability codes (`server_busy`,
-    /// `commit_queue_full`, `shutting_down` — a draining process telling the
-    /// caller to retry against the next one) and network-level transport
-    /// errors (connect failures, timeouts, resets). Off by default — the
-    /// retry runs — because every request the client sends is idempotent to
-    /// resend: mutations carry their commit id in the body and staging
-    /// repeats are recognized, so resending after an ambiguous transport
-    /// failure is safe by construction.
-    #[serde(default)]
-    pub disable_transient_retry: bool,
-}
-
-/// Cap on attempts for transient-error retry: one initial try plus three
-/// retries, sleeping with doubling backoff in between.
-const MAX_TRANSIENT_ATTEMPTS: u32 = 4;
-/// First transient-retry sleep; doubles per retry up to
-/// [`MAX_TRANSIENT_RETRY_DELAY`].
-const INITIAL_TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
-/// Ceiling for one transient-retry sleep.
-const MAX_TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Socket read/write inactivity timeout applied to every request. A
-/// connection that makes no progress for this long fails instead of hanging
-/// the caller forever.
-const IO_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+pub use config::ClientConfig;
+pub use error::ClientError;
+use transport::IO_INACTIVITY_TIMEOUT;
 
 /// Synchronous HTTP client for LoonFS.
 #[derive(Debug, Clone)]
@@ -105,153 +62,6 @@ pub struct NamespacePath {
     pub namespace: String,
     /// Absolute path inside the namespace.
     pub absolute_path: String,
-}
-
-/// Error returned by the blocking HTTP client.
-///
-/// Foreign causes (io, json, ureq) are captured as message strings rather
-/// than `#[source]` chains.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum ClientError {
-    #[error("failed to read config: {0}")]
-    ConfigIo(String),
-    #[error("failed to decode config: {0}")]
-    ConfigDecode(String),
-    #[error("missing `{field}`")]
-    MissingConfigField { field: &'static str },
-    #[error("invalid `{field}`: {reason}")]
-    ConfigValidation { field: &'static str, reason: String },
-    #[error("invalid namespace path `{0}`")]
-    InvalidNamespacePath(String),
-    #[error("invalid commit_id `{0}`")]
-    InvalidCommitId(String),
-    #[error("invalid checkpoint_id `{0}`")]
-    InvalidCheckpointId(String),
-    #[error("http error: {0}")]
-    Http(String),
-    #[error("server returned {status} {code}: {message}")]
-    Api {
-        status: u16,
-        code: String,
-        /// Capability feature key accompanying `not_supported` errors.
-        feature: Option<String>,
-        message: String,
-        /// Correlation id the server assigned to the failed request.
-        request_id: Option<String>,
-        /// Structured context for the code, when the server sent any. Boxed
-        /// so the rare detailed error does not widen every client result.
-        details: Option<Box<ErrorDetails>>,
-    },
-    #[error("i/o error: {0}")]
-    Io(String),
-    #[error("json error: {0}")]
-    Json(String),
-}
-
-impl ClientError {
-    /// Returns the typed code for [`ClientError::Api`] errors, or `None` for
-    /// non-API errors and for codes this build does not know (clients must
-    /// tolerate unknown codes).
-    pub fn error_code(&self) -> Option<ErrorCode> {
-        match self {
-            ClientError::Api { code, .. } => ErrorCode::parse(code),
-            _ => None,
-        }
-    }
-
-    /// Returns the caller-action category for [`ClientError::Api`] errors.
-    ///
-    /// Known codes classify through [`ErrorCode::kind`]. Unknown codes (a
-    /// newer server) fall back to the HTTP status class, so retry decisions
-    /// still work: 503 is [`ErrorKind::Unavailable`], other 5xx are
-    /// [`ErrorKind::Internal`], and 4xx are [`ErrorKind::InvalidRequest`].
-    pub fn kind(&self) -> Option<ErrorKind> {
-        match self {
-            ClientError::Api { status, code, .. } => match ErrorCode::parse(code) {
-                Some(code) => Some(code.kind()),
-                None => kind_for_status_class(*status),
-            },
-            _ => None,
-        }
-    }
-}
-
-/// The retry policy for one failed attempt: `transport` is whether the
-/// network layer itself reported the failure (classified before the error
-/// is flattened by `map_error`), and served envelopes retry only on the
-/// retryable-unavailability codes.
-fn transient_failure(transport: bool, error: &ClientError) -> bool {
-    transport
-        || matches!(
-            error,
-            ClientError::Api { code, .. }
-                if code == ErrorCode::ServerBusy.as_str()
-                    || code == ErrorCode::CommitQueueFull.as_str()
-                    || code == ErrorCode::ShuttingDown.as_str()
-        )
-}
-
-/// Deterministic doubling, the same shape as the object-store transport
-/// retry: workspace policy avoids ambient randomness, and a bounded
-/// per-request retry does not need jitter.
-fn transient_retry_backoff(attempt: u32) -> std::time::Duration {
-    let doublings = attempt.saturating_sub(1).min(16);
-    INITIAL_TRANSIENT_RETRY_DELAY
-        .saturating_mul(1u32 << doublings)
-        .min(MAX_TRANSIENT_RETRY_DELAY)
-}
-
-/// The blocking client waits an isolated OS timer between attempts; there
-/// is no async runtime on this call path to time against.
-#[allow(clippy::disallowed_methods)]
-fn transient_retry_pause(backoff: std::time::Duration) {
-    std::thread::sleep(backoff);
-}
-
-/// Coarse status-class fallback for error codes this build does not know.
-fn kind_for_status_class(status: u16) -> Option<ErrorKind> {
-    match status {
-        // 503 stays retryable even when the code is unknown.
-        503 => Some(ErrorKind::Unavailable),
-        400..=499 => Some(ErrorKind::InvalidRequest),
-        500..=599 => Some(ErrorKind::Internal),
-        _ => None,
-    }
-}
-
-impl ClientConfig {
-    /// Loads and validates a client config from TOML.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, ClientError> {
-        let bytes =
-            fs::read(path.as_ref()).map_err(|err| ClientError::ConfigIo(err.to_string()))?;
-        let config: Self = toml::from_str(
-            std::str::from_utf8(&bytes)
-                .map_err(|err| ClientError::ConfigDecode(err.to_string()))?,
-        )
-        .map_err(|err| ClientError::ConfigDecode(err.to_string()))?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    fn validate(&self) -> Result<(), ClientError> {
-        validate_absolute_http_url("server_url", &self.server_url)?;
-        if let Some(token) = &self.auth_token {
-            if token.trim().is_empty() {
-                return Err(ClientError::ConfigValidation {
-                    field: "auth_token",
-                    reason: "must not be empty".to_owned(),
-                });
-            }
-        }
-        if self.request_timeout_ms == Some(0) {
-            return Err(ClientError::ConfigValidation {
-                field: "request_timeout_ms",
-                reason: "must be greater than zero; omit it for no deadline".to_owned(),
-            });
-        }
-        Ok(())
-    }
 }
 
 /// Options shared by every client mutation, mirroring the runtime's
@@ -1075,116 +885,6 @@ impl Client {
             }),
         )
     }
-
-    fn request_json<Req, Resp>(
-        &self,
-        request: ureq::Request,
-        body: Option<&Req>,
-    ) -> Result<Resp, ClientError>
-    where
-        Req: serde::Serialize,
-        Resp: serde::de::DeserializeOwned,
-    {
-        let request = self.authenticated(request);
-        let response = match body {
-            Some(body) => {
-                // Serialized once: every retry attempt resends identical
-                // bytes under the same commit id.
-                let bytes =
-                    serde_json::to_vec(body).map_err(|err| ClientError::Json(err.to_string()))?;
-                let request = request.set("content-type", "application/json");
-                self.call_with_transient_retry(&request, Some(&bytes))?
-            }
-            None => self.call_with_transient_retry(&request, None)?,
-        };
-        serde_json::from_reader(response.into_reader())
-            .map_err(|err| ClientError::Json(err.to_string()))
-    }
-
-    fn request_bytes(&self, url: &str) -> Result<Vec<u8>, ClientError> {
-        let request = self.authenticated(self.agent.get(url));
-        let response = self.call_with_transient_retry(&request, None)?;
-        let mut reader = response.into_reader();
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut bytes)
-            .map_err(|err| ClientError::Io(err.to_string()))?;
-        Ok(bytes)
-    }
-
-    /// Sends one request, resending on quick-clearing transient failures —
-    /// the retryable-unavailability codes (`server_busy`,
-    /// `commit_queue_full`, `shutting_down`) and network-level transport
-    /// errors — with doubling backoff, bounded by
-    /// [`MAX_TRANSIENT_ATTEMPTS`]. Resending is safe for every request this
-    /// client issues: mutation bodies carry their commit id (replayed,
-    /// never double-committed) and staging repeats are recognized by the
-    /// server, which is exactly what makes an ambiguous transport failure —
-    /// the request may or may not have been served — safe to resend. Other
-    /// unavailability codes are excluded on purpose — `maintenance_required`
-    /// and `index_lagging` clear on a maintenance tick, not on a resend —
-    /// and a served status with a non-envelope body is not retried: only
-    /// failures the network layer itself reported count as transport.
-    fn call_with_transient_retry(
-        &self,
-        request: &ureq::Request,
-        body: Option<&[u8]>,
-    ) -> Result<ureq::Response, ClientError> {
-        let mut attempts = 0;
-        loop {
-            let outcome = match body {
-                Some(bytes) => request.clone().send_bytes(bytes),
-                None => request.clone().call(),
-            };
-            let error = match outcome {
-                Ok(response) => return Ok(response),
-                Err(error) => error,
-            };
-            // Classified before `map_error` flattens it: only a true
-            // network-level failure retries — a served status with a
-            // non-envelope body (a load balancer's HTML 502) does not.
-            let transport = matches!(&error, ureq::Error::Transport(_));
-            let error = self.map_error(error);
-            attempts += 1;
-            let transient = transient_failure(transport, &error);
-            if !self.transient_retry || !transient || attempts >= MAX_TRANSIENT_ATTEMPTS {
-                return Err(error);
-            }
-            transient_retry_pause(transient_retry_backoff(attempts));
-        }
-    }
-
-    fn authenticated(&self, request: ureq::Request) -> ureq::Request {
-        match &self.auth_token {
-            Some(token) => request.set("authorization", &format!("Bearer {token}")),
-            None => request,
-        }
-    }
-
-    fn map_error(&self, error: ureq::Error) -> ClientError {
-        match error {
-            ureq::Error::Status(status, response) => {
-                let parsed = serde_json::from_reader::<_, ApiError>(response.into_reader());
-                match parsed {
-                    Ok(body) => ClientError::Api {
-                        status,
-                        code: body.code,
-                        feature: body.feature,
-                        message: body.message,
-                        request_id: body.request_id,
-                        details: body.details,
-                    },
-                    // A status with a non-envelope body is most commonly an
-                    // intermediary answering for the server (a load
-                    // balancer's HTML 502): keep the status — it is the only
-                    // signal the response carried.
-                    Err(err) => ClientError::Http(format!(
-                        "http status {status} with a non-envelope body: {err}"
-                    )),
-                }
-            }
-            ureq::Error::Transport(err) => ClientError::Http(err.to_string()),
-        }
-    }
 }
 
 impl NamespacePath {
@@ -1251,46 +951,6 @@ fn parse_commit_id(commit_id: &str) -> Result<CommitId, ClientError> {
 
 fn generated_commit_id() -> String {
     CommitId::generate().to_string()
-}
-
-fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ClientError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(ClientError::MissingConfigField { field });
-    }
-
-    let uri: Uri =
-        trimmed
-            .parse()
-            .map_err(|err: http::uri::InvalidUri| ClientError::ConfigValidation {
-                field,
-                reason: err.to_string(),
-            })?;
-
-    match uri.scheme_str() {
-        Some("http" | "https") => {}
-        Some(other) => {
-            return Err(ClientError::ConfigValidation {
-                field,
-                reason: format!("scheme must be http or https, got `{other}`"),
-            });
-        }
-        None => {
-            return Err(ClientError::ConfigValidation {
-                field,
-                reason: "must be an absolute http or https URL".to_owned(),
-            });
-        }
-    }
-
-    if uri.authority().is_none() {
-        return Err(ClientError::ConfigValidation {
-            field,
-            reason: "must be an absolute http or https URL".to_owned(),
-        });
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1423,8 +1083,10 @@ mod tests {
     }
     use super::{
         BeginUploadRequest, Client, ClientConfig, ClientError, CreateCheckpointRequest, ErrorCode,
-        ErrorKind, NamespacePath,
+        NamespacePath,
     };
+    use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
+    use loonfs_api::ErrorKind;
     use std::fs;
     use tempfile::tempdir;
 
