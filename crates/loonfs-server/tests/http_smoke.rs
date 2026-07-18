@@ -1,6 +1,3 @@
-#![allow(clippy::panic, clippy::disallowed_methods)]
-// Smoke tests use explicit polling and panic-heavy match assertions for readable diagnostics.
-
 use bytes::Bytes;
 use loonfs_api::{
     v0::{
@@ -61,7 +58,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
                 assert_eq!(status, 409);
                 assert_eq!(code, "stale_head");
             }
-            other => panic!("expected stale_head, got {other:?}"),
+            other => unreachable!("expected stale_head, got {other:?}"),
         }
         harness
             .client
@@ -86,7 +83,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
                 assert_eq!(status, 410);
                 assert_eq!(code, "namespace_deleted");
             }
-            other => panic!("expected namespace_deleted, got {other:?}"),
+            other => unreachable!("expected namespace_deleted, got {other:?}"),
         }
         let read = harness
             .client
@@ -94,7 +91,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
             .expect_err("reads observe the deleted namespace");
         match read {
             ClientError::Api { code, .. } => assert_eq!(code, "namespace_deleted"),
-            other => panic!("expected namespace_deleted, got {other:?}"),
+            other => unreachable!("expected namespace_deleted, got {other:?}"),
         }
         let again = harness
             .client
@@ -105,7 +102,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
                 assert_eq!(status, 410);
                 assert_eq!(code, "namespace_deleted");
             }
-            other => panic!("expected namespace_deleted, got {other:?}"),
+            other => unreachable!("expected namespace_deleted, got {other:?}"),
         }
         let recreate = harness
             .client
@@ -116,7 +113,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
                 assert_eq!(status, 410);
                 assert_eq!(code, "namespace_deleted");
             }
-            other => panic!("expected namespace_deleted, got {other:?}"),
+            other => unreachable!("expected namespace_deleted, got {other:?}"),
         }
     })
     .await
@@ -222,7 +219,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
                 assert_eq!(status, 400);
                 assert_eq!(code, "invalid_request");
             }
-            other => panic!("expected cursor rejection, got {other:?}"),
+            other => unreachable!("expected cursor rejection, got {other:?}"),
         }
 
         let raw_first_page: ListPathEntriesResponse = get_json(
@@ -354,7 +351,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
                 assert_eq!(status, 404);
                 assert_eq!(code, "namespace_not_found");
             }
-            other => panic!("expected API error for missing namespace, got {other:?}"),
+            other => unreachable!("expected API error for missing namespace, got {other:?}"),
         }
     })
     .await
@@ -389,8 +386,8 @@ async fn http_namespace_listing_route_is_not_exposed() {
                     "GET /v0/namespaces should be missing or method-not-allowed, got {status}"
                 );
             }
-            Ok(_) => panic!("GET /v0/namespaces must not return a namespace list"),
-            Err(error) => panic!("unexpected transport error: {error}"),
+            Ok(_) => unreachable!("GET /v0/namespaces must not return a namespace list"),
+            Err(error) => unreachable!("unexpected transport error: {error}"),
         }
     })
     .await
@@ -456,7 +453,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
                 assert_eq!(status, 400);
                 assert_eq!(code, "invalid_request");
             }
-            other => panic!("expected upload id rejection, got {other:?}"),
+            other => unreachable!("expected upload id rejection, got {other:?}"),
         }
     })
     .await
@@ -498,7 +495,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             &MutationOptions::default(),
         ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
-            other => panic!("expected path_conflict, got {other:?}"),
+            other => unreachable!("expected path_conflict, got {other:?}"),
         }
 
         harness
@@ -619,7 +616,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         match harness.client.list_changes("clone", ChangeSeq(0)) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
-            other => panic!("expected rebootstrap_required, got {other:?}"),
+            other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
         let clone_changes = harness
             .client
@@ -671,7 +668,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .upload_content(namespace, begin.upload_id.as_str(), b"different bytes")
         {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
-            other => panic!("expected upload_content_conflict, got {other:?}"),
+            other => unreachable!("expected upload_content_conflict, got {other:?}"),
         }
 
         let mismatch_upload = harness
@@ -694,7 +691,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             },
         ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_request"),
-            other => panic!("expected upload content rejection, got {other:?}"),
+            other => unreachable!("expected upload content rejection, got {other:?}"),
         }
 
         let content_ref = stage_uploaded_content_ref(&harness.client, namespace, file_bytes);
@@ -1173,7 +1170,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                 assert_eq!(status, 404);
                 assert_eq!(code, "revision_not_found");
             }
-            other => panic!("expected revision_not_found, got {other:?}"),
+            other => unreachable!("expected revision_not_found, got {other:?}"),
         }
     })
     .await
@@ -1248,7 +1245,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 let request_id = request_id.expect("request id");
                 assert!(request_id.starts_with("req_"), "got `{request_id}`");
             }
-            other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
+            other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
         }
     })
     .await
@@ -1324,7 +1321,7 @@ async fn http_commit_name_collision_reports_readable_error_message() {
                     "expected no Debug formatting in message, got {message:?}"
                 );
             }
-            other => panic!("expected path_conflict, got {other:?}"),
+            other => unreachable!("expected path_conflict, got {other:?}"),
         }
     })
     .await
@@ -1387,7 +1384,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             Err(ClientError::Api { code, .. }) => {
                 assert_eq!(code, "commit_id_reuse_conflict")
             }
-            other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
+            other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
         }
     })
     .await
@@ -1464,7 +1461,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         assert_eq!(move_repeated, move_first);
         match harness.client.stat_path(&copied) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-            other => panic!("expected path_not_found for moved-from path, got {other:?}"),
+            other => unreachable!("expected path_not_found for moved-from path, got {other:?}"),
         }
         let moved_entry = harness.client.stat_path(&moved).expect("moved stat");
         assert_eq!(moved_entry.inode_id, copied_entry.inode_id);
@@ -1480,7 +1477,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         assert_eq!(delete_repeated, delete_first);
         match harness.client.stat_path(&moved) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-            other => panic!("expected path_not_found for deleted path, got {other:?}"),
+            other => unreachable!("expected path_not_found for deleted path, got {other:?}"),
         }
     })
     .await
@@ -1520,7 +1517,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
                 assert_eq!(status, 409);
                 assert_eq!(code, "directory_not_empty");
             }
-            other => panic!("expected directory_not_empty, got {other:?}"),
+            other => unreachable!("expected directory_not_empty, got {other:?}"),
         }
 
         harness
@@ -1529,7 +1526,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
             .expect("recursive delete succeeds");
         match harness.client.stat_path(&child) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-            other => panic!("expected path_not_found after recursive delete, got {other:?}"),
+            other => unreachable!("expected path_not_found after recursive delete, got {other:?}"),
         }
     })
     .await
@@ -1584,7 +1581,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
                         serde_json::from_reader(response.into_reader()).expect("decode api error");
                     assert_eq!(error.code, "invalid_request");
                 }
-                other => panic!("expected rejected move behavior, got {other:?}"),
+                other => unreachable!("expected rejected move behavior, got {other:?}"),
             }
         }
 
@@ -1604,7 +1601,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
                     serde_json::from_reader(response.into_reader()).expect("decode api error");
                 assert_eq!(error.code, "invalid_request");
             }
-            other => panic!("expected rejected upload body, got {other:?}"),
+            other => unreachable!("expected rejected upload body, got {other:?}"),
         }
     })
     .await
@@ -1681,7 +1678,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 
         match client.list_changes(namespace, ChangeSeq(0)) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
-            other => panic!("expected rebootstrap_required, got {other:?}"),
+            other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
 
         let empty = client
@@ -1875,7 +1872,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 
         match cold_client.stat_path(&target) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
-            other => panic!("expected namespace_corrupt, got {other:?}"),
+            other => unreachable!("expected namespace_corrupt, got {other:?}"),
         }
         // The warm server keeps serving its pinned pair; the corruption is
         // surfaced by whoever actually consumes the manifest.
@@ -1945,7 +1942,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                 Err(ClientError::Api { code, .. }) => {
                     assert_eq!(code, "writer_fenced", "attempt {attempt}")
                 }
-                other => panic!("expected writer_fenced on attempt {attempt}, got {other:?}"),
+                other => unreachable!("expected writer_fenced on attempt {attempt}, got {other:?}"),
             }
         }
 
@@ -1977,7 +1974,7 @@ struct TestServer {
 async fn start_server(config: ServerConfig) -> TestServer {
     let (store_root, store_key_prefix) = match &config.store {
         StoreConfig::LocalFs { root, key_prefix } => (PathBuf::from(root), key_prefix.clone()),
-        other => panic!("test harness requires local fs store, got {other:?}"),
+        other => unreachable!("test harness requires local fs store, got {other:?}"),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -2175,7 +2172,7 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
             assert_eq!(error.code, "invalid_request");
             assert!(error.message.contains("invalid namespace_id"));
         }
-        other => panic!("expected invalid_namespace_id response, got {other:?}"),
+        other => unreachable!("expected invalid_namespace_id response, got {other:?}"),
     }
 }
 

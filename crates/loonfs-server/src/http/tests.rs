@@ -62,7 +62,8 @@ fn error_status_mapping_matches_the_api_spec_table() {
 
 use super::error::status_for_core_error_code;
 use super::{
-    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path, SharedStore,
+    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
+    SharedObjectStore,
 };
 use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
@@ -155,7 +156,7 @@ impl ObjectStore for StaleHeadOnceStore {
 async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     let store_dir = tempdir().expect("store tempdir");
     let metrics_dir = tempdir().expect("metrics tempdir");
-    let store = Arc::new(LocalFsStore::new(store_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(store_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(store_dir.path(), "server-writer");
     let metrics_path = metrics_dir.path().join("object-store.ndjson");
 
@@ -222,7 +223,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_created_state_is_readable_through_http() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = test_runtime(store.clone(), "runtime-writer").await;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -258,7 +259,7 @@ async fn runtime_created_state_is_readable_through_http() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_created_state_is_readable_through_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = test_runtime(store.clone(), "runtime-reader").await;
     let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
 
@@ -292,7 +293,7 @@ async fn http_created_state_is_readable_through_runtime() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_missing_namespace_mutations_return_namespace_not_found() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     tokio::task::spawn_blocking(move || {
@@ -335,7 +336,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_missing_namespace_reads_return_namespace_not_found() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     tokio::task::spawn_blocking(move || {
@@ -356,7 +357,7 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_delete_missing_path_returns_path_not_found() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -380,7 +381,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_over_directory_and_move_into_existing_target_return_path_conflict() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
     write_file_bytes(
         &seeder,
@@ -444,7 +445,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
     write_file_bytes(
         &seeder,
@@ -502,7 +503,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_path_mutation_retries_transient_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(StaleHeadOnceStore::new(temp_dir.path(), "demo")) as SharedStore;
+    let store = Arc::new(StaleHeadOnceStore::new(temp_dir.path(), "demo")) as SharedObjectStore;
     bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
@@ -525,7 +526,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
     // With no lease, the server's first semantic write acquires the
     // epoch immediately and fences the previous session.
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "other-writer", &namespace_id("demo")).await;
     let store_for_check = store.clone();
 
@@ -564,7 +565,7 @@ struct TestHarness {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "server-writer");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -604,7 +605,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "server-writer");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -673,7 +674,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_upload_bytes = 1024;
@@ -714,7 +715,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capability_document_advertises_the_upload_limit() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     tokio::task::spawn_blocking(move || {
@@ -771,7 +772,7 @@ async fn capability_document_advertises_the_upload_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_unknown_routes_and_methods_answer_in_envelope() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "server-writer");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -817,7 +818,7 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_commit_body_over_the_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_commit_body_bytes = 1024;
@@ -870,7 +871,7 @@ async fn http_commit_body_over_the_limit_answers_content_too_large() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     write_file_bytes(
         &fs,
@@ -957,7 +958,7 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_concurrent_uploads = 1;
@@ -1019,7 +1020,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.max_concurrent_uploads = 1;
@@ -1069,7 +1070,7 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     write_file_bytes(
         &seed_writer,
@@ -1138,7 +1139,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seed_writer = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     write_file_bytes(
         &seed_writer,
@@ -1195,7 +1196,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "server-writer");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1284,7 +1285,7 @@ fn flush_everything_tick() -> MaintenanceTickOptions {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_maintenance_honors_a_zero_configured_cache_budget() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.background_maintenance = false;
     config.runtime_cache.metadata_table_cache_max_decoded_bytes = Some(0);
@@ -1319,7 +1320,7 @@ async fn explicit_maintenance_honors_a_zero_configured_cache_budget() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_maintenance_populates_the_writer_visible_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "server-writer");
     config.background_maintenance = false;
     let (writer, _reader, admin) = build_handles_with_metrics_jsonl_path(&config, store, None)
@@ -1353,7 +1354,7 @@ async fn explicit_maintenance_populates_the_writer_visible_cache() {
     writer.shutdown_background().await.expect("writer shutdown");
 }
 
-async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestHarness {
+async fn start_server(store: SharedObjectStore, root: &Path, writer_id: &str) -> TestHarness {
     let config = test_config(root, writer_id);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1375,7 +1376,7 @@ async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestH
     }
 }
 
-async fn test_runtime(store: SharedStore, writer_id: &str) -> FsWriter {
+async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> FsWriter {
     FsWriter::builder_with_store(store)
         .writer_id(writer_id)
         .writer_version(format!("{writer_id}/0.1.0"))
@@ -1415,7 +1416,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
 /// durable state as `writer_id` would from another process — and returns
 /// that runtime for follow-up seed writes.
 async fn bootstrap_namespace(
-    store: &SharedStore,
+    store: &SharedObjectStore,
     writer_id: &str,
     namespace_id: &NamespaceId,
 ) -> FsWriter {

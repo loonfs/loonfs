@@ -57,7 +57,10 @@ pub const FILTER_HASH_COUNT: u32 = 7;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
 const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
-const ZSTD_LEVEL: i32 = 3;
+/// One compression level for every zstd-compressed durable artifact (SST
+/// blocks and WAL segment envelopes). 3 is also the library default, so
+/// this pins in a name what an implicit `0` would choose silently.
+pub(crate) const ZSTD_LEVEL: i32 = 3;
 
 /// Where one stored section lives inside a segment object, and how to
 /// verify it: the CRC32C of the stored bytes and their decoded length.

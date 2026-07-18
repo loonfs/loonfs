@@ -539,12 +539,9 @@ pub struct NamespaceManifestPayload {
     /// Values are feature-owned JSON objects; readers ignore unknown keys.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, serde_json::Value>,
-    // TODO: split this flat list into structured run/table/index roots when
-    // compaction and GC need richer reachability decisions.
     pub metadata_files: Vec<MetadataFileRef>,
     /// Derived-index segments materialized on this file-set version, empty
-    /// (and omitted) when no derived index exists. Additive: readers that
-    /// predate derived indexes ignore the field, and the paired `features`
+    /// (and omitted) when no derived index exists. The paired `features`
     /// entry — not this list — says what the segments mean.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub index_files: Vec<IndexFileRef>,

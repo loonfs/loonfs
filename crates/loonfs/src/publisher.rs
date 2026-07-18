@@ -1761,8 +1761,7 @@ mod tests {
 
     /// A submission to a cold namespace is taken immediately: after one
     /// poll of the publish task there is no open batch parked behind a
-    /// timer. The old fixed coalescing delay left the candidate in the
-    /// open batch for its full 100ms window.
+    /// timer, so a lone candidate never waits out a coalescing window.
     #[tokio::test(flavor = "current_thread")]
     async fn cold_submission_publishes_without_a_coalescing_delay() {
         let temp_dir = tempdir().expect("tempdir");

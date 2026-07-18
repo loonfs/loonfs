@@ -1,6 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
-// CLI integration tests use concise JSON/path assertions and explicit server polling.
-
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -25,7 +22,7 @@ fn profile_create_list_show_remove_work() {
         "--store-kind",
         "local-fs",
         "--root",
-        harness.store_root("default").to_str().unwrap(),
+        harness.store_root("default").to_str().expect("utf-8 path"),
     ]);
     assert_success(&add_embedded);
     assert_eq!(json_data(&add_embedded)["mode"], "embedded");
@@ -50,7 +47,7 @@ fn profile_create_list_show_remove_work() {
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
     let list_data = json_data(&list);
-    let profiles = list_data["profiles"].as_array().unwrap();
+    let profiles = list_data["profiles"].as_array().expect("json array");
     assert_eq!(profiles.len(), 2);
     assert_eq!(profiles[0]["name"], "default");
     assert_eq!(profiles[1]["name"], "prod");
@@ -107,7 +104,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     let put = harness.run(&[
         "--json",
         "put",
-        upload_path.to_str().unwrap(),
+        upload_path.to_str().expect("utf-8 path"),
         "/docs/hello.txt",
     ]);
     assert_success(&put);
@@ -116,7 +113,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     let put_conflict = harness.run(&[
         "--json",
         "put",
-        upload_path.to_str().unwrap(),
+        upload_path.to_str().expect("utf-8 path"),
         "/docs/hello.txt",
     ]);
     assert_failure(&put_conflict);
@@ -125,7 +122,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     let put_force = harness.run(&[
         "--json",
         "put",
-        update_path.to_str().unwrap(),
+        update_path.to_str().expect("utf-8 path"),
         "/docs/hello.txt",
         "--force",
     ]);
@@ -134,7 +131,10 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     let revisions = harness.run(&["--json", "revisions", "/docs/hello.txt"]);
     assert_success(&revisions);
     assert_eq!(
-        json_data(&revisions)["revisions"].as_array().unwrap().len(),
+        json_data(&revisions)["revisions"]
+            .as_array()
+            .expect("json array")
+            .len(),
         2
     );
 
@@ -171,7 +171,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
         "--json",
         "get",
         "/docs/hello.txt",
-        download_path.to_str().unwrap(),
+        download_path.to_str().expect("utf-8 path"),
     ]);
     assert_success(&get_file);
     assert_eq!(
@@ -208,7 +208,11 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
 
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
-    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/shared.txt"]));
+    assert_success(&harness.run(&[
+        "put",
+        upload_path.to_str().expect("utf-8 path"),
+        "/docs/shared.txt",
+    ]));
 
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
     assert_success(&fork);
@@ -227,7 +231,7 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
         "put",
         "--namespace",
         "clone",
-        clone_upload_path.to_str().unwrap(),
+        clone_upload_path.to_str().expect("utf-8 path"),
         "/docs/shared.txt",
         "--force",
     ]));
@@ -254,7 +258,7 @@ fn init_creates_embedded_profile_and_current_reports_namespace_unset() {
         "--store-kind",
         "local-fs",
         "--root",
-        harness.store_root("mystore").to_str().unwrap(),
+        harness.store_root("mystore").to_str().expect("utf-8 path"),
     ]);
     assert_success(&init);
     assert_eq!(json_data(&init)["mode"], "embedded");
@@ -288,13 +292,13 @@ fn invalid_profile_mode_is_rejected() {
         "--store-kind",
         "local-fs",
         "--root",
-        harness.store_root("default").to_str().unwrap(),
+        harness.store_root("default").to_str().expect("utf-8 path"),
     ]);
 
     assert_failure(&result);
     let error = json_error(&result);
     assert_eq!(error["code"], "invalid_input");
-    let message = error["message"].as_str().unwrap();
+    let message = error["message"].as_str().expect("json string");
     assert!(message.contains("expected embedded or remote"));
 }
 
@@ -310,7 +314,7 @@ fn removing_last_profile_leaves_empty_config() {
     assert_success(&list);
     let data = json_data(&list);
     assert!(data["default_profile"].is_null());
-    assert_eq!(data["profiles"].as_array().unwrap().len(), 0);
+    assert_eq!(data["profiles"].as_array().expect("json array").len(), 0);
 
     let show_config = harness.run(&["config", "show"]);
     assert_success(&show_config);
@@ -334,7 +338,7 @@ fn removing_default_profile_requires_explicit_reselection() {
     assert_success(&list);
     let data = json_data(&list);
     assert!(data["default_profile"].is_null());
-    assert_eq!(data["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(data["profiles"].as_array().expect("json array").len(), 1);
 
     let current = harness.run(&["--json", "current"]);
     assert_failure(&current);
@@ -368,14 +372,14 @@ fn profile_update_changes_fields() {
         "update",
         "default",
         "--root",
-        new_root.to_str().unwrap(),
+        new_root.to_str().expect("utf-8 path"),
     ]);
     assert_success(&update);
 
     let show = harness.run(&["--json", "profile", "show", "default"]);
     assert_success(&show);
     let store = &json_data(&show)["store"];
-    assert_eq!(store["root"], new_root.to_str().unwrap());
+    assert_eq!(store["root"], new_root.to_str().expect("utf-8 path"));
 }
 
 #[test]
@@ -418,7 +422,10 @@ fn profile_names_matching_top_level_config_keys_are_allowed() {
         "--store-kind",
         "local-fs",
         "--root",
-        harness.store_root("default_profile").to_str().unwrap(),
+        harness
+            .store_root("default_profile")
+            .to_str()
+            .expect("utf-8 path"),
     ]);
     assert_success(&init);
 
@@ -432,7 +439,10 @@ fn profile_names_matching_top_level_config_keys_are_allowed() {
         "--store-kind",
         "local-fs",
         "--root",
-        harness.store_root("config_version").to_str().unwrap(),
+        harness
+            .store_root("config_version")
+            .to_str()
+            .expect("utf-8 path"),
     ]);
     assert_success(&create);
 
@@ -476,12 +486,12 @@ root = "{}"
         "--store-kind",
         "local-fs",
         "--root",
-        harness.store_root("mystore").to_str().unwrap(),
+        harness.store_root("mystore").to_str().expect("utf-8 path"),
     ]);
     assert_failure(&init);
     let error = json_error(&init);
     assert_eq!(error["code"], "config_already_exists");
-    let message = error["message"].as_str().unwrap();
+    let message = error["message"].as_str().expect("json string");
     assert!(message.contains("loon profile create"));
     assert!(message.contains("loon profile update"));
     assert!(message.contains("loon profile use"));
@@ -529,7 +539,7 @@ default_profile = ""
     assert_eq!(error["code"], "invalid_config");
     assert!(error["message"]
         .as_str()
-        .unwrap()
+        .expect("json string")
         .contains("default_profile"));
 }
 
@@ -549,7 +559,7 @@ default_profile = "   "
     assert_eq!(error["code"], "invalid_config");
     assert!(error["message"]
         .as_str()
-        .unwrap()
+        .expect("json string")
         .contains("default_profile"));
 }
 
@@ -576,7 +586,7 @@ root = ""
     assert_eq!(error["code"], "invalid_config");
     assert!(error["message"]
         .as_str()
-        .unwrap()
+        .expect("json string")
         .contains("default.store.root"));
 }
 
@@ -605,7 +615,7 @@ root = "{}"
     assert_eq!(error["code"], "invalid_config");
     assert!(error["message"]
         .as_str()
-        .unwrap()
+        .expect("json string")
         .contains("default.default_namespace"));
 }
 
@@ -619,7 +629,7 @@ fn embedded_namespace_commands_reject_invalid_namespace_ids() {
     assert_eq!(json_error(&create)["code"], "invalid_request");
     assert!(json_error(&create)["message"]
         .as_str()
-        .unwrap()
+        .expect("json string")
         .contains("invalid namespace_id"));
 
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -678,7 +688,7 @@ fn invalid_remote_urls_are_rejected() {
     assert_eq!(json_error(&missing_host_http)["code"], "invalid_config");
     assert!(json_error(&missing_host_http)["message"]
         .as_str()
-        .unwrap()
+        .expect("json string")
         .contains("default.server_url"));
 
     let missing_host_https = harness.run(&[
@@ -908,10 +918,14 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     let payload_two = harness.temp_dir.path().join("two.txt");
     fs::write(&payload_one, b"draft one").expect("payload one");
     fs::write(&payload_two, b"draft two").expect("payload two");
-    assert_success(&harness.run(&["put", payload_one.to_str().unwrap(), "/docs/report.txt"]));
     assert_success(&harness.run(&[
         "put",
-        payload_two.to_str().unwrap(),
+        payload_one.to_str().expect("utf-8 path"),
+        "/docs/report.txt",
+    ]));
+    assert_success(&harness.run(&[
+        "put",
+        payload_two.to_str().expect("utf-8 path"),
         "/docs/report.txt",
         "--force",
     ]));
@@ -948,7 +962,10 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     let revisions = harness.run(&["--json", "revisions", "/docs/report.txt"]);
     assert_success(&revisions);
     assert_eq!(
-        json_data(&revisions)["revisions"].as_array().unwrap().len(),
+        json_data(&revisions)["revisions"]
+            .as_array()
+            .expect("json array")
+            .len(),
         2
     );
 
@@ -988,7 +1005,7 @@ fn remote_undelete_recovers_through_http() {
 
     let payload = harness.temp_dir.path().join("wire.txt");
     fs::write(&payload, b"over the wire").expect("payload");
-    assert_success(&harness.run(&["put", payload.to_str().unwrap(), "/wire.txt"]));
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/wire.txt"]));
     let removed = harness.run(&["--json", "rm", "/wire.txt"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
@@ -1034,14 +1051,25 @@ fn mkdir_parents_get_noclobber_and_version_metadata() {
     // get refuses to clobber a local file unless forced.
     let payload = harness.temp_dir.path().join("f.txt");
     fs::write(&payload, b"remote bytes").expect("payload");
-    assert_success(&harness.run(&["put", payload.to_str().unwrap(), "/f.txt"]));
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/f.txt"]));
     let dest = harness.temp_dir.path().join("dest.txt");
     fs::write(&dest, b"precious local bytes").expect("existing local file");
-    let refused = harness.run(&["--json", "get", "/f.txt", dest.to_str().unwrap()]);
+    let refused = harness.run(&[
+        "--json",
+        "get",
+        "/f.txt",
+        dest.to_str().expect("utf-8 path"),
+    ]);
     assert_failure(&refused);
     assert_eq!(json_error(&refused)["code"], "destination_exists");
     assert_eq!(fs::read(&dest).expect("unchanged"), b"precious local bytes");
-    let forced = harness.run(&["--json", "get", "/f.txt", dest.to_str().unwrap(), "--force"]);
+    let forced = harness.run(&[
+        "--json",
+        "get",
+        "/f.txt",
+        dest.to_str().expect("utf-8 path"),
+        "--force",
+    ]);
     assert_success(&forced);
     assert_eq!(fs::read(&dest).expect("replaced"), b"remote bytes");
 
@@ -1177,7 +1205,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
             .iter()
             .find(|(advertised, _)| *advertised == profile.as_str())
             .unwrap_or_else(|| {
-                panic!(
+                unreachable!(
                     "capability profile `{profile}` has no CLI command mapping; \
                      add its command paths to PROFILE_COMMAND_PATHS"
                 )
@@ -1192,7 +1220,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
             .iter()
             .find(|(advertised, _)| *advertised == feature.as_str())
             .unwrap_or_else(|| {
-                panic!(
+                unreachable!(
                     "capability feature `{feature}` has no CLI command mapping; \
                      add its command path to FEATURE_COMMAND_PATHS"
                 )
@@ -1236,14 +1264,14 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "put",
             "--profile",
             profile,
-            first_payload.to_str().unwrap(),
+            first_payload.to_str().expect("utf-8 path"),
             "/first.txt",
         ]));
         assert_success(&harness.run(&[
             "put",
             "--profile",
             profile,
-            second_payload.to_str().unwrap(),
+            second_payload.to_str().expect("utf-8 path"),
             "/second.txt",
         ]));
 
@@ -1255,17 +1283,26 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(changes_data["after_seq"], 0);
         assert_eq!(changes_data["through_seq"], 2);
         assert!(changes_data["next_after_seq"].is_null());
-        let listed = changes_data["changes"].as_array().unwrap();
+        let listed = changes_data["changes"].as_array().expect("json array");
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0]["seq"], 1);
         assert_eq!(listed[1]["seq"], 2);
-        assert!(listed[0]["commit_id"].as_str().unwrap().starts_with("c_"));
-        assert!(!listed[1]["deltas"].as_array().unwrap().is_empty());
+        assert!(listed[0]["commit_id"]
+            .as_str()
+            .expect("json string")
+            .starts_with("c_"));
+        assert!(!listed[1]["deltas"]
+            .as_array()
+            .expect("json array")
+            .is_empty());
 
         let paged = harness.run(&["--json", "changes", "--profile", profile, "--limit", "1"]);
         assert_success(&paged);
         let paged_data = json_data(&paged);
-        assert_eq!(paged_data["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            paged_data["changes"].as_array().expect("json array").len(),
+            1
+        );
         assert_eq!(paged_data["changes"][0]["seq"], 1);
         assert_eq!(paged_data["next_after_seq"], 1);
 
@@ -1273,7 +1310,13 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_success(&resumed);
         let resumed_data = json_data(&resumed);
         assert_eq!(resumed_data["after_seq"], 1);
-        assert_eq!(resumed_data["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            resumed_data["changes"]
+                .as_array()
+                .expect("json array")
+                .len(),
+            1
+        );
         assert_eq!(resumed_data["changes"][0]["seq"], 2);
 
         let checkpoint = harness.run(&[
@@ -1292,7 +1335,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(checkpoint_data["checkpoint_seq"], 2);
         let checkpoint_id = checkpoint_data["checkpoint_id"]
             .as_str()
-            .unwrap()
+            .expect("json string")
             .to_owned();
         assert!(checkpoint_id.starts_with("chk_"));
 
@@ -1428,7 +1471,7 @@ impl Harness {
             "--store-kind",
             "local-fs",
             "--root",
-            self.store_root(name).to_str().unwrap(),
+            self.store_root(name).to_str().expect("utf-8 path"),
         ]);
         assert_success(&output);
     }
@@ -1483,7 +1526,7 @@ key_prefix = "{key_prefix}"
             rewrite_server_bind(&server_config_path, available_port());
         }
 
-        panic!(
+        unreachable!(
             "timed out waiting for external server from {}",
             server_config_path.display()
         );
@@ -1555,6 +1598,10 @@ fn server_url_from_config(path: &Path) -> String {
     format!("http://{bind}")
 }
 
+// Polls a spawned server binary for readiness; a wall-clock deadline is the
+// point, so the timer methods the workspace otherwise disallows are scoped
+// to this helper.
+#[allow(clippy::disallowed_methods)]
 fn wait_for_health_ready(server_url: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

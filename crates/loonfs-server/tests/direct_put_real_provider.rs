@@ -1,4 +1,3 @@
-#![allow(clippy::panic, clippy::disallowed_methods)]
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
 use loonfs_api::{
@@ -266,9 +265,11 @@ fn presigned_access_without_header(
 
 fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
     match result {
-        Ok(_) => panic!("{context} unexpectedly succeeded"),
+        Ok(_) => unreachable!("{context} unexpectedly succeeded"),
         Err(ClientError::Api { .. } | ClientError::Http(_)) => {}
-        Err(error) => panic!("{context} failed with unexpected client-side error: {error}"),
+        Err(error) => {
+            unreachable!("{context} failed with unexpected client-side error: {error}")
+        }
     }
 }
 

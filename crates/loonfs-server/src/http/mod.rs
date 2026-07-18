@@ -66,7 +66,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-type SharedStore = SharedObjectStore;
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 
 /// Response header carrying the request's correlation id.
@@ -147,7 +146,7 @@ impl ServerLifecycle {
 pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), ServerConfigError> {
     let store = config.object_store()?;
     let transfer_issuer = store.transfer_issuer();
-    let store = Arc::new(store) as SharedStore;
+    let store = Arc::new(store) as SharedObjectStore;
     let (router, lifecycle, _state) =
         app_with_store_and_transfer_issuer(config, store, transfer_issuer).await?;
     Ok((router, lifecycle))
@@ -156,7 +155,7 @@ pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), Serv
 #[cfg(test)]
 async fn app_with_store(
     config: ServerConfig,
-    store: SharedStore,
+    store: SharedObjectStore,
 ) -> Result<Router, ServerConfigError> {
     Ok(app_with_store_and_transfer_issuer(config, store, None)
         .await?
@@ -168,7 +167,7 @@ async fn app_with_store(
 #[cfg(test)]
 async fn app_with_store_and_state(
     config: ServerConfig,
-    store: SharedStore,
+    store: SharedObjectStore,
 ) -> Result<(Router, AppState), ServerConfigError> {
     let (router, _lifecycle, state) =
         app_with_store_and_transfer_issuer(config, store, None).await?;
@@ -177,7 +176,7 @@ async fn app_with_store_and_state(
 
 async fn app_with_store_and_transfer_issuer(
     config: ServerConfig,
-    store: SharedStore,
+    store: SharedObjectStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 ) -> Result<(Router, ServerLifecycle, AppState), ServerConfigError> {
     let (writer, reader, admin) = build_handles(&config, store).await?;
@@ -331,7 +330,7 @@ async fn method_not_allowed() -> ApiResponseError {
 /// inside this one runtime ownership domain.
 async fn build_handles(
     config: &ServerConfig,
-    store: SharedStore,
+    store: SharedObjectStore,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     build_handles_with_metrics_jsonl_path(
         config,
@@ -343,7 +342,7 @@ async fn build_handles(
 
 async fn build_handles_with_metrics_jsonl_path(
     config: &ServerConfig,
-    store: SharedStore,
+    store: SharedObjectStore,
     metrics_jsonl_path: Option<OsString>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let metrics_recorder = object_store_metrics_recorder(metrics_jsonl_path)?;
