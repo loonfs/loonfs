@@ -159,7 +159,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             delta: WalDelta::BindDirentry {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
-                name_key: "docs".to_owned(),
+                name_key: NameKey::parse("docs").expect("valid name key"),
                 display_name: "Docs".to_owned(),
                 child_inode_id: InodeId(7),
             },
@@ -169,7 +169,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             delta: WalDelta::UnbindDirentry {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
-                name_key: "old.txt".to_owned(),
+                name_key: NameKey::parse("old.txt").expect("valid name key"),
                 child_inode_id: InodeId(5),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -581,6 +581,33 @@ fn with_cbor_document_entry(
 }
 
 #[test]
+fn wal_delta_decode_rejects_invalid_name_key() {
+    // The WAL delta's `name_key` field is a typed `NameKey`, so the wire
+    // decode boundary is where malformed keys are rejected — nothing
+    // downstream re-validates. Encode a valid bind delta, corrupt the key
+    // in the CBOR map, and require the decode to fail.
+    let valid = WalDelta::BindDirentry {
+        delta_index: 0,
+        parent_inode_id: InodeId(1),
+        name_key: name_key("docs"),
+        display_name: "Docs".to_owned(),
+        child_inode_id: InodeId(2),
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&valid, &mut encoded).expect("encode delta");
+    let corrupted = with_cbor_document_entry(&encoded, "name_key", |value| {
+        *value = ciborium::Value::from("bad/key");
+    });
+
+    ciborium::de::from_reader::<WalDelta, _>(corrupted.as_slice())
+        .expect_err("invalid name key must fail wire decode");
+
+    let round_tripped: WalDelta =
+        ciborium::de::from_reader(encoded.as_slice()).expect("valid delta round-trips");
+    assert_eq!(round_tripped, valid);
+}
+
+#[test]
 fn wal_decode_rejects_future_format_version_cleanly() {
     let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
     let bumped = with_cbor_document_entry(&document, "format_version", |value| {
@@ -778,7 +805,7 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::BindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
-                name_key: "a".to_owned(),
+                name_key: NameKey::parse("a").expect("valid name key"),
                 display_name: "a".to_owned(),
                 child_inode_id: InodeId(2),
             }),
@@ -788,7 +815,7 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::UnbindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
-                name_key: "a".to_owned(),
+                name_key: NameKey::parse("a").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,

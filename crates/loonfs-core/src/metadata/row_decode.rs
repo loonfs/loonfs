@@ -48,7 +48,7 @@ pub(crate) fn direntry_bind_from_manifest_row(
             bind_delta_index,
         } => Ok(DirentryBindRecord {
             parent_inode_id,
-            name_key: name_key.as_str().to_owned(),
+            name_key,
             display_name,
             child_inode_id,
             bind_seq,
@@ -72,7 +72,7 @@ pub(crate) fn direntry_unbind_from_manifest_row(
             unbind_delta_index,
         } => Ok(DirentryUnbindRecord {
             parent_inode_id,
-            name_key: name_key.as_str().to_owned(),
+            name_key,
             child_inode_id,
             bind_seq,
             bind_delta_index,

@@ -271,12 +271,6 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
     })
 }
 
-#[cfg(test)]
-struct PathPlanningView<'a> {
-    head: &'a HeadState,
-    metadata_state: &'a MetadataState,
-}
-
 struct PublishPathPlanningView<'a, 'b, 'store, S: ObjectStore + ?Sized> {
     head: &'a HeadState,
     metadata_state: &'a MetadataView<'b, 'store, S>,
@@ -299,9 +293,7 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode_id,
-        name_key: NameKey::parse(&binding.name_key).map_err(|err| {
-            CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
-        })?,
+        name_key: binding.name_key.clone(),
         child_inode_id: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
@@ -926,38 +918,10 @@ async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
 }
 
 #[cfg(test)]
-fn binding_is_precondition(
-    view: &PathPlanningView<'_>,
-    resolved: &ResolvedVisiblePath,
-) -> Result<ApiCommitPrecondition, CoreError> {
-    let parent_inode_id = resolved
-        .parent_inode_id
-        .ok_or(CoreError::RootMutationForbidden)?;
-    let binding = view
-        .metadata_state
-        .current_parent_binding_for_child(resolved.inode_id, view.head.seq)
-        .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
-    if binding.parent_inode_id != parent_inode_id {
-        return Err(CoreError::PathNotFound(resolved.absolute_path.clone()));
-    }
-    Ok(ApiCommitPrecondition::BindingIs {
-        parent_inode_id,
-        name_key: NameKey::parse(&binding.name_key).map_err(|err| {
-            CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
-        })?,
-        child_inode_id: binding.child_inode_id,
-        bind_seq: binding.bind_seq,
-        bind_delta_index: binding.bind_delta_index,
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::commit::core_commit_fingerprint_for_v0_request;
     use crate::context::MutationContext;
-    use crate::error::ErrorCode;
-    use crate::metadata::{DirentryBindRecord, InodeRecord};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
@@ -1255,55 +1219,6 @@ mod tests {
                 precondition,
                 CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "b.txt"
             )));
-    }
-
-    #[tokio::test]
-    async fn binding_is_precondition_reports_invalid_durable_name_key_as_namespace_corrupt() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let mut head = HeadState::initial(namespace_id);
-        head.seq = ChangeSeq(1);
-        let metadata_state = MetadataState::from_rows(
-            vec![
-                InodeRecord {
-                    inode_id: InodeId(1),
-                    inode_kind: InodeKind::Directory,
-                    created_seq: ChangeSeq(0),
-                },
-                InodeRecord {
-                    inode_id: InodeId(2),
-                    inode_kind: InodeKind::File,
-                    created_seq: ChangeSeq(1),
-                },
-            ],
-            vec![DirentryBindRecord {
-                parent_inode_id: InodeId(1),
-                name_key: "bad/key".to_owned(),
-                display_name: "file.txt".to_owned(),
-                child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
-            }],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
-        let view = PathPlanningView {
-            head: &head,
-            metadata_state: &metadata_state,
-        };
-        let resolved = ResolvedVisiblePath {
-            absolute_path: "/file.txt".to_owned(),
-            inode_id: InodeId(2),
-            inode_kind: InodeKind::File,
-            parent_inode_id: Some(InodeId(1)),
-            display_name: "file.txt".to_owned(),
-        };
-
-        let error =
-            binding_is_precondition(&view, &resolved).expect_err("invalid durable name key");
-
-        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
 
     #[tokio::test]

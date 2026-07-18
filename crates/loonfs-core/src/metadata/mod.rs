@@ -39,7 +39,6 @@ pub use self::rows::{
     RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
 
-pub(crate) use self::rows::record_name_key;
 pub(crate) use self::view::{
     DurableVisibilityCache, InMemoryMetadataView, MetadataView, MetadataViewSession,
     VisibleChildEntry,

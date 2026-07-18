@@ -53,7 +53,7 @@ impl<'a> From<&'a DirentryBindRecord> for BindingIdentity<'a> {
     fn from(record: &'a DirentryBindRecord) -> Self {
         Self {
             parent_inode_id: record.parent_inode_id,
-            name_key: &record.name_key,
+            name_key: record.name_key.as_str(),
             child_inode_id: record.child_inode_id,
             bind_seq: record.bind_seq,
             bind_delta_index: record.bind_delta_index,
@@ -65,7 +65,7 @@ impl<'a> From<&'a DirentryUnbindRecord> for BindingIdentity<'a> {
     fn from(record: &'a DirentryUnbindRecord) -> Self {
         Self {
             parent_inode_id: record.parent_inode_id,
-            name_key: &record.name_key,
+            name_key: record.name_key.as_str(),
             child_inode_id: record.child_inode_id,
             bind_seq: record.bind_seq,
             bind_delta_index: record.bind_delta_index,

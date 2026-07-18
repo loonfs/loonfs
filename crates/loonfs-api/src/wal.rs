@@ -5,8 +5,8 @@ use crate::control::WalSegmentPointer;
 use crate::digest::sha256_digest;
 use crate::envelope::EnvelopeProbe;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo, WalSegmentId,
-    WriterEpoch,
+    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    WalSegmentId, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -43,14 +43,14 @@ pub enum WalDelta {
     BindDirentry {
         delta_index: u32,
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         display_name: String,
         child_inode_id: InodeId,
     },
     UnbindDirentry {
         delta_index: u32,
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,

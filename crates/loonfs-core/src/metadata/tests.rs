@@ -4,7 +4,8 @@
 use super::*;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamePolicy,
+    RevisionNo,
 };
 
 #[test]
@@ -15,7 +16,7 @@ fn bind_direntry_replay_uses_persisted_name_key() {
         &[WalDelta::BindDirentry {
             delta_index: 7,
             parent_inode_id: InodeId(1),
-            name_key: "persisted-key".to_owned(),
+            name_key: NameKey::parse("persisted-key").expect("valid name key"),
             display_name: "Report.TXT".to_owned(),
             child_inode_id: InodeId(2),
         }],
@@ -23,7 +24,7 @@ fn bind_direntry_replay_uses_persisted_name_key() {
 
     assert_eq!(applied.metadata_state.direntry_binds().len(), 1);
     let bind = &applied.metadata_state.direntry_binds()[0];
-    assert_eq!(bind.name_key, "persisted-key");
+    assert_eq!(bind.name_key.as_str(), "persisted-key");
     assert_eq!(bind.display_name, "Report.TXT");
     assert_eq!(bind.bind_delta_index, 7);
 }
@@ -45,7 +46,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         ],
         vec![DirentryBindRecord {
             parent_inode_id: InodeId(1),
-            name_key: "persisted-key".to_owned(),
+            name_key: NameKey::parse("persisted-key").expect("valid name key"),
             display_name: "Report.TXT".to_owned(),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
@@ -88,7 +89,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         vec![
             DirentryBindRecord {
                 parent_inode_id: InodeId(1),
-                name_key: "docs".to_owned(),
+                name_key: NameKey::parse("docs").expect("valid name key"),
                 display_name: "docs".to_owned(),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
@@ -96,7 +97,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             },
             DirentryBindRecord {
                 parent_inode_id: InodeId(2),
-                name_key: "report.txt".to_owned(),
+                name_key: NameKey::parse("report.txt").expect("valid name key"),
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(3),
                 bind_seq: ChangeSeq(2),
@@ -133,7 +134,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             &[WalDelta::UnbindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
-                name_key: "docs".to_owned(),
+                name_key: NameKey::parse("docs").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -154,7 +155,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             &[WalDelta::BindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
-                name_key: "renamed".to_owned(),
+                name_key: NameKey::parse("renamed").expect("valid name key"),
                 display_name: "renamed".to_owned(),
                 child_inode_id: InodeId(2),
             }],
@@ -210,7 +211,7 @@ fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
         ],
         vec![DirentryBindRecord {
             parent_inode_id: InodeId(1),
-            name_key: "file.txt".to_owned(),
+            name_key: NameKey::parse("file.txt").expect("valid name key"),
             display_name: "file.txt".to_owned(),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
@@ -263,7 +264,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
         vec![
             DirentryBindRecord {
                 parent_inode_id: InodeId(1),
-                name_key: "report".to_owned(),
+                name_key: NameKey::parse("report").expect("valid name key"),
                 display_name: "report".to_owned(),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
@@ -271,7 +272,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             },
             DirentryBindRecord {
                 parent_inode_id: InodeId(1),
-                name_key: "report".to_owned(),
+                name_key: NameKey::parse("report").expect("valid name key"),
                 display_name: "report".to_owned(),
                 child_inode_id: InodeId(3),
                 bind_seq: ChangeSeq(2),
@@ -313,7 +314,7 @@ fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
         ],
         vec![DirentryBindRecord {
             parent_inode_id: InodeId(1),
-            name_key: "report.txt".to_owned(),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
             display_name: "Report.TXT".to_owned(),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
@@ -547,7 +548,7 @@ fn churned_binding_state() -> MetadataState {
             WalDelta::BindDirentry {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
-                name_key: "contested".to_owned(),
+                name_key: NameKey::parse("contested").expect("valid name key"),
                 display_name: "contested".to_owned(),
                 child_inode_id: InodeId(2),
             },
@@ -559,7 +560,7 @@ fn churned_binding_state() -> MetadataState {
             WalDelta::BindDirentry {
                 delta_index: 3,
                 parent_inode_id: InodeId(1),
-                name_key: "deleted".to_owned(),
+                name_key: NameKey::parse("deleted").expect("valid name key"),
                 display_name: "deleted".to_owned(),
                 child_inode_id: InodeId(4),
             },
@@ -572,7 +573,7 @@ fn churned_binding_state() -> MetadataState {
             WalDelta::UnbindDirentry {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
-                name_key: "contested".to_owned(),
+                name_key: NameKey::parse("contested").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 1,
@@ -580,14 +581,14 @@ fn churned_binding_state() -> MetadataState {
             WalDelta::BindDirentry {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
-                name_key: "renamed-away".to_owned(),
+                name_key: NameKey::parse("renamed-away").expect("valid name key"),
                 display_name: "renamed-away".to_owned(),
                 child_inode_id: InodeId(2),
             },
             WalDelta::UnbindDirentry {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
-                name_key: "deleted".to_owned(),
+                name_key: NameKey::parse("deleted").expect("valid name key"),
                 child_inode_id: InodeId(4),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 3,
@@ -606,7 +607,7 @@ fn churned_binding_state() -> MetadataState {
             WalDelta::BindDirentry {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
-                name_key: "contested".to_owned(),
+                name_key: NameKey::parse("contested").expect("valid name key"),
                 display_name: "contested".to_owned(),
                 child_inode_id: InodeId(3),
             },
@@ -725,7 +726,7 @@ fn has_visible_children_sees_through_unbinds() {
         ],
         vec![DirentryBindRecord {
             parent_inode_id: dir,
-            name_key: "doc.txt".to_owned(),
+            name_key: NameKey::parse("doc.txt").expect("valid name key"),
             display_name: "doc.txt".to_owned(),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(2),
@@ -753,7 +754,7 @@ fn has_visible_children_sees_through_unbinds() {
         state.direntry_binds().to_vec(),
         vec![DirentryUnbindRecord {
             parent_inode_id: dir,
-            name_key: "doc.txt".to_owned(),
+            name_key: NameKey::parse("doc.txt").expect("valid name key"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(2),
             bind_delta_index: 0,

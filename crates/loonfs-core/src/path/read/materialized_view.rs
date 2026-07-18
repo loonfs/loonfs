@@ -35,8 +35,8 @@ use loonfs_api::{
     decode_grep_cursor, encode_grep_cursor, AbsolutePath, AuthoritativeFileBytes,
     AuthoritativePathEntry, ContentStoreId, DirectoryPageCursor, DisplayName, FileRevision,
     FileRevisionsPageCursor, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId,
-    InodeKind, ListFileRevisionsResponse, ManifestId, NameKey, NamePolicy, NamespaceId, Page,
-    PageRequest, PaginationPolicy, RevisionNo,
+    InodeKind, ListFileRevisionsResponse, ManifestId, NamePolicy, NamespaceId, Page, PageRequest,
+    PaginationPolicy, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -985,9 +985,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             Some(DirectoryPageCursor {
                 head_seq: self.head.seq,
                 dir_inode_id: resolved.inode_id,
-                last_name_key: NameKey::parse(&last.binding.name_key).map_err(|error| {
-                    CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))
-                })?,
+                last_name_key: last.binding.name_key.clone(),
             })
         } else {
             None

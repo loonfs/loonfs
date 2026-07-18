@@ -5,7 +5,9 @@ use super::ResolvedBinding;
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ChangeSeq, CommitId, ContentRef, InodeId, NamePolicy, NamespaceId, RevisionNo};
+use loonfs_api::{
+    ChangeSeq, CommitId, ContentRef, InodeId, NameKey, NamePolicy, NamespaceId, RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +27,7 @@ pub(crate) enum ValidatedOp {
         op_index: u32,
         parent_inode_id: InodeId,
         display_name: String,
-        name_key: String,
+        name_key: NameKey,
         child_inode_id: InodeId,
         create_inode_delta_index: u32,
         bind_delta_index: u32,
@@ -34,7 +36,7 @@ pub(crate) enum ValidatedOp {
         op_index: u32,
         parent_inode_id: InodeId,
         display_name: String,
-        name_key: String,
+        name_key: NameKey,
         child_inode_id: InodeId,
         content_ref: ContentRef,
         create_inode_delta_index: u32,
@@ -69,7 +71,7 @@ pub(crate) enum ValidatedOp {
         source_binding: ResolvedBinding,
         new_parent_inode_id: InodeId,
         new_display_name: String,
-        new_name_key: String,
+        new_name_key: NameKey,
         unbind_delta_index: u32,
         bind_delta_index: u32,
     },
@@ -85,7 +87,7 @@ pub(crate) enum ValidatedOp {
         inode_id: InodeId,
         parent_inode_id: InodeId,
         display_name: String,
-        name_key: String,
+        name_key: NameKey,
         /// The exact deletion generation validation resolved and pinned:
         /// the active tombstone's own event coordinates.
         target_seq: ChangeSeq,
