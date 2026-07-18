@@ -1,6 +1,6 @@
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo,
+    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::MetadataState as CoreMetadataState;
 use loonfs_model::metadata::MetadataState as ModelMetadataState;
@@ -39,10 +39,11 @@ fn create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: loonfs_api::name_key_for_display_name(
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 display_name,
-            ),
+            ))
+            .expect("derived name key"),
             display_name: display_name.to_owned(),
             child_inode_id: inode_id,
         },
@@ -65,10 +66,11 @@ fn create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: loonfs_api::name_key_for_display_name(
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 display_name,
-            ),
+            ))
+            .expect("derived name key"),
             display_name: display_name.to_owned(),
             child_inode_id: inode_id,
         },
@@ -104,10 +106,11 @@ fn bind(
     vec![WalDelta::BindDirentry {
         delta_index,
         parent_inode_id,
-        name_key: loonfs_api::name_key_for_display_name(
+        name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
             loonfs_api::NamePolicy::default(),
             display_name,
-        ),
+        ))
+        .expect("derived name key"),
         display_name: display_name.to_owned(),
         child_inode_id: inode_id,
     }]

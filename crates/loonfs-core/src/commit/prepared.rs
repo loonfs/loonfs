@@ -84,6 +84,7 @@ mod tests {
     use super::*;
     use crate::commit::{materialize_commit, CommitOp, CommitOpResult, ValidatedOp};
     use loonfs_api::wire::wal::WalDelta;
+    use loonfs_api::NameKey;
     use loonfs_api::{ChangeSeq, CommitId, InodeId};
 
     fn request() -> CommitRequest {
@@ -112,7 +113,7 @@ mod tests {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
-                name_key: "docs".to_owned(),
+                name_key: NameKey::parse("docs").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
                 bind_delta_index: 1,

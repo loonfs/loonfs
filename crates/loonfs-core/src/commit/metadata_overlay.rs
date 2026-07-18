@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::commit::ResolvedBinding;
     use loonfs_api::wire::wal::WalDelta;
-    use loonfs_api::{ContentRef, ContentRefKind, InodeId, RevisionNo};
+    use loonfs_api::{ContentRef, ContentRefKind, InodeId, NameKey, RevisionNo};
 
     /// The commit overlay derives its rows from the WAL encoding
     /// (`materialize_validated_op` + `apply_committed_wal_delta_mut`), the
@@ -146,7 +146,7 @@ mod tests {
     ) -> ResolvedBinding {
         ResolvedBinding {
             parent_inode_id: InodeId(parent),
-            name_key: name_key.to_owned(),
+            name_key: NameKey::parse(name_key).expect("valid name key"),
             display_name: display_name.to_owned(),
             child_inode_id: InodeId(child),
             bind_seq: ChangeSeq(bind_seq),
@@ -162,7 +162,7 @@ mod tests {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
                 display_name: "Docs".to_owned(),
-                name_key: "docs".to_owned(),
+                name_key: NameKey::parse("docs").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
                 bind_delta_index: 1,
@@ -178,7 +178,7 @@ mod tests {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
                 display_name: "Note.TXT".to_owned(),
-                name_key: "note.txt".to_owned(),
+                name_key: NameKey::parse("note.txt").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 content_ref: content_ref(1),
                 create_inode_delta_index: 0,
@@ -241,7 +241,7 @@ mod tests {
                 source_binding: binding(2, "old.txt", "Old.TXT", 4, 11, 2),
                 new_parent_inode_id: InodeId(3),
                 new_display_name: "New.TXT".to_owned(),
-                new_name_key: "new.txt".to_owned(),
+                new_name_key: NameKey::parse("new.txt").expect("valid name key"),
                 unbind_delta_index: 0,
                 bind_delta_index: 1,
             }],
@@ -261,7 +261,7 @@ mod tests {
                     op_index: 0,
                     parent_inode_id: InodeId(1),
                     display_name: "Draft.md".to_owned(),
-                    name_key: "draft.md".to_owned(),
+                    name_key: NameKey::parse("draft.md").expect("valid name key"),
                     child_inode_id: InodeId(2),
                     content_ref: content_ref(4),
                     create_inode_delta_index: 0,
@@ -274,7 +274,7 @@ mod tests {
                     source_binding: binding(1, "draft.md", "Draft.md", 2, committed_seq.0, 1),
                     new_parent_inode_id: InodeId(1),
                     new_display_name: "Final.md".to_owned(),
-                    new_name_key: "final.md".to_owned(),
+                    new_name_key: NameKey::parse("final.md").expect("valid name key"),
                     unbind_delta_index: 3,
                     bind_delta_index: 4,
                 },
@@ -311,7 +311,7 @@ mod tests {
                     op_index: 0,
                     parent_inode_id: InodeId(1),
                     display_name: "Docs".to_owned(),
-                    name_key: "docs".to_owned(),
+                    name_key: NameKey::parse("docs").expect("valid name key"),
                     child_inode_id: InodeId(2),
                     create_inode_delta_index: 0,
                     bind_delta_index: 1,
@@ -320,7 +320,7 @@ mod tests {
                     op_index: 1,
                     parent_inode_id: InodeId(2),
                     display_name: "Note.txt".to_owned(),
-                    name_key: "note.txt".to_owned(),
+                    name_key: NameKey::parse("note.txt").expect("valid name key"),
                     child_inode_id: InodeId(3),
                     content_ref: content_ref(5),
                     create_inode_delta_index: 2,
@@ -340,7 +340,7 @@ mod tests {
                     source_binding: binding(2, "note.txt", "Note.txt", 3, committed_seq.0, 3),
                     new_parent_inode_id: InodeId(2),
                     new_display_name: "Renamed.txt".to_owned(),
-                    new_name_key: "renamed.txt".to_owned(),
+                    new_name_key: NameKey::parse("renamed.txt").expect("valid name key"),
                     unbind_delta_index: 6,
                     bind_delta_index: 7,
                 },
@@ -382,7 +382,7 @@ mod tests {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
                 display_name: "a".to_owned(),
-                name_key: "a".to_owned(),
+                name_key: NameKey::parse("a").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
                 bind_delta_index: 1,
@@ -391,7 +391,7 @@ mod tests {
                 op_index: 1,
                 parent_inode_id: InodeId(2),
                 display_name: "f".to_owned(),
-                name_key: "f".to_owned(),
+                name_key: NameKey::parse("f").expect("valid name key"),
                 child_inode_id: InodeId(3),
                 content_ref: content_ref(7),
                 create_inode_delta_index: 2,
@@ -413,7 +413,7 @@ mod tests {
                 source_binding: binding(2, "f", "f", 3, first_seq.0, 3),
                 new_parent_inode_id: InodeId(1),
                 new_display_name: "f2".to_owned(),
-                new_name_key: "f2".to_owned(),
+                new_name_key: NameKey::parse("f2").expect("valid name key"),
                 unbind_delta_index: 1,
                 bind_delta_index: 2,
             },

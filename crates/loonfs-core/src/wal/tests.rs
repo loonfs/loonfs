@@ -8,7 +8,7 @@ use crate::commit::{
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
-use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, WalSegmentId, WriterEpoch};
+use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WalSegmentId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -40,7 +40,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
             op_index: 0,
             parent_inode_id: InodeId(1),
             display_name: "docs".to_owned(),
-            name_key: "docs".to_owned(),
+            name_key: NameKey::parse("docs").expect("valid name key"),
             child_inode_id: InodeId(2),
             create_inode_delta_index: 0,
             bind_delta_index: 1,
@@ -386,10 +386,11 @@ fn materialized_create_directory(
             op_index: 0,
             parent_inode_id: InodeId(1),
             display_name: display_name.to_owned(),
-            name_key: loonfs_api::name_key_for_display_name(
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 display_name,
-            ),
+            ))
+            .expect("derived name key"),
             child_inode_id: InodeId(2),
             create_inode_delta_index: 0,
             bind_delta_index: 1,

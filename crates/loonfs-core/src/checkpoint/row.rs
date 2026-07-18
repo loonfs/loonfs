@@ -1,7 +1,7 @@
 //! Converts in-memory metadata state into manifest rows, per family and in
 //! row-key order.
 
-use crate::metadata::{record_name_key, MetadataState};
+use crate::metadata::MetadataState;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::ChangeSeq;
 
@@ -52,7 +52,7 @@ pub(super) fn manifest_rows_for_family(
                 .iter()
                 .map(|direntry| MetadataRow::DirentryBind {
                     parent_inode_id: direntry.parent_inode_id,
-                    name_key: record_name_key(&direntry.name_key),
+                    name_key: direntry.name_key.clone(),
                     display_name: direntry.display_name.clone(),
                     child_inode_id: direntry.child_inode_id,
                     bind_seq: direntry.bind_seq,
@@ -65,7 +65,7 @@ pub(super) fn manifest_rows_for_family(
             .iter()
             .map(|unbind| MetadataRow::DirentryUnbind {
                 parent_inode_id: unbind.parent_inode_id,
-                name_key: record_name_key(&unbind.name_key),
+                name_key: unbind.name_key.clone(),
                 child_inode_id: unbind.child_inode_id,
                 bind_seq: unbind.bind_seq,
                 bind_delta_index: unbind.bind_delta_index,

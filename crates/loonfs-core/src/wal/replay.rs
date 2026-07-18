@@ -6,7 +6,7 @@ use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
-use loonfs_api::{ChangeSeq, InodeId, NameKey, NamespaceId, WriterEpoch};
+use loonfs_api::{ChangeSeq, InodeId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::wal_segment;
 
 pub(crate) fn project_validated_wal_tail(
@@ -176,18 +176,6 @@ pub(super) fn validate_wal_segment_for_replay(
                 expected,
                 actual: record.seq,
             });
-        }
-        // Replay is the choke point where WAL name keys enter metadata
-        // records, so reject malformed keys here: everything downstream
-        // (checkpoint row building, view row keys) relies on record name
-        // keys converting back to typed `NameKey`s infallibly.
-        for delta in &record.deltas {
-            if let WalDelta::BindDirentry { name_key, .. }
-            | WalDelta::UnbindDirentry { name_key, .. } = &delta.delta
-            {
-                NameKey::parse(name_key)
-                    .map_err(|err| WalReplayError::Codec(format!("invalid WAL name_key: {err}")))?;
-            }
         }
     }
 

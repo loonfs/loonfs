@@ -82,7 +82,7 @@ impl MetadataState {
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
-                    && direntry.name_key == name_key
+                    && direntry.name_key.as_str() == name_key
                     && direntry.bind_seq <= base_seq
             })
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))

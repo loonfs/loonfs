@@ -122,7 +122,7 @@ impl MetadataState {
                 } => {
                     metadata_state.direntry_binds.push(DirentryBindRecord {
                         parent_inode_id: *parent_inode_id,
-                        name_key: name_key.clone(),
+                        name_key: name_key.as_str().to_owned(),
                         display_name: display_name.clone(),
                         child_inode_id: *child_inode_id,
                         bind_seq: committed_seq,
@@ -143,7 +143,7 @@ impl MetadataState {
                 } => {
                     metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
                         parent_inode_id: *parent_inode_id,
-                        name_key: name_key.clone(),
+                        name_key: name_key.as_str().to_owned(),
                         child_inode_id: *child_inode_id,
                         bind_seq: *bind_seq,
                         bind_delta_index: *bind_delta_index,
@@ -231,6 +231,7 @@ fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::NameKey;
 
     #[test]
     fn bind_direntry_replay_uses_persisted_name_key() {
@@ -239,7 +240,7 @@ mod tests {
             &[WalDelta::BindDirentry {
                 delta_index: 7,
                 parent_inode_id: InodeId(1),
-                name_key: "persisted-key".to_owned(),
+                name_key: NameKey::parse("persisted-key").expect("valid name key"),
                 display_name: "Report.TXT".to_owned(),
                 child_inode_id: InodeId(2),
             }],

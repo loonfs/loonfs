@@ -11,9 +11,7 @@ use super::super::{
 use super::view::CommitValidationView;
 use crate::invariants::InvariantId;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
-use loonfs_api::{
-    name_key_for_display_name, ChangeSeq, DisplayName, InodeId, InodeKind, NamePolicy, RevisionNo,
-};
+use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo};
 
 pub(super) struct ValidatedMetadataOps {
     pub(super) validated_ops: Vec<ValidatedOp>,
@@ -529,8 +527,8 @@ async fn validate_name_absent<V: CommitValidationView>(
     parent_missing: impl FnOnce() -> CommitValidationError,
     parent_not_directory: impl FnOnce(InodeKind) -> CommitValidationError,
     collision: impl FnOnce(String, InodeId) -> CommitValidationError,
-) -> Result<String, V::Error> {
-    validate_display_name(display_name)?;
+) -> Result<NameKey, V::Error> {
+    let display_name = validate_display_name(display_name)?;
     validate_inode_kind(
         metadata_state,
         parent_inode_id,
@@ -540,12 +538,12 @@ async fn validate_name_absent<V: CommitValidationView>(
     )
     .await?;
 
-    let name_key = name_key_for_display_name(name_policy, display_name);
+    let name_key = NameKey::for_display_name(name_policy, &display_name);
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode_id, &name_key)
+        .visible_child(parent_inode_id, name_key.as_str())
         .await?
     {
-        return Err(collision(name_key, existing.child_inode_id).into());
+        return Err(collision(name_key.as_str().to_owned(), existing.child_inode_id).into());
     }
 
     Ok(name_key)
@@ -556,7 +554,7 @@ async fn validate_child_name_absent<V: CommitValidationView>(
     parent_inode_id: InodeId,
     display_name: &str,
     name_policy: NamePolicy,
-) -> Result<String, V::Error> {
+) -> Result<NameKey, V::Error> {
     validate_name_absent(
         metadata_state,
         parent_inode_id,
@@ -581,7 +579,7 @@ async fn validate_rename_target_name_absent<V: CommitValidationView>(
     parent_inode_id: InodeId,
     display_name: &str,
     name_policy: NamePolicy,
-) -> Result<String, V::Error> {
+) -> Result<NameKey, V::Error> {
     validate_name_absent(
         metadata_state,
         parent_inode_id,
@@ -860,11 +858,9 @@ async fn validate_rename_does_not_cycle<V: CommitValidationView>(
     Ok(())
 }
 
-fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError> {
-    DisplayName::parse(display_name)
-        .map(|_| ())
-        .map_err(|error| CommitValidationError::InvalidDisplayName {
-            display_name: error.invalid_path_input().to_owned(),
-            reason: error.to_string(),
-        })
+fn validate_display_name(display_name: &str) -> Result<DisplayName, CommitValidationError> {
+    DisplayName::parse(display_name).map_err(|error| CommitValidationError::InvalidDisplayName {
+        display_name: error.invalid_path_input().to_owned(),
+        reason: error.to_string(),
+    })
 }

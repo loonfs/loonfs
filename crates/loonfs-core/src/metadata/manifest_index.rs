@@ -122,10 +122,10 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
     direntry: &DirentryBindRecord,
 ) -> Result<Vec<DirentryUnbindRecord>> {
     let filter_probe =
-        lookup_keys::direntry_unbind_probe(direntry.parent_inode_id, &direntry.name_key);
+        lookup_keys::direntry_unbind_probe(direntry.parent_inode_id, direntry.name_key.as_str());
     let prefix = lookup_keys::direntry_unbind_binding_prefix(
         direntry.parent_inode_id,
-        &direntry.name_key,
+        direntry.name_key.as_str(),
         direntry.bind_seq,
         direntry.bind_delta_index,
     );

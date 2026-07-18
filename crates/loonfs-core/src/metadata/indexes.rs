@@ -6,7 +6,7 @@ use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
-use loonfs_api::{ChangeSeq, CommitId, InodeId};
+use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl MetadataIndexes {
             indexes.indexed_seq = indexes.indexed_seq.max(bind.bind_seq);
             replace_if_newer_bind(
                 &mut latest_by_parent_name,
-                (bind.parent_inode_id, bind.name_key.clone()),
+                (bind.parent_inode_id, bind.name_key.as_str().to_owned()),
                 bind.clone(),
             );
             replace_if_newer_bind(&mut latest_by_child, bind.child_inode_id, bind.clone());
@@ -80,9 +80,10 @@ impl MetadataIndexes {
             if !bind.same_binding(latest_child_bind) {
                 continue;
             }
-            indexes
-                .active_child_by_parent_name
-                .insert((bind.parent_inode_id, bind.name_key.clone()), bind.clone());
+            indexes.active_child_by_parent_name.insert(
+                (bind.parent_inode_id, bind.name_key.as_str().to_owned()),
+                bind.clone(),
+            );
             indexes
                 .active_parent_by_child
                 .insert(bind.child_inode_id, bind.clone());
@@ -167,7 +168,7 @@ impl MetadataIndexes {
 
     pub(super) fn record_bind(&mut self, record: &DirentryBindRecord) {
         self.indexed_seq = self.indexed_seq.max(record.bind_seq);
-        let parent_name_key = (record.parent_inode_id, record.name_key.clone());
+        let parent_name_key = (record.parent_inode_id, record.name_key.as_str().to_owned());
         replace_if_newer_bind(
             &mut self.latest_bind_by_parent_name,
             parent_name_key.clone(),
@@ -202,7 +203,7 @@ impl MetadataIndexes {
         self.unbound_binding_keys
             .insert(BindingKey::from_unbind(record));
 
-        let parent_name_key = (record.parent_inode_id, record.name_key.clone());
+        let parent_name_key = (record.parent_inode_id, record.name_key.as_str().to_owned());
         if self
             .active_child_by_parent_name
             .get(&parent_name_key)
@@ -254,7 +255,7 @@ impl MetadataIndexes {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BindingKey {
     parent_inode_id: InodeId,
-    name_key: String,
+    name_key: NameKey,
     child_inode_id: InodeId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
@@ -343,7 +344,7 @@ fn remove_active_child_if_same(
     active_child_by_parent_name: &mut BTreeMap<(InodeId, String), DirentryBindRecord>,
     record: &DirentryBindRecord,
 ) {
-    let key = (record.parent_inode_id, record.name_key.clone());
+    let key = (record.parent_inode_id, record.name_key.as_str().to_owned());
     if active_child_by_parent_name
         .get(&key)
         .map(|active| active.same_binding(record))

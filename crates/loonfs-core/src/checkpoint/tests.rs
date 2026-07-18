@@ -4228,11 +4228,13 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .metadata_state
         .direntry_binds()
         .iter()
-        .find(|binding| binding.name_key == "x.txt")
+        .find(|binding| binding.name_key.as_str() == "x.txt")
         .expect("binding for x.txt")
         .clone();
-    let prefix = lookup_keys::direntry_bind_prefix(binding.parent_inode_id, &binding.name_key);
-    let probe = lookup_keys::direntry_bind_probe(binding.parent_inode_id, &binding.name_key);
+    let prefix =
+        lookup_keys::direntry_bind_prefix(binding.parent_inode_id, binding.name_key.as_str());
+    let probe =
+        lookup_keys::direntry_bind_probe(binding.parent_inode_id, binding.name_key.as_str());
 
     store.reset_metadata_sst_gets();
     let rows = tables

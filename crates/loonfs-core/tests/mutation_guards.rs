@@ -647,10 +647,11 @@ fn wal_create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: loonfs_api::name_key_for_display_name(
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 &display_name,
-            ),
+            ))
+            .expect("derived name key"),
             display_name,
             child_inode_id: inode_id,
         },
@@ -673,10 +674,11 @@ fn wal_create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: loonfs_api::name_key_for_display_name(
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 &display_name,
-            ),
+            ))
+            .expect("derived name key"),
             display_name,
             child_inode_id: inode_id,
         },
@@ -2497,7 +2499,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             display_name,
             ..
         } => {
-            assert_eq!(name_key, "alpha");
+            assert_eq!(name_key.as_str(), "alpha");
             assert_eq!(display_name, "alpha");
         }
         delta => panic!("expected bind delta, got {delta:?}"),

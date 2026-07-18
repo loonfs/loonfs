@@ -517,7 +517,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .direntry_binds()
                     .iter()
                     .filter(move |direntry| {
-                        direntry.parent_inode_id == parent_inode_id && direntry.name_key == name_key
+                        direntry.parent_inode_id == parent_inode_id
+                            && direntry.name_key.as_str() == name_key
                     })
                     .cloned()
             }));
@@ -536,7 +537,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 .direntry_binds()
                 .iter()
                 .filter(move |direntry| {
-                    direntry.parent_inode_id == parent_inode_id && direntry.name_key == name_key
+                    direntry.parent_inode_id == parent_inode_id
+                        && direntry.name_key.as_str() == name_key
                 })
                 .cloned()
         }));
@@ -1014,7 +1016,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             };
 
             match groups.last_mut() {
-                Some(group) if group.name_key == candidate.record.name_key => {
+                Some(group) if group.name_key == candidate.record.name_key.as_str() => {
                     group.rows.push(candidate.record);
                 }
                 _ => {
@@ -1025,7 +1027,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         break;
                     }
                     groups.push(DirentryBindNameGroup {
-                        name_key: candidate.record.name_key.clone(),
+                        name_key: candidate.record.name_key.as_str().to_owned(),
                         rows: vec![candidate.record],
                     });
                 }
@@ -1695,7 +1697,7 @@ struct ParentNameCacheKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BindingCacheKey {
     parent_inode_id: InodeId,
-    name_key: String,
+    name_key: NameKey,
     child_inode_id: InodeId,
     bind_seq: loonfs_api::ChangeSeq,
     bind_delta_index: u32,
@@ -1766,7 +1768,7 @@ struct DirentryBindPageCandidate {
 fn direntry_bind_row_key(record: &DirentryBindRecord) -> String {
     MetadataRow::DirentryBind {
         parent_inode_id: record.parent_inode_id,
-        name_key: crate::metadata::record_name_key(&record.name_key),
+        name_key: record.name_key.clone(),
         display_name: record.display_name.clone(),
         child_inode_id: record.child_inode_id,
         bind_seq: record.bind_seq,

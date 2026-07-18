@@ -8,7 +8,7 @@ use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{ChangesResponse, CommitDelta, CommittedChange};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
-use loonfs_api::{ChangeSeq, EffectiveLimit, NameKey, NamespaceId};
+use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -127,9 +127,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
             semantic_op_index,
             delta_index: *delta_index,
             parent_inode_id: *parent_inode_id,
-            name_key: NameKey::parse(name_key).map_err(|err| {
-                CoreError::NamespaceCorrupt(format!("invalid WAL name_key: {err}"))
-            })?,
+            name_key: name_key.clone(),
             display_name: display_name.clone(),
             child_inode_id: *child_inode_id,
         },
@@ -144,9 +142,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
             semantic_op_index,
             delta_index: *delta_index,
             parent_inode_id: *parent_inode_id,
-            name_key: NameKey::parse(name_key).map_err(|err| {
-                CoreError::NamespaceCorrupt(format!("invalid WAL name_key: {err}"))
-            })?,
+            name_key: name_key.clone(),
             child_inode_id: *child_inode_id,
             bind_seq: *bind_seq,
             bind_delta_index: *bind_delta_index,
@@ -184,48 +180,4 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
             target_delta_index: *target_delta_index,
         },
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::ErrorCode;
-    use loonfs_api::{ChangeSeq, InodeId};
-
-    #[test]
-    fn invalid_wal_delta_name_key_is_namespace_corrupt() {
-        let delta = WalCommitDelta {
-            semantic_op_index: 0,
-            delta: WalDelta::BindDirentry {
-                delta_index: 0,
-                parent_inode_id: InodeId(1),
-                name_key: "bad/key".to_owned(),
-                display_name: "file.txt".to_owned(),
-                child_inode_id: InodeId(2),
-            },
-        };
-
-        let error = commit_delta_from_wal(&delta).expect_err("invalid durable WAL name key");
-
-        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    }
-
-    #[test]
-    fn invalid_wal_unbind_name_key_is_namespace_corrupt() {
-        let delta = WalCommitDelta {
-            semantic_op_index: 0,
-            delta: WalDelta::UnbindDirentry {
-                delta_index: 0,
-                parent_inode_id: InodeId(1),
-                name_key: "bad/key".to_owned(),
-                child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
-            },
-        };
-
-        let error = commit_delta_from_wal(&delta).expect_err("invalid durable WAL name key");
-
-        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    }
 }

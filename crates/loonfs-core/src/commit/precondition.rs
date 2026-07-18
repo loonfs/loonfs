@@ -1,6 +1,6 @@
 //! [`Precondition`]: the core form of one commit precondition.
 
-use loonfs_api::{ChangeSeq, InodeId, RevisionNo};
+use loonfs_api::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 /// Core form of a commit precondition.
@@ -40,7 +40,7 @@ pub enum Precondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedBinding {
     pub parent_inode_id: InodeId,
-    pub name_key: String,
+    pub name_key: NameKey,
     pub display_name: String,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
