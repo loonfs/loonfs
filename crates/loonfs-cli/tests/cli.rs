@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
-fn profile_create_list_show_remove_work() {
+fn profile_create_list_show_delete_work() {
     let harness = Harness::new();
 
     let add_embedded = harness.run(&[
@@ -63,7 +63,7 @@ fn profile_create_list_show_remove_work() {
     assert_success(&show_default);
     assert_eq!(json_data(&show_default)["mode"], "embedded");
 
-    let remove_default = harness.run(&["--json", "profile", "remove", "default"]);
+    let remove_default = harness.run(&["--json", "profile", "delete", "default"]);
     assert_success(&remove_default);
     assert_eq!(json_data(&remove_default)["name"], "default");
 
@@ -307,7 +307,7 @@ fn removing_last_profile_leaves_empty_config() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
-    let remove = harness.run(&["--json", "--no-input", "profile", "remove", "default"]);
+    let remove = harness.run(&["--json", "--no-input", "profile", "delete", "default"]);
     assert_success(&remove);
 
     let list = harness.run(&["--json", "profile", "list"]);
@@ -331,7 +331,7 @@ fn removing_default_profile_requires_explicit_reselection() {
     harness.add_embedded_profile("alpha");
     harness.add_embedded_profile("beta");
 
-    let remove = harness.run(&["--json", "--no-input", "profile", "remove", "alpha"]);
+    let remove = harness.run(&["--json", "--no-input", "profile", "delete", "alpha"]);
     assert_success(&remove);
 
     let list = harness.run(&["--json", "profile", "list"]);

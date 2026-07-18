@@ -229,8 +229,8 @@ impl RuntimeControlCache {
             // a cache and never gets disabled.
             return Arc::new(AsyncMutex::new(
                 NamespaceCommitEngine::new(namespace_id.clone())
-                    .with_table_cache(table_cache)
-                    .with_writer_session(session),
+                    .table_cache(table_cache)
+                    .writer_session(session),
             ));
         }
         let entry = self.namespace_entry(namespace_id, max_cached_namespaces);
@@ -238,10 +238,10 @@ impl RuntimeControlCache {
             return Arc::clone(engine);
         }
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone())
-            .with_table_cache(table_cache)
-            .with_writer_session(session);
+            .table_cache(table_cache)
+            .writer_session(session);
         if let Some(catalog) = &entry.catalog {
-            engine = engine.with_catalog_entry(catalog.clone());
+            engine = engine.catalog_entry(catalog.clone());
         }
         let engine = Arc::new(AsyncMutex::new(engine));
         entry.engine = Some(Arc::clone(&engine));

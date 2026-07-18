@@ -141,8 +141,8 @@ pub(crate) enum ProfileCommand {
     Show { name: Option<String> },
     /// Update fields of an existing profile.
     Update(ProfileUpdateArgs),
-    /// Remove a profile from the config file.
-    Remove { name: String },
+    /// Delete a profile from the config file.
+    Delete { name: String },
     /// Make a profile the default.
     Use { name: String },
 }
@@ -577,7 +577,7 @@ pub(crate) enum CommandKind {
     ProfileList,
     ProfileShow,
     ProfileUpdate,
-    ProfileRemove,
+    ProfileDelete,
     ProfileUse,
     NamespaceCreate,
     NamespaceDelete,
@@ -619,7 +619,7 @@ impl CommandKind {
             CommandKind::ProfileList => "profile_list",
             CommandKind::ProfileShow => "profile_show",
             CommandKind::ProfileUpdate => "profile_update",
-            CommandKind::ProfileRemove => "profile_remove",
+            CommandKind::ProfileDelete => "profile_delete",
             CommandKind::ProfileUse => "profile_use",
             CommandKind::NamespaceCreate => "namespace_create",
             CommandKind::NamespaceDelete => "namespace_delete",
@@ -668,7 +668,7 @@ impl Cli {
                 ProfileCommand::List => CommandKind::ProfileList,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
                 ProfileCommand::Update(_) => CommandKind::ProfileUpdate,
-                ProfileCommand::Remove { .. } => CommandKind::ProfileRemove,
+                ProfileCommand::Delete { .. } => CommandKind::ProfileDelete,
                 ProfileCommand::Use { .. } => CommandKind::ProfileUse,
             },
             Command::Namespace { command } => match command {

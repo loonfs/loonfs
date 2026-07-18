@@ -1,7 +1,7 @@
 //! `loon admin` commands: status, checkpoints, retention, gc, indexes,
 //! and the change feed.
 
-use super::context::{fail, resolve_command_context};
+use super::context::resolve_command_context;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminNamespaceArgs,
@@ -41,14 +41,7 @@ async fn run_admin_tick(
         .backend()
         .maintenance_tick(&context.namespace, request)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -72,14 +65,7 @@ async fn run_admin_gc(
         .backend()
         .gc_namespace(&context.namespace, request)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -103,14 +89,7 @@ async fn run_admin_checkpoint(
         .backend()
         .create_checkpoint(&context.namespace, request)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -130,14 +109,7 @@ async fn run_admin_checkpoint_release(
         .backend()
         .release_checkpoint(&context.namespace, &args.checkpoint_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -157,14 +129,7 @@ async fn run_admin_flush(
         .backend()
         .flush_wal(&context.namespace)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -184,14 +149,7 @@ async fn run_admin_retention_advance(
         .backend()
         .advance_retention(&context.namespace)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -212,14 +170,7 @@ pub(crate) async fn run_admin_changes(
         .backend()
         .list_changes(&context.namespace, after_seq, args.limit)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -239,14 +190,7 @@ async fn run_admin_index_enable(
         .backend()
         .enable_grams_index(&context.namespace)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
     // An enabled index is only queryable once maintenance builds it; kick a
     // tick here instead of leaving search unavailable until someone
     // discovers `loon admin tick`. Run it even when the feature was already
@@ -258,14 +202,7 @@ async fn run_admin_index_enable(
             .backend()
             .maintenance_tick(&context.namespace, MaintenanceTickRequest::default())
             .await
-            .map_err(|error| {
-                fail(
-                    kind,
-                    Some(context.profile_name.clone()),
-                    Some(context.mode.clone()),
-                    error,
-                )
-            })?,
+            .map_err(|error| context.fail(kind, error))?,
     );
     Ok(CommandOutput {
         kind,
@@ -288,14 +225,7 @@ async fn run_admin_index_disable(
         .backend()
         .disable_grams_index(&context.namespace)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),

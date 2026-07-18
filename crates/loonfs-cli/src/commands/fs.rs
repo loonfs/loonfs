@@ -69,27 +69,13 @@ pub(crate) async fn run_filesystem_ls(
         args.path.as_deref().unwrap_or("/"),
         true,
     )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    .map_err(|error| context.fail(kind, error))?;
     let entries = context
         .target
         .backend()
         .list_path(&spec)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
@@ -103,27 +89,14 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemPathArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
         .backend()
         .stat_path(&spec)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -155,14 +128,7 @@ pub(crate) async fn run_filesystem_grep(
             .backend()
             .grep(&context.namespace, &request)
             .await
-            .map_err(|error| {
-                fail(
-                    kind,
-                    Some(context.profile_name.clone()),
-                    Some(context.mode.clone()),
-                    error,
-                )
-            })?;
+            .map_err(|error| context.fail(kind, error))?;
         matches.extend(response.matches);
         tail_scanned &= response.tail_scanned;
         match response.next_cursor {
@@ -197,14 +163,8 @@ pub(crate) async fn run_filesystem_cat(
     args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
     let revision_no = args.revision.map(RevisionNo);
     let bytes = match revision_no {
         Some(revision_no) => {
@@ -216,14 +176,7 @@ pub(crate) async fn run_filesystem_cat(
         }
         None => context.target.backend().read_file_bytes(&spec).await,
     }
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -248,32 +201,17 @@ pub(crate) async fn run_filesystem_get(
         ));
     }
 
-    let spec = namespace_path(&context.namespace, &args.remote_path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.remote_path, false)
+        .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
         .backend()
         .stat_path(&spec)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
     if entry.inode_kind == InodeKind::Directory {
-        return Err(fail(
+        return Err(context.fail(
             kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
             CliError::invalid_input(format!(
                 "directory operations are not available for `{}`",
                 spec.absolute_path
@@ -292,39 +230,20 @@ pub(crate) async fn run_filesystem_get(
         }
         None => context.target.backend().read_file_bytes(&spec).await,
     }
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    .map_err(|error| context.fail(kind, error))?;
     let data = match args.local_destination.as_deref() {
         Some("-") => CommandData::StreamBytes(bytes),
         other => {
             let derived_name = other.is_none();
-            let destination =
-                destination_path_for_get(&spec.absolute_path, other).map_err(|error| {
-                    fail(
-                        kind,
-                        Some(context.profile_name.clone()),
-                        Some(context.mode.clone()),
-                        error,
-                    )
-                })?;
+            let destination = destination_path_for_get(&spec.absolute_path, other)
+                .map_err(|error| context.fail(kind, error))?;
             // The local working copy is the one thing this CLI touches
             // that has no revision history behind it, so clobbering it is
             // opt-in. `persist_noclobber` closes the race between checking
             // and installing the completed temporary file.
             write_local_file_atomically(&destination, &bytes, args.force).map_err(|error| {
                 if !args.force && error.kind() == std::io::ErrorKind::AlreadyExists {
-                    return fail(
-                        kind,
-                        Some(context.profile_name.clone()),
-                        Some(context.mode.clone()),
-                        CliError::destination_exists(&destination),
-                    );
+                    return context.fail(kind, CliError::destination_exists(&destination));
                 }
                 let mut error = CliError::io(error);
                 if derived_name {
@@ -333,12 +252,7 @@ pub(crate) async fn run_filesystem_get(
                          explicit destination or `-` for stdout",
                     );
                 }
-                fail(
-                    kind,
-                    Some(context.profile_name.clone()),
-                    Some(context.mode.clone()),
-                    error,
-                )
+                context.fail(kind, error)
             })?;
             CommandData::FileTransfer {
                 target: render_target(&context.namespace, &spec.absolute_path),
@@ -361,27 +275,14 @@ pub(crate) async fn run_filesystem_revisions(
     args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
         .backend()
         .list_file_revisions(&spec, args.limit, args.cursor.as_deref())
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -410,19 +311,11 @@ pub(crate) async fn run_filesystem_put(
         ));
     }
 
-    let metadata = fs::metadata(&local_path).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            CliError::io(error),
-        )
-    })?;
+    let metadata =
+        fs::metadata(&local_path).map_err(|error| context.fail(kind, CliError::io(error)))?;
     if metadata.is_dir() {
-        return Err(fail(
+        return Err(context.fail(
             kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
             CliError::invalid_input(format!(
                 "directory operations are not available for `{}`",
                 local_path.display()
@@ -434,38 +327,12 @@ pub(crate) async fn run_filesystem_put(
         Some(path) => normalize_absolute_path(&path, false),
         None => default_remote_put_path(&local_path),
     }
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let spec = namespace_path(&context.namespace, &remote_path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let bytes = fs::read(&local_path).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            CliError::io(error),
-        )
-    })?;
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    .map_err(|error| context.fail(kind, error))?;
+    let spec = namespace_path(&context.namespace, &remote_path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let bytes = fs::read(&local_path).map_err(|error| context.fail(kind, CliError::io(error)))?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let behavior = if args.force {
         PutBehavior::Replace
     } else {
@@ -476,14 +343,7 @@ pub(crate) async fn run_filesystem_put(
         .backend()
         .put_file_bytes(&spec, &bytes, behavior, commit_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -503,22 +363,10 @@ pub(crate) async fn run_filesystem_rm(
     args: FilesystemPathMutationArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     // Resolve the inode before deleting: the id is half of the recovery
     // handle `loon undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
@@ -528,28 +376,14 @@ pub(crate) async fn run_filesystem_rm(
         .backend()
         .stat_path(&spec)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?
+        .map_err(|error| context.fail(kind, error))?
         .inode_id;
     let result = context
         .target
         .backend()
         .delete_path(&spec, Some(deleted_inode), commit_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -569,35 +403,16 @@ pub(crate) async fn run_filesystem_restore(
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .backend()
         .restore_file_revision(&spec, RevisionNo(args.revision), commit_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -617,22 +432,10 @@ pub(crate) async fn run_filesystem_undelete(
     args: FilesystemUndeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .backend()
@@ -643,14 +446,7 @@ pub(crate) async fn run_filesystem_undelete(
             commit_id,
         )
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -670,35 +466,16 @@ pub(crate) async fn run_filesystem_mkdir(
     args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec = namespace_path(&context.namespace, &args.path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .backend()
         .create_directory(&spec, args.parents, commit_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -733,50 +510,23 @@ async fn run_filesystem_transfer(
     copy: bool,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let from = namespace_path(&context.namespace, &args.source_path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let to = namespace_path(&context.namespace, &args.dest_path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let from = namespace_path(&context.namespace, &args.source_path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let to = namespace_path(&context.namespace, &args.dest_path, false)
+        .map_err(|error| context.fail(kind, error))?;
 
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref()).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
+        .map_err(|error| context.fail(kind, error))?;
     let result = if copy {
         let entry = context
             .target
             .backend()
             .stat_path(&from)
             .await
-            .map_err(|error| {
-                fail(
-                    kind,
-                    Some(context.profile_name.clone()),
-                    Some(context.mode.clone()),
-                    error,
-                )
-            })?;
+            .map_err(|error| context.fail(kind, error))?;
         if entry.inode_kind == InodeKind::Directory {
-            return Err(fail(
+            return Err(context.fail(
                 kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
                 CliError::invalid_input(format!(
                     "directory operations are not available for `{}`",
                     from.absolute_path
@@ -805,14 +555,7 @@ async fn run_filesystem_transfer(
             .move_path(&from, &to, behavior, commit_id)
             .await
     }
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    .map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,

@@ -651,7 +651,7 @@ async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
     if walk_complete && !budget_reached {
         unit.backfill_cursor = None;
     }
-    fetch_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
+    load_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
     Ok(unit)
 }
 
@@ -763,7 +763,7 @@ async fn collect_wal_unit<S: ObjectStore + ?Sized>(
     if unit.built_through_seq == feature.built_through_seq {
         return Ok(None);
     }
-    fetch_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
+    load_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
     Ok(Some(unit))
 }
 
@@ -782,7 +782,7 @@ struct PendingRevisionContent {
 /// oversized revisions, so every entry here costs one content read; the
 /// text sniff still runs on the fetched bytes and drops non-text files
 /// after the read, exactly as the serial path did.
-async fn fetch_and_fold_revision_contents<S: ObjectStore + ?Sized>(
+async fn load_and_fold_revision_contents<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     pending: &[PendingRevisionContent],
