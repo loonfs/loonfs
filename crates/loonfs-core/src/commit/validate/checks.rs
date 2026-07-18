@@ -703,7 +703,7 @@ async fn validate_directory_empty_precondition<V: CommitValidationView>(
         );
     }
 
-    if !metadata_state.visible_children(inode_id).await?.is_empty() {
+    if metadata_state.has_visible_children(inode_id).await? {
         return Err(CommitValidationError::DirectoryEmptyPreconditionNotEmpty { inode_id }.into());
     }
 

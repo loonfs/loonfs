@@ -724,3 +724,71 @@ fn queries_above_indexed_seq_match_at_head_results() {
         state.visible_inode_at_head(InodeId(3)),
     );
 }
+
+/// The directory-empty checks probe existence through the bounded
+/// [`MetadataView::has_visible_children`]; a directory whose every child
+/// binding was unbound must read as empty again.
+#[test]
+fn has_visible_children_sees_through_unbinds() {
+    let dir = InodeId(1);
+    let state = MetadataState::from_rows(
+        vec![
+            InodeRecord {
+                inode_id: dir,
+                inode_kind: InodeKind::Directory,
+                created_seq: ChangeSeq(1),
+            },
+            InodeRecord {
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::File,
+                created_seq: ChangeSeq(2),
+            },
+        ],
+        vec![DirentryBindRecord {
+            parent_inode_id: dir,
+            name_key: "doc.txt".to_owned(),
+            display_name: "doc.txt".to_owned(),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(2),
+            bind_delta_index: 0,
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let view =
+        InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2), NamePolicy::NfcCasefoldV0);
+    assert!(
+        visibility::resolve_in_memory_read(view.has_visible_children(dir))
+            .expect("probe bound child")
+    );
+    // The file inode is not a directory: probing it reports no children.
+    assert!(
+        !visibility::resolve_in_memory_read(view.has_visible_children(InodeId(2)))
+            .expect("probe non-directory")
+    );
+
+    let emptied = MetadataState::from_rows(
+        state.inodes().to_vec(),
+        state.direntry_binds().to_vec(),
+        vec![DirentryUnbindRecord {
+            parent_inode_id: dir,
+            name_key: "doc.txt".to_owned(),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(2),
+            bind_delta_index: 0,
+            unbind_seq: ChangeSeq(3),
+            unbind_delta_index: 0,
+        }],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let view =
+        InMemoryMetadataView::in_memory(&emptied, None, ChangeSeq(3), NamePolicy::NfcCasefoldV0);
+    assert!(
+        !visibility::resolve_in_memory_read(view.has_visible_children(dir))
+            .expect("probe emptied directory")
+    );
+}

@@ -35,20 +35,6 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
         .transpose()
 }
 
-pub(super) async fn direntry_binds_for_parent<S: ObjectStore + ?Sized>(
-    tables: &VerifiedMetadataTables<'_, S>,
-    parent_inode_id: InodeId,
-) -> Result<Vec<DirentryBindRecord>> {
-    let prefix = lookup_keys::direntry_parent_prefix(parent_inode_id);
-    tables
-        .scan_prefix(MetadataTableFamily::DirentryBinds, &prefix)
-        .await
-        .map_err(manifest_error_to_core)?
-        .into_iter()
-        .map(direntry_bind_from_manifest_row)
-        .collect()
-}
-
 pub(super) struct ManifestDirentryBindCandidate {
     pub(super) row_key: String,
     pub(super) record: DirentryBindRecord,

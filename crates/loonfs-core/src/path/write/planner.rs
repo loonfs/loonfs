@@ -601,11 +601,11 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
             root_inode_id: resolved.inode_id,
         },
         InodeKind::Directory => {
-            let children = view
+            if view
                 .metadata_state
-                .visible_children(resolved.inode_id)
-                .await?;
-            if !children.is_empty() {
+                .has_visible_children(resolved.inode_id)
+                .await?
+            {
                 return Err(CoreError::DirectoryNotEmpty(
                     absolute_path.as_str().to_owned(),
                 ));

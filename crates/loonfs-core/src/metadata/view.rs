@@ -237,31 +237,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         MetadataViewReads { view: *self }
     }
 
-    pub(crate) async fn visible_children(
+    /// Whether the directory currently has at least one visible child,
+    /// answered by a limit-1 page through a fresh session so the cost stays
+    /// bounded no matter how wide the directory is.
+    pub(crate) async fn has_visible_children(
         &self,
         parent_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let Some(parent) = self.visible_inode(parent_inode_id).await? else {
-            return Ok(Vec::new());
-        };
-        if parent.inode_kind != InodeKind::Directory {
-            return Ok(Vec::new());
-        }
-
-        let candidates = self.direntry_binds_for_parent(parent_inode_id).await?;
-        let mut reads = self.reads();
-        let mut children = Vec::new();
-        for direntry in candidates {
-            if visibility::is_visible_child_direntry(&mut reads, &direntry).await? {
-                children.push(direntry);
-            }
-        }
-        children.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
-        });
-        Ok(children)
+    ) -> Result<bool, CoreError> {
+        let mut session = self.session();
+        Ok(!session
+            .visible_children_page_by_name_key(parent_inode_id, None, 1)
+            .await?
+            .is_empty())
     }
 
     pub(crate) async fn resolve_visible_path(
@@ -501,49 +488,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             tombstones,
             self.visible_seq(),
         ))
-    }
-
-    async fn direntry_binds_for_parent(
-        &self,
-        parent_inode_id: InodeId,
-    ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let durable = if let Some(cached) = self
-            .sources
-            .durable_cache
-            .and_then(|cache| cache.get(|inner| &mut inner.binds_for_parent, &parent_inode_id))
-        {
-            cached
-        } else {
-            let mut durable = if let Some(tables) = self.manifest_tables() {
-                manifest_index::direntry_binds_for_parent(tables, parent_inode_id).await?
-            } else {
-                Vec::new()
-            };
-            durable.extend(self.durable_row_states().flat_map(|state| {
-                state
-                    .direntry_binds()
-                    .iter()
-                    .filter(move |direntry| direntry.parent_inode_id == parent_inode_id)
-                    .cloned()
-            }));
-            if let Some(cache) = self.sources.durable_cache {
-                cache.insert(
-                    |inner| &mut inner.binds_for_parent,
-                    parent_inode_id,
-                    durable.clone(),
-                );
-            }
-            durable
-        };
-        let mut bindings = durable;
-        bindings.extend(self.overlay_state().into_iter().flat_map(|state| {
-            state
-                .direntry_binds()
-                .iter()
-                .filter(move |direntry| direntry.parent_inode_id == parent_inode_id)
-                .cloned()
-        }));
-        Ok(bindings)
     }
 
     async fn direntry_binds_for_parent_name(
@@ -1685,7 +1629,6 @@ pub(crate) struct DurableVisibilityCache {
 struct DurableVisibilityCacheInner {
     inodes: HashMap<InodeId, Option<InodeRecord>>,
     binds_for_parent_name: HashMap<ParentNameCacheKey, Vec<DirentryBindRecord>>,
-    binds_for_parent: HashMap<InodeId, Vec<DirentryBindRecord>>,
     binds_for_child: HashMap<InodeId, Vec<DirentryBindRecord>>,
     unbinds_for_binding: HashMap<BindingCacheKey, Vec<DirentryUnbindRecord>>,
     tombstones_for_root: HashMap<InodeId, Vec<SubtreeTombstoneRecord>>,
