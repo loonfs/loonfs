@@ -1450,7 +1450,7 @@ impl FsCore {
         // but the session's epoch and fencing still come from the registry —
         // no cache configuration disables session state.
         let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
-            .with_writer_session(self.inner.writer_sessions.state(namespace_id));
+            .writer_session(self.inner.writer_sessions.state(namespace_id));
         let context = self.mutation_context();
         // Boxed for the same type-recursion reason as the cached-engine path.
         let results: Vec<_> = Box::pin(engine.publish_batch(&store, candidates, &context))

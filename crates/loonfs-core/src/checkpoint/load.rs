@@ -716,7 +716,7 @@ fn segment_block_cache_key(
 }
 
 /// Fetches exactly the byte range a handle names.
-async fn fetch_section_bytes<S: ObjectStore + ?Sized>(
+async fn load_section_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     offset: u64,
@@ -777,7 +777,7 @@ fn segment_object_len(descriptor: &MetadataFileRef) -> u64 {
 /// filter that is the filter plus the index that directly follows it
 /// (manifest loading rejects any other layout), and for an index exactly the
 /// index, which ends the object. Returns the requested block.
-async fn fetch_and_publish_segment_sections<S: ObjectStore + ?Sized>(
+async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
@@ -799,7 +799,7 @@ async fn fetch_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         MetadataTableBlockKind::Filter => filter_handle.offset,
         MetadataTableBlockKind::Index => index_handle.offset,
     };
-    let bytes = fetch_section_bytes(
+    let bytes = load_section_bytes(
         store,
         &descriptor.object_key,
         fetch_offset,
@@ -920,7 +920,7 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
         return Ok(entries);
     }
     let fetch = || async {
-        fetch_and_publish_segment_sections(
+        load_and_publish_segment_sections(
             store,
             table_cache,
             memo,
@@ -982,7 +982,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         return Ok(filter);
     }
     let fetch = || async {
-        fetch_and_publish_segment_sections(
+        load_and_publish_segment_sections(
             store,
             table_cache,
             memo,
@@ -1023,7 +1023,7 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         return Ok(block);
     }
     let fetch = || async {
-        let bytes = fetch_section_bytes(
+        let bytes = load_section_bytes(
             store,
             &descriptor.object_key,
             handle.offset,
@@ -1129,7 +1129,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 span[0].block.offset,
             );
             let fetch = || async {
-                fetch_and_publish_span(store, table_cache, memo, family, descriptor, span).await
+                load_and_publish_span(store, table_cache, memo, family, descriptor, span).await
             };
             match table_cache {
                 Some(cache) => {
@@ -1165,7 +1165,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 /// block, and publishes them to the per-view memo and (when populating) the
 /// shared cache. Returns the first block's cache entry for the
 /// single-flight cell.
-async fn fetch_and_publish_span<S: ObjectStore + ?Sized>(
+async fn load_and_publish_span<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     memo: &SessionBlockMemo,
@@ -1176,7 +1176,7 @@ async fn fetch_and_publish_span<S: ObjectStore + ?Sized>(
     let first = &span[0].block;
     let last = &span[span.len() - 1].block;
     let span_len = last.offset + u64::from(last.stored_len) - first.offset;
-    let bytes = fetch_section_bytes(store, &descriptor.object_key, first.offset, span_len).await?;
+    let bytes = load_section_bytes(store, &descriptor.object_key, first.offset, span_len).await?;
     let mut first_block = None;
     for entry in span {
         let handle = entry.block;

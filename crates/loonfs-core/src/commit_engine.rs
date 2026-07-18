@@ -146,7 +146,7 @@ impl NamespaceCommitEngine {
 
     /// Attaches the runtime's session state for this namespace, so the
     /// acquired epoch and fencing outlive this engine instance.
-    pub fn with_writer_session(mut self, session: SharedWriterSessionState) -> Self {
+    pub fn writer_session(mut self, session: SharedWriterSessionState) -> Self {
         self.session = session;
         self
     }
@@ -166,12 +166,12 @@ impl NamespaceCommitEngine {
         self
     }
 
-    pub fn with_table_cache(mut self, table_cache: Arc<MetadataTableCache>) -> Self {
+    pub fn table_cache(mut self, table_cache: Arc<MetadataTableCache>) -> Self {
         self.table_cache = Some(table_cache);
         self
     }
 
-    pub fn with_catalog_entry(mut self, catalog_entry: VerifiedNamespaceCatalogEntry) -> Self {
+    pub fn catalog_entry(mut self, catalog_entry: VerifiedNamespaceCatalogEntry) -> Self {
         self.catalog_entry = Some(catalog_entry);
         self
     }
@@ -522,8 +522,8 @@ mod tests {
             .expect("bootstrap");
 
         let session = SharedWriterSessionState::default();
-        let mut engine_a1 = NamespaceCommitEngine::new(namespace_id.clone())
-            .with_writer_session(Arc::clone(&session));
+        let mut engine_a1 =
+            NamespaceCommitEngine::new(namespace_id.clone()).writer_session(Arc::clone(&session));
         engine_a1
             .publish_batch(&store, vec![create_dir("from-a-first", "alpha")], &writer_a)
             .await
@@ -561,7 +561,7 @@ mod tests {
         // never touches the head.
         drop(engine_a1);
         let mut engine_a2 =
-            NamespaceCommitEngine::new(namespace_id.clone()).with_writer_session(session);
+            NamespaceCommitEngine::new(namespace_id.clone()).writer_session(session);
         let still_fenced = engine_a2
             .publish_batch(&store, vec![create_dir("from-a-third", "delta")], &writer_a)
             .await;
@@ -712,7 +712,7 @@ mod tests {
         );
 
         let cache = Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default()));
-        let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).with_table_cache(cache);
+        let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).table_cache(cache);
         store.reset_metadata_sst_gets();
         cached
             .publish_batch(&store, vec![create_dir("cached-a", "gamma")], &writer)

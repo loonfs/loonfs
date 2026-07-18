@@ -131,7 +131,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
         }
         CommandData::ProfileSummary(profile) => match output.kind {
-            CommandKind::ProfileRemove => format!("removed profile {}", profile.name),
+            CommandKind::ProfileDelete => format!("deleted profile {}", profile.name),
             _ => {
                 let store = profile
                     .store_kind

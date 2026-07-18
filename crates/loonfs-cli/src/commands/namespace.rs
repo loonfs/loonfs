@@ -1,6 +1,6 @@
 //! `loon namespace` commands: create, fork, delete, use, and current.
 
-use super::context::{fail, validate_namespace_id};
+use super::context::{fail, fail_for, validate_namespace_id};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
@@ -35,27 +35,14 @@ async fn run_namespace_create(
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.namespace_id).map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
+    validate_namespace_id(&args.namespace_id)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
         .backend()
         .create_namespace(&args.namespace_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -75,14 +62,8 @@ async fn run_namespace_delete(
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.namespace_id).map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
+    validate_namespace_id(&args.namespace_id)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     if !args.yes {
         // Without a terminal (or under --no-input / --json) there is no
@@ -105,14 +86,7 @@ async fn run_namespace_delete(
             "deleting `{}` is permanent and retires the id; type the namespace id to confirm",
             args.namespace_id
         ))
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
         if typed.trim() != args.namespace_id {
             return Err(fail(
                 kind,
@@ -131,14 +105,7 @@ async fn run_namespace_delete(
         .backend()
         .delete_namespace(&args.namespace_id, args.expected_head_seq)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -157,35 +124,16 @@ async fn run_namespace_fork(
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.source).map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
-    validate_namespace_id(&args.new_namespace_id).map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
+    validate_namespace_id(&args.source)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+    validate_namespace_id(&args.new_namespace_id)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
         .backend()
         .fork_namespace(&args.source, &args.new_namespace_id)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     Ok(CommandOutput {
         kind,
@@ -207,47 +155,20 @@ pub(crate) async fn run_namespace_use(
             .await
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.namespace).map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
+    validate_namespace_id(&args.namespace)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     resolved
         .target
         .backend()
         .namespace_status(&args.namespace)
         .await
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
-    set_default_namespace(&mut loaded.config, &resolved.profile_name, &args.namespace).map_err(
-        |error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        },
-    )?;
-    save_config(&loaded.path, &loaded.config).map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(mode.clone()),
-            error,
-        )
-    })?;
+    set_default_namespace(&mut loaded.config, &resolved.profile_name, &args.namespace)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+    save_config(&loaded.path, &loaded.config)
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     Ok(CommandOutput {
         kind,

@@ -51,7 +51,7 @@ fn index_section_cache_key(
 
 /// Fetches exactly the byte range a handle names, refusing handles whose
 /// bounds do not fit the address space.
-async fn fetch_index_section_bytes<S: ObjectStore + ?Sized>(
+async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     handle: &BlockHandle,
@@ -95,7 +95,7 @@ pub(crate) async fn load_index_segment_filter_block<S: ObjectStore + ?Sized>(
     let cache_key =
         index_section_cache_key(payload_checksum, MetadataTableBlockKind::Filter, handle);
     let fetch = || async {
-        let bytes = fetch_index_section_bytes(store, object_key, handle).await?;
+        let bytes = load_index_section_bytes(store, object_key, handle).await?;
         let filter = decode_filter_block(&bytes, handle)
             .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?;
         Ok::<_, CoreError>(DecodedMetadataTableBlock::Filter {
@@ -132,7 +132,7 @@ pub(crate) async fn load_index_segment_index_block<S: ObjectStore + ?Sized>(
     let cache_key =
         index_section_cache_key(payload_checksum, MetadataTableBlockKind::Index, handle);
     let fetch = || async {
-        let bytes = fetch_index_section_bytes(store, object_key, handle).await?;
+        let bytes = load_index_section_bytes(store, object_key, handle).await?;
         let entries = decode_index_block(&bytes, handle)
             .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?;
         Ok::<_, CoreError>(DecodedMetadataTableBlock::Index {
@@ -176,7 +176,7 @@ pub(crate) async fn load_index_segment_data_block<S: ObjectStore + ?Sized>(
 ) -> Result<Arc<DecodedDataBlock<IndexRow>>> {
     let cache_key = index_section_cache_key(payload_checksum, MetadataTableBlockKind::Data, handle);
     let fetch = || async {
-        let bytes = fetch_index_section_bytes(store, object_key, handle).await?;
+        let bytes = load_index_section_bytes(store, object_key, handle).await?;
         let block = decode_data_block_rows::<IndexRow>(&bytes, handle)
             .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?;
         Ok::<_, CoreError>(DecodedMetadataTableBlock::IndexData {

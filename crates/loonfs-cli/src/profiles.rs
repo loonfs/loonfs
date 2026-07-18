@@ -76,7 +76,7 @@ pub(crate) fn update_profile(
     Ok((name.to_owned(), redacted))
 }
 
-pub(crate) fn remove_profile(
+pub(crate) fn delete_profile(
     config: &mut CliConfig,
     name: &str,
 ) -> Result<ProfileSummary, CliError> {

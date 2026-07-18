@@ -15,6 +15,35 @@ pub(crate) struct CommandContext {
     pub(crate) target: crate::backend::ResolvedTarget,
 }
 
+/// Attributes a failure to a resolved profile and mode, for command paths
+/// that run before (or without) a full [`CommandContext`].
+pub(crate) fn fail_for(
+    kind: CommandKind,
+    profile_name: &str,
+    mode: &str,
+    error: impl Into<CliError>,
+) -> CommandFailure {
+    fail(
+        kind,
+        Some(profile_name.to_owned()),
+        Some(mode.to_owned()),
+        error,
+    )
+}
+
+impl CommandContext {
+    /// Attributes a failure to this resolved context: the profile and mode
+    /// that produced it ride with the error.
+    pub(crate) fn fail(&self, kind: CommandKind, error: impl Into<CliError>) -> CommandFailure {
+        fail(
+            kind,
+            Some(self.profile_name.clone()),
+            Some(self.mode.clone()),
+            error,
+        )
+    }
+}
+
 pub(crate) async fn resolve_command_context(
     kind: CommandKind,
     target: &TargetSelectorArgs,

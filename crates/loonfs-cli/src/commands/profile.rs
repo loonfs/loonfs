@@ -11,7 +11,7 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::{
-    add_profile, list_profiles, make_default_profile, remove_profile, show_profile, update_profile,
+    add_profile, delete_profile, list_profiles, make_default_profile, show_profile, update_profile,
 };
 use crate::prompt;
 use std::path::Path;
@@ -52,7 +52,7 @@ pub(crate) fn run_profile_command(
             })
         }
         ProfileCommand::Update(args) => run_profile_update(kind, &config_path, args, runtime),
-        ProfileCommand::Remove { name } => run_profile_remove(kind, &config_path, &name, runtime),
+        ProfileCommand::Delete { name } => run_profile_delete(kind, &config_path, &name, runtime),
         ProfileCommand::Use { name } => run_profile_use(kind, &config_path, &name),
     }
 }
@@ -136,14 +136,14 @@ fn run_profile_update(
     })
 }
 
-fn run_profile_remove(
+fn run_profile_delete(
     kind: CommandKind,
     config_path: &Path,
     name: &str,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     if runtime.interactive {
-        let confirmed = prompt::prompt_confirm(&format!("remove profile `{name}`?"))
+        let confirmed = prompt::prompt_confirm(&format!("delete profile `{name}`?"))
             .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
         if !confirmed {
             return Err(fail(
@@ -157,7 +157,7 @@ fn run_profile_remove(
 
     let mut config =
         load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    let removed = remove_profile(&mut config, name)
+    let removed = delete_profile(&mut config, name)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     let mode = removed.mode.clone();
     save_config(config_path, &config)
