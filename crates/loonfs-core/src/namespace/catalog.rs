@@ -1,6 +1,7 @@
 //! The namespace catalog: the immutable descriptor pair (namespace config
 //! and content-store descriptor) loaded once and reused for a session.
 
+use crate::error::StoreFailureClass;
 use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
@@ -56,11 +57,23 @@ pub(crate) enum NamespaceInitializationError {
     #[error(transparent)]
     InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("failed to inspect namespace descriptor object `{object_key}`: {message}")]
-    InspectNamespaceDescriptor { object_key: String, message: String },
+    InspectNamespaceDescriptor {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("failed to inspect namespace head object `{object_key}`: {message}")]
-    InspectNamespaceHead { object_key: String, message: String },
+    InspectNamespaceHead {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("failed to inspect namespace control object `{object_key}`: {message}")]
-    InspectNamespaceControl { object_key: String, message: String },
+    InspectNamespaceControl {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
@@ -118,6 +131,7 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
             |err| NamespaceInitializationError::InspectNamespaceDescriptor {
                 object_key: descriptor_key.clone(),
                 message: err.message(),
+                class: StoreFailureClass::of(&err),
             },
         )?
         .is_some();
@@ -127,6 +141,7 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
         .map_err(|err| NamespaceInitializationError::InspectNamespaceHead {
             object_key: head_key.clone(),
             message: err.message(),
+            class: StoreFailureClass::of(&err),
         })?
         .is_some();
 
@@ -148,6 +163,7 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
                         |err| NamespaceInitializationError::InspectNamespaceControl {
                             object_key: probe_key.clone(),
                             message: err.message(),
+                            class: StoreFailureClass::of(&err),
                         },
                     )?
                     .is_some();

@@ -194,17 +194,21 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
         NamespaceInitializationError::InspectNamespaceDescriptor {
             object_key,
             message,
+            class,
         }
         | NamespaceInitializationError::InspectNamespaceHead {
             object_key,
             message,
+            class,
         }
         | NamespaceInitializationError::InspectNamespaceControl {
             object_key,
             message,
+            class,
         } => CoreError::Store {
             object_key,
             message,
+            class,
         },
     }
 }

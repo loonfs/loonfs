@@ -1,7 +1,7 @@
 //! Read-modify-write loops for control objects: load, edit, and
 //! compare-and-swap the head or an upload session on its etag.
 
-use crate::error::CoreError;
+use crate::error::{CoreError, StoreFailureClass};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError, LoadedHeadObject};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -173,6 +173,7 @@ fn required_etag_core<'a>(
     metadata.etag.as_deref().ok_or_else(|| CoreError::Store {
         object_key: object_key.to_owned(),
         message: "missing control object etag".to_owned(),
+        class: StoreFailureClass::Other,
     })
 }
 

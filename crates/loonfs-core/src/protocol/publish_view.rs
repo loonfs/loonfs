@@ -7,7 +7,7 @@ use crate::checkpoint::{
     VerifiedMetadataTables,
 };
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
@@ -309,6 +309,7 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
                 ControlObjectLoadError::Store {
                     object_key: object_key.clone(),
                     message: error.message(),
+                    class: StoreFailureClass::of(&error),
                 },
             ))
         })?

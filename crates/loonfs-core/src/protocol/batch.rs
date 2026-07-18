@@ -14,7 +14,7 @@ use crate::commit::{
 };
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::path::write::PublishPlanningSession;
 use crate::storage::content::ContentValidationTracker;
 use crate::timing::MonotonicTimer;
@@ -359,6 +359,7 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
             .map_err(|error| CoreError::WalWrite {
                 object_key: wal.object_key.clone(),
                 message: error.message(),
+                class: StoreFailureClass::of(&error),
             })?;
         Ok(wal)
     }

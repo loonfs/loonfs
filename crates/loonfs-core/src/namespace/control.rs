@@ -1,6 +1,7 @@
 //! Typed loaders for the namespace's control objects: head, metadata root,
 //! WAL floor, and the descriptor pair.
 
+use crate::error::StoreFailureClass;
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
@@ -135,7 +136,11 @@ pub enum ControlObjectLoadError {
     #[error("control object codec error for `{object_key}`: {message}")]
     Codec { object_key: String, message: String },
     #[error("control object store error for `{object_key}`: {message}")]
-    Store { object_key: String, message: String },
+    Store {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
 }
 
 pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
@@ -407,6 +412,7 @@ fn control_identity(
         .ok_or_else(|| ControlObjectLoadError::Store {
             object_key: object_key.to_owned(),
             message: "missing control object etag".to_owned(),
+            class: StoreFailureClass::Other,
         })?;
     Ok(ControlObjectIdentity { etag })
 }
@@ -474,5 +480,6 @@ fn map_store_load_error(object_key: &str, err: ObjectStoreError) -> ControlObjec
     ControlObjectLoadError::Store {
         object_key: object_key.to_owned(),
         message: err.message(),
+        class: StoreFailureClass::of(&err),
     }
 }

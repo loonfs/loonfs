@@ -120,6 +120,7 @@ macro_rules! error_codes {
 error_codes! {
     InvalidRequest => "invalid_request",
     Unauthorized => "unauthorized",
+    PermissionDenied => "permission_denied",
     ContentTooLarge => "content_too_large",
     NotSupported => "not_supported",
     RouteNotFound => "route_not_found",
@@ -167,6 +168,10 @@ impl ErrorCode {
             // into a capped scan.
             ErrorCode::InvalidRequest | ErrorCode::QueryUnindexable => ErrorKind::InvalidRequest,
             ErrorCode::Unauthorized => ErrorKind::Unauthorized,
+            // Produced when the backing object store rejects the
+            // deployment's credentials: operator-actionable and never
+            // transient, exactly the kind's contract.
+            ErrorCode::PermissionDenied => ErrorKind::PermissionDenied,
             ErrorCode::ContentTooLarge => ErrorKind::ContentTooLarge,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound

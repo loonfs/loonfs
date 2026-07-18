@@ -56,7 +56,11 @@ pub enum CoreError {
     #[error("head publish failed: {0}")]
     HeadPublish(#[from] CommitHeadPublishError),
     #[error("failed to write wal object `{object_key}`: {message}")]
-    WalWrite { object_key: String, message: String },
+    WalWrite {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
     #[error(transparent)]
@@ -153,7 +157,11 @@ pub enum CoreError {
     #[error("writer session fenced: {0}")]
     WriterFenced(WriterFence),
     #[error("object store error for `{object_key}`: {message}")]
-    Store { object_key: String, message: String },
+    Store {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     /// Non-store internal failure (codec, overflow, invariant breach). Same
     /// wire code as [`ErrorCode::ServerError`]; the message is the detail.
     #[error("internal error: {0}")]
@@ -270,11 +278,43 @@ impl From<ImmutableObjectWriteError> for CoreError {
             ImmutableObjectWriteError::Store {
                 object_key,
                 message,
+                class,
             } => Self::Store {
                 object_key,
                 message,
+                class,
             },
         }
+    }
+}
+
+/// What a failed provider operation says about who can fix it, preserved
+/// across the message-flattening seams so the wire code can distinguish
+/// "fix the storage credentials" from "unclassified internal failure".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StoreFailureClass {
+    /// The provider rejected the deployment's credentials: operator work,
+    /// never transient. Served as `permission_denied`.
+    PermissionDenied,
+    /// Everything else is internal from the caller's point of view.
+    Other,
+}
+
+impl StoreFailureClass {
+    /// Classifies a provider error at the seam where its message is
+    /// flattened into a carrier's `message` field.
+    pub fn of(error: &ObjectStoreError) -> Self {
+        match error {
+            ObjectStoreError::PermissionDenied { .. } => Self::PermissionDenied,
+            _ => Self::Other,
+        }
+    }
+}
+
+fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
+    match class {
+        StoreFailureClass::PermissionDenied => ErrorCode::PermissionDenied,
+        StoreFailureClass::Other => ErrorCode::ServerError,
     }
 }
 
@@ -285,6 +325,7 @@ impl CoreError {
         Self::Store {
             object_key: object_key.into(),
             message: error.message(),
+            class: StoreFailureClass::of(error),
         }
     }
 
@@ -300,10 +341,10 @@ impl CoreError {
             CoreError::DurableContent(error) => classify_durable_content_error(error),
             CoreError::WriterEpoch(error) => classify_writer_epoch_acquire_error(error),
             CoreError::CommitValidation(error) => classify_commit_validation_error(error),
-            CoreError::WalBuild(_)
-            | CoreError::WalWrite { .. }
-            | CoreError::Store { .. }
-            | CoreError::Internal(_) => ErrorCode::ServerError,
+            CoreError::WalBuild(_) | CoreError::Internal(_) => ErrorCode::ServerError,
+            CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
+                classify_store_failure(*class)
+            }
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
             CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
                 ErrorCode::InvalidRequest
@@ -672,6 +713,7 @@ mod tests {
     use loonfs_api::{
         ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
     };
+    use loonfs_objectstore::ObjectStoreError;
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
@@ -786,5 +828,23 @@ mod tests {
 
         // Errors without machine-usable identity stay detail-free.
         assert!(CoreError::Internal("boom".to_owned()).details().is_none());
+    }
+
+    /// Provider auth failures keep their class across the message-flattening
+    /// seams and reach the wire as `permission_denied`; every other store
+    /// failure stays `server_error`.
+    #[test]
+    fn store_permission_denied_classifies_to_its_wire_code() {
+        let denied = ObjectStoreError::PermissionDenied {
+            object_key: "namespaces/demo/wal/head.json".to_owned(),
+            message: "AccessDenied: bucket policy".to_owned(),
+        };
+        let error = CoreError::store("namespaces/demo/wal/head.json", &denied);
+        assert_eq!(error.code(), ErrorCode::PermissionDenied);
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+
+        let transport = ObjectStoreError::transport("namespaces/demo/wal/head.json", "timed out");
+        let error = CoreError::store("namespaces/demo/wal/head.json", &transport);
+        assert_eq!(error.code(), ErrorCode::ServerError);
     }
 }
