@@ -48,10 +48,14 @@ pub struct ClientConfig {
     #[serde(default)]
     pub request_timeout_ms: Option<u64>,
     /// Disables the bounded automatic retry of quick-clearing transient
-    /// server errors (`server_busy`, `commit_queue_full`). Off by default:
-    /// every request the client sends is idempotent to resend — mutations
-    /// carry their commit id in the body, staging repeats are recognized —
-    /// so retrying is safe.
+    /// failures: the retryable-unavailability codes (`server_busy`,
+    /// `commit_queue_full`, `shutting_down` — a draining process telling the
+    /// caller to retry against the next one) and network-level transport
+    /// errors (connect failures, timeouts, resets). Off by default — the
+    /// retry runs — because every request the client sends is idempotent to
+    /// resend: mutations carry their commit id in the body and staging
+    /// repeats are recognized, so resending after an ambiguous transport
+    /// failure is safe by construction.
     #[serde(default)]
     pub disable_transient_retry: bool,
 }
@@ -166,6 +170,21 @@ impl ClientError {
             _ => None,
         }
     }
+}
+
+/// The retry policy for one failed attempt: `transport` is whether the
+/// network layer itself reported the failure (classified before the error
+/// is flattened by `map_error`), and served envelopes retry only on the
+/// retryable-unavailability codes.
+fn transient_failure(transport: bool, error: &ClientError) -> bool {
+    transport
+        || matches!(
+            error,
+            ClientError::Api { code, .. }
+                if code == ErrorCode::ServerBusy.as_str()
+                    || code == ErrorCode::CommitQueueFull.as_str()
+                    || code == ErrorCode::ShuttingDown.as_str()
+        )
 }
 
 /// Deterministic doubling, the same shape as the object-store transport
@@ -1087,14 +1106,19 @@ impl Client {
         Ok(bytes)
     }
 
-    /// Sends one request, resending on quick-clearing transient errors
-    /// (`server_busy`, `commit_queue_full`) with doubling backoff, bounded
-    /// by [`MAX_TRANSIENT_ATTEMPTS`]. Resending is safe for every request
-    /// this client issues: mutation bodies carry their commit id (replayed,
+    /// Sends one request, resending on quick-clearing transient failures —
+    /// the retryable-unavailability codes (`server_busy`,
+    /// `commit_queue_full`, `shutting_down`) and network-level transport
+    /// errors — with doubling backoff, bounded by
+    /// [`MAX_TRANSIENT_ATTEMPTS`]. Resending is safe for every request this
+    /// client issues: mutation bodies carry their commit id (replayed,
     /// never double-committed) and staging repeats are recognized by the
-    /// server. Other unavailability codes are excluded on purpose —
-    /// `maintenance_required` and `index_lagging` clear on a maintenance
-    /// tick, not on a resend.
+    /// server, which is exactly what makes an ambiguous transport failure —
+    /// the request may or may not have been served — safe to resend. Other
+    /// unavailability codes are excluded on purpose — `maintenance_required`
+    /// and `index_lagging` clear on a maintenance tick, not on a resend —
+    /// and a served status with a non-envelope body is not retried: only
+    /// failures the network layer itself reported count as transport.
     fn call_with_transient_retry(
         &self,
         request: &ureq::Request,
@@ -1108,15 +1132,15 @@ impl Client {
             };
             let error = match outcome {
                 Ok(response) => return Ok(response),
-                Err(error) => self.map_error(error),
+                Err(error) => error,
             };
+            // Classified before `map_error` flattens it: only a true
+            // network-level failure retries — a served status with a
+            // non-envelope body (a load balancer's HTML 502) does not.
+            let transport = matches!(&error, ureq::Error::Transport(_));
+            let error = self.map_error(error);
             attempts += 1;
-            let transient = matches!(
-                &error,
-                ClientError::Api { code, .. }
-                    if code == ErrorCode::ServerBusy.as_str()
-                        || code == ErrorCode::CommitQueueFull.as_str()
-            );
+            let transient = transient_failure(transport, &error);
             if !self.transient_retry || !transient || attempts >= MAX_TRANSIENT_ATTEMPTS {
                 return Err(error);
             }
@@ -1266,6 +1290,95 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The retry policy in one place: network-level transport failures and
+    /// the retryable-unavailability codes resend; everything else — including
+    /// a served status whose body was not the error envelope — surfaces
+    /// immediately.
+    #[test]
+    fn transient_failure_covers_transport_and_retryable_unavailability_only() {
+        let api = |code: &str| ClientError::Api {
+            status: 503,
+            code: code.to_owned(),
+            feature: None,
+            message: String::new(),
+            request_id: None,
+            details: None,
+        };
+        assert!(transient_failure(
+            true,
+            &ClientError::Http("reset".to_owned())
+        ));
+        assert!(transient_failure(false, &api("server_busy")));
+        assert!(transient_failure(false, &api("commit_queue_full")));
+        assert!(transient_failure(false, &api("shutting_down")));
+        assert!(!transient_failure(false, &api("server_error")));
+        assert!(!transient_failure(false, &api("maintenance_required")));
+        assert!(!transient_failure(
+            false,
+            &ClientError::Http("http status 502 with a non-envelope body".to_owned())
+        ));
+    }
+
+    /// A connection the server drops before answering is a transport
+    /// failure: with the retry enabled the client resends up to the attempt
+    /// cap; with it disabled the first failure surfaces.
+    #[test]
+    fn transport_failures_resend_up_to_the_attempt_cap() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        let total_expected = MAX_TRANSIENT_ATTEMPTS as usize + 1;
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let seen = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                // Read a little so the request bytes are on the wire, then
+                // drop the connection without answering.
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf);
+                drop(stream);
+                if seen >= total_expected {
+                    break;
+                }
+            }
+        });
+
+        let retrying = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+        });
+        let error = retrying
+            .namespace_status("demo")
+            .expect_err("dropped connections must fail");
+        assert!(matches!(error, ClientError::Http(_)), "{error:?}");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            MAX_TRANSIENT_ATTEMPTS as usize
+        );
+
+        let single_shot = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+        });
+        single_shot
+            .namespace_status("demo")
+            .expect_err("dropped connection must fail without retry");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            MAX_TRANSIENT_ATTEMPTS as usize + 1
+        );
+        server.join().expect("server thread");
+    }
 
     /// An intermediary answering with a non-envelope body (a load balancer's
     /// HTML 502) must keep its status in the surfaced error — the status is
