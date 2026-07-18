@@ -2,8 +2,7 @@
 //! checkpoint records, upload sessions, and their envelopes (format spec,
 //! "Control objects").
 
-use crate::digest::sha256_digest;
-use crate::envelope::EnvelopeProbe;
+use crate::envelope::EnvelopeCodecError;
 use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
@@ -12,8 +11,6 @@ use crate::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
-use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -325,7 +322,7 @@ where
         kind: ControlObjectKind,
         writer_version: impl Into<String>,
         state: T,
-    ) -> Result<Self, ControlCodecError> {
+    ) -> Result<Self, EnvelopeCodecError> {
         Ok(Self {
             kind,
             format_version: kind.format_version(),
@@ -344,144 +341,66 @@ pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
 pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 
-/// Durable layout of a control object: the envelope fields plus the payload
-/// as a raw JSON fragment. The payload stays inline (rather than as encoded
-/// bytes) so control objects remain directly readable JSON, while
-/// `payload_checksum` covers the exact fragment bytes as stored.
-#[derive(Serialize, Deserialize)]
-struct ControlObjectDocument {
-    kind: String,
-    format_version: u32,
-    writer_version: String,
-    payload_checksum: String,
-    payload: Box<RawValue>,
-}
-
-#[derive(Debug, Error)]
-pub enum ControlCodecError {
-    #[error("failed to encode control object payload to JSON: {0}")]
-    PayloadEncode(String),
-    #[error("failed to encode control object envelope to JSON: {0}")]
-    EnvelopeEncode(String),
-    #[error("failed to decode control object envelope from JSON: {0}")]
-    EnvelopeDecode(String),
-    #[error("failed to decode control object payload from JSON: {0}")]
-    PayloadDecode(String),
-    #[error("unknown control object kind `{found}`")]
-    UnknownKind { found: String },
-    #[error("control object kind mismatch: expected `{expected}`, found `{found}`")]
-    KindMismatch { expected: String, found: String },
-    #[error(
-        "unsupported `{kind}` control object format version `{found}`: \
-         this build supports `{supported}`"
-    )]
-    UnsupportedFormatVersion {
-        kind: String,
-        found: u32,
-        supported: u32,
-    },
-    #[error("control object payload checksum mismatch: expected {expected}, actual {actual}")]
-    ChecksumMismatch { expected: String, actual: String },
-    #[error(
-        "control object envelope checksum `{checksum}` does not match its payload `{actual}`: \
-         rebuild the envelope with `ControlObjectEnvelope::from_state`"
-    )]
-    StalePayloadChecksum { checksum: String, actual: String },
-}
-
-pub fn control_payload_checksum<T>(state: &T) -> Result<String, ControlCodecError>
+pub fn control_payload_checksum<T>(state: &T) -> Result<String, EnvelopeCodecError>
 where
     T: Serialize,
 {
-    let bytes = serde_json::to_vec(state)
-        .map_err(|err| ControlCodecError::PayloadEncode(err.to_string()))?;
-    Ok(sha256_digest(&bytes))
+    crate::envelope::json_payload_checksum(state)
 }
 
 pub fn encode_control_object<T>(
     envelope: &ControlObjectEnvelope<T>,
-) -> Result<Vec<u8>, ControlCodecError>
+) -> Result<Vec<u8>, EnvelopeCodecError>
 where
     T: Serialize,
 {
-    if envelope.format_version != envelope.kind.format_version() {
-        return Err(ControlCodecError::UnsupportedFormatVersion {
-            kind: envelope.kind.as_str().to_owned(),
-            found: envelope.format_version,
-            supported: envelope.kind.format_version(),
-        });
-    }
-    let payload_json = serde_json::to_string(&envelope.state)
-        .map_err(|err| ControlCodecError::PayloadEncode(err.to_string()))?;
-    let actual = sha256_digest(payload_json.as_bytes());
-    if actual != envelope.payload_checksum {
-        return Err(ControlCodecError::StalePayloadChecksum {
-            checksum: envelope.payload_checksum.clone(),
-            actual,
-        });
-    }
-
-    let document = ControlObjectDocument {
-        kind: envelope.kind.as_str().to_owned(),
-        format_version: envelope.format_version,
-        writer_version: envelope.writer_version.clone(),
-        payload_checksum: envelope.payload_checksum.clone(),
-        payload: RawValue::from_string(payload_json)
-            .map_err(|err| ControlCodecError::PayloadEncode(err.to_string()))?,
-    };
-    serde_json::to_vec(&document).map_err(|err| ControlCodecError::EnvelopeEncode(err.to_string()))
+    crate::envelope::encode_json_envelope(
+        envelope.kind.as_str(),
+        envelope.format_version,
+        envelope.kind.format_version(),
+        &envelope.writer_version,
+        &envelope.payload_checksum,
+        &envelope.state,
+    )
 }
 
 pub fn decode_control_object<T>(
     bytes: &[u8],
     expected_kind: ControlObjectKind,
-) -> Result<ControlObjectEnvelope<T>, ControlCodecError>
+) -> Result<ControlObjectEnvelope<T>, EnvelopeCodecError>
 where
     T: DeserializeOwned,
 {
-    let probe: EnvelopeProbe = serde_json::from_slice(bytes)
-        .map_err(|err| ControlCodecError::EnvelopeDecode(err.to_string()))?;
-    let Some(kind) = ControlObjectKind::parse(&probe.kind) else {
-        return Err(ControlCodecError::UnknownKind { found: probe.kind });
-    };
-    if kind != expected_kind {
-        return Err(ControlCodecError::KindMismatch {
-            expected: expected_kind.as_str().to_owned(),
-            found: probe.kind,
-        });
-    }
-    if probe.format_version != kind.format_version() {
-        return Err(ControlCodecError::UnsupportedFormatVersion {
-            kind: kind.as_str().to_owned(),
-            found: probe.format_version,
-            supported: kind.format_version(),
-        });
-    }
-
-    let document: ControlObjectDocument = serde_json::from_slice(bytes)
-        .map_err(|err| ControlCodecError::EnvelopeDecode(err.to_string()))?;
-    let actual = sha256_digest(document.payload.get().as_bytes());
-    if actual != document.payload_checksum {
-        return Err(ControlCodecError::ChecksumMismatch {
-            expected: document.payload_checksum,
-            actual,
-        });
-    }
-    let state: T = serde_json::from_str(document.payload.get())
-        .map_err(|err| ControlCodecError::PayloadDecode(err.to_string()))?;
+    let decoded = crate::envelope::decode_json_envelope(
+        bytes,
+        expected_kind.format_version(),
+        // The kind registry reports unknown kinds distinctly from
+        // registered-but-mismatched ones.
+        |found| match ControlObjectKind::parse(found) {
+            None => Err(EnvelopeCodecError::UnknownKind {
+                found: found.to_owned(),
+            }),
+            Some(kind) if kind != expected_kind => Err(EnvelopeCodecError::KindMismatch {
+                expected: expected_kind.as_str().to_owned(),
+                found: found.to_owned(),
+            }),
+            Some(_) => Ok(()),
+        },
+    )?;
 
     Ok(ControlObjectEnvelope {
-        kind,
-        format_version: document.format_version,
-        writer_version: document.writer_version,
-        payload_checksum: document.payload_checksum,
-        state,
+        kind: expected_kind,
+        format_version: decoded.format_version,
+        writer_version: decoded.writer_version,
+        payload_checksum: decoded.payload_checksum,
+        state: decoded.payload,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::digest::sha256_digest;
 
     #[test]
     fn control_object_kind_strings_round_trip_and_match_serde() {
@@ -525,7 +444,7 @@ mod tests {
             ControlObjectKind::NamespaceConfig,
         )
         .expect_err("kind mismatch");
-        assert!(matches!(mismatch, ControlCodecError::KindMismatch { .. }));
+        assert!(matches!(mismatch, EnvelopeCodecError::KindMismatch { .. }));
     }
 
     #[test]
