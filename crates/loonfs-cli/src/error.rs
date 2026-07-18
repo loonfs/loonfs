@@ -1,6 +1,5 @@
 //! [`CliError`]: the structured failure every command surfaces.
 
-use loonfs_api::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 /// Structured failure surfaced by every CLI command (`--json` renders it verbatim).
@@ -15,15 +14,16 @@ use serde::{Deserialize, Serialize};
 ///   through verbatim from the backend seam: `invalid_config`,
 ///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
 /// - **CLI-local codes** cover failures that never reach a backend. The
-///   complete list, each owned by a constructor below, is: `invalid_input`,
-///   `profile_not_found`, `no_default_profile`, `no_default_namespace`,
-///   `profile_already_exists`, `config_already_exists`,
+///   complete list, each owned by a constructor below, is: `invalid_config`,
+///   `invalid_input`, `profile_not_found`, `no_default_profile`,
+///   `no_default_namespace`, `profile_already_exists`,
+///   `config_already_exists`, `destination_exists`,
 ///   `non_interactive_input_required`, `json_not_supported_for_streaming`,
 ///   `io_error`, and `cancelled`. Overlaps with backend-local codes are
 ///   deliberate: the same string means the same thing on both sides of the
-///   seam. (The CLI's own `invalid_config` constructor is the one exception:
-///   it deliberately reports the registry `invalid_request` code, the code the
-///   server serves for configuration mistakes.)
+///   seam — a local configuration failure is `invalid_config` whether the
+///   CLI or the backend seam caught it, and the registry codes are reserved
+///   for failures a server could also produce.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CliError {
     pub code: String,
@@ -62,7 +62,7 @@ impl CliError {
     }
 
     pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
-        Self::new(ErrorCode::InvalidRequest.as_str(), message)
+        Self::new("invalid_config", message)
     }
 
     pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
@@ -105,10 +105,25 @@ impl CliError {
         )
     }
 
-    pub(crate) fn non_interactive_input_required(field: &str) -> Self {
+    /// Interactive input is required but unavailable; `requirement` says
+    /// what to pass instead.
+    pub(crate) fn non_interactive_input_required(requirement: impl Into<String>) -> Self {
+        Self::new("non_interactive_input_required", requirement)
+    }
+
+    pub(crate) fn non_interactive_field_required(field: &str) -> Self {
+        Self::non_interactive_input_required(format!(
+            "missing required `{field}` while `--no-input` is active"
+        ))
+    }
+
+    pub(crate) fn destination_exists(path: &std::path::Path) -> Self {
         Self::new(
-            "non_interactive_input_required",
-            format!("missing required `{field}` while `--no-input` is active"),
+            "destination_exists",
+            format!(
+                "local file `{}` already exists; pass --force to overwrite",
+                path.display()
+            ),
         )
     }
 

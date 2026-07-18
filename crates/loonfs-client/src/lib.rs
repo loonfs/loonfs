@@ -1144,7 +1144,13 @@ impl Client {
                         request_id: body.request_id,
                         details: body.details,
                     },
-                    Err(err) => ClientError::Http(err.to_string()),
+                    // A status with a non-envelope body is most commonly an
+                    // intermediary answering for the server (a load
+                    // balancer's HTML 502): keep the status — it is the only
+                    // signal the response carried.
+                    Err(err) => ClientError::Http(format!(
+                        "http status {status} with a non-envelope body: {err}"
+                    )),
                 }
             }
             ureq::Error::Transport(err) => ClientError::Http(err.to_string()),
@@ -1260,6 +1266,27 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
+
+    /// An intermediary answering with a non-envelope body (a load balancer's
+    /// HTML 502) must keep its status in the surfaced error — the status is
+    /// the only signal the response carried.
+    #[test]
+    fn map_error_keeps_the_status_when_the_body_is_not_the_envelope() {
+        let client = Client::new(ClientConfig {
+            server_url: "http://localhost:0".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+        });
+        let response = ureq::Response::new(502, "Bad Gateway", "<html>upstream error</html>")
+            .expect("synthetic response");
+        let error = client.map_error(ureq::Error::Status(502, response));
+        let ClientError::Http(message) = error else {
+            unreachable!("expected Http error, got {error:?}");
+        };
+        assert!(message.contains("502"), "{message}");
+        assert!(message.contains("non-envelope body"), "{message}");
+    }
     use super::{
         BeginUploadRequest, Client, ClientConfig, ClientError, CreateCheckpointRequest, ErrorCode,
         ErrorKind, NamespacePath,

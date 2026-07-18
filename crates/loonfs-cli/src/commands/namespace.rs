@@ -93,8 +93,7 @@ async fn run_namespace_delete(
                 kind,
                 Some(resolved.profile_name),
                 Some(mode),
-                CliError::new(
-                    "non_interactive_input_required",
+                CliError::non_interactive_input_required(
                     "deleting a namespace requires confirmation: pass --yes, or run \
                      interactively to confirm at the prompt",
                 ),

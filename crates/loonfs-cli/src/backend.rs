@@ -520,9 +520,11 @@ fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, BackendError> {
 }
 
 fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendError> {
+    // The server maps this same policy error to `invalid_request`; embedded
+    // mode must report the identical registry code for the identical failure.
     PaginationPolicy::default()
         .resolve_limit(limit)
-        .map_err(|error| BackendError::invalid_input(error.to_string()))
+        .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
 }
 
 fn map_runtime_error(error: RuntimeError) -> BackendError {
@@ -707,7 +709,9 @@ impl RemoteTarget {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{map_bootstrap_error, map_core_error, Backend, EmbeddedTarget};
+    use super::{
+        map_bootstrap_error, map_core_error, resolve_cli_page_limit, Backend, EmbeddedTarget,
+    };
     use crate::config::StoreConfig;
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
@@ -728,6 +732,15 @@ mod tests {
         });
 
         assert_eq!(error.code, ErrorCode::RevisionNotFound.as_str());
+    }
+
+    #[test]
+    fn page_limit_errors_report_the_registry_code_the_server_serves() {
+        // `--limit 0` fails the same PaginationPolicy check in both modes;
+        // embedded mode must answer `invalid_request` like the server, not a
+        // CLI-local `invalid_input` rewrite.
+        let error = resolve_cli_page_limit(Some(0)).expect_err("zero limit is invalid");
+        assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
     }
 
     #[test]

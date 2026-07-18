@@ -323,13 +323,7 @@ pub(crate) async fn run_filesystem_get(
                         kind,
                         Some(context.profile_name.clone()),
                         Some(context.mode.clone()),
-                        CliError::new(
-                            "destination_exists",
-                            format!(
-                                "local file `{}` already exists; pass --force to overwrite",
-                                destination.display()
-                            ),
-                        ),
+                        CliError::destination_exists(&destination),
                     );
                 }
                 let mut error = CliError::io(error);
