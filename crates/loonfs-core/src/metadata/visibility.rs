@@ -15,7 +15,7 @@
 //!   path — never to re-derive the rules.
 //! - The free functions ([`active_child_binding`],
 //!   [`current_parent_binding_for_child`], [`covering_subtree_tombstone`],
-//!   [`visible_inode`], [`visible_child`], [`is_visible_child_direntry`],
+//!   [`visible_inode`], [`visible_child`],
 //!   [`would_create_directory_cycle`], [`resolve_visible_path`]) are the
 //!   canonical rule bodies that both the provided trait methods and every
 //!   caching/gating override delegate to.
@@ -350,25 +350,6 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
 /// and its child inode is visible. Enumerating candidate rows is storage
 /// specific; deciding them is not. Callers must already have checked that
 /// the parent is a visible directory.
-pub(crate) async fn is_visible_child_direntry<R: MetadataVisibilityReads>(
-    reads: &mut R,
-    direntry: &DirentryBindRecord,
-) -> Result<bool, R::Error> {
-    let Some(active) = reads
-        .active_child_binding(direntry.parent_inode_id, &direntry.name_key)
-        .await?
-    else {
-        return Ok(false);
-    };
-    if !active.same_binding(direntry) {
-        return Ok(false);
-    }
-    Ok(reads
-        .visible_inode(direntry.child_inode_id)
-        .await?
-        .is_some())
-}
-
 /// Resolves `absolute_path` component by component through visible
 /// directories and visible child bindings, starting at the canonical root
 /// inode.

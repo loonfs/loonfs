@@ -6,7 +6,7 @@ use super::grep::{
     DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_CONTENT_IO, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES,
     MAX_GREP_TAIL_FILES, MAX_GREP_VERIFIED_FILES_PER_PAGE,
 };
-use super::listing::{invalid_cursor, page_head_seq, validate_directory_cursor};
+use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
     head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
     VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
@@ -885,14 +885,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
-        let page_head_seq = page_head_seq(self.head.seq, request.cursor.as_ref())?;
-        if page_head_seq != self.head.seq {
-            return Err(MetadataViewError::UnsupportedHistoricalRead {
-                requested_seq: page_head_seq,
-                head_seq: self.head.seq,
-            }
-            .into());
-        }
+        validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let mut session = self.metadata_view().session();
@@ -951,7 +944,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .last()
                 .expect("non-zero page limit with more children must return an item");
             Some(DirectoryPageCursor {
-                head_seq: page_head_seq,
+                head_seq: self.head.seq,
                 dir_inode_id: resolved.inode_id,
                 last_name_key: NameKey::parse(&last.binding.name_key).map_err(|error| {
                     CoreError::NamespaceCorrupt(format!("invalid stored name_key: {error}"))

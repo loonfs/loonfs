@@ -8,10 +8,8 @@
 //! (historical scan or at-head index) answers the primitive lookups.
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
-use super::{
-    DirentryBindRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-};
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo};
+use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NamePolicy};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
@@ -27,8 +25,6 @@ pub struct ResolvedVisiblePath {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum VisiblePathError {
-    #[error("invalid absolute path `{absolute_path}`")]
-    InvalidAbsolutePath { absolute_path: String },
     #[error("canonical root inode is missing")]
     RootMissing,
     #[error("visible path not found: `{absolute_path}`")]
@@ -59,76 +55,6 @@ impl MetadataState {
         self.inodes
             .iter()
             .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
-            .cloned()
-    }
-
-    pub fn latest_revision_head_at_seq(
-        &self,
-        inode_id: InodeId,
-        base_seq: ChangeSeq,
-    ) -> Option<RevisionRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.latest_revision_at_head(inode_id);
-        }
-        self.latest_revision_head_at_seq_scan(inode_id, base_seq)
-    }
-
-    pub fn latest_revision_at_head(&self, inode_id: InodeId) -> Option<RevisionRecord> {
-        self.indexes.latest_revision(inode_id)
-    }
-
-    fn latest_revision_head_at_seq_scan(
-        &self,
-        inode_id: InodeId,
-        base_seq: ChangeSeq,
-    ) -> Option<RevisionRecord> {
-        self.revisions
-            .iter()
-            .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
-            .max_by_key(|revision| {
-                (
-                    revision.revision_no,
-                    revision.committed_seq,
-                    revision.revision_delta_index,
-                )
-            })
-            .cloned()
-    }
-
-    pub fn revision_at_seq(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        base_seq: ChangeSeq,
-    ) -> Option<RevisionRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.revision_at_head(inode_id, revision_no);
-        }
-        self.revision_at_seq_scan(inode_id, revision_no, base_seq)
-    }
-
-    pub fn revision_at_head(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Option<RevisionRecord> {
-        self.indexes.revision(inode_id, revision_no)
-    }
-
-    fn revision_at_seq_scan(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        base_seq: ChangeSeq,
-    ) -> Option<RevisionRecord> {
-        self.revisions
-            .iter()
-            .filter(|revision| {
-                revision.inode_id == inode_id
-                    && revision.revision_no == revision_no
-                    && revision.committed_seq <= base_seq
-            })
-            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
             .cloned()
     }
 
@@ -257,15 +183,6 @@ impl MetadataState {
         ))
     }
 
-    pub fn current_revision_head(
-        &self,
-        inode_id: InodeId,
-        base_seq: ChangeSeq,
-    ) -> Option<RevisionRecord> {
-        self.visible_inode(inode_id, base_seq)?;
-        self.latest_revision_head_at_seq(inode_id, base_seq)
-    }
-
     pub fn visible_child(
         &self,
         parent_inode_id: InodeId,
@@ -292,133 +209,6 @@ impl MetadataState {
             parent_inode_id,
             name_key,
         ))
-    }
-
-    pub fn visible_children(
-        &self,
-        parent_inode_id: InodeId,
-        base_seq: ChangeSeq,
-    ) -> Vec<DirentryBindRecord> {
-        if base_seq >= self.indexed_seq() {
-            return self.visible_children_at_head(parent_inode_id);
-        }
-
-        let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
-            return Vec::new();
-        };
-        if parent.inode_kind != InodeKind::Directory {
-            return Vec::new();
-        }
-
-        let mut reads = self.reads_at_seq(base_seq);
-        let mut children = self
-            .direntry_binds
-            .iter()
-            .filter(|direntry| {
-                direntry.parent_inode_id == parent_inode_id && direntry.bind_seq <= base_seq
-            })
-            .filter(|direntry| {
-                read_now(visibility::is_visible_child_direntry(&mut reads, direntry))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        children.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
-        });
-        children
-    }
-
-    pub fn visible_children_page_by_name_key(
-        &self,
-        parent_inode_id: InodeId,
-        base_seq: ChangeSeq,
-        start_after_name_key: Option<&str>,
-        limit: usize,
-    ) -> Vec<DirentryBindRecord> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        if base_seq >= self.indexed_seq() {
-            return self.visible_children_page_by_name_key_at_head(
-                parent_inode_id,
-                start_after_name_key,
-                limit,
-            );
-        }
-
-        let mut children = self.visible_children(parent_inode_id, base_seq);
-        children.sort_by(|left, right| left.name_key.cmp(&right.name_key));
-        children
-            .into_iter()
-            .filter(|child| {
-                start_after_name_key
-                    .map(|last_name_key| child.name_key.as_str() > last_name_key)
-                    .unwrap_or(true)
-            })
-            .take(limit)
-            .collect()
-    }
-
-    pub fn visible_children_page_by_name_key_at_head(
-        &self,
-        parent_inode_id: InodeId,
-        start_after_name_key: Option<&str>,
-        limit: usize,
-    ) -> Vec<DirentryBindRecord> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
-            return Vec::new();
-        };
-        if parent.inode_kind != InodeKind::Directory {
-            return Vec::new();
-        }
-
-        let mut children = Vec::with_capacity(limit);
-        for direntry in self
-            .indexes
-            .active_children_after_name_key(parent_inode_id, start_after_name_key)
-        {
-            if self
-                .visible_inode_at_head(direntry.child_inode_id)
-                .is_none()
-            {
-                continue;
-            }
-            children.push(direntry.clone());
-            if children.len() == limit {
-                break;
-            }
-        }
-        children
-    }
-
-    pub fn visible_children_at_head(&self, parent_inode_id: InodeId) -> Vec<DirentryBindRecord> {
-        let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
-            return Vec::new();
-        };
-        if parent.inode_kind != InodeKind::Directory {
-            return Vec::new();
-        }
-
-        let mut children = self
-            .indexes
-            .active_children(parent_inode_id)
-            .into_iter()
-            .filter(|direntry| {
-                self.visible_inode_at_head(direntry.child_inode_id)
-                    .is_some()
-            })
-            .collect::<Vec<_>>();
-        children.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
-        });
-        children
     }
 
     pub fn resolve_visible_path(

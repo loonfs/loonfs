@@ -8,7 +8,7 @@ use crate::error::Result as CoreResult;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
-use crate::path::query::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
+use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_api::generated_id;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,

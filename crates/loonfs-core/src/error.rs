@@ -528,7 +528,6 @@ fn classify_wal_chain_load_error(error: &WalChainLoadError) -> ErrorCode {
 
 fn classify_visible_path_error(error: &VisiblePathError) -> ErrorCode {
     match error {
-        VisiblePathError::InvalidAbsolutePath { .. } => ErrorCode::InvalidRequest,
         VisiblePathError::RootMissing => ErrorCode::NamespaceCorrupt,
         VisiblePathError::PathNotFound { .. } => ErrorCode::PathNotFound,
         VisiblePathError::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
