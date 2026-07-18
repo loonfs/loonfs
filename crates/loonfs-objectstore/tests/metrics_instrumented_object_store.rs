@@ -44,7 +44,7 @@ async fn records_put_success() {
 }
 
 #[tokio::test]
-async fn delegates_convenience_writes_to_inner_store() {
+async fn convenience_writes_funnel_through_put_with_distinct_modes() {
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
@@ -62,10 +62,10 @@ async fn delegates_convenience_writes_to_inner_store() {
         .expect("compare and swap");
 
     let inner = store.into_inner();
-    assert_eq!(
-        inner.calls(),
-        vec!["put_overwrite", "put_if_absent", "compare_and_swap"]
-    );
+    // The sugar methods are trait defaults now: every write funnels through
+    // the one instrumented `put`, so the inner store sees `put` three
+    // times while the samples still carry the distinct modes below.
+    assert_eq!(inner.calls(), vec!["put", "put", "put"]);
 
     let samples = recorder.samples();
     assert_eq!(samples.len(), 3);

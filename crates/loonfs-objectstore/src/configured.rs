@@ -12,7 +12,6 @@ use crate::object_store::Result;
 use crate::presign::{ObjectTransferIssuer, S3CompatiblePresigner, S3PresignerConfig};
 use crate::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
-use crate::ObjectStoreError;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};

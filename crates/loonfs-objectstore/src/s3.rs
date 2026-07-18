@@ -4,7 +4,6 @@ use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::object_store::Result;
 use crate::secret::SecretString;
-use crate::ObjectStoreError;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
