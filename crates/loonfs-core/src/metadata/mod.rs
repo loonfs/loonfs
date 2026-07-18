@@ -32,7 +32,7 @@ mod tests;
 mod view;
 mod visibility;
 
-pub use self::apply::{AppliedMetadataState, MetadataApplyError};
+pub use self::apply::AppliedMetadataState;
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,

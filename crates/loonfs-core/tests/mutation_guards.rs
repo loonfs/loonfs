@@ -1193,10 +1193,8 @@ async fn restore_revision_overflow_is_rejected() {
                 inode_kind: InodeKind::Directory,
             }],
         )
-        .expect("bootstrap root")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas)
-        .expect("create max revision")
         .metadata_state;
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
@@ -5145,7 +5143,6 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
                 inode_kind: InodeKind::Directory,
             }],
         )
-        .expect("bootstrap root")
         .metadata_state;
 
     for (index, deltas) in sequences.iter().enumerate() {
@@ -5155,7 +5152,6 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
                 4_200,
                 deltas,
             )
-            .expect("apply deltas")
             .metadata_state;
     }
 

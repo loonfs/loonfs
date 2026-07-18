@@ -50,16 +50,14 @@ where
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        let apply_invariants = current_metadata_state
-            .apply_committed_wal_record_parts_mut(
-                record.seq,
-                record.committed_at_ms,
-                record.commit_id,
-                record.semantic_commit_fingerprint,
-                record.message,
-                &record.deltas,
-            )
-            .map_err(WalReplayError::MetadataApply)?;
+        let apply_invariants = current_metadata_state.apply_committed_wal_record_parts_mut(
+            record.seq,
+            record.committed_at_ms,
+            record.commit_id,
+            record.semantic_commit_fingerprint,
+            record.message,
+            &record.deltas,
+        );
         push_invariant(
             &mut checked_invariants,
             InvariantId::WalReplayAppliesMetadataRows,

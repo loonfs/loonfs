@@ -9,19 +9,17 @@ use loonfs_api::{
 
 #[test]
 fn bind_direntry_replay_uses_persisted_name_key() {
-    let applied = MetadataState::default()
-        .apply_committed_wal_deltas(
-            ChangeSeq(1),
-            4_200,
-            &[WalDelta::BindDirentry {
-                delta_index: 7,
-                parent_inode_id: InodeId(1),
-                name_key: "persisted-key".to_owned(),
-                display_name: "Report.TXT".to_owned(),
-                child_inode_id: InodeId(2),
-            }],
-        )
-        .expect("apply bind delta");
+    let applied = MetadataState::default().apply_committed_wal_deltas(
+        ChangeSeq(1),
+        4_200,
+        &[WalDelta::BindDirentry {
+            delta_index: 7,
+            parent_inode_id: InodeId(1),
+            name_key: "persisted-key".to_owned(),
+            display_name: "Report.TXT".to_owned(),
+            child_inode_id: InodeId(2),
+        }],
+    );
 
     assert_eq!(applied.metadata_state.direntry_binds().len(), 1);
     let bind = &applied.metadata_state.direntry_binds()[0];
@@ -141,7 +139,6 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 bind_delta_index: 0,
             }],
         )
-        .expect("unbind")
         .metadata_state;
     assert!(metadata_state
         .visible_child_at_head(InodeId(1), "docs")
@@ -162,7 +159,6 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 child_inode_id: InodeId(2),
             }],
         )
-        .expect("rebind")
         .metadata_state;
     assert!(metadata_state
         .visible_child_at_head(InodeId(1), "docs")
@@ -184,7 +180,6 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 root_inode_id: InodeId(2),
             }],
         )
-        .expect("tombstone")
         .metadata_state;
     assert!(metadata_state
         .visible_child_at_head(InodeId(1), "renamed")
@@ -531,100 +526,92 @@ fn revisions_advance_watermark_and_receipt_index_round_trips() {
 /// `deleted` with only a dead binding.
 fn churned_binding_state() -> MetadataState {
     let mut state = MetadataState::default();
-    state
-        .apply_committed_wal_deltas_mut(
-            ChangeSeq(0),
-            4_200,
-            &[WalDelta::CreateInode {
+    state.apply_committed_wal_deltas_mut(
+        ChangeSeq(0),
+        4_200,
+        &[WalDelta::CreateInode {
+            delta_index: 0,
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Directory,
+        }],
+    );
+    state.apply_committed_wal_deltas_mut(
+        ChangeSeq(1),
+        4_200,
+        &[
+            WalDelta::CreateInode {
                 delta_index: 0,
-                inode_id: InodeId(1),
+                inode_id: InodeId(2),
                 inode_kind: InodeKind::Directory,
-            }],
-        )
-        .expect("seed root");
-    state
-        .apply_committed_wal_deltas_mut(
-            ChangeSeq(1),
-            4_200,
-            &[
-                WalDelta::CreateInode {
-                    delta_index: 0,
-                    inode_id: InodeId(2),
-                    inode_kind: InodeKind::Directory,
-                },
-                WalDelta::BindDirentry {
-                    delta_index: 1,
-                    parent_inode_id: InodeId(1),
-                    name_key: "contested".to_owned(),
-                    display_name: "contested".to_owned(),
-                    child_inode_id: InodeId(2),
-                },
-                WalDelta::CreateInode {
-                    delta_index: 2,
-                    inode_id: InodeId(4),
-                    inode_kind: InodeKind::Directory,
-                },
-                WalDelta::BindDirentry {
-                    delta_index: 3,
-                    parent_inode_id: InodeId(1),
-                    name_key: "deleted".to_owned(),
-                    display_name: "deleted".to_owned(),
-                    child_inode_id: InodeId(4),
-                },
-            ],
-        )
-        .expect("bind children 2 and 4");
-    state
-        .apply_committed_wal_deltas_mut(
-            ChangeSeq(2),
-            4_200,
-            &[
-                WalDelta::UnbindDirentry {
-                    delta_index: 0,
-                    parent_inode_id: InodeId(1),
-                    name_key: "contested".to_owned(),
-                    child_inode_id: InodeId(2),
-                    bind_seq: ChangeSeq(1),
-                    bind_delta_index: 1,
-                },
-                WalDelta::BindDirentry {
-                    delta_index: 1,
-                    parent_inode_id: InodeId(1),
-                    name_key: "renamed-away".to_owned(),
-                    display_name: "renamed-away".to_owned(),
-                    child_inode_id: InodeId(2),
-                },
-                WalDelta::UnbindDirentry {
-                    delta_index: 2,
-                    parent_inode_id: InodeId(1),
-                    name_key: "deleted".to_owned(),
-                    child_inode_id: InodeId(4),
-                    bind_seq: ChangeSeq(1),
-                    bind_delta_index: 3,
-                },
-            ],
-        )
-        .expect("rename child 2, unbind child 4");
-    state
-        .apply_committed_wal_deltas_mut(
-            ChangeSeq(3),
-            4_200,
-            &[
-                WalDelta::CreateInode {
-                    delta_index: 0,
-                    inode_id: InodeId(3),
-                    inode_kind: InodeKind::Directory,
-                },
-                WalDelta::BindDirentry {
-                    delta_index: 1,
-                    parent_inode_id: InodeId(1),
-                    name_key: "contested".to_owned(),
-                    display_name: "contested".to_owned(),
-                    child_inode_id: InodeId(3),
-                },
-            ],
-        )
-        .expect("bind child 3");
+            },
+            WalDelta::BindDirentry {
+                delta_index: 1,
+                parent_inode_id: InodeId(1),
+                name_key: "contested".to_owned(),
+                display_name: "contested".to_owned(),
+                child_inode_id: InodeId(2),
+            },
+            WalDelta::CreateInode {
+                delta_index: 2,
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::Directory,
+            },
+            WalDelta::BindDirentry {
+                delta_index: 3,
+                parent_inode_id: InodeId(1),
+                name_key: "deleted".to_owned(),
+                display_name: "deleted".to_owned(),
+                child_inode_id: InodeId(4),
+            },
+        ],
+    );
+    state.apply_committed_wal_deltas_mut(
+        ChangeSeq(2),
+        4_200,
+        &[
+            WalDelta::UnbindDirentry {
+                delta_index: 0,
+                parent_inode_id: InodeId(1),
+                name_key: "contested".to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 1,
+            },
+            WalDelta::BindDirentry {
+                delta_index: 1,
+                parent_inode_id: InodeId(1),
+                name_key: "renamed-away".to_owned(),
+                display_name: "renamed-away".to_owned(),
+                child_inode_id: InodeId(2),
+            },
+            WalDelta::UnbindDirentry {
+                delta_index: 2,
+                parent_inode_id: InodeId(1),
+                name_key: "deleted".to_owned(),
+                child_inode_id: InodeId(4),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 3,
+            },
+        ],
+    );
+    state.apply_committed_wal_deltas_mut(
+        ChangeSeq(3),
+        4_200,
+        &[
+            WalDelta::CreateInode {
+                delta_index: 0,
+                inode_id: InodeId(3),
+                inode_kind: InodeKind::Directory,
+            },
+            WalDelta::BindDirentry {
+                delta_index: 1,
+                parent_inode_id: InodeId(1),
+                name_key: "contested".to_owned(),
+                display_name: "contested".to_owned(),
+                child_inode_id: InodeId(3),
+            },
+        ],
+    );
     state
 }
 

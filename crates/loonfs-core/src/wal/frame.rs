@@ -2,7 +2,6 @@
 //! replay paths.
 
 use crate::invariants::InvariantId;
-use crate::metadata::MetadataApplyError;
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalSegmentId, WriterEpoch};
@@ -228,8 +227,6 @@ pub enum WalReplayError {
     EmptySegment,
     #[error("WAL segment summary does not match its records")]
     SegmentSummaryMismatch,
-    #[error(transparent)]
-    MetadataApply(#[from] MetadataApplyError),
     #[error("sequence counter overflow")]
     SeqOverflow,
 }

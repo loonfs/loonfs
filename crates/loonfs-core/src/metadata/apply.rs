@@ -9,7 +9,6 @@ use crate::invariants::InvariantId;
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, CommitId};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedMetadataState {
@@ -17,27 +16,21 @@ pub struct AppliedMetadataState {
     pub checked_invariants: Vec<InvariantId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum MetadataApplyError {}
-
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
         committed_at_ms: u64,
         deltas: &[WalDelta],
-    ) -> Result<AppliedMetadataState, MetadataApplyError> {
+    ) -> AppliedMetadataState {
         let mut metadata_state = self.clone();
-        let checked_invariants = metadata_state.apply_committed_wal_deltas_mut(
-            committed_seq,
-            committed_at_ms,
-            deltas,
-        )?;
+        let checked_invariants =
+            metadata_state.apply_committed_wal_deltas_mut(committed_seq, committed_at_ms, deltas);
 
-        Ok(AppliedMetadataState {
+        AppliedMetadataState {
             metadata_state,
             checked_invariants,
-        })
+        }
     }
 
     pub fn apply_committed_wal_deltas_mut(
@@ -45,7 +38,7 @@ impl MetadataState {
         committed_seq: ChangeSeq,
         committed_at_ms: u64,
         deltas: &[WalDelta],
-    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
+    ) -> Vec<InvariantId> {
         let mut checked_invariants = Vec::new();
 
         for delta in deltas {
@@ -54,7 +47,7 @@ impl MetadataState {
             push_unique_invariant(&mut checked_invariants, checked_invariant);
         }
 
-        Ok(checked_invariants)
+        checked_invariants
     }
 
     /// Appends the metadata row encoded by one committed WAL delta and
@@ -171,7 +164,7 @@ impl MetadataState {
     pub fn apply_committed_wal_record_mut(
         &mut self,
         record: &WalCommitPayload,
-    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
+    ) -> Vec<InvariantId> {
         self.apply_committed_wal_record_parts_mut(
             record.seq,
             record.committed_at_ms,
@@ -190,7 +183,7 @@ impl MetadataState {
         semantic_commit_fingerprint: &str,
         message: Option<&str>,
         deltas: &[WalCommitDelta],
-    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
+    ) -> Vec<InvariantId> {
         let mut checked_invariants = Vec::new();
         for delta in deltas {
             let checked_invariant =
@@ -208,7 +201,7 @@ impl MetadataState {
             &mut checked_invariants,
             InvariantId::WalReplayRecordsCommitReceipt,
         );
-        Ok(checked_invariants)
+        checked_invariants
     }
 }
 
