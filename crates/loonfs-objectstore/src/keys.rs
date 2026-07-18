@@ -2,7 +2,6 @@
 
 use crate::layout::ObjectLayout;
 use crate::object_store::Result;
-use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
 
 pub fn namespace_config(namespace: &str) -> String {

@@ -1,7 +1,6 @@
 //! Presigned-URL issuing for direct_put uploads.
 
 use crate::object_store::Result;
-use crate::ObjectStoreError;
 use loonfs_api::ContentRef;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};

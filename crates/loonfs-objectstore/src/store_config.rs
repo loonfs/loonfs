@@ -11,7 +11,7 @@ use crate::gcs::GcpGcsStoreConfig;
 use crate::r2::CloudflareR2StoreConfig;
 use crate::s3::AwsS3StoreConfig;
 use crate::secret::SecretString;
-use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind, ObjectStoreError};
+use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 use http::Uri;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
