@@ -1,11 +1,9 @@
 //! Key validation and prefix scoping shared by the provider stores.
 
+use crate::object_store::Result;
 use crate::ObjectStoreError;
 
-pub(crate) fn validate_segments(
-    key: &str,
-    allow_trailing_separator: bool,
-) -> Result<Vec<&str>, ObjectStoreError> {
+pub(crate) fn validate_segments(key: &str, allow_trailing_separator: bool) -> Result<Vec<&str>> {
     if key.is_empty() {
         return Ok(Vec::new());
     }
@@ -39,9 +37,7 @@ pub(crate) fn validate_segments(
     Ok(segments)
 }
 
-pub(crate) fn normalize_key_prefix(
-    key_prefix: Option<&str>,
-) -> Result<Option<String>, ObjectStoreError> {
+pub(crate) fn normalize_key_prefix(key_prefix: Option<&str>) -> Result<Option<String>> {
     let Some(key_prefix) = key_prefix else {
         return Ok(None);
     };
@@ -53,10 +49,7 @@ pub(crate) fn normalize_key_prefix(
     Ok(Some(segments.join("/")))
 }
 
-pub(crate) fn scope_object_key(
-    key_prefix: Option<&str>,
-    key: &str,
-) -> Result<String, ObjectStoreError> {
+pub(crate) fn scope_object_key(key_prefix: Option<&str>, key: &str) -> Result<String> {
     validate_segments(key, false)?;
 
     match key_prefix {
@@ -68,10 +61,7 @@ pub(crate) fn scope_object_key(
     }
 }
 
-pub(crate) fn scope_list_prefix(
-    key_prefix: Option<&str>,
-    prefix: &str,
-) -> Result<String, ObjectStoreError> {
+pub(crate) fn scope_list_prefix(key_prefix: Option<&str>, prefix: &str) -> Result<String> {
     validate_segments(prefix, true)?;
 
     match key_prefix {
@@ -89,6 +79,37 @@ pub(crate) fn unscope_listed_key(key_prefix: Option<&str>, scoped_key: &str) -> 
     scoped_key
         .strip_prefix(&prefix)
         .map(|unscoped| unscoped.to_owned())
+}
+
+/// A parsed `http(s)://authority[/base-path]` endpoint, shared by the
+/// provider client and the presigner so the two cannot drift.
+pub(crate) struct ParsedEndpoint<'a> {
+    pub(crate) scheme: &'a str,
+    pub(crate) authority: &'a str,
+    pub(crate) path: &'a str,
+}
+
+pub(crate) fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>> {
+    let (scheme, rest) = value
+        .strip_prefix("https://")
+        .map(|rest| ("https", rest))
+        .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
+        .ok_or_else(|| {
+            ObjectStoreError::Configuration(
+                "endpoint url must start with http:// or https://".to_owned(),
+            )
+        })?;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.is_empty() {
+        return Err(ObjectStoreError::Configuration(
+            "endpoint url must include authority".to_owned(),
+        ));
+    }
+    Ok(ParsedEndpoint {
+        scheme,
+        authority,
+        path: path.trim_end_matches('/'),
+    })
 }
 
 #[cfg(test)]
@@ -153,35 +174,4 @@ mod tests {
             Err(ObjectStoreError::InvalidKey { .. })
         ));
     }
-}
-
-/// A parsed `http(s)://authority[/base-path]` endpoint, shared by the
-/// provider client and the presigner so the two cannot drift.
-pub(crate) struct ParsedEndpoint<'a> {
-    pub(crate) scheme: &'a str,
-    pub(crate) authority: &'a str,
-    pub(crate) path: &'a str,
-}
-
-pub(crate) fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>, ObjectStoreError> {
-    let (scheme, rest) = value
-        .strip_prefix("https://")
-        .map(|rest| ("https", rest))
-        .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
-        .ok_or_else(|| {
-            ObjectStoreError::Configuration(
-                "endpoint url must start with http:// or https://".to_owned(),
-            )
-        })?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "endpoint url must include authority".to_owned(),
-        ));
-    }
-    Ok(ParsedEndpoint {
-        scheme,
-        authority,
-        path: path.trim_end_matches('/'),
-    })
 }

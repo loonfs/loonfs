@@ -30,8 +30,9 @@ pub mod timing;
 mod transfer_timeouts;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
+pub use object_store::ObjectStoreError as Error;
 pub use object_store::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result,
     SharedObjectStore,
 };
 pub use provider_object_store::{

@@ -2,6 +2,7 @@
 
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::object_store::Result;
 use crate::secret::SecretString;
 use crate::ObjectStoreError;
 use async_trait::async_trait;
@@ -26,7 +27,7 @@ pub struct AwsS3Store {
 }
 
 impl AwsS3Store {
-    pub fn new(config: AwsS3StoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn new(config: AwsS3StoreConfig) -> Result<Self> {
         Ok(Self {
             inner: S3CompatibleStore::new(S3CompatibleConfig {
                 provider_name: "aws-s3",
@@ -46,39 +47,27 @@ impl AwsS3Store {
 
 #[async_trait]
 impl ObjectStore for AwsS3Store {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.inner.head(key).await
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.inner.get_with_metadata(key).await
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.inner.get(key, range).await
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.inner.put(key, bytes, mode).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.inner.list_prefix_stream(prefix)
     }
 }

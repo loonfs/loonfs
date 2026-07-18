@@ -5,6 +5,7 @@
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
+use crate::object_store::Result;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
@@ -39,8 +40,11 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// every retry of that operation rather than restarting per attempt. Reads
 /// get it as the provider client's retry timeout; single-request writes and
 /// deletes get it through `TransportRetryPolicy`. The deadline gates
-/// starting another attempt, so one operation's total wall time is bounded
-/// by the deadline plus one attempt bound. The GC grace window is derived
+/// starting another attempt, and one outer attempt may itself contain the
+/// inner client's full retry budget for status-code retries — so one
+/// operation's total wall time is bounded by the deadline plus the inner
+/// retry budget plus one attempt bound (worst case roughly six minutes),
+/// still a hard bound. The GC grace window is derived
 /// above this bound (format spec, "Garbage collection", rule 1); multipart
 /// uploads deliberately carry no whole-operation clock (their parts are
 /// individually bounded), which leaves the floor inequality untouched
@@ -239,7 +243,7 @@ impl ProviderObjectStore {
         inner: Arc<dyn provider_store::ObjectStore>,
         multipart: Option<Arc<dyn MultipartStore>>,
         config: ProviderObjectStoreConfig,
-    ) -> Result<Self, ObjectStoreError> {
+    ) -> Result<Self> {
         Ok(Self {
             inner,
             multipart,
@@ -271,7 +275,7 @@ impl ProviderObjectStore {
         self
     }
 
-    fn to_path(&self, key: &str) -> Result<Path, ObjectStoreError> {
+    fn to_path(&self, key: &str) -> Result<Path> {
         let scoped = scope_object_key(self.key_prefix.as_deref(), key)?;
         Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey {
             object_key: key.to_owned(),
@@ -279,11 +283,11 @@ impl ProviderObjectStore {
         })
     }
 
-    pub(crate) fn validate_key(&self, key: &str) -> Result<(), ObjectStoreError> {
+    pub(crate) fn validate_key(&self, key: &str) -> Result<()> {
         self.to_path(key).map(|_| ())
     }
 
-    fn list_path(&self, prefix: &str) -> Result<Option<Path>, ObjectStoreError> {
+    fn list_path(&self, prefix: &str) -> Result<Option<Path>> {
         let scoped = scope_list_prefix(self.key_prefix.as_deref(), prefix)?;
         if scoped.is_empty() {
             return Ok(None);
@@ -348,7 +352,7 @@ impl ProviderObjectStore {
         key: &str,
         path: &Path,
         bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    ) -> Result<ObjectMetadata> {
         let size_bytes = bytes.len() as u64;
         let upload = MultipartWrite {
             store: self,
@@ -439,10 +443,7 @@ struct MultipartWrite<'op> {
 }
 
 impl MultipartWrite<'_> {
-    async fn create(
-        &self,
-        payload_bytes: u64,
-    ) -> Result<provider_store::MultipartId, ObjectStoreError> {
+    async fn create(&self, payload_bytes: u64) -> Result<provider_store::MultipartId> {
         let mut retries: u32 = 0;
         loop {
             let err = match self.multipart.create_multipart(self.path).await {
@@ -470,7 +471,7 @@ impl MultipartWrite<'_> {
         &self,
         upload_id: &provider_store::MultipartId,
         bytes: &Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    ) -> Result<ObjectMetadata> {
         let part_size = self.store.multipart_geometry.part_bytes as usize;
         let part_count = bytes.len().div_ceil(part_size);
         let mut part_ids: Vec<Option<PartId>> = vec![None; part_count];
@@ -510,7 +511,7 @@ impl MultipartWrite<'_> {
         upload_id: &provider_store::MultipartId,
         part_index: usize,
         payload: Bytes,
-    ) -> Result<PartId, ObjectStoreError> {
+    ) -> Result<PartId> {
         let payload_bytes = payload.len() as u64;
         let mut retries: u32 = 0;
         loop {
@@ -549,7 +550,7 @@ impl MultipartWrite<'_> {
         upload_id: &provider_store::MultipartId,
         parts: Vec<PartId>,
         size_bytes: u64,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    ) -> Result<ObjectMetadata> {
         let mut retries: u32 = 0;
         loop {
             let err = match self
@@ -603,7 +604,7 @@ impl MultipartWrite<'_> {
 
 #[async_trait]
 impl ObjectStore for ProviderObjectStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let path = self.to_path(key)?;
         match self.inner.head(&path).await {
             Ok(meta) => Ok(Some(Self::from_meta(meta))),
@@ -612,7 +613,7 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
@@ -638,11 +639,7 @@ impl ObjectStore for ProviderObjectStore {
     /// object is `Ok(None)` however the request was shaped, an end past the
     /// object clamps, `start == size` reads empty, and `start > size` is
     /// `InvalidRange`.
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let path = self.to_path(key)?;
         let Some(range) = range else {
             return match self.inner.get(&path).await {
@@ -710,12 +707,7 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.to_path(key)?;
         let size_bytes = bytes.len() as u64;
 
@@ -811,7 +803,7 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         let path = self.to_path(key)?;
         let deadline =
             OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
@@ -837,10 +829,7 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         let prefix_path = match self.list_path(prefix) {
             Ok(prefix_path) => prefix_path,
             Err(err) => return stream::once(async { Err(err) }).boxed(),

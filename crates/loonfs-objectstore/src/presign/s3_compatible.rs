@@ -2,6 +2,7 @@
 
 use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
 use crate::keyspace::{parse_endpoint_url, scope_object_key};
+use crate::object_store::Result;
 use crate::presign::aws_sigv4::{
     aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,
     percent_encode_path, percent_encode_segment,
@@ -36,7 +37,7 @@ pub struct S3CompatiblePresigner {
 }
 
 impl S3CompatiblePresigner {
-    pub fn new(config: S3PresignerConfig) -> Result<Self, ObjectStoreError> {
+    pub fn new(config: S3PresignerConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "bucket must not be empty".to_owned(),
@@ -60,7 +61,7 @@ impl S3CompatiblePresigner {
         Ok(Self { config })
     }
 
-    fn endpoint(&self, object_key: &str) -> Result<S3Endpoint, ObjectStoreError> {
+    fn endpoint(&self, object_key: &str) -> Result<S3Endpoint> {
         let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), object_key)?;
         let encoded_key = percent_encode_path(&scoped_key);
 
@@ -129,7 +130,7 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
         &self,
         request: PresignedPutRequest<'_>,
         now: SystemTime,
-    ) -> Result<PresignedUrl, ObjectStoreError> {
+    ) -> Result<PresignedUrl> {
         // Expiry comes from deployment configuration, not the transport:
         // a bad value is a config bug and must not look like network
         // weather.
@@ -217,9 +218,7 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
     }
 }
 
-fn s3_direct_put_required_headers(
-    content_ref: &ContentRef,
-) -> Result<BTreeMap<String, String>, ObjectStoreError> {
+fn s3_direct_put_required_headers(content_ref: &ContentRef) -> Result<BTreeMap<String, String>> {
     Ok(BTreeMap::from([
         (S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned()),
         (
@@ -229,7 +228,7 @@ fn s3_direct_put_required_headers(
     ]))
 }
 
-fn s3_sha256_checksum_header(content_ref: &ContentRef) -> Result<String, ObjectStoreError> {
+fn s3_sha256_checksum_header(content_ref: &ContentRef) -> Result<String> {
     if content_ref.kind != ContentRefKind::WholeFileV0 {
         return Err(invalid_direct_put_content(
             "direct_put only supports whole_file_v0 content refs",
@@ -275,7 +274,7 @@ struct S3Endpoint {
     canonical_uri: String,
 }
 
-fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64, ObjectStoreError> {
+fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
     let duration = time.duration_since(std::time::UNIX_EPOCH).map_err(|err| {
         ObjectStoreError::transport(
             object_key,

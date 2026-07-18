@@ -447,7 +447,38 @@ async fn assert_provider_conformance<S: ObjectStore>(store: &S) {
     assert_lists_immediately_after_write_and_delete(store).await;
     assert_sorted_list_prefix(store).await;
     assert_supports_range_reads(store).await;
+    assert_multipart_overwrite_round_trips(store).await;
     assert_rejects_invalid_keys_consistently(store).await;
+}
+
+/// The one live exercise of the native multipart path: an overwrite past
+/// the threshold uploads in parts (at least two) and must read back
+/// byte-identical. R2's fixed-part-size rule and each provider's completion
+/// semantics only show up against the real service.
+async fn assert_multipart_overwrite_round_trips<S: ObjectStore>(store: &S) {
+    let key = wal_segment("ns-1", "seg_00000000000000000000000000000777");
+    let _ = store.delete(&key).await;
+
+    let payload_len = loonfs_objectstore::PROVIDER_MULTIPART_THRESHOLD_BYTES as usize
+        + loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES as usize
+        + 4096;
+    let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
+
+    let metadata = store
+        .put_overwrite(&key, Bytes::from(payload.clone()))
+        .await
+        .expect("multipart overwrite");
+    assert_eq!(metadata.size_bytes, payload_len as u64);
+
+    let read_back = store
+        .get(&key, None)
+        .await
+        .expect("read back")
+        .expect("object exists");
+    assert_eq!(read_back.len(), payload_len);
+    assert_eq!(read_back.as_ref(), payload.as_slice());
+
+    store.delete(&key).await.expect("cleanup multipart object");
 }
 
 async fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S) {

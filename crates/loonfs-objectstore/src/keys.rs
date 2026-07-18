@@ -1,6 +1,7 @@
 //! Key construction for every durable object family.
 
 use crate::layout::ObjectLayout;
+use crate::object_store::Result;
 use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
 
@@ -76,7 +77,7 @@ pub fn content_store_descriptor(content_store: &str) -> String {
     ObjectLayout::new().content_store_descriptor(content_store)
 }
 
-pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectStoreError> {
+pub fn content_blob(content_store: &str, digest: &str) -> Result<String> {
     ObjectLayout::new().content_blob(content_store, digest)
 }
 

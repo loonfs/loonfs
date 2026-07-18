@@ -8,6 +8,7 @@ use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
 use crate::local_fs_store::LocalFsStore;
+use crate::object_store::Result;
 use crate::presign::{ObjectTransferIssuer, S3CompatiblePresigner, S3PresignerConfig};
 use crate::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use crate::s3::{AwsS3Store, AwsS3StoreConfig};
@@ -61,10 +62,7 @@ enum ConfiguredObjectStoreInner {
 }
 
 impl ConfiguredObjectStore {
-    pub fn local_fs(
-        root: impl Into<PathBuf>,
-        key_prefix: Option<&str>,
-    ) -> Result<Self, ObjectStoreError> {
+    pub fn local_fs(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         Ok(Self {
             kind: ConfiguredObjectStoreKind::LocalFs,
             inner: ConfiguredObjectStoreInner::LocalFs {
@@ -75,7 +73,7 @@ impl ConfiguredObjectStore {
         })
     }
 
-    pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
         let transfer_issuer = Some(Arc::new(S3CompatiblePresigner::new(S3PresignerConfig {
             bucket: config.bucket.clone(),
             region: config.region.clone(),
@@ -94,7 +92,7 @@ impl ConfiguredObjectStore {
         })
     }
 
-    pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
         let transfer_issuer = Some(Arc::new(S3CompatiblePresigner::new(S3PresignerConfig {
             bucket: config.bucket.clone(),
             region: "auto".to_owned(),
@@ -113,7 +111,7 @@ impl ConfiguredObjectStore {
         })
     }
 
-    pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
         let store = GcpGcsStore::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::GcpGcs,
@@ -122,7 +120,7 @@ impl ConfiguredObjectStore {
         })
     }
 
-    pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<Self> {
         let store = AzureAbsStore::new(config)?;
         Ok(Self {
             kind: ConfiguredObjectStoreKind::AzureAbs,
@@ -142,7 +140,7 @@ impl ConfiguredObjectStore {
 
 #[async_trait]
 impl ObjectStore for ConfiguredObjectStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
                 store
@@ -156,7 +154,7 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
                 store
@@ -170,11 +168,7 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
                 store
@@ -188,12 +182,7 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
                 store
@@ -207,7 +196,7 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
                 store
@@ -221,10 +210,7 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
                 let scoped_prefix = match scope_list_prefix(key_prefix.as_deref(), prefix) {

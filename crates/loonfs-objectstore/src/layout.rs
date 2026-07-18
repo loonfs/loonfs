@@ -1,6 +1,7 @@
 //! The durable key grammar: object families, their path shapes, and
 //! parsing keys back into classified families.
 
+use crate::object_store::Result;
 use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
 
@@ -187,11 +188,7 @@ impl ObjectLayout {
         format!("content-stores/{content_store}/descriptor.json")
     }
 
-    pub fn content_blob(
-        &self,
-        content_store: &str,
-        digest: &str,
-    ) -> Result<String, ObjectStoreError> {
+    pub fn content_blob(&self, content_store: &str, digest: &str) -> Result<String> {
         let hex = sha256_hex_from_digest(digest)?;
         Ok(format!(
             "content-stores/{content_store}/blobs/sha256/{}/{}/{}",
@@ -268,7 +265,7 @@ fn parsed(
     })
 }
 
-pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
+pub fn sha256_hex_from_digest(digest: &str) -> Result<&str> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         return Err(ObjectStoreError::InvalidKey {
             object_key: digest.to_owned(),
