@@ -9,6 +9,7 @@
 //! connector onto its store's own runtime, so caller runtime topology can
 //! never affect provider IO.
 
+use crate::object_store::Result;
 use crate::transfer_timeouts::TransferTimeoutConnector;
 use crate::ObjectStoreError;
 use std::fmt;
@@ -35,7 +36,7 @@ impl StoreIoRuntime {
     ///
     /// One worker thread multiplexes every request for the store; HTTP IO is
     /// reactor-driven, so request concurrency does not need more threads.
-    pub(crate) fn new() -> Result<Self, ObjectStoreError> {
+    pub(crate) fn new() -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("loonfs-store-io")

@@ -1,5 +1,6 @@
 //! Presigned-URL issuing for direct_put uploads.
 
+use crate::object_store::Result;
 use crate::ObjectStoreError;
 use loonfs_api::ContentRef;
 use std::collections::BTreeMap;
@@ -30,5 +31,5 @@ pub trait ObjectTransferIssuer: Send + Sync + std::fmt::Debug {
         &self,
         request: PresignedPutRequest<'_>,
         now: SystemTime,
-    ) -> Result<PresignedUrl, ObjectStoreError>;
+    ) -> Result<PresignedUrl>;
 }

@@ -1,6 +1,7 @@
 //! Azure Blob Storage provider.
 
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::object_store::Result;
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
@@ -34,7 +35,7 @@ pub struct AzureAbsStore {
 }
 
 impl AzureAbsStore {
-    pub fn new(config: AzureAbsStoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn new(config: AzureAbsStoreConfig) -> Result<Self> {
         if config.account_name.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "account name must not be empty".to_owned(),
@@ -102,39 +103,27 @@ fn normalize_http_endpoint_scheme(endpoint_url: &str) -> String {
 
 #[async_trait]
 impl ObjectStore for AzureAbsStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.inner.head(key).await
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.inner.get_with_metadata(key).await
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.inner.get(key, range).await
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.inner.put(key, bytes, mode).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.inner.list_prefix_stream(prefix)
     }
 }

@@ -1,6 +1,12 @@
 //! [`LocalFsStore`]: the local-filesystem [`ObjectStore`] provider.
+//!
+//! This is the dev and test provider. Its correctness contract is identical
+//! to the cloud providers'; its performance shapes are deliberately relaxed
+//! (content-hash etags, whole-file reads, whole-tree listings) and are not
+//! optimization targets.
 
 use crate::keyspace::validate_segments;
+use crate::object_store::Result;
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -24,7 +30,7 @@ pub struct LocalFsStore {
 }
 
 impl LocalFsStore {
-    pub fn new(root: impl Into<PathBuf>) -> Result<Self, ObjectStoreError> {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|err| {
             ObjectStoreError::Configuration(format!(
@@ -41,10 +47,7 @@ impl LocalFsStore {
     /// Extends the in-process write mutex across processes with an advisory
     /// file lock on the store root. Check-then-act writes (compare-and-swap,
     /// delete-then-prune) are only safe while both are held.
-    async fn acquire_cross_process_write_lock(
-        &self,
-        key: &str,
-    ) -> Result<std::fs::File, ObjectStoreError> {
+    async fn acquire_cross_process_write_lock(&self, key: &str) -> Result<std::fs::File> {
         let lock_path = self.root.join(STORE_LOCK_FILE_NAME);
         let lock_key = key.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -66,7 +69,7 @@ impl LocalFsStore {
         &self.root
     }
 
-    fn resolve_key(&self, key: &str) -> Result<PathBuf, ObjectStoreError> {
+    fn resolve_key(&self, key: &str) -> Result<PathBuf> {
         let segments = validate_segments(key, false)?;
         // Scratch-shaped names are reserved by this store: they are hidden
         // from listings, so accepting them as keys would create objects a
@@ -84,10 +87,7 @@ impl LocalFsStore {
         Ok(path)
     }
 
-    async fn metadata_for_path(
-        key: &str,
-        path: &Path,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn metadata_for_path(key: &str, path: &Path) -> Result<Option<ObjectMetadata>> {
         let metadata = match fs::metadata(path).await {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -103,7 +103,7 @@ impl LocalFsStore {
         metadata: &std::fs::Metadata,
         content_digest: &str,
         path: &Path,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    ) -> Result<ObjectMetadata> {
         if !metadata.is_file() {
             return Err(ObjectStoreError::transport(
                 key,
@@ -124,35 +124,38 @@ impl LocalFsStore {
         })
     }
 
-    async fn create_new_object(
-        key: &str,
-        root: &Path,
-        path: &Path,
-        bytes: &[u8],
-    ) -> Result<(), ObjectStoreError> {
+    async fn create_new_object(key: &str, root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+        // Stage to a temp file and link into place, like `replace_object`:
+        // the bytes become visible at the final key atomically, so a reader
+        // never observes a partial object and a crash never leaves a torn
+        // file wedging the key. `hard_link` fails if the key exists, which
+        // is exactly the create-if-absent precondition.
         let created_dirs = ensure_parent_dir(key, path).await?;
-        let mut file = match OpenOptions::new()
+        let temp_path = temp_path(path);
+        let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(path)
+            .open(&temp_path)
             .await
-        {
-            Ok(file) => file,
-            Err(err) => return Err(map_create_error(key, err)),
-        };
+            .map_err(|err| io_error(key, err))?;
 
-        let result: Result<(), ObjectStoreError> = async {
+        let staged: Result<()> = async {
             file.write_all(bytes)
                 .await
                 .map_err(|err| io_error(key, err))?;
             file.sync_all().await.map_err(|err| io_error(key, err))
         }
         .await;
-
-        if result.is_err() {
-            let _ = fs::remove_file(path).await;
-            return result;
+        if staged.is_err() {
+            let _ = fs::remove_file(&temp_path).await;
+            return staged;
         }
+
+        let linked = fs::hard_link(&temp_path, path)
+            .await
+            .map_err(|err| map_create_error(key, err));
+        let _ = fs::remove_file(&temp_path).await;
+        linked?;
 
         if created_dirs {
             sync_dir_chain(key, path, root).await?;
@@ -160,16 +163,11 @@ impl LocalFsStore {
         sync_parent_dir(key, path).await
     }
 
-    async fn replace_object(
-        key: &str,
-        root: &Path,
-        path: &Path,
-        bytes: &[u8],
-    ) -> Result<(), ObjectStoreError> {
+    async fn replace_object(key: &str, root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
         let created_dirs = ensure_parent_dir(key, path).await?;
         let temp_path = temp_path(path);
 
-        let result: Result<(), ObjectStoreError> = async {
+        let result: Result<()> = async {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -216,15 +214,12 @@ impl LocalFsStore {
 }
 
 impl LocalFsStore {
-    async fn head_object(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head_object(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let path = self.resolve_key(key)?;
         Self::metadata_for_path(key, &path).await
     }
 
-    async fn get_with_metadata_object(
-        &self,
-        key: &str,
-    ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata_object(&self, key: &str) -> Result<Option<ObjectBody>> {
         let path = self.resolve_key(key)?;
         let mut file = match File::open(&path).await {
             Ok(file) => file,
@@ -243,11 +238,7 @@ impl LocalFsStore {
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
-    async fn get_object(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+    async fn get_object(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Vec<u8>>> {
         let path = self.resolve_key(key)?;
         let mut file = match File::open(&path).await {
             Ok(file) => file,
@@ -279,12 +270,7 @@ impl LocalFsStore {
         }
     }
 
-    async fn put_object(
-        &self,
-        key: &str,
-        bytes: &[u8],
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_object(&self, key: &str, bytes: &[u8], mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.resolve_key(key)?;
         let _guard = self.write_lock.lock().await;
         let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
@@ -319,7 +305,7 @@ impl LocalFsStore {
             .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
     }
 
-    async fn delete_object(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete_object(&self, key: &str) -> Result<()> {
         let path = self.resolve_key(key)?;
         let _guard = self.write_lock.lock().await;
         let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
@@ -338,41 +324,29 @@ impl LocalFsStore {
 
 #[async_trait]
 impl ObjectStore for LocalFsStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.head_object(key).await
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.get_with_metadata_object(key).await
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.get_object(key, range)
             .await
             .map(|maybe| maybe.map(Bytes::from))
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.put_object(key, &bytes, mode).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.delete_object(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         let root = self.root.clone();
         let prefix = prefix.to_owned();
         Box::pin(
@@ -386,10 +360,7 @@ impl ObjectStore for LocalFsStore {
     }
 }
 
-async fn list_prefix_for_root(
-    root: PathBuf,
-    prefix: String,
-) -> Result<Vec<String>, ObjectStoreError> {
+async fn list_prefix_for_root(root: PathBuf, prefix: String) -> Result<Vec<String>> {
     validate_segments(&prefix, true)?;
 
     if !fs::try_exists(&root)
@@ -407,7 +378,7 @@ async fn list_prefix_for_root(
 
 /// Creates the parent directory chain. Returns whether anything was created,
 /// so callers know the new directory entries also need to be made durable.
-async fn ensure_parent_dir(key: &str, path: &Path) -> Result<bool, ObjectStoreError> {
+async fn ensure_parent_dir(key: &str, path: &Path) -> Result<bool> {
     match path.parent() {
         Some(parent) => {
             if fs::try_exists(parent)
@@ -431,7 +402,7 @@ async fn ensure_parent_dir(key: &str, path: &Path) -> Result<bool, ObjectStoreEr
 /// Fsyncs the directory holding `path`, making a rename, create, or unlink
 /// of that entry durable. Without this, the file data can survive a crash
 /// while the directory entry pointing at it does not.
-async fn sync_parent_dir(key: &str, path: &Path) -> Result<(), ObjectStoreError> {
+async fn sync_parent_dir(key: &str, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         if let Some(parent) = path.parent() {
@@ -449,7 +420,7 @@ async fn sync_parent_dir(key: &str, path: &Path) -> Result<(), ObjectStoreError>
 /// Fsyncs every directory from `path`'s parent up to and including the
 /// store root, so a freshly created directory chain survives a crash. The
 /// root itself pre-exists, so the chain never needs to go past it.
-async fn sync_dir_chain(key: &str, path: &Path, root: &Path) -> Result<(), ObjectStoreError> {
+async fn sync_dir_chain(key: &str, path: &Path, root: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let mut current = path.parent();
@@ -469,7 +440,7 @@ async fn sync_dir_chain(key: &str, path: &Path, root: &Path) -> Result<(), Objec
     Ok(())
 }
 
-async fn collect_keys(prefix: &str, root: PathBuf) -> Result<Vec<String>, ObjectStoreError> {
+async fn collect_keys(prefix: &str, root: PathBuf) -> Result<Vec<String>> {
     let mut keys = Vec::new();
     let mut dirs = vec![root.clone()];
 
@@ -513,7 +484,7 @@ async fn collect_keys(prefix: &str, root: PathBuf) -> Result<Vec<String>, Object
     Ok(keys)
 }
 
-fn relative_key(prefix: &str, root: &Path, path: &Path) -> Result<String, ObjectStoreError> {
+fn relative_key(prefix: &str, root: &Path, path: &Path) -> Result<String> {
     let relative = path.strip_prefix(root).map_err(|err| {
         ObjectStoreError::transport(
             prefix,
@@ -542,11 +513,7 @@ fn relative_key(prefix: &str, root: &Path, path: &Path) -> Result<String, Object
     Ok(parts.join("/"))
 }
 
-async fn prune_empty_parent_dirs(
-    key: &str,
-    mut current: Option<&Path>,
-    root: &Path,
-) -> Result<(), ObjectStoreError> {
+async fn prune_empty_parent_dirs(key: &str, mut current: Option<&Path>, root: &Path) -> Result<()> {
     while let Some(dir) = current {
         if dir == root {
             break;

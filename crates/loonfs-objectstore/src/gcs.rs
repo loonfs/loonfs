@@ -1,6 +1,7 @@
 //! Google Cloud Storage provider.
 
 use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use crate::object_store::Result;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
 use async_trait::async_trait;
@@ -32,7 +33,7 @@ pub struct GcpGcsStore {
 }
 
 impl GcpGcsStore {
-    pub fn new(config: GcpGcsStoreConfig) -> Result<Self, ObjectStoreError> {
+    pub fn new(config: GcpGcsStoreConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
                 "bucket must not be empty".to_owned(),
@@ -78,10 +79,7 @@ impl GcpGcsStore {
         }
     }
 
-    fn require_generation_compare_token(
-        key: &str,
-        expected_etag: &str,
-    ) -> Result<(), ObjectStoreError> {
+    fn require_generation_compare_token(key: &str, expected_etag: &str) -> Result<()> {
         expected_etag
             .parse::<u64>()
             .map(|_| ())
@@ -93,7 +91,7 @@ impl GcpGcsStore {
 
 #[async_trait]
 impl ObjectStore for GcpGcsStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         Ok(self
             .inner
             .head(key)
@@ -101,7 +99,7 @@ impl ObjectStore for GcpGcsStore {
             .map(Self::generation_as_compare_token))
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         Ok(self
             .inner
             .get_with_metadata(key)
@@ -112,20 +110,11 @@ impl ObjectStore for GcpGcsStore {
             }))
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.inner.get(key, range).await
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.inner.validate_key(key)?;
         if let PutMode::CompareAndSwap { expected_etag } = &mode {
             Self::require_generation_compare_token(key, expected_etag)?;
@@ -135,14 +124,11 @@ impl ObjectStore for GcpGcsStore {
         ))
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.inner.list_prefix_stream(prefix)
     }
 }

@@ -2,6 +2,7 @@
 //! samples classified by object family.
 
 use crate::layout::{parse_object_key, DurableObjectFamily};
+use crate::object_store::Result;
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -36,12 +37,12 @@ pub struct ObjectStoreMetricSample {
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStoreOperation {
     Head,
-    HeadWithChecksum,
     GetWithMetadata,
     Get,
     Put,
     Delete,
     ListPrefix,
+    ListPrefixStream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,37 +204,28 @@ impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
     S: ObjectStore,
 {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let start = Instant::now();
         let result = self.inner.head(key).await;
         self.record_head_like(ObjectStoreOperation::Head, key, start.elapsed(), &result);
         result
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let start = Instant::now();
         let result = self.inner.get(key, range.clone()).await;
         self.record_get(key, range.as_ref(), start.elapsed(), &result);
         result
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         let start = Instant::now();
         let result = self.inner.get_with_metadata(key).await;
         self.record_get_with_metadata(key, start.elapsed(), &result);
         result
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let start = Instant::now();
         let bytes_in = bytes.len() as u64;
         let result = self.inner.put(key, bytes, mode.clone()).await;
@@ -241,74 +233,32 @@ where
         result
     }
 
-    async fn put_overwrite(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let start = Instant::now();
-        let bytes_in = bytes.len() as u64;
-        let result = self.inner.put_overwrite(key, bytes).await;
-        self.record_put(key, bytes_in, &PutMode::Overwrite, start.elapsed(), &result);
-        result
-    }
-
-    async fn put_if_absent(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let start = Instant::now();
-        let bytes_in = bytes.len() as u64;
-        let result = self.inner.put_if_absent(key, bytes).await;
-        self.record_put(
-            key,
-            bytes_in,
-            &PutMode::CreateIfAbsent,
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let start = Instant::now();
-        let bytes_in = bytes.len() as u64;
-        let result = self.inner.compare_and_swap(key, expected_etag, bytes).await;
-        self.record_put(
-            key,
-            bytes_in,
-            &PutMode::CompareAndSwap {
-                expected_etag: expected_etag.to_owned(),
-            },
-            start.elapsed(),
-            &result,
-        );
-        result
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         let start = Instant::now();
         let result = self.inner.delete(key).await;
         self.record_unit(ObjectStoreOperation::Delete, key, start.elapsed(), &result);
         result
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+        // Streamed listings (WAL replay, GC) must not be invisible in the
+        // metrics. The wrapper records one sample when the stream is
+        // dropped — finished or abandoned — carrying the item count and
+        // the first error's class.
+        Box::pin(RecordedListStream {
+            inner: self.inner.list_prefix_stream(prefix),
+            recorder: Arc::clone(&self.recorder),
+            store_kind: self.store_kind.clone(),
+            key_class: classify_key(prefix),
+            started: Instant::now(),
+            items: 0,
+            first_error: None,
+        })
     }
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         let start = Instant::now();
-        let result: Result<Vec<_>, _> = self
+        let result: std::result::Result<Vec<_>, _> = self
             .inner
             .list_prefix_stream(prefix)
             .try_collect()
@@ -328,7 +278,7 @@ impl<S> InstrumentedObjectStore<S> {
         operation: ObjectStoreOperation,
         key: &str,
         elapsed: Duration,
-        result: &Result<Option<ObjectMetadata>, ObjectStoreError>,
+        result: &Result<Option<ObjectMetadata>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation,
@@ -349,7 +299,7 @@ impl<S> InstrumentedObjectStore<S> {
         key: &str,
         range: Option<&ByteRange>,
         elapsed: Duration,
-        result: &Result<Option<Bytes>, ObjectStoreError>,
+        result: &Result<Option<Bytes>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Get,
@@ -372,7 +322,7 @@ impl<S> InstrumentedObjectStore<S> {
         &self,
         key: &str,
         elapsed: Duration,
-        result: &Result<Option<ObjectBody>, ObjectStoreError>,
+        result: &Result<Option<ObjectBody>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::GetWithMetadata,
@@ -397,7 +347,7 @@ impl<S> InstrumentedObjectStore<S> {
         bytes_in: u64,
         mode: &PutMode,
         elapsed: Duration,
-        result: &Result<ObjectMetadata, ObjectStoreError>,
+        result: &Result<ObjectMetadata>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Put,
@@ -418,7 +368,7 @@ impl<S> InstrumentedObjectStore<S> {
         operation: ObjectStoreOperation,
         key: &str,
         elapsed: Duration,
-        result: &Result<(), ObjectStoreError>,
+        result: &Result<()>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation,
@@ -434,12 +384,7 @@ impl<S> InstrumentedObjectStore<S> {
         });
     }
 
-    fn record_list(
-        &self,
-        prefix: &str,
-        elapsed: Duration,
-        result: &Result<Vec<String>, ObjectStoreError>,
-    ) {
+    fn record_list(&self, prefix: &str, elapsed: Duration, result: &Result<Vec<String>>) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::ListPrefix,
             elapsed_micros: elapsed.as_micros(),
@@ -456,6 +401,55 @@ impl<S> InstrumentedObjectStore<S> {
 
     fn record(&self, sample: ObjectStoreMetricSample) {
         self.recorder.record(sample);
+    }
+}
+
+struct RecordedListStream {
+    inner: BoxStream<'static, Result<String>>,
+    recorder: Arc<dyn ObjectStoreMetricsRecorder>,
+    store_kind: Option<String>,
+    key_class: KeyClass,
+    started: Instant,
+    items: u64,
+    first_error: Option<ObjectStoreResultClass>,
+}
+
+impl futures::Stream for RecordedListStream {
+    type Item = Result<String>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let polled = self.inner.as_mut().poll_next(cx);
+        if let std::task::Poll::Ready(Some(item)) = &polled {
+            match item {
+                Ok(_) => self.items += 1,
+                Err(error) => {
+                    if self.first_error.is_none() {
+                        self.first_error = Some(classify_error(error));
+                    }
+                }
+            }
+        }
+        polled
+    }
+}
+
+impl Drop for RecordedListStream {
+    fn drop(&mut self) {
+        self.recorder.record(ObjectStoreMetricSample {
+            operation: ObjectStoreOperation::ListPrefixStream,
+            elapsed_micros: self.started.elapsed().as_micros(),
+            result: self.first_error.unwrap_or(ObjectStoreResultClass::Ok),
+            bytes_in: None,
+            bytes_out: None,
+            item_count: Some(self.items),
+            key_class: self.key_class,
+            range_class: None,
+            put_mode: None,
+            store_kind: self.store_kind.clone(),
+        });
     }
 }
 
@@ -484,9 +478,7 @@ fn classify_key(key: &str) -> KeyClass {
     }
 }
 
-fn classify_optional_result<T>(
-    result: &Result<Option<T>, ObjectStoreError>,
-) -> ObjectStoreResultClass {
+fn classify_optional_result<T>(result: &Result<Option<T>>) -> ObjectStoreResultClass {
     match result {
         Ok(Some(_)) => ObjectStoreResultClass::Ok,
         Ok(None) => ObjectStoreResultClass::NotFound,
@@ -494,7 +486,7 @@ fn classify_optional_result<T>(
     }
 }
 
-fn classify_result<T>(result: &Result<T, ObjectStoreError>) -> ObjectStoreResultClass {
+fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultClass {
     match result {
         Ok(_) => ObjectStoreResultClass::Ok,
         Err(error) => classify_error(error),

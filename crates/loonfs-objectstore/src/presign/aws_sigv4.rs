@@ -1,5 +1,6 @@
 //! AWS Signature Version 4 primitives used to presign S3-compatible URLs.
 
+use crate::object_store::Result;
 use crate::ObjectStoreError;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -14,10 +15,7 @@ pub(crate) struct AwsSigV4Dates {
     pub(crate) amz_date: String,
 }
 
-pub(crate) fn aws_dates(
-    object_key: &str,
-    time: SystemTime,
-) -> Result<AwsSigV4Dates, ObjectStoreError> {
+pub(crate) fn aws_dates(object_key: &str, time: SystemTime) -> Result<AwsSigV4Dates> {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map_err(|err| {

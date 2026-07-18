@@ -2,6 +2,7 @@
 //! Cloudflare R2 providers.
 
 use crate::keyspace::parse_endpoint_url;
+use crate::object_store::Result;
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
@@ -50,7 +51,7 @@ impl fmt::Debug for S3CompatibleStore {
 }
 
 impl S3CompatibleStore {
-    pub(crate) fn new(config: S3CompatibleConfig) -> Result<Self, ObjectStoreError> {
+    pub(crate) fn new(config: S3CompatibleConfig) -> Result<Self> {
         validate_config(&config)?;
         let endpoint_url = config
             .endpoint_url
@@ -107,44 +108,32 @@ impl S3CompatibleStore {
 
 #[async_trait]
 impl ObjectStore for S3CompatibleStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.inner.head(key).await
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.inner.get_with_metadata(key).await
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.inner.get(key, range).await
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.inner.put(key, bytes, mode).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.inner.list_prefix_stream(prefix)
     }
 }
 
-fn validate_config(config: &S3CompatibleConfig) -> Result<(), ObjectStoreError> {
+fn validate_config(config: &S3CompatibleConfig) -> Result<()> {
     if config.bucket.trim().is_empty() {
         return Err(ObjectStoreError::Configuration(
             "bucket must not be empty".to_owned(),
@@ -172,7 +161,7 @@ fn object_store_endpoint_url(
     bucket: &str,
     endpoint_url: &str,
     force_path_style: bool,
-) -> Result<String, ObjectStoreError> {
+) -> Result<String> {
     if force_path_style {
         return Ok(endpoint_url.to_owned());
     }

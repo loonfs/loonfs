@@ -77,6 +77,10 @@ pub enum ObjectStoreError {
     InvalidRange { object_key: String },
     #[error("precondition failed for `{object_key}`")]
     PreconditionFailed { object_key: String },
+    /// Producible only by fault injection (the simulator's fault store):
+    /// no real provider constructs it. Core treats it alongside
+    /// [`Self::PreconditionFailed`] so injected conflicts exercise the
+    /// same recovery paths.
     #[error("conflict for `{object_key}`")]
     Conflict { object_key: String },
     /// The provider rejected the caller's identity or authorization —
@@ -141,51 +145,34 @@ impl ObjectStoreError {
     }
 }
 
+/// Facade alias: signatures inside this crate use `Result<T>`.
+pub type Result<T> = std::result::Result<T, ObjectStoreError>;
+
 #[async_trait]
 pub trait ObjectStore: Send + Sync + Debug {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>>;
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError>;
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>>;
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError>;
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>>;
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError>;
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata>;
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError>;
+    async fn delete(&self, key: &str) -> Result<()>;
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>>;
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>>;
 
-    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys: Vec<String> = self.list_prefix_stream(prefix).try_collect().await?;
         keys.sort();
         Ok(keys)
     }
 
-    async fn put_overwrite(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.put(key, bytes, PutMode::Overwrite).await
     }
 
-    async fn put_if_absent(
-        &self,
-        key: &str,
-        bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.put(key, bytes, PutMode::CreateIfAbsent).await
     }
 
@@ -194,7 +181,7 @@ pub trait ObjectStore: Send + Sync + Debug {
         key: &str,
         expected_etag: &str,
         bytes: Bytes,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    ) -> Result<ObjectMetadata> {
         self.put(
             key,
             bytes,
@@ -208,78 +195,54 @@ pub trait ObjectStore: Send + Sync + Debug {
 
 #[async_trait]
 impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.as_ref().head(key).await
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.as_ref().get_with_metadata(key).await
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.as_ref().get(key, range).await
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.as_ref().put(key, bytes, mode).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.as_ref().delete(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.as_ref().list_prefix_stream(prefix)
     }
 }
 
 #[async_trait]
 impl<T: ObjectStore + ?Sized> ObjectStore for &T {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         (*self).head(key).await
     }
 
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         (*self).get_with_metadata(key).await
     }
 
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         (*self).get(key, range).await
     }
 
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
+    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         (*self).put(key, bytes, mode).await
     }
 
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+    async fn delete(&self, key: &str) -> Result<()> {
         (*self).delete(key).await
     }
 
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         (*self).list_prefix_stream(prefix)
     }
 }

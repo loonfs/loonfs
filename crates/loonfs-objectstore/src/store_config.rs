@@ -104,7 +104,7 @@ impl StoreConfig {
     }
 
     /// Builds the configured runtime object store for this provider.
-    pub fn configured_object_store(&self) -> Result<ConfiguredObjectStore, ObjectStoreError> {
+    pub fn configured_object_store(&self) -> crate::object_store::Result<ConfiguredObjectStore> {
         match self {
             StoreConfig::LocalFs { root, key_prefix } => {
                 ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())
