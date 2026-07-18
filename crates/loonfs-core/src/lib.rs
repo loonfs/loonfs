@@ -114,7 +114,6 @@ pub use checkpoint::{
     MetadataReorganizeReport,
 };
 pub use context::MutationContext;
-#[doc(hidden)]
 pub use engine::RuntimeReadContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};

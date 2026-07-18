@@ -31,7 +31,13 @@ use thiserror::Error;
 /// The pinned inputs the runtime resolves once per read: the head anchored
 /// to its manifest, the shared caches, and (when the runtime has it) the
 /// namespace's immutable catalog pair.
-#[doc(hidden)]
+///
+/// This is the runtime seam: the `loonfs` crate pins one context per
+/// request and fans every read of that request through it, so the whole
+/// request observes a single snapshot and shares the caches. It is a
+/// sanctioned public hook (STYLE, "Harness hooks are sanctioned"), not an
+/// application API — embedded applications use the `loonfs` handles, which
+/// drive this seam internally.
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
     pub head: HeadState,
@@ -163,7 +169,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    #[doc(hidden)]
+    /// Stats one path against the pinned runtime read context.
     pub async fn resolve_path_with_runtime_context(
         &self,
         path: impl AsRef<str>,
@@ -173,7 +179,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    #[doc(hidden)]
+    /// Lists one directory page against the pinned runtime read context.
     pub async fn list_path_page_with_runtime_context(
         &self,
         path: impl AsRef<str>,
@@ -184,7 +190,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    #[doc(hidden)]
+    /// Reads file content against the pinned runtime read context.
     pub async fn read_file_with_runtime_context(
         &self,
         path: impl AsRef<str>,
@@ -199,7 +205,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    #[doc(hidden)]
+    /// Runs one content-search page against the pinned runtime read context.
     pub async fn grep_with_runtime_context(
         &self,
         request: &GrepRequest,
@@ -211,7 +217,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         view.grep(&self.store, request).await
     }
 
-    #[doc(hidden)]
+    /// Lists one revision page for a path against the pinned runtime read context.
     pub async fn list_file_revisions_page_with_runtime_context(
         &self,
         path: impl AsRef<str>,
@@ -226,7 +232,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    #[doc(hidden)]
+    /// Lists one revision page for an inode against the pinned runtime read context.
     pub async fn list_file_revisions_for_inode_page_with_runtime_context(
         &self,
         inode_id: InodeId,
@@ -241,7 +247,8 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    #[doc(hidden)]
+    /// Reads one revision's content by path against the pinned runtime
+    /// read context.
     pub async fn read_file_revision_with_runtime_context(
         &self,
         path: impl AsRef<str>,
@@ -258,7 +265,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    #[doc(hidden)]
+    /// Reads one revision's content against the pinned runtime read context.
     pub async fn read_file_revision_for_inode_with_runtime_context(
         &self,
         inode_id: InodeId,
@@ -640,7 +647,8 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         self
     }
 
-    #[doc(hidden)]
+    /// Pins the writer session id instead of generating one — the runtime
+    /// seam for hosts that manage session identity themselves.
     pub fn writer_session_id(mut self, writer_session_id: impl Into<String>) -> Self {
         self.writer_session_id = Some(writer_session_id.into());
         self

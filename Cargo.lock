@@ -1174,7 +1174,6 @@ version = "0.1.1"
 dependencies = [
  "loonfs-api",
  "serde",
- "thiserror 2.0.18",
 ]
 
 [[package]]

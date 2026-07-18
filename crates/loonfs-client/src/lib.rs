@@ -35,7 +35,12 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 /// Client configuration loaded from TOML or built by the caller.
+///
+/// Strict like every config struct in the workspace: an unknown key is a
+/// decode error, so a typo (`auth_tokn`) fails loudly instead of silently
+/// producing an unauthenticated client.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     /// Base URL for the LoonFS server.
     pub server_url: String,
@@ -1290,6 +1295,22 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
+
+    /// Configs are strict like everywhere else in the workspace: a typo'd
+    /// key fails decode instead of silently producing an unauthenticated
+    /// client.
+    #[test]
+    fn client_config_rejects_unknown_keys() {
+        let error = toml::from_str::<ClientConfig>(
+            "server_url = \"http://localhost:1\"\nauth_tokn = \"oops\"\n",
+        )
+        .expect_err("unknown key must fail decode");
+        assert!(error.to_string().contains("auth_tokn"), "{error}");
+
+        let config: ClientConfig =
+            toml::from_str("server_url = \"http://localhost:1\"\n").expect("minimal config");
+        assert!(config.auth_token.is_none());
+    }
     use super::*;
 
     /// The retry policy in one place: network-level transport failures and

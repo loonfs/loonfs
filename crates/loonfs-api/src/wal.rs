@@ -236,7 +236,7 @@ pub fn encode_wal_segment_envelope_zstd(
     let mut encoded = Vec::new();
     into_writer(&document, &mut encoded)
         .map_err(|err| WalCodecError::EnvelopeEncode(err.to_string()))?;
-    zstd::stream::encode_all(encoded.as_slice(), 0)
+    zstd::stream::encode_all(encoded.as_slice(), crate::sst_blocks::ZSTD_LEVEL)
         .map_err(|err| WalCodecError::Compress(err.to_string()))
 }
 

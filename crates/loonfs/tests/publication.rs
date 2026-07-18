@@ -3,10 +3,6 @@
 //! one, or all of them — abandons only result delivery, never the
 //! publication itself.
 
-#![allow(clippy::panic, clippy::disallowed_methods)]
-// Cancellation tests park a real publication at a blocked head
-// compare-and-swap and poll for that state with short sleeps.
-
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -132,7 +128,10 @@ struct ParkedPuts {
 }
 
 /// Parks one publication at the blocked head CAS with a second put queued
-/// behind it, so tests can cancel callers at both positions.
+/// behind it, so tests can cancel callers at both positions. The settle
+/// sleep is the point of the fixture, so the timer method the workspace
+/// otherwise disallows is scoped to this helper.
+#[allow(clippy::disallowed_methods)]
 async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
     let store_impl = Arc::new(BlockingHeadCasStore::new(temp_dir, &namespace_id));
