@@ -4,9 +4,10 @@
 use crate::error::StoreFailureClass;
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlCodecError, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
-    MetadataRootState, NamespaceConfigEnvelope, NamespaceConfigState, WalFloorEnvelope,
+    ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
+    NamespaceConfigEnvelope, NamespaceConfigState, WalFloorEnvelope,
 };
+use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::{
     content_store_descriptor, metadata_root, namespace_config, wal_floor, wal_head,
@@ -459,10 +460,10 @@ fn validate_expected_namespace(
 
 pub(crate) fn map_control_codec_error(
     object_key: &str,
-    err: ControlCodecError,
+    err: EnvelopeCodecError,
 ) -> ControlObjectLoadError {
     match err {
-        ControlCodecError::ChecksumMismatch { expected, actual } => {
+        EnvelopeCodecError::ChecksumMismatch { expected, actual } => {
             ControlObjectLoadError::ChecksumMismatch {
                 object_key: object_key.to_owned(),
                 expected,

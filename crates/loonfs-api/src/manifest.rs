@@ -2,8 +2,7 @@
 //! metadata SST runs and index segments that materialize one namespace
 //! file-set version (format spec, "Namespace manifests").
 
-use crate::digest::sha256_digest;
-use crate::envelope::EnvelopeProbe;
+use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
@@ -11,9 +10,7 @@ use crate::{
     ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use std::collections::BTreeMap;
-use thiserror::Error;
 
 /// Version 1: an uncompressed JSON envelope document carrying the payload as
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
@@ -567,7 +564,7 @@ impl NamespaceManifestEnvelope {
     pub fn from_payload(
         writer_version: impl Into<String>,
         payload: NamespaceManifestPayload,
-    ) -> Result<Self, NamespaceManifestCodecError> {
+    ) -> Result<Self, EnvelopeCodecError> {
         Ok(Self {
             kind: NamespaceManifestKind::NamespaceManifest,
             format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
@@ -578,119 +575,40 @@ impl NamespaceManifestEnvelope {
     }
 }
 
-/// Durable layout of a namespace manifest object: the envelope fields plus
-/// the payload as a raw JSON fragment. Keeping the payload inline (rather
-/// than as encoded bytes) preserves the operational property that manifests
-/// are directly readable JSON, while `payload_checksum` still covers the
-/// exact fragment bytes as stored.
-#[derive(Serialize, Deserialize)]
-struct NamespaceManifestDocument {
-    kind: String,
-    format_version: u32,
-    writer_version: String,
-    payload_checksum: String,
-    payload: Box<RawValue>,
-}
-
-#[derive(Debug, Error)]
-pub enum NamespaceManifestCodecError {
-    #[error("failed to encode namespace manifest payload to JSON: {0}")]
-    PayloadEncode(String),
-    #[error("failed to encode namespace manifest envelope to JSON: {0}")]
-    EnvelopeEncode(String),
-    #[error("failed to decode namespace manifest envelope from JSON: {0}")]
-    EnvelopeDecode(String),
-    #[error("failed to decode namespace manifest payload from JSON: {0}")]
-    PayloadDecode(String),
-    #[error("unexpected namespace manifest kind `{found}`: expected `{expected}`")]
-    UnexpectedKind { expected: String, found: String },
-    #[error("unsupported namespace manifest format version `{found}`: this build supports `{supported}`")]
-    UnsupportedFormatVersion { found: u32, supported: u32 },
-    #[error("namespace manifest payload checksum mismatch: expected {expected}, actual {actual}")]
-    ChecksumMismatch { expected: String, actual: String },
-    #[error(
-        "namespace manifest envelope checksum `{checksum}` does not match its payload `{actual}`: \
-         rebuild the envelope with `NamespaceManifestEnvelope::from_payload`"
-    )]
-    StalePayloadChecksum { checksum: String, actual: String },
-}
-
 fn namespace_manifest_payload_checksum(
     payload: &NamespaceManifestPayload,
-) -> Result<String, NamespaceManifestCodecError> {
-    let bytes = serde_json::to_vec(payload)
-        .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?;
-    Ok(sha256_digest(&bytes))
+) -> Result<String, EnvelopeCodecError> {
+    crate::envelope::json_payload_checksum(payload)
 }
 
 pub fn encode_namespace_manifest_json(
     envelope: &NamespaceManifestEnvelope,
-) -> Result<Vec<u8>, NamespaceManifestCodecError> {
-    if envelope.format_version != NAMESPACE_MANIFEST_FORMAT_VERSION {
-        return Err(NamespaceManifestCodecError::UnsupportedFormatVersion {
-            found: envelope.format_version,
-            supported: NAMESPACE_MANIFEST_FORMAT_VERSION,
-        });
-    }
-    let payload_json = serde_json::to_string(&envelope.payload)
-        .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?;
-    let actual = sha256_digest(payload_json.as_bytes());
-    if actual != envelope.payload_checksum {
-        return Err(NamespaceManifestCodecError::StalePayloadChecksum {
-            checksum: envelope.payload_checksum.clone(),
-            actual,
-        });
-    }
-
-    let document = NamespaceManifestDocument {
-        kind: envelope.kind.as_str().to_owned(),
-        format_version: envelope.format_version,
-        writer_version: envelope.writer_version.clone(),
-        payload_checksum: envelope.payload_checksum.clone(),
-        payload: RawValue::from_string(payload_json)
-            .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?,
-    };
-    serde_json::to_vec(&document)
-        .map_err(|err| NamespaceManifestCodecError::EnvelopeEncode(err.to_string()))
+) -> Result<Vec<u8>, EnvelopeCodecError> {
+    crate::envelope::encode_json_envelope(
+        envelope.kind.as_str(),
+        envelope.format_version,
+        NAMESPACE_MANIFEST_FORMAT_VERSION,
+        &envelope.writer_version,
+        &envelope.payload_checksum,
+        &envelope.payload,
+    )
 }
 
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
-) -> Result<NamespaceManifestEnvelope, NamespaceManifestCodecError> {
-    let probe: EnvelopeProbe = serde_json::from_slice(bytes)
-        .map_err(|err| NamespaceManifestCodecError::EnvelopeDecode(err.to_string()))?;
+) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {
     let expected_kind = NamespaceManifestKind::NamespaceManifest;
-    if probe.kind != expected_kind.as_str() {
-        return Err(NamespaceManifestCodecError::UnexpectedKind {
-            expected: expected_kind.as_str().to_owned(),
-            found: probe.kind,
-        });
-    }
-    if probe.format_version != NAMESPACE_MANIFEST_FORMAT_VERSION {
-        return Err(NamespaceManifestCodecError::UnsupportedFormatVersion {
-            found: probe.format_version,
-            supported: NAMESPACE_MANIFEST_FORMAT_VERSION,
-        });
-    }
-
-    let document: NamespaceManifestDocument = serde_json::from_slice(bytes)
-        .map_err(|err| NamespaceManifestCodecError::EnvelopeDecode(err.to_string()))?;
-    let actual = sha256_digest(document.payload.get().as_bytes());
-    if actual != document.payload_checksum {
-        return Err(NamespaceManifestCodecError::ChecksumMismatch {
-            expected: document.payload_checksum,
-            actual,
-        });
-    }
-    let payload: NamespaceManifestPayload = serde_json::from_str(document.payload.get())
-        .map_err(|err| NamespaceManifestCodecError::PayloadDecode(err.to_string()))?;
+    let decoded =
+        crate::envelope::decode_json_envelope(bytes, NAMESPACE_MANIFEST_FORMAT_VERSION, |found| {
+            crate::envelope::verify_kind(expected_kind.as_str(), found)
+        })?;
 
     Ok(NamespaceManifestEnvelope {
         kind: expected_kind,
-        format_version: document.format_version,
-        writer_version: document.writer_version,
-        payload_checksum: document.payload_checksum,
-        payload,
+        format_version: decoded.format_version,
+        writer_version: decoded.writer_version,
+        payload_checksum: decoded.payload_checksum,
+        payload: decoded.payload,
     })
 }
 

@@ -20,22 +20,23 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlCodecError,
-    ControlObjectEnvelope, ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState,
-    NamespaceState, UploadSessionState, WalFloorState, WalSegmentPointer, WriterBlock,
+    CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlObjectEnvelope,
+    ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState, NamespaceState,
+    UploadSessionState, WalFloorState, WalSegmentPointer, WriterBlock,
 };
+use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::index_grams::{
     decode_gram_postings, encode_gram_postings, Gram, GramIndexFoldState, GramPosting,
     IndexGramsFeature, IndexRow, INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
 };
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, IndexFileRef, MetadataFileRef,
-    MetadataRow, MetadataTableFamily, NamespaceManifestCodecError, NamespaceManifestEnvelope,
-    NamespaceManifestFork, NamespaceManifestPayload, TombstoneRowAction,
+    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
+    NamespaceManifestPayload, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
-    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCodecError,
-    WalCommitDelta, WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
+    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
+    WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
@@ -619,9 +620,10 @@ fn wal_decode_rejects_future_format_version_cleanly() {
     assert!(
         matches!(
             err,
-            WalCodecError::UnsupportedFormatVersion {
+            EnvelopeCodecError::UnsupportedFormatVersion {
                 found: 2,
                 supported: 1,
+                ..
             }
         ),
         "unexpected error: {err}"
@@ -638,7 +640,7 @@ fn wal_decode_rejects_unknown_kind_cleanly() {
     let err = decode_wal_segment_envelope_zstd(&rezstd(&rekinded))
         .expect_err("unknown kind must be rejected");
     assert!(
-        matches!(err, WalCodecError::UnexpectedKind { .. }),
+        matches!(err, EnvelopeCodecError::KindMismatch { .. }),
         "unexpected error: {err}"
     );
 }
@@ -658,7 +660,7 @@ fn wal_decode_rejects_tampered_payload_bytes_as_checksum_mismatch() {
     let err = decode_wal_segment_envelope_zstd(&rezstd(&tampered))
         .expect_err("tampered payload must be rejected");
     assert!(
-        matches!(err, WalCodecError::ChecksumMismatch { .. }),
+        matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
     );
 }
@@ -719,7 +721,7 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
     let err = decode_control_object::<HeadState>(&tampered, ControlObjectKind::WalHead)
         .expect_err("tampered payload must be rejected");
     assert!(
-        matches!(err, ControlCodecError::ChecksumMismatch { .. }),
+        matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
     );
 }
@@ -736,9 +738,10 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
     assert!(
         matches!(
             err,
-            NamespaceManifestCodecError::UnsupportedFormatVersion {
+            EnvelopeCodecError::UnsupportedFormatVersion {
                 found: 2,
                 supported: 1,
+                ..
             }
         ),
         "unexpected error: {err}"
@@ -756,7 +759,7 @@ fn namespace_manifest_decode_rejects_tampered_payload_as_checksum_mismatch() {
     let err =
         decode_namespace_manifest_json(&tampered).expect_err("tampered payload must be rejected");
     assert!(
-        matches!(err, NamespaceManifestCodecError::ChecksumMismatch { .. }),
+        matches!(err, EnvelopeCodecError::ChecksumMismatch { .. }),
         "unexpected error: {err}"
     );
 }
