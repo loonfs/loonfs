@@ -440,8 +440,11 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
     assert_eq!(receipt.semantic_commit_fingerprint, "new");
 }
 
+/// Revision rows keep no in-memory index — reads scan the tail-sized rows —
+/// but they must still advance the indexed-seq watermark that gates at-head
+/// query routing, and the receipt index must survive a serde round trip.
 #[test]
-fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
+fn revisions_advance_watermark_and_receipt_index_round_trips() {
     let commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
     let content_ref = ContentRef {
         kind: loonfs_api::ContentRefKind::WholeFileV0,
@@ -489,19 +492,14 @@ fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
 
     assert_eq!(metadata_state.row_count(), 4);
     assert!(metadata_state.decoded_bytes() >= metadata_state.row_count());
+    assert_eq!(metadata_state.indexed_seq(), ChangeSeq(3));
     assert_eq!(
         metadata_state
-            .latest_revision_at_head(InodeId(7))
-            .expect("latest revision")
-            .revision_no,
-        RevisionNo(2)
-    );
-    assert_eq!(
-        metadata_state
-            .revision_at_head(InodeId(7), RevisionNo(1))
-            .expect("first revision")
+            .revisions()
+            .last()
+            .expect("revision rows")
             .content_ref,
-        content_ref
+        replacement_ref
     );
     assert_eq!(
         metadata_state
@@ -514,13 +512,7 @@ fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
     let decoded: MetadataState =
         serde_json::from_value(serde_json::to_value(&metadata_state).expect("encode"))
             .expect("decode");
-    assert_eq!(
-        decoded
-            .latest_revision_at_head(InodeId(7))
-            .expect("latest revision after decode")
-            .content_ref,
-        replacement_ref
-    );
+    assert_eq!(decoded.indexed_seq(), ChangeSeq(3));
     assert_eq!(
         decoded
             .find_commit_receipt(&commit_id)

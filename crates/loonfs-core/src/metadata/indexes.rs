@@ -6,9 +6,8 @@ use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
-use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
+use loonfs_api::{ChangeSeq, CommitId, InodeId};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ops::Bound;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataIndexes {
@@ -22,8 +21,6 @@ pub(super) struct MetadataIndexes {
     active_parent_by_child: HashMap<InodeId, DirentryBindRecord>,
     unbound_binding_keys: HashSet<BindingKey>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
-    latest_revision_by_inode: HashMap<InodeId, RevisionRecord>,
-    revision_by_inode_no: HashMap<(InodeId, RevisionNo), RevisionRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
 }
 
@@ -37,8 +34,6 @@ impl Default for MetadataIndexes {
             active_parent_by_child: HashMap::new(),
             unbound_binding_keys: HashSet::new(),
             tombstone_by_root: HashMap::new(),
-            latest_revision_by_inode: HashMap::new(),
-            revision_by_inode_no: HashMap::new(),
             commit_receipt_by_id: HashMap::new(),
         }
     }
@@ -137,27 +132,6 @@ impl MetadataIndexes {
             .cloned()
     }
 
-    pub(super) fn active_children(&self, parent_inode_id: InodeId) -> Vec<DirentryBindRecord> {
-        self.active_children_after_name_key(parent_inode_id, None)
-            .cloned()
-            .collect()
-    }
-
-    pub(super) fn active_children_after_name_key<'a>(
-        &'a self,
-        parent_inode_id: InodeId,
-        start_after_name_key: Option<&str>,
-    ) -> impl Iterator<Item = &'a DirentryBindRecord> + 'a {
-        let lower_bound = match start_after_name_key {
-            Some(name_key) => Bound::Excluded((parent_inode_id, name_key.to_owned())),
-            None => Bound::Excluded((parent_inode_id, String::new())),
-        };
-        self.active_child_by_parent_name
-            .range((lower_bound, Bound::Unbounded))
-            .take_while(move |((candidate_parent, _), _)| *candidate_parent == parent_inode_id)
-            .map(|(_, record)| record)
-    }
-
     pub(super) fn active_parent_for_child(
         &self,
         child_inode_id: InodeId,
@@ -174,20 +148,6 @@ impl MetadataIndexes {
         self.tombstone_by_root
             .get(&root_inode_id)
             .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set))
-            .cloned()
-    }
-
-    pub(super) fn latest_revision(&self, inode_id: InodeId) -> Option<RevisionRecord> {
-        self.latest_revision_by_inode.get(&inode_id).cloned()
-    }
-
-    pub(super) fn revision(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Option<RevisionRecord> {
-        self.revision_by_inode_no
-            .get(&(inode_id, revision_no))
             .cloned()
     }
 
@@ -261,18 +221,11 @@ impl MetadataIndexes {
         }
     }
 
+    /// Revisions contribute only the seq watermark: no read consults an
+    /// in-memory revision index — revision lookups scan the rows, which stay
+    /// tail-sized in memory (the manifest tables answer the bulk).
     pub(super) fn record_revision(&mut self, record: &RevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
-        replace_if_newer_revision(
-            &mut self.latest_revision_by_inode,
-            record.inode_id,
-            record.clone(),
-        );
-        replace_if_newer_revision(
-            &mut self.revision_by_inode_no,
-            (record.inode_id, record.revision_no),
-            record.clone(),
-        );
     }
 
     pub(super) fn record_tombstone(&mut self, record: &SubtreeTombstoneRecord) {
@@ -345,22 +298,6 @@ fn replace_if_newer_bind<K>(
     }
 }
 
-fn replace_if_newer_revision<K>(
-    map: &mut HashMap<K, RevisionRecord>,
-    key: K,
-    record: RevisionRecord,
-) where
-    K: Eq + std::hash::Hash,
-{
-    let should_replace = map
-        .get(&key)
-        .map(|existing| revision_order_key(&record) > revision_order_key(existing))
-        .unwrap_or(true);
-    if should_replace {
-        map.insert(key, record);
-    }
-}
-
 fn replace_if_newer_receipt(
     map: &mut HashMap<CommitId, CommitReceiptRecord>,
     key: CommitId,
@@ -418,14 +355,6 @@ fn remove_active_child_if_same(
 
 fn bind_order_key(record: &DirentryBindRecord) -> (ChangeSeq, u32) {
     (record.bind_seq, record.bind_delta_index)
-}
-
-fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, ChangeSeq, u32) {
-    (
-        record.revision_no,
-        record.committed_seq,
-        record.revision_delta_index,
-    )
 }
 
 fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
