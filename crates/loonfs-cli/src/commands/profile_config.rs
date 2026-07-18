@@ -321,7 +321,7 @@ pub(super) fn build_profile_from_create_spec(
         }
         None if runtime.interactive => prompt::prompt_choice("mode", &["embedded", "remote"])?,
         None => {
-            return Err(CliError::non_interactive_input_required("mode"));
+            return Err(CliError::non_interactive_field_required("mode"));
         }
     };
 
@@ -364,7 +364,7 @@ fn build_embedded_profile(
                 )
             });
         }
-        None => return Err(CliError::non_interactive_input_required("store-kind")),
+        None => return Err(CliError::non_interactive_field_required("store-kind")),
     };
 
     reject_inapplicable_create_flags(&spec, &[store_kind.into()], store_kind.as_str())?;

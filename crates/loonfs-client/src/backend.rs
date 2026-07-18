@@ -38,10 +38,10 @@ use thiserror::Error;
 ///   code as a string literal; use `ErrorCode::X.as_str()` or an error's
 ///   `code()`.
 /// - **Backend-local codes** cover failures that never produce a registry
-///   code. The complete list, each owned by a constructor below, is:
-///   `invalid_config` (deliberately the same string as the registry code of
-///   the same meaning), `invalid_input`, `client_error`, `io_error`, and
-///   `runtime_error`.
+///   code — a server cannot see a caller's local profile or store
+///   configuration, so these deliberately live outside the registry. The
+///   complete list, each owned by a constructor below, is: `invalid_config`,
+///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
 pub struct BackendError {
