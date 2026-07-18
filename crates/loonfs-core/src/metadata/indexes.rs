@@ -169,6 +169,17 @@ impl MetadataIndexes {
     pub(super) fn record_bind(&mut self, record: &DirentryBindRecord) {
         self.indexed_seq = self.indexed_seq.max(record.bind_seq);
         let parent_name_key = (record.parent_inode_id, record.name_key.as_str().to_owned());
+        // The unconditional active-map install below is only correct because
+        // binds for one (parent, name) arrive in append order — WAL apply
+        // walks deltas in seq order and manifest projection pushes rows in
+        // row-key order, which is per-name seq order. Global seq order
+        // across names is NOT required or assumed.
+        debug_assert!(
+            self.latest_bind_by_parent_name
+                .get(&parent_name_key)
+                .is_none_or(|existing| bind_order_key(record) >= bind_order_key(existing)),
+            "binds for one (parent, name) must be recorded in append order"
+        );
         replace_if_newer_bind(
             &mut self.latest_bind_by_parent_name,
             parent_name_key.clone(),
