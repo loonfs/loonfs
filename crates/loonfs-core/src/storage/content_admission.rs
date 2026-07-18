@@ -6,12 +6,11 @@ use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
 use loonfs_api::{ContentRef, NamespaceId};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct0";
 const DEFAULT_TOKEN_TTL_MS: u64 = 60 * 60 * 1000;
-const SHA256_BLOCK_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentAdmission {
@@ -149,27 +148,10 @@ fn base64_url(bytes: &[u8]) -> String {
 }
 
 fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let mut normalized_key = if key.len() > SHA256_BLOCK_BYTES {
-        Sha256::digest(key).to_vec()
-    } else {
-        key.to_vec()
-    };
-    normalized_key.resize(SHA256_BLOCK_BYTES, 0);
-    let mut outer = [0x5c; SHA256_BLOCK_BYTES];
-    let mut inner = [0x36; SHA256_BLOCK_BYTES];
-    for (idx, byte) in normalized_key.iter().enumerate() {
-        outer[idx] ^= *byte;
-        inner[idx] ^= *byte;
-    }
-    let inner_hash = Sha256::new()
-        .chain_update(inner)
-        .chain_update(value)
-        .finalize();
-    Sha256::new()
-        .chain_update(outer)
-        .chain_update(inner_hash)
-        .finalize()
-        .to_vec()
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC accepts keys of any length");
+    mac.update(value);
+    mac.finalize().into_bytes().to_vec()
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -185,6 +167,23 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// RFC 4231 test vectors pin the HMAC-SHA256 construction across
+    /// implementation changes.
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_vectors() {
+        let case_one = hmac_sha256(&[0x0b; 20], b"Hi There");
+        assert_eq!(
+            loonfs_api::wire::manifest::hex_encode_bytes(&case_one),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        let case_two = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            loonfs_api::wire::manifest::hex_encode_bytes(&case_two),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
     use super::{mint_content_token, verify_content_token};
     use loonfs_api::v0::ValidatedContentToken;
     use loonfs_api::{ContentRef, NamespaceId};

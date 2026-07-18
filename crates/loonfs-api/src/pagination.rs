@@ -430,34 +430,11 @@ pub enum PageCursorError {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
+    crate::manifest::hex_encode_bytes(bytes)
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, PageCursorError> {
-    if value.len() % 2 != 0 {
-        return Err(PageCursorError::InvalidEncoding);
-    }
-    let mut decoded = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
-        let high = hex_value(pair[0])?;
-        let low = hex_value(pair[1])?;
-        decoded.push((high << 4) | low);
-    }
-    Ok(decoded)
-}
-
-fn hex_value(byte: u8) -> Result<u8, PageCursorError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(PageCursorError::InvalidEncoding),
-    }
+    crate::manifest::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)
 }
 
 fn hard_coded_nonzero(value: u32) -> NonZeroU32 {
