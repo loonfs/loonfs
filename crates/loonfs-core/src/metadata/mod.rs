@@ -25,7 +25,7 @@ mod apply;
 mod indexes;
 pub(crate) mod manifest_index;
 mod queries;
-mod row_decode;
+pub(crate) mod row_decode;
 mod rows;
 #[cfg(test)]
 mod tests;

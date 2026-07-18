@@ -27,11 +27,12 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
 ) -> Result<Option<InodeRecord>> {
     let key = lookup_keys::inode_key(inode_id);
-    Ok(tables
+    tables
         .get_for_lookup(MetadataTableFamily::Inodes, &key, &key)
         .await
         .map_err(manifest_error_to_core)?
-        .and_then(inode_from_manifest_row))
+        .map(inode_from_manifest_row)
+        .transpose()
 }
 
 pub(super) async fn direntry_binds_for_parent<S: ObjectStore + ?Sized>(
@@ -39,13 +40,13 @@ pub(super) async fn direntry_binds_for_parent<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
 ) -> Result<Vec<DirentryBindRecord>> {
     let prefix = lookup_keys::direntry_parent_prefix(parent_inode_id);
-    Ok(tables
+    tables
         .scan_prefix(MetadataTableFamily::DirentryBinds, &prefix)
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(direntry_bind_from_manifest_row)
-        .collect())
+        .map(direntry_bind_from_manifest_row)
+        .collect()
 }
 
 pub(super) struct ManifestDirentryBindCandidate {
@@ -70,7 +71,7 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
         parent_prefix.clone()
     };
     let upper_bound = string_prefix_upper_bound(&parent_prefix);
-    Ok(tables
+    tables
         .scan_range_page_with_keys(
             MetadataTableFamily::DirentryBinds,
             &lower_bound,
@@ -80,11 +81,13 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(|(row_key, row)| {
-            direntry_bind_from_manifest_row(row)
-                .map(|record| ManifestDirentryBindCandidate { row_key, record })
+        .map(|(row_key, row)| {
+            Ok(ManifestDirentryBindCandidate {
+                record: direntry_bind_from_manifest_row(row)?,
+                row_key,
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
@@ -94,7 +97,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<DirentryBindRecord>> {
     let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key);
     let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
-    Ok(tables
+    tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::DirentryBinds,
             &prefix,
@@ -104,8 +107,8 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(direntry_bind_from_manifest_row)
-        .collect())
+        .map(direntry_bind_from_manifest_row)
+        .collect()
 }
 
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
@@ -114,7 +117,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<DirentryBindRecord>> {
     let filter_probe = lookup_keys::direntry_child_probe(child_inode_id);
     let prefix = lookup_keys::direntry_child_prefix(child_inode_id);
-    Ok(tables
+    tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::DirentryChildBinds,
             &prefix,
@@ -124,8 +127,8 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(direntry_bind_from_manifest_row)
-        .collect())
+        .map(direntry_bind_from_manifest_row)
+        .collect()
 }
 
 pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
@@ -140,7 +143,7 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
         direntry.bind_seq,
         direntry.bind_delta_index,
     );
-    Ok(tables
+    let unbinds: Vec<DirentryUnbindRecord> = tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::DirentryUnbinds,
             &prefix,
@@ -150,7 +153,10 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(direntry_unbind_from_manifest_row)
+        .map(direntry_unbind_from_manifest_row)
+        .collect::<Result<_>>()?;
+    Ok(unbinds
+        .into_iter()
         .filter(|unbind| unbind_matches_binding(unbind, direntry))
         .collect())
 }
@@ -185,10 +191,9 @@ pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Siz
         let last_row_key = page
             .last()
             .map(|row| row.row_key_for_family(MetadataTableFamily::DirentryUnbinds));
-        unbinds.extend(
-            page.into_iter()
-                .filter_map(direntry_unbind_from_manifest_row),
-        );
+        for row in page {
+            unbinds.push(direntry_unbind_from_manifest_row(row)?);
+        }
         if page_len < UNBIND_RANGE_SCAN_LIMIT {
             break;
         }
@@ -238,7 +243,7 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
 ) -> Result<Option<RevisionRecord>> {
     let exact_prefix = revision_by_inode_desc_exact_revision_prefix(inode_id, revision_no);
     let filter_probe = revision_by_inode_desc_filter_probe(inode_id);
-    Ok(tables
+    tables
         .scan_range_page_for_lookup(
             MetadataTableFamily::RevisionsByInodeDesc,
             &exact_prefix,
@@ -249,8 +254,9 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(revision_from_manifest_row)
-        .next())
+        .next()
+        .map(revision_from_manifest_row)
+        .transpose()
 }
 
 pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
@@ -267,7 +273,7 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
     let lower_bound = start_after
         .map(|position| resume_after_row_key(&revision_by_inode_desc_row_key(inode_id, position)))
         .unwrap_or_else(|| inode_prefix.clone());
-    Ok(tables
+    tables
         .scan_range_page_for_lookup(
             MetadataTableFamily::RevisionsByInodeDesc,
             &lower_bound,
@@ -278,8 +284,8 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(revision_from_manifest_row)
-        .collect())
+        .map(revision_from_manifest_row)
+        .collect()
 }
 
 pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
@@ -288,7 +294,7 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<SubtreeTombstoneRecord>> {
     let filter_probe = lookup_keys::tombstone_probe(root_inode_id);
     let prefix = lookup_keys::tombstone_prefix(root_inode_id);
-    Ok(tables
+    tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::Tombstones,
             &prefix,
@@ -298,8 +304,8 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(tombstone_from_manifest_row)
-        .collect())
+        .map(tombstone_from_manifest_row)
+        .collect()
 }
 
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
@@ -308,7 +314,7 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
 ) -> Result<Option<CommitReceiptRecord>> {
     let filter_probe = lookup_keys::commit_receipt_probe(commit_id.as_str());
     let prefix = lookup_keys::commit_receipt_prefix(commit_id.as_str());
-    Ok(tables
+    let receipts: Vec<CommitReceiptRecord> = tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::CommitReceipts,
             &prefix,
@@ -318,7 +324,10 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .filter_map(commit_receipt_from_manifest_row)
+        .map(commit_receipt_from_manifest_row)
+        .collect::<Result<_>>()?;
+    Ok(receipts
+        .into_iter()
         .max_by_key(|receipt| receipt.committed_seq))
 }
 
