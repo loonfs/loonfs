@@ -6,7 +6,7 @@
 //! name, so renaming a handler changes the published id — regenerate
 //! `docs/specs/openapi.json` deliberately when that happens.
 
-use loonfs::ChangeSeq;
+use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,

@@ -179,6 +179,12 @@ and names the capability-document key the client should reconcile against.
 Clients must branch on `code`, must tolerate codes they do not recognize, and
 must not parse `message`.
 
+This contract covers request-shape failures too: a query string, path
+parameter, or JSON body the server cannot parse answers `invalid_request`
+inside this envelope, never a framework plain-text rejection — and
+authorization is checked first, so a malformed request without valid
+credentials answers `unauthorized`.
+
 `request_id` is the correlation id the server assigned to the request; every
 response — success or error — also carries it as the `x-request-id` header,
 so a caller's log line and the server's trace can be joined.

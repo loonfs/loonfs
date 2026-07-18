@@ -4,8 +4,8 @@
 
 use super::error::ApiResponseError;
 use super::handlers_uploads::{content_admissions_for_put, current_unix_ms};
-use super::{authorize, AppJson, AppState, CommitAppJson, NamespaceIdPath};
-use axum::extract::{Path as AxumPath, Query, State};
+use super::{authorize, AppJson, AppPath, AppQuery, AppState, CommitAppJson, NamespaceIdPath};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -96,10 +96,11 @@ pub(super) async fn list_entries(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    Query(query): Query<PathPageQuery>,
+    query: AppQuery<PathPageQuery>,
 ) -> Result<Json<loonfs_api::ListPathEntriesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
     let path = query.path;
     let listing = state
         .reader
@@ -141,10 +142,11 @@ pub(super) async fn stat_entry(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    query: AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_api::AuthoritativePathEntry>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
     let path = query.path;
     let entry = state
         .reader
@@ -182,10 +184,11 @@ pub(super) async fn get_content(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    Query(query): Query<ContentQuery>,
+    query: AppQuery<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
     // Held for the read below: content reads buffer the whole file, so the
     // permit is what bounds how many such buffers exist at once.
     let _permit = state
@@ -239,10 +242,11 @@ pub(super) async fn list_path_revisions(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    Query(query): Query<PathPageQuery>,
+    query: AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
     let path = query.path;
     let response = state
         .reader
@@ -285,12 +289,14 @@ pub(super) async fn list_path_revisions(
 pub(super) async fn list_inode_revisions(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AxumPath(InodePathParams { inode_id }): AxumPath<InodePathParams>,
+    path: AppPath<InodePathParams>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    query: AppQuery<PageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let InodePathParams { inode_id } = path.into_params()?;
+    let query = query.into_params()?;
     let inode_id = parse_inode_id(&inode_id)?;
     let response = state
         .reader
@@ -334,14 +340,15 @@ pub(super) async fn list_inode_revisions(
 pub(super) async fn get_inode_revision_content(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AxumPath(InodeRevisionPathParams {
-        inode_id,
-        revision_no,
-    }): AxumPath<InodeRevisionPathParams>,
+    path: AppPath<InodeRevisionPathParams>,
     headers: HeaderMap,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let InodeRevisionPathParams {
+        inode_id,
+        revision_no,
+    } = path.into_params()?;
     let _permit = state
         .download_permits
         .clone()
@@ -384,15 +391,16 @@ pub(super) async fn get_inode_revision_content(
 pub(super) async fn restore_inode_revision(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AxumPath(InodeRestorePathParams {
-        inode_id,
-        source_revision_no,
-    }): AxumPath<InodeRestorePathParams>,
+    path: AppPath<InodeRestorePathParams>,
     headers: HeaderMap,
     AppJson(request): AppJson<RestoreFileRevisionRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let InodeRestorePathParams {
+        inode_id,
+        source_revision_no,
+    } = path.into_params()?;
     let inode_id = parse_inode_id(&inode_id)?;
     let source_revision_no = parse_revision_no(&source_revision_no)?;
     let commit = ApiCommitRequest {
@@ -650,10 +658,11 @@ pub(super) async fn list_changes(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-    Query(query): Query<ChangesQuery>,
+    query: AppQuery<ChangesQuery>,
 ) -> Result<Json<ChangesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
     let after_seq = loonfs_api::ChangeSeq(query.after_seq);
     let limit = resolve_page_limit(query.limit)?;
     let response = state

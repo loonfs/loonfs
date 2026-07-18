@@ -2,17 +2,19 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{authorize, AppJson, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyBytes};
+use super::{
+    authorize, AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyBytes,
+};
 use crate::config::ServerConfig;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs::content_tokens::{
     mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
 };
-use loonfs::ErrorCode;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
+use loonfs_api::ErrorCode;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
@@ -215,12 +217,13 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
 pub(super) async fn upload_content(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AxumPath(UploadPathParams { upload_id }): AxumPath<UploadPathParams>,
+    path: AppPath<UploadPathParams>,
     headers: HeaderMap,
     body: UploadBodyBytes,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let response = state
         .writer
@@ -256,12 +259,13 @@ pub(super) async fn upload_content(
 pub(super) async fn complete_upload(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AxumPath(UploadPathParams { upload_id }): AxumPath<UploadPathParams>,
+    path: AppPath<UploadPathParams>,
     headers: HeaderMap,
     AppJson(request): AppJson<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
     let mut response = state
         .writer

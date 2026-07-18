@@ -5,11 +5,11 @@ use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-#[cfg(feature = "openapi")]
-use loonfs_api::v0::ApiError;
 use loonfs_api::v0::{
     DisableGramsIndexResponse, EnableGramsIndexResponse, GrepRequest, GrepResponse,
 };
+#[cfg(feature = "openapi")]
+use loonfs_api::ApiError;
 
 #[cfg_attr(
     feature = "openapi",

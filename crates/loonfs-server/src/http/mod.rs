@@ -44,7 +44,7 @@ use axum::async_trait;
 use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{
-    DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Request, State,
+    DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Query, Request, State,
 };
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -59,6 +59,7 @@ use loonfs::{
 };
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::presign::ObjectTransferIssuer;
+use std::convert::Infallible;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -622,18 +623,89 @@ impl<S> FromRequestParts<S> for NamespaceIdPath
 where
     S: Send + Sync,
 {
-    type Rejection = PathRejection;
+    type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let AxumPath(NamespaceSegment { namespace }) =
-            AxumPath::<NamespaceSegment>::from_request_parts(parts, state).await?;
-        Ok(Self(parse_namespace_id(namespace)))
+        match AxumPath::<NamespaceSegment>::from_request_parts(parts, state).await {
+            Ok(AxumPath(NamespaceSegment { namespace })) => Ok(Self(parse_namespace_id(namespace))),
+            Err(rejection) => Ok(Self(Err(invalid_path_params(&rejection)))),
+        }
+    }
+}
+
+fn invalid_path_params(rejection: &PathRejection) -> ApiResponseError {
+    ApiResponseError::new(
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidRequest,
+        &format!("invalid path parameters: {rejection}"),
+    )
+}
+
+/// Path extractor that never rejects at extraction: the parse outcome is
+/// surfaced through [`AppPath::into_params`] inside the handler, after
+/// `authorize`, so malformed path parameters answer inside the JSON error
+/// envelope and never turn an unauthorized request's 401 into a 400.
+struct AppPath<T>(Result<T, ApiResponseError>);
+
+impl<T> AppPath<T> {
+    fn into_params(self) -> Result<T, ApiResponseError> {
+        self.0
+    }
+}
+
+#[async_trait]
+impl<S, T> FromRequestParts<S> for AppPath<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned + Send,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match AxumPath::<T>::from_request_parts(parts, state).await {
+            Ok(AxumPath(value)) => Ok(Self(Ok(value))),
+            Err(rejection) => Ok(Self(Err(invalid_path_params(&rejection)))),
+        }
+    }
+}
+
+/// [`AppPath`]'s query-string twin: missing required parameters, values that
+/// fail their field types (`after_seq=abc`), and undecodable query strings
+/// all surface through [`AppQuery::into_params`] after `authorize`, inside
+/// the envelope.
+struct AppQuery<T>(Result<T, ApiResponseError>);
+
+impl<T> AppQuery<T> {
+    fn into_params(self) -> Result<T, ApiResponseError> {
+        self.0
+    }
+}
+
+#[async_trait]
+impl<S, T> FromRequestParts<S> for AppQuery<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(Self(Ok(value))),
+            Err(rejection) => Ok(Self(Err(ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &format!("invalid query parameters: {rejection}"),
+            )))),
+        }
     }
 }
 
 /// A `Json` extractor whose rejections stay inside the error contract:
 /// malformed bodies answer 400 with an `invalid_request` `ApiError` body
-/// instead of the raw framework rejection.
+/// instead of the raw framework rejection, and authorization runs before
+/// the body is read so a malformed body never turns an unauthorized
+/// request's 401 into a 400.
 struct AppJson<T>(T);
 
 async fn extract_json<S, T>(
@@ -659,14 +731,17 @@ where
 }
 
 #[async_trait]
-impl<S, T> FromRequest<S> for AppJson<T>
+impl<T> FromRequest<AppState> for AppJson<T>
 where
     T: serde::de::DeserializeOwned,
-    S: Send + Sync,
 {
     type Rejection = ApiResponseError;
 
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        authorize(&state.config, req.headers())?;
         extract_json(req, state, json_body_too_large_error)
             .await
             .map(AppJson)
@@ -783,17 +858,17 @@ struct OptionalAppJson<T>(Option<T>);
 const MAX_OPTIONAL_JSON_BODY_BYTES: usize = 1024 * 1024;
 
 #[async_trait]
-impl<S, T> FromRequest<S> for OptionalAppJson<T>
+impl<T> FromRequest<AppState> for OptionalAppJson<T>
 where
     T: serde::de::DeserializeOwned,
-    S: Send + Sync,
 {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        _state: &S,
+        state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        authorize(&state.config, req.headers())?;
         let body = axum::body::to_bytes(req.into_body(), MAX_OPTIONAL_JSON_BODY_BYTES)
             .await
             .map_err(|error| {
