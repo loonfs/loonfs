@@ -5,7 +5,7 @@ use super::intent::PathMutationIntent;
 use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
 use crate::commit::CommitPlan;
 use crate::error::CoreError;
-use crate::metadata::{DurableVisibilityCache, MetadataApplyError, MetadataState, MetadataView};
+use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 #[cfg(test)]
@@ -63,15 +63,10 @@ impl PublishPlanningSession {
 
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
-    pub(crate) fn apply_accepted_commit(
-        &mut self,
-        preview: &WalCommitPayload,
-        plan: &CommitPlan,
-    ) -> Result<(), MetadataApplyError> {
-        self.accepted_rows.apply_committed_wal_record_mut(preview)?;
+    pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
+        self.accepted_rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
-        Ok(())
     }
 }
 

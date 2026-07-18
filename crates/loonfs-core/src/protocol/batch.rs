@@ -216,15 +216,12 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                     }
                 }
             };
-            let applied = {
+            {
                 let _span = tracing::info_span!("loon.phase", phase = "apply_committed_wal_record")
                     .entered();
-                session.apply_accepted_commit(&preview, &plan)
-            };
-            match applied {
-                Ok(()) => accepted.push((index, materialized)),
-                Err(error) => outcomes[index] = Some(Err(error.into())),
+                session.apply_accepted_commit(&preview, &plan);
             }
+            accepted.push((index, materialized));
         }
     }
     .instrument(prepare_span.clone())

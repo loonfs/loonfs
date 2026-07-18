@@ -137,13 +137,10 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
 
     let core_state = core_state
         .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &create_directory)
-        .expect("core applies create-dir delta")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(2), 4_200, &create_file)
-        .expect("core applies create-file deltas")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(3), 4_200, &replace_file)
-        .expect("core applies replace-file delta")
         .metadata_state;
 
     let model_state = model_state
@@ -238,7 +235,6 @@ fn core_bootstrap_state() -> CoreMetadataState {
                 inode_kind: InodeKind::Directory,
             }],
         )
-        .expect("bootstrap core root")
         .metadata_state
 }
 
@@ -254,7 +250,6 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
         core_state = core_state
             .apply_committed_wal_deltas(seq, 4_200, deltas)
-            .expect("core apply")
             .metadata_state;
         model_state = model_state
             .apply_committed_wal_deltas(seq, deltas)

@@ -7,7 +7,7 @@
 
 use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
-use crate::metadata::{MetadataApplyError, VisiblePathError};
+use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::writer_epoch::WriterEpochAcquireError;
@@ -53,8 +53,6 @@ pub enum CoreError {
     CommitValidation(#[from] CommitValidationError),
     #[error("wal build failed: {0}")]
     WalBuild(#[from] WalBuildError),
-    #[error("metadata apply failed: {0}")]
-    MetadataApply(#[from] MetadataApplyError),
     #[error("head publish failed: {0}")]
     HeadPublish(#[from] CommitHeadPublishError),
     #[error("failed to write wal object `{object_key}`: {message}")]
@@ -303,7 +301,6 @@ impl CoreError {
             CoreError::WriterEpoch(error) => classify_writer_epoch_acquire_error(error),
             CoreError::CommitValidation(error) => classify_commit_validation_error(error),
             CoreError::WalBuild(_)
-            | CoreError::MetadataApply(_)
             | CoreError::WalWrite { .. }
             | CoreError::Store { .. }
             | CoreError::Internal(_) => ErrorCode::ServerError,

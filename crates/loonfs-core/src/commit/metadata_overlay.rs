@@ -71,9 +71,11 @@ mod tests {
     fn assert_overlay_matches_replay(committed_seq: ChangeSeq, ops: &[ValidatedOp]) {
         let overlay = overlay_rows(committed_seq, ops);
         let mut replayed = MetadataState::default();
-        replayed
-            .apply_committed_wal_deltas_mut(committed_seq, 4_200, &materialized_wal_deltas(ops))
-            .expect("replaying materialized deltas is infallible");
+        replayed.apply_committed_wal_deltas_mut(
+            committed_seq,
+            4_200,
+            &materialized_wal_deltas(ops),
+        );
 
         assert!(
             replayed.row_count() > 0,
@@ -421,16 +423,16 @@ mod tests {
         let second_overlay = overlay_rows(second_seq, &second_ops);
 
         let mut replayed = MetadataState::default();
-        replayed
-            .apply_committed_wal_deltas_mut(first_seq, 4_200, &materialized_wal_deltas(&first_ops))
-            .expect("replaying first commit deltas is infallible");
-        replayed
-            .apply_committed_wal_deltas_mut(
-                second_seq,
-                4_200,
-                &materialized_wal_deltas(&second_ops),
-            )
-            .expect("replaying second commit deltas is infallible");
+        replayed.apply_committed_wal_deltas_mut(
+            first_seq,
+            4_200,
+            &materialized_wal_deltas(&first_ops),
+        );
+        replayed.apply_committed_wal_deltas_mut(
+            second_seq,
+            4_200,
+            &materialized_wal_deltas(&second_ops),
+        );
 
         assert_eq!(
             concat(first_overlay.inodes(), second_overlay.inodes()),

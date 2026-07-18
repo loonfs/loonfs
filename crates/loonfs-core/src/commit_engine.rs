@@ -381,14 +381,7 @@ impl NamespaceCommitEngine {
             return wal_tail_segments;
         };
         for record in &published.published_records {
-            if projection
-                .tail_state
-                .apply_committed_wal_record_mut(record)
-                .is_err()
-            {
-                self.invalidate();
-                return wal_tail_segments;
-            }
+            projection.tail_state.apply_committed_wal_record_mut(record);
         }
         projection.head_seq = resulting_head.seq;
         projection.head_etag = resulting_head_etag;
