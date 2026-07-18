@@ -1525,54 +1525,49 @@ impl FsCore {
         if !run_full_tick && !index_may_lag {
             return;
         }
-        if !self.inner.background.try_claim(namespace_id) {
+        if !self.inner.background.try_claim(namespace_id, run_full_tick) {
             return;
         }
-        let claim = BackgroundTickClaim {
+        let mut claim = BackgroundTickClaim {
             fs: self.clone(),
             namespace_id: namespace_id.clone(),
+            releases_on_drop: true,
         };
         self.inner.background.spawn(async move {
-            let tick = if run_full_tick {
-                claim
+            let mut run_full_tick = run_full_tick;
+            loop {
+                if let Err(error) = claim
                     .fs
-                    .maintenance_tick_namespace(&claim.namespace_id, options)
+                    .run_auto_maintenance(&claim.namespace_id, options, run_full_tick)
                     .await
-                    .map(|_| ())
-            } else {
-                Ok(())
-            };
-            let drained = match tick {
-                Ok(()) => {
-                    let folds = if run_full_tick {
-                        claim
-                            .fs
-                            .drain_reorganization_backlog(&claim.namespace_id)
-                            .await
-                    } else {
-                        Ok(())
-                    };
-                    match folds {
-                        Ok(()) => {
-                            claim
-                                .fs
-                                .drain_grams_index_backlog(&claim.namespace_id)
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    }
+                {
+                    tracing::info!(
+                        phase = "auto_maintenance_tick",
+                        result = "error",
+                        error = %error,
+                        "post-publish maintenance tick failed"
+                    );
                 }
-                Err(error) => Err(error),
-            };
-            if let Err(error) = drained {
-                tracing::info!(
-                    phase = "auto_maintenance_tick",
-                    result = "error",
-                    error = %error,
-                    "post-publish maintenance tick failed"
-                );
+                if !claim.finish_tick() {
+                    break;
+                }
+                run_full_tick = true;
             }
         });
+    }
+
+    async fn run_auto_maintenance(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+        run_full_tick: bool,
+    ) -> Result<()> {
+        if run_full_tick {
+            self.maintenance_tick_namespace(namespace_id, options)
+                .await?;
+            self.drain_reorganization_backlog(namespace_id).await?;
+        }
+        self.drain_grams_index_backlog(namespace_id).await
     }
 
     /// Waits until every scheduled background maintenance tick has finished.
@@ -1741,11 +1736,25 @@ impl FsCore {
 struct BackgroundTickClaim {
     fs: FsCore,
     namespace_id: NamespaceId,
+    releases_on_drop: bool,
+}
+
+impl BackgroundTickClaim {
+    fn finish_tick(&mut self) -> bool {
+        // Disarm before releasing the slot so a new owner cannot claim it
+        // and then be accidentally released by this guard's later drop.
+        self.releases_on_drop = false;
+        let run_deferred_full_tick = self.fs.inner.background.finish_tick(&self.namespace_id);
+        self.releases_on_drop = run_deferred_full_tick;
+        run_deferred_full_tick
+    }
 }
 
 impl Drop for BackgroundTickClaim {
     fn drop(&mut self) {
-        self.fs.inner.background.release(&self.namespace_id);
+        if self.releases_on_drop {
+            self.fs.inner.background.release(&self.namespace_id);
+        }
     }
 }
 

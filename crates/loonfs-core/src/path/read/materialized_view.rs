@@ -2,8 +2,9 @@
 //! that answers every read — stat, list, revisions, content, grep.
 
 use super::grep::{
-    derive_visible_path, indexed_candidates, line_matches, tail_revisions, GrepCandidates,
-    DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_CONTENT_IO, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES,
+    derive_visible_path, fold_rejected_frontier, indexed_candidates, line_matches, tail_revisions,
+    GrepCandidates, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_CONTENT_IO,
+    MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES,
     MAX_GREP_TAIL_FILES, MAX_GREP_VERIFIED_FILES_PER_PAGE,
 };
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
@@ -398,7 +399,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .build()
             .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
 
-        let view = self.metadata_view();
+        // One view session serves the whole page: candidates in the same
+        // directory tree share ancestor bindings, tombstone checks, and
+        // path verifications, so the per-candidate metadata walks below hit
+        // the session caches instead of re-fetching per candidate.
+        let mut session = self.metadata_view().session();
         // The scope filter tests durable identity: resolve the prefix to
         // its inode once, then require it among each candidate's ancestors,
         // so name-policy folding and path normalization apply exactly as
@@ -407,7 +412,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let scope_root = match &request.path_prefix {
             Some(prefix) => {
                 let parsed = parse_absolute_path_for_core(prefix)?;
-                match view.resolve_visible_path(&parsed).await {
+                match session.resolve_visible_path(&parsed, false).await {
                     Ok(resolved) => Some(resolved.inode_id),
                     Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => {
                         return Ok(GrepResponse {
@@ -473,11 +478,18 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
         let mut matches: Vec<GrepMatch> = Vec::new();
         let mut verified_files = 0usize;
+        let mut examined_candidates = 0usize;
         let mut has_more = false;
         // Where the next page resumes when this one stops early: the last
         // candidate this page finished scanning (offset MAX), or the last
         // emitted match when the page filled mid-file.
         let mut resume_cursor: Option<(InodeId, u64)> = None;
+        // Highest candidate this page examined and rejected (invisible,
+        // superseded, or out of scope). A rejection is final for the page,
+        // so budget exits fold this into the cursor — without it, a run of
+        // rejections longer than a page budget would resume at the same
+        // cursor and re-reject the same candidates forever.
+        let mut rejected_frontier: Option<InodeId> = None;
         let ordered_candidates = candidates.inodes().collect::<Vec<_>>();
         let mut next_candidate = 0usize;
         'page: loop {
@@ -492,17 +504,36 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             let mut budget_exhausted = false;
             while next_candidate < ordered_candidates.len() {
                 let inode_id = ordered_candidates[next_candidate];
-                next_candidate += 1;
                 if let Some((last_inode, last_offset)) = resume {
                     if inode_id < last_inode || (inode_id == last_inode && last_offset == u64::MAX)
                     {
+                        next_candidate += 1;
                         continue;
                     }
                 }
-                let Some(revision) = view.latest_revision_head(inode_id).await? else {
+                // The examination budget bounds a page's metadata work the
+                // way the verified budget bounds its content work: a scope
+                // filter that rejects nearly every candidate would
+                // otherwise walk metadata for the entire candidate set in
+                // one page. The candidate at the boundary is left for the
+                // next page.
+                if examined_candidates == MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE {
+                    budget_exhausted = true;
+                    break;
+                }
+                next_candidate += 1;
+                examined_candidates += 1;
+                if session.visible_inode(inode_id).await?.is_none() {
+                    rejected_frontier = Some(inode_id);
+                    continue;
+                }
+                let Some(revision) = session.latest_revision_head_of_visible(inode_id).await?
+                else {
+                    rejected_frontier = Some(inode_id);
                     continue;
                 };
                 if !candidates.admits(inode_id, revision.revision_no) {
+                    rejected_frontier = Some(inode_id);
                     continue;
                 }
                 // With the tail skipped (`allow_stale`), serve the index's
@@ -512,13 +543,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 // — a mix of two snapshots rather than a stale-but-
                 // consistent one.
                 if !tail_scanned && revision.committed_seq > feature.built_through_seq {
+                    rejected_frontier = Some(inode_id);
                     continue;
                 }
-                let Some(chain) = derive_visible_path(&view, inode_id).await? else {
+                let Some(chain) = derive_visible_path(&mut session, inode_id).await? else {
+                    rejected_frontier = Some(inode_id);
                     continue;
                 };
                 if let Some(scope_root) = scope_root {
                     if !chain.ancestors.contains(&scope_root) {
+                        rejected_frontier = Some(inode_id);
                         continue;
                     }
                 }
@@ -550,6 +584,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             if batch.is_empty() {
                 if budget_exhausted {
                     has_more = true;
+                    fold_rejected_frontier(&mut resume_cursor, rejected_frontier);
                 }
                 break 'page;
             }
@@ -623,6 +658,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             if budget_exhausted {
                 has_more = true;
+                // The whole final batch was scanned, so every examined
+                // candidate is resolved; rejections past the last scanned
+                // file move the cursor with them.
+                fold_rejected_frontier(&mut resume_cursor, rejected_frontier);
                 break 'page;
             }
         }
