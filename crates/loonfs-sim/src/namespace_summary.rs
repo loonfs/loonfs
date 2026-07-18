@@ -77,7 +77,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
 
     #[tokio::test]
     async fn namespace_object_summary_counts_known_key_families() {

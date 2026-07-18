@@ -224,31 +224,25 @@ async fn classifies_gc_namespace_layout_family() {
 
     store
         .put_overwrite(
-            &layout
-                .metadata_manifest_object(
-                    "ns-1",
-                    &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
-                        .expect("valid manifest object id"),
-                )
-                .into_string(),
+            &layout.metadata_manifest_object(
+                "ns-1",
+                &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+                    .expect("valid manifest object id"),
+            ),
             bytes(b"manifest"),
         )
         .await
         .expect("put namespace manifest");
     store
         .put_overwrite(
-            &layout
-                .metadata_table("ns-1", "tbl_00000000000000000000000000000001")
-                .into_string(),
+            &layout.metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
             bytes(b"metadata"),
         )
         .await
         .expect("put metadata sst");
     store
         .put_overwrite(
-            &layout
-                .pin("ns-1", "pin_00000000000000000000000000000001")
-                .into_string(),
+            &layout.pin("ns-1", "pin_00000000000000000000000000000001"),
             bytes(b"boundary"),
         )
         .await

@@ -29,11 +29,6 @@ mod store_io_runtime;
 pub mod timing;
 mod transfer_timeouts;
 
-/// Simulator-contract hook: the frozen `loonfs-sim` crate imports the local
-/// provider as `loonfs_objectstore::fs`. In-repo code spells out
-/// [`local_fs_store`]; do not add new users of this alias.
-pub use local_fs_store as fs;
-
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use object_store::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,

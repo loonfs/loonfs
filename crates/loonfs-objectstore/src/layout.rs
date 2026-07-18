@@ -46,48 +46,6 @@ pub struct ParsedObjectKey<'a> {
     owner_namespace_id: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ObjectKey(String);
-
-macro_rules! typed_key {
-    ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $name(ObjectKey);
-
-        impl $name {
-            pub fn as_str(&self) -> &str {
-                self.0.as_str()
-            }
-
-            pub fn into_string(self) -> String {
-                self.0.into_string()
-            }
-        }
-
-        impl From<$name> for String {
-            fn from(key: $name) -> Self {
-                key.into_string()
-            }
-        }
-    };
-}
-
-typed_key!(NamespaceConfigKey);
-typed_key!(WalHeadKey);
-typed_key!(WalFloorKey);
-typed_key!(WalIndexKey);
-typed_key!(WalIndexRunKey);
-typed_key!(WalSegmentKey);
-typed_key!(MetadataRootKey);
-typed_key!(MetadataManifestKey);
-typed_key!(MetadataTableKey);
-typed_key!(IndexSegmentKey);
-typed_key!(CheckpointRecordKey);
-typed_key!(PinKey);
-typed_key!(UploadSessionKey);
-typed_key!(ContentStoreDescriptorKey);
-typed_key!(ContentBlobKey);
-
 impl<'a> ParsedObjectKey<'a> {
     pub fn family(&self) -> DurableObjectFamily {
         self.family
@@ -95,20 +53,6 @@ impl<'a> ParsedObjectKey<'a> {
 
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
-    }
-}
-
-impl ObjectKey {
-    fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn into_string(self) -> String {
-        self.0
     }
 }
 
@@ -123,47 +67,35 @@ impl ObjectLayout {
 
     /// Stable namespace identity and immutable configuration; written last
     /// during bootstrap as the namespace completion marker.
-    pub fn namespace_config(&self, namespace: &str) -> NamespaceConfigKey {
-        NamespaceConfigKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/namespace.json"
-        )))
+    pub fn namespace_config(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/namespace.json")
     }
 
     /// Hot head of the semantic commit stream: the only object whose CAS
     /// gates user-write throughput.
-    pub fn wal_head(&self, namespace: &str) -> WalHeadKey {
-        WalHeadKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/head.json"
-        )))
+    pub fn wal_head(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/wal/head.json")
     }
 
     /// Cold lower bound of retained WAL/change history.
-    pub fn wal_floor(&self, namespace: &str) -> WalFloorKey {
-        WalFloorKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/floor.json"
-        )))
+    pub fn wal_floor(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/wal/floor.json")
     }
 
     /// Optional mutable pointer to the newest WAL index run (accelerator,
     /// never authority). Reserved: parseable and buildable ahead of the
     /// accelerator subsystem landing.
-    pub fn wal_index(&self, namespace: &str) -> WalIndexKey {
-        WalIndexKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/index.json"
-        )))
+    pub fn wal_index(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/wal/index.json")
     }
 
     /// Optional immutable run of visible-chain segment pointers. Reserved.
-    pub fn wal_index_run(&self, namespace: &str, index_id: &str) -> WalIndexRunKey {
-        WalIndexRunKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/indexes/{index_id}.json"
-        )))
+    pub fn wal_index_run(&self, namespace: &str, index_id: &str) -> String {
+        format!("namespaces/{namespace}/wal/indexes/{index_id}.json")
     }
 
-    pub fn wal_segment(&self, namespace: &str, segment_id: &str) -> WalSegmentKey {
-        WalSegmentKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/segments/{segment_id}.wal.zst"
-        )))
+    pub fn wal_segment(&self, namespace: &str, segment_id: &str) -> String {
+        format!("namespaces/{namespace}/wal/segments/{segment_id}.wal.zst")
     }
 
     /// Listing prefix that contains every WAL segment of `namespace` and
@@ -186,31 +118,27 @@ impl ObjectLayout {
     }
 
     /// Cold pointer to the best known materialized metadata root.
-    pub fn metadata_root(&self, namespace: &str) -> MetadataRootKey {
-        MetadataRootKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/metadata/root.json"
-        )))
+    pub fn metadata_root(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/metadata/root.json")
     }
 
     pub fn metadata_manifest_object(
         &self,
         namespace: &str,
         manifest_object_id: &ManifestObjectId,
-    ) -> MetadataManifestKey {
-        MetadataManifestKey(ObjectKey::new(format!(
+    ) -> String {
+        format!(
             "namespaces/{namespace}/metadata/manifests/{}.manifest.json",
             manifest_object_id.as_str()
-        )))
+        )
     }
 
     pub fn metadata_manifest_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/metadata/manifests/")
     }
 
-    pub fn metadata_table(&self, namespace: &str, table_id: &str) -> MetadataTableKey {
-        MetadataTableKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/metadata/tables/{table_id}.sst.zst"
-        )))
+    pub fn metadata_table(&self, namespace: &str, table_id: &str) -> String {
+        format!("namespaces/{namespace}/metadata/tables/{table_id}.sst.zst")
     }
 
     pub fn metadata_table_prefix(&self, namespace: &str) -> String {
@@ -220,10 +148,8 @@ impl ObjectLayout {
     /// Derived-index segment (format spec, "Derived work"): same block
     /// grammar as a metadata table, feature-owned row payload, referenced
     /// from the manifest's `index_files` list.
-    pub fn index_segment(&self, namespace: &str, segment_id: &str) -> IndexSegmentKey {
-        IndexSegmentKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/metadata/indexes/{segment_id}.idx.zst"
-        )))
+    pub fn index_segment(&self, namespace: &str, segment_id: &str) -> String {
+        format!("namespaces/{namespace}/metadata/indexes/{segment_id}.idx.zst")
     }
 
     pub fn index_segment_prefix(&self, namespace: &str) -> String {
@@ -231,10 +157,8 @@ impl ObjectLayout {
     }
 
     /// Durable stable-view pin to a metadata manifest.
-    pub fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> CheckpointRecordKey {
-        CheckpointRecordKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/checkpoints/{checkpoint_id}.json"
-        )))
+    pub fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> String {
+        format!("namespaces/{namespace}/checkpoints/{checkpoint_id}.json")
     }
 
     pub fn checkpoint_prefix(&self, namespace: &str) -> String {
@@ -243,44 +167,38 @@ impl ObjectLayout {
 
     /// Explicit reachability pin, stored under the **source** namespace —
     /// the namespace whose objects it protects.
-    pub fn pin(&self, source_namespace: &str, pin_id: &str) -> PinKey {
-        PinKey(ObjectKey::new(format!(
-            "namespaces/{source_namespace}/pins/{pin_id}.json"
-        )))
+    pub fn pin(&self, source_namespace: &str, pin_id: &str) -> String {
+        format!("namespaces/{source_namespace}/pins/{pin_id}.json")
     }
 
     pub fn pin_prefix(&self, source_namespace: &str) -> String {
         format!("namespaces/{source_namespace}/pins/")
     }
 
-    pub fn upload_session(&self, namespace: &str, upload_id: &str) -> UploadSessionKey {
-        UploadSessionKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/uploads/{upload_id}.json"
-        )))
+    pub fn upload_session(&self, namespace: &str, upload_id: &str) -> String {
+        format!("namespaces/{namespace}/uploads/{upload_id}.json")
     }
 
     pub fn upload_session_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    pub fn content_store_descriptor(&self, content_store: &str) -> ContentStoreDescriptorKey {
-        ContentStoreDescriptorKey(ObjectKey::new(format!(
-            "content-stores/{content_store}/descriptor.json"
-        )))
+    pub fn content_store_descriptor(&self, content_store: &str) -> String {
+        format!("content-stores/{content_store}/descriptor.json")
     }
 
     pub fn content_blob(
         &self,
         content_store: &str,
         digest: &str,
-    ) -> Result<ContentBlobKey, ObjectStoreError> {
+    ) -> Result<String, ObjectStoreError> {
         let hex = sha256_hex_from_digest(digest)?;
-        Ok(ContentBlobKey(ObjectKey::new(format!(
+        Ok(format!(
             "content-stores/{content_store}/blobs/sha256/{}/{}/{}",
             &hex[0..2],
             &hex[2..4],
             hex
-        ))))
+        ))
     }
 }
 
@@ -490,71 +408,50 @@ mod tests {
         let layout = ObjectLayout::new();
         let cases = [
             (
-                layout.namespace_config("ns-1").into_string(),
+                layout.namespace_config("ns-1"),
                 DurableObjectFamily::NamespaceConfig,
             ),
+            (layout.wal_head("ns-1"), DurableObjectFamily::WalHead),
+            (layout.wal_floor("ns-1"), DurableObjectFamily::WalFloor),
+            (layout.wal_index("ns-1"), DurableObjectFamily::WalIndex),
             (
-                layout.wal_head("ns-1").into_string(),
-                DurableObjectFamily::WalHead,
-            ),
-            (
-                layout.wal_floor("ns-1").into_string(),
-                DurableObjectFamily::WalFloor,
-            ),
-            (
-                layout.wal_index("ns-1").into_string(),
-                DurableObjectFamily::WalIndex,
-            ),
-            (
-                layout
-                    .wal_index_run("ns-1", "idx_00000000000000000000000000000001")
-                    .into_string(),
+                layout.wal_index_run("ns-1", "idx_00000000000000000000000000000001"),
                 DurableObjectFamily::WalIndexRun,
             ),
             (
-                layout
-                    .wal_segment("ns-1", "seg_00000000000000000000000000000001")
-                    .into_string(),
+                layout.wal_segment("ns-1", "seg_00000000000000000000000000000001"),
                 DurableObjectFamily::WalSegment,
             ),
             (
-                layout.metadata_root("ns-1").into_string(),
+                layout.metadata_root("ns-1"),
                 DurableObjectFamily::MetadataRoot,
             ),
             (
-                layout
-                    .metadata_manifest_object(
-                        "ns-1",
-                        &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
-                            .expect("valid manifest object id"),
-                    )
-                    .into_string(),
+                layout.metadata_manifest_object(
+                    "ns-1",
+                    &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
+                        .expect("valid manifest object id"),
+                ),
                 DurableObjectFamily::MetadataManifest,
             ),
             (
-                layout.metadata_table("ns-1", "tbl_abc").into_string(),
+                layout.metadata_table("ns-1", "tbl_abc"),
                 DurableObjectFamily::MetadataTable,
             ),
             (
-                layout.index_segment("ns-1", "idx_abc").into_string(),
+                layout.index_segment("ns-1", "idx_abc"),
                 DurableObjectFamily::IndexSegment,
             ),
             (
-                layout
-                    .checkpoint_record("ns-1", "chk_00000000000000000000000000000001")
-                    .into_string(),
+                layout.checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
                 DurableObjectFamily::CheckpointRecord,
             ),
             (
-                layout
-                    .pin("ns-1", "pin_00000000000000000000000000000001")
-                    .into_string(),
+                layout.pin("ns-1", "pin_00000000000000000000000000000001"),
                 DurableObjectFamily::Pin,
             ),
             (
-                layout
-                    .upload_session("ns-1", "upl_00000000000000000000000000000001")
-                    .into_string(),
+                layout.upload_session("ns-1", "upl_00000000000000000000000000000001"),
                 DurableObjectFamily::UploadSession,
             ),
         ];
@@ -609,13 +506,10 @@ mod tests {
                 "cs_00000000000000000000000000000001",
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
             )
-            .expect("content key")
-            .into_string();
+            .expect("content key");
         let cases = [
             (
-                layout
-                    .content_store_descriptor("cs_00000000000000000000000000000001")
-                    .into_string(),
+                layout.content_store_descriptor("cs_00000000000000000000000000000001"),
                 DurableObjectFamily::ContentStoreDescriptor,
             ),
             (content_key, DurableObjectFamily::ContentBlob),
