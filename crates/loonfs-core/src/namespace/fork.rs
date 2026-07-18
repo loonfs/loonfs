@@ -9,7 +9,7 @@ use crate::checkpoint::{
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::namespace::catalog::{
     load_namespace_descriptor, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
@@ -453,6 +453,7 @@ async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
                 NamespaceInitializationState::Absent => Err(CoreError::Store {
                     object_key: object_key.to_owned(),
                     message: "control object write failed, but namespace remains absent".to_owned(),
+                    class: StoreFailureClass::Other,
                 }),
             }
         }

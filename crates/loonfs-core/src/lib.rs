@@ -120,7 +120,7 @@ pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
-    WriterFence,
+    StoreFailureClass, WriterFence,
 };
 pub use gc::{gc_namespace, GcConfig, GcReport};
 pub use namespace::BootstrapNamespaceError;

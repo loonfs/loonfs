@@ -1,7 +1,7 @@
 //! Content blob reads and writes: content-addressed storage, reference
 //! validation, and verified read-back.
 
-use crate::error::CoreError;
+use crate::error::{CoreError, StoreFailureClass};
 use crate::invariants::InvariantId;
 use crate::namespace::catalog::load_namespace_content_store_id;
 use bytes::Bytes;
@@ -87,7 +87,11 @@ pub enum DurableContentValidationError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub(crate) enum ImmutableObjectWriteError {
     #[error("failed to write immutable object `{object_key}`: {message}")]
-    Store { object_key: String, message: String },
+    Store {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
 }
 
 pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
@@ -272,6 +276,7 @@ pub(crate) async fn write_immutable_object<S: ObjectStore + ?Sized>(
             Err(ImmutableObjectWriteError::Store {
                 object_key: object_key.to_owned(),
                 message: "object already exists with different bytes".to_owned(),
+                class: StoreFailureClass::Other,
             })
         }
         Err(err @ ObjectStoreError::Transport { .. }) => {
@@ -283,18 +288,21 @@ pub(crate) async fn write_immutable_object<S: ObjectStore + ?Sized>(
                     message: format!(
                         "{original}; immutable object exists with different bytes after transport error"
                     ),
+                    class: StoreFailureClass::Other,
                 }),
                 Err(verify_err) => Err(ImmutableObjectWriteError::Store {
                     object_key: object_key.to_owned(),
                     message: format!(
                         "{original}; failed to verify immutable write after transport error: {verify_err}"
                     ),
+                    class: StoreFailureClass::Other,
                 }),
             }
         }
         Err(err) => Err(ImmutableObjectWriteError::Store {
             object_key: object_key.to_owned(),
             message: err.message(),
+            class: StoreFailureClass::of(&err),
         }),
     }
 }
@@ -312,6 +320,7 @@ async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
             .map_err(|err| ImmutableObjectWriteError::Store {
                 object_key: object_key.to_owned(),
                 message: err.message(),
+                class: StoreFailureClass::of(&err),
             })?
     {
         if metadata.size_bytes != expected_size {
@@ -325,10 +334,12 @@ async fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
         .map_err(|err| ImmutableObjectWriteError::Store {
             object_key: object_key.to_owned(),
             message: err.message(),
+            class: StoreFailureClass::of(&err),
         })?
         .ok_or_else(|| ImmutableObjectWriteError::Store {
             object_key: object_key.to_owned(),
             message: "object is missing while verifying immutable write".to_owned(),
+            class: StoreFailureClass::Other,
         })?;
     Ok(existing == expected_bytes)
 }

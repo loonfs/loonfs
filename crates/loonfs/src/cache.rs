@@ -18,7 +18,7 @@ use loonfs_core::control::{
     VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState};
-use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
+use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
 use loonfs_objectstore::keys::{namespace_config, wal_head};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -355,6 +355,7 @@ impl FsCore {
                 return RuntimeError::Core(CoreError::Store {
                     object_key: descriptor_key,
                     message: error.message(),
+                    class: StoreFailureClass::of(&error),
                 })
             }
         };
@@ -387,6 +388,7 @@ impl FsCore {
             .map_err(|error| ControlObjectLoadError::Store {
                 object_key: object_key.to_owned(),
                 message: error.message(),
+                class: StoreFailureClass::of(&error),
             })?
             .ok_or_else(|| ControlObjectLoadError::MissingObject {
                 object_key: object_key.to_owned(),
@@ -395,6 +397,7 @@ impl FsCore {
             return Err(ControlObjectLoadError::Store {
                 object_key: object_key.to_owned(),
                 message: "missing control object etag".to_owned(),
+                class: StoreFailureClass::Other,
             });
         };
         Ok(etag == identity.etag)

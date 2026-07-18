@@ -97,14 +97,17 @@ impl From<NamespaceInitializationError> for BootstrapNamespaceError {
             NamespaceInitializationError::InspectNamespaceDescriptor {
                 object_key,
                 message,
+                ..
             } => Self::DescriptorWrite(format!("failed to inspect `{object_key}`: {message}")),
             NamespaceInitializationError::InspectNamespaceHead {
                 object_key,
                 message,
+                ..
             } => Self::HeadWrite(format!("failed to inspect `{object_key}`: {message}")),
             NamespaceInitializationError::InspectNamespaceControl {
                 object_key,
                 message,
+                ..
             } => Self::DebrisCleanup(format!("failed to inspect `{object_key}`: {message}")),
             NamespaceInitializationError::LoadNamespaceDescriptor(error)
             | NamespaceInitializationError::LoadContentStoreDescriptor(error) => {

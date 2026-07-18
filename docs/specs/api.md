@@ -209,6 +209,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, or configuration value fails validation. The message names the offending field. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
+| `permission_denied` | 403 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; retrying unchanged will not succeed. |
 | `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads, `commit.max_body_bytes` for commit bodies. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put`; for commits, split the batch; for reads, the deployment limit must be raised. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |

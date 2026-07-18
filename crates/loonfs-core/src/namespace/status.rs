@@ -140,20 +140,25 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
         NamespaceInitializationError::InspectNamespaceControl {
             object_key,
             message,
+            class,
         } => CoreError::Store {
             object_key,
             message,
+            class,
         },
         NamespaceInitializationError::InspectNamespaceDescriptor {
             object_key,
             message,
+            class,
         }
         | NamespaceInitializationError::InspectNamespaceHead {
             object_key,
             message,
+            class,
         } => CoreError::Store {
             object_key,
             message,
+            class,
         },
     }
 }
