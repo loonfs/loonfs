@@ -1,6 +1,7 @@
 //! Presigner for S3-compatible providers (AWS S3, Cloudflare R2).
 
 use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
+use crate::keyspace::{parse_endpoint_url, scope_object_key};
 use crate::presign::aws_sigv4::{
     aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,
     percent_encode_path, percent_encode_segment,
@@ -66,13 +67,18 @@ impl S3CompatiblePresigner {
         match self.config.endpoint_url.as_deref() {
             Some(endpoint_url) => {
                 let parsed = parse_endpoint_url(endpoint_url)?;
+                let base_path = if parsed.path.is_empty() {
+                    String::new()
+                } else {
+                    format!("/{}", parsed.path)
+                };
                 if self.config.force_path_style {
                     Ok(S3Endpoint {
-                        scheme: parsed.scheme,
-                        host: parsed.authority,
+                        scheme: parsed.scheme.to_owned(),
+                        host: parsed.authority.to_owned(),
                         canonical_uri: format!(
                             "{}/{}/{}",
-                            parsed.base_path,
+                            base_path,
                             percent_encode_segment(&self.config.bucket),
                             encoded_key
                         ),
@@ -80,14 +86,14 @@ impl S3CompatiblePresigner {
                 } else {
                     let bucket_prefix = format!("{}.", self.config.bucket);
                     let host = if parsed.authority.starts_with(&bucket_prefix) {
-                        parsed.authority
+                        parsed.authority.to_owned()
                     } else {
                         format!("{}.{}", self.config.bucket, parsed.authority)
                     };
                     Ok(S3Endpoint {
-                        scheme: parsed.scheme,
+                        scheme: parsed.scheme.to_owned(),
                         host,
-                        canonical_uri: format!("{}/{}", parsed.base_path, encoded_key),
+                        canonical_uri: format!("{}/{}", base_path, encoded_key),
                     })
                 }
             }
@@ -267,57 +273,6 @@ struct S3Endpoint {
     scheme: String,
     host: String,
     canonical_uri: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedEndpoint {
-    scheme: String,
-    authority: String,
-    base_path: String,
-}
-
-fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint, ObjectStoreError> {
-    let (scheme, rest) = value
-        .strip_prefix("https://")
-        .map(|rest| ("https", rest))
-        .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
-        .ok_or_else(|| {
-            ObjectStoreError::Configuration(
-                "endpoint url must start with http:// or https://".to_owned(),
-            )
-        })?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "endpoint url must include authority".to_owned(),
-        ));
-    }
-    let path = path.trim_end_matches('/');
-    Ok(ParsedEndpoint {
-        scheme: scheme.to_owned(),
-        authority: authority.to_owned(),
-        base_path: if path.is_empty() {
-            String::new()
-        } else {
-            format!("/{path}")
-        },
-    })
-}
-
-fn scope_object_key(prefix: Option<&str>, key: &str) -> Result<String, ObjectStoreError> {
-    let key = key.trim_start_matches('/');
-    if key.is_empty() {
-        return Err(ObjectStoreError::InvalidKey {
-            object_key: key.to_owned(),
-            message: "object key must not be empty".to_owned(),
-        });
-    }
-    Ok(match prefix {
-        Some(prefix) if !prefix.trim_matches('/').is_empty() => {
-            format!("{}/{}", prefix.trim_matches('/'), key)
-        }
-        _ => key.to_owned(),
-    })
 }
 
 fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64, ObjectStoreError> {

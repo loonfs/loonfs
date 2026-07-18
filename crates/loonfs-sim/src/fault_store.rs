@@ -566,7 +566,7 @@ mod tests {
     use super::*;
     use crate::fault::ScheduledFault;
     use crate::rng::SimSeed;
-    use loonfs_objectstore::fs::LocalFsStore;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
 
     fn temp_store() -> (tempfile::TempDir, LocalFsStore) {
         let temp_dir = tempfile::tempdir().expect("temp dir");

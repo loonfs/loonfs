@@ -1,6 +1,7 @@
 //! The shared S3-compatible store implementation behind the AWS S3 and
 //! Cloudflare R2 providers.
 
+use crate::keyspace::parse_endpoint_url;
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
@@ -188,36 +189,6 @@ fn object_store_endpoint_url(
     )
     .trim_end_matches('/')
     .to_owned())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedEndpoint<'a> {
-    scheme: &'a str,
-    authority: &'a str,
-    path: &'a str,
-}
-
-fn parse_endpoint_url(value: &str) -> Result<ParsedEndpoint<'_>, ObjectStoreError> {
-    let (scheme, rest) = value
-        .strip_prefix("https://")
-        .map(|rest| ("https", rest))
-        .or_else(|| value.strip_prefix("http://").map(|rest| ("http", rest)))
-        .ok_or_else(|| {
-            ObjectStoreError::Configuration(
-                "endpoint url must start with http:// or https://".to_owned(),
-            )
-        })?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() {
-        return Err(ObjectStoreError::Configuration(
-            "endpoint url must include authority".to_owned(),
-        ));
-    }
-    Ok(ParsedEndpoint {
-        scheme,
-        authority,
-        path: path.trim_end_matches('/'),
-    })
 }
 
 #[cfg(test)]

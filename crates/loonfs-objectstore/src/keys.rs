@@ -5,23 +5,19 @@ use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
 
 pub fn namespace_config(namespace: &str) -> String {
-    ObjectLayout::new()
-        .namespace_config(namespace)
-        .into_string()
+    ObjectLayout::new().namespace_config(namespace)
 }
 
 pub fn wal_head(namespace: &str) -> String {
-    ObjectLayout::new().wal_head(namespace).into_string()
+    ObjectLayout::new().wal_head(namespace)
 }
 
 pub fn wal_floor(namespace: &str) -> String {
-    ObjectLayout::new().wal_floor(namespace).into_string()
+    ObjectLayout::new().wal_floor(namespace)
 }
 
 pub fn wal_segment(namespace: &str, segment_id: &str) -> String {
-    ObjectLayout::new()
-        .wal_segment(namespace, segment_id)
-        .into_string()
+    ObjectLayout::new().wal_segment(namespace, segment_id)
 }
 
 pub fn wal_segment_prefix(namespace: &str) -> String {
@@ -33,7 +29,7 @@ pub fn wal_segment_id_from_key(key: &str) -> Option<&str> {
 }
 
 pub fn metadata_root(namespace: &str) -> String {
-    ObjectLayout::new().metadata_root(namespace).into_string()
+    ObjectLayout::new().metadata_root(namespace)
 }
 
 pub fn metadata_manifest_prefix(namespace: &str) -> String {
@@ -45,21 +41,15 @@ pub fn metadata_table_prefix(namespace: &str) -> String {
 }
 
 pub fn metadata_manifest_object(namespace: &str, manifest_object_id: &ManifestObjectId) -> String {
-    ObjectLayout::new()
-        .metadata_manifest_object(namespace, manifest_object_id)
-        .into_string()
+    ObjectLayout::new().metadata_manifest_object(namespace, manifest_object_id)
 }
 
 pub fn metadata_table(namespace: &str, table_id: &str) -> String {
-    ObjectLayout::new()
-        .metadata_table(namespace, table_id)
-        .into_string()
+    ObjectLayout::new().metadata_table(namespace, table_id)
 }
 
 pub fn index_segment(namespace: &str, segment_id: &str) -> String {
-    ObjectLayout::new()
-        .index_segment(namespace, segment_id)
-        .into_string()
+    ObjectLayout::new().index_segment(namespace, segment_id)
 }
 
 pub fn index_segment_prefix(namespace: &str) -> String {
@@ -67,9 +57,7 @@ pub fn index_segment_prefix(namespace: &str) -> String {
 }
 
 pub fn checkpoint_record(namespace: &str, checkpoint_id: &str) -> String {
-    ObjectLayout::new()
-        .checkpoint_record(namespace, checkpoint_id)
-        .into_string()
+    ObjectLayout::new().checkpoint_record(namespace, checkpoint_id)
 }
 
 pub fn checkpoint_prefix(namespace: &str) -> String {
@@ -81,21 +69,15 @@ pub fn upload_session_prefix(namespace: &str) -> String {
 }
 
 pub fn upload_session(namespace: &str, upload_id: &str) -> String {
-    ObjectLayout::new()
-        .upload_session(namespace, upload_id)
-        .into_string()
+    ObjectLayout::new().upload_session(namespace, upload_id)
 }
 
 pub fn content_store_descriptor(content_store: &str) -> String {
-    ObjectLayout::new()
-        .content_store_descriptor(content_store)
-        .into_string()
+    ObjectLayout::new().content_store_descriptor(content_store)
 }
 
 pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectStoreError> {
-    ObjectLayout::new()
-        .content_blob(content_store, digest)
-        .map(|key| key.into_string())
+    ObjectLayout::new().content_blob(content_store, digest)
 }
 
 #[cfg(test)]
