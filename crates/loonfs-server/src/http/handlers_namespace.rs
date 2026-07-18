@@ -48,6 +48,10 @@ pub(super) async fn config(
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let mut capabilities = state.reader.capabilities();
+    // An issuer's existence is the capability: `ObjectTransferIssuer` is
+    // only implemented where the provider enforces the digest and
+    // create-only preconditions inside the signed request, which is what
+    // lets completion verify a direct_put without reading content back.
     capabilities.features.insert(
         FEATURE_UPLOADS_DIRECT_PUT.to_owned(),
         state.transfer_issuer.is_some(),

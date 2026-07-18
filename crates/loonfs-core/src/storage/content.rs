@@ -106,6 +106,29 @@ pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
 }
 
+/// Proves a content reference is durable — the object exists and carries the
+/// declared size — from one HEAD, without reading the content.
+///
+/// This is the completion check for writes whose digest integrity the
+/// provider already enforced at upload time (a `direct_put` transfer
+/// capability signs the digest into the write, and the provider refuses a
+/// body that does not hash to it — see
+/// [`ObjectTransferIssuer`](loonfs_objectstore::presign::ObjectTransferIssuer)).
+/// Re-hashing here would re-download the payload through the server and
+/// prove nothing the write path has not already proven; the size check
+/// stays because the declared `size_bytes` rides the reference, not the
+/// digest, so a mis-declared size must fail completion. Callers without a
+/// write-time digest guarantee use [`validate_durable_content_reference`],
+/// which reads and hashes.
+pub(crate) async fn probe_durable_content_reference<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) -> Result<(), DurableContentValidationError> {
+    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    validate_content_size(store, &object_key, content_ref).await
+}
+
 pub async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
@@ -173,10 +196,13 @@ fn validate_loaded_content_bytes(
     })
 }
 
-/// Cheap prevalidation before the authoritative read-and-hash: existence
-/// and size come from one HEAD, so a wrong-sized object fails fast without
-/// downloading it. Digest verification always reads the bytes — provider
-/// checksums are not part of the read contract anywhere in the fleet.
+/// Existence and size from one HEAD, serving two roles: the authoritative
+/// read-and-hash uses it as cheap prevalidation, so a wrong-sized object
+/// fails fast without downloading it, and the durability probe uses it as
+/// the whole check, because the probe's callers hold a write-time digest
+/// guarantee. When this crate itself verifies a digest it always reads the
+/// bytes — provider checksums are not part of the read contract anywhere
+/// in the fleet.
 async fn validate_content_size<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
@@ -363,8 +389,9 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        read_durable_content_bytes, validate_durable_content_reference, write_immutable_object,
-        DurableContentValidationError, ImmutableObjectWriteError,
+        probe_durable_content_reference, read_durable_content_bytes,
+        validate_durable_content_reference, write_immutable_object, DurableContentValidationError,
+        ImmutableObjectWriteError,
     };
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -465,6 +492,55 @@ mod tests {
         assert!(matches!(
             err,
             DurableContentValidationError::ContentDigestMismatch { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn probe_whole_file_content_ref_proves_durability_without_reading() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = GetCountingStore::new(inner);
+        let bytes = b"provider-verified bytes";
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+
+        store.reset_content_blob_get_count();
+        probe_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
+            .expect("probe content ref");
+        assert_eq!(
+            store.content_blob_get_count(),
+            0,
+            "the probe proves durability from metadata alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_whole_file_content_ref_rejects_missing_object() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let content_ref = ContentRef::whole_file_v0(b"missing");
+
+        let err = probe_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
+            .expect_err("missing object");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::MissingContentObject { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn probe_whole_file_content_ref_rejects_size_mismatch() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let mut content_ref = ContentRef::whole_file_v0(b"abc");
+        put_content_object(&store, &content_store_id, &content_ref, b"abc").await;
+        content_ref.size_bytes += 1;
+
+        let err = probe_durable_content_reference(&store, &content_store_id, &content_ref)
+            .await
+            .expect_err("size mismatch");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::ContentLengthMismatch { .. }
         ));
     }
 
