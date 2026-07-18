@@ -1005,7 +1005,22 @@ than its limit and still carry a cursor. Each page is evaluated against
 the namespace head at page time and reports it in `head_seq`; the cursor
 resumes strictly after the last candidate the issuing page finished
 scanning and is bound to that request — replaying it with different
-criteria is rejected as `invalid_request`. A pattern with no required
+criteria is rejected as `invalid_request`.
+
+Grep cursors deliberately tolerate head drift, unlike directory listing
+cursors (section 5), which are bound to the head that minted them and must
+re-bootstrap after any commit. A grep cursor minted at an older head is
+accepted, and the resumed page evaluates at the then-current head and
+reports it: each page is internally consistent at its own head, but a
+multi-page search spans whatever heads its pages ran at, and candidates
+the cursor has passed are not revisited even if later commits changed
+them. A search is a bounded sampling read over content, not an
+enumeration contract; a client that needs one consistent cut across pages
+re-issues the search when `head_seq` changes between pages. A cursor from
+a head newer than the serving view's is still rejected
+(`snapshot_unavailable`) — drift tolerance runs forward, never backward.
+
+A pattern with no required
 literal bytes is rejected with `query_unindexable` unless `allow_scan`
 opts into a capped exhaustive scan. A tail past the scan budget is
 rejected with `index_lagging` unless `allow_stale` accepts indexed-only

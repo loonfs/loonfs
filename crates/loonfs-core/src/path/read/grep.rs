@@ -38,6 +38,13 @@ pub(super) const GREP_LINE_CAP_BYTES: usize = 512;
 /// resume cursor, so a page's cost is bounded by its own budget rather
 /// than by how many false-positive candidates the plan admits.
 pub(super) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
+/// Candidates one page will examine — visibility, latest revision, path
+/// derivation, scope — before returning with a resume cursor: the metadata
+/// twin of [`MAX_GREP_VERIFIED_FILES_PER_PAGE`], for pages where a scope
+/// filter rejects nearly every candidate. Rejected candidates move the
+/// cursor with them (see `fold_rejected_frontier`), so the next page
+/// continues past them instead of re-examining the same run.
+pub(super) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
 /// Concurrent gram posting probes one grep query issues at a time: the
 /// (gram, segment) probes of an OR-set fan out in chunks of this size,
 /// each probe a handful of small ranged GETs (filter, index, and posting
@@ -136,6 +143,12 @@ pub(super) async fn indexed_candidates<S: ObjectStore + ?Sized>(
                 probes.push((gram_lookup, descriptor));
             }
         }
+        // This union is the query's peak memory: worst case one
+        // (inode, revision) pair per indexed revision when a gram is
+        // common to every file — 16 bytes a pair, on the order of 16 MiB
+        // per million indexed revisions. A streamed merge-intersection
+        // would trade that ceiling for probe-ordering complexity; not
+        // taken until a profile shows these unions dominating.
         let mut set_postings = BTreeSet::new();
         for chunk in probes.chunks(MAX_GREP_READ_IO) {
             let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {
@@ -386,9 +399,10 @@ pub(super) fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec
 /// bindings to the root, then verifies the derived path forward under the
 /// full visibility rules — tombstones, unbinds, kinds — by resolving it
 /// back to the same inode. `None` means the inode is not visible at the
-/// view's sequence.
+/// view's sequence. Runs over the page's session so candidates under the
+/// same directories share the ancestor lookups.
 pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
-    view: &crate::metadata::MetadataView<'_, '_, S>,
+    session: &mut crate::metadata::MetadataViewSession<'_, '_, S>,
     inode_id: InodeId,
 ) -> Result<Option<VisiblePathChain>> {
     const MAX_PATH_DEPTH: usize = 4096;
@@ -403,7 +417,7 @@ pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
         if segments.len() >= MAX_PATH_DEPTH {
             return Ok(None);
         }
-        let Some(binding) = view.current_parent_binding_for_child(current).await? else {
+        let Some(binding) = session.current_parent_binding_for_child(current).await? else {
             return Ok(None);
         };
         segments.push(binding.display_name.clone());
@@ -418,13 +432,32 @@ pub(super) async fn derive_visible_path<S: ObjectStore + ?Sized>(
         // path result; the file is unreachable by path and skipped.
         Err(_) => return Ok(None),
     };
-    match view.resolve_visible_path(&parsed).await {
+    match session.resolve_visible_path(&parsed, false).await {
         Ok(resolved) if resolved.inode_id == inode_id => {
             Ok(Some(VisiblePathChain { path, ancestors }))
         }
         Ok(_) => Ok(None),
         Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// Folds the page's highest examined-and-rejected candidate into the resume
+/// cursor on a budget exit. Sound only when every examined candidate is
+/// resolved — rejected, or scanned by a fully-walked batch — which the
+/// budget exits guarantee. Never sound on a mid-file page fill: there,
+/// later batch members were examined but their fetched contents discarded,
+/// and the cursor must stay at the last emitted match.
+pub(super) fn fold_rejected_frontier(
+    resume_cursor: &mut Option<(InodeId, u64)>,
+    rejected_frontier: Option<InodeId>,
+) {
+    let Some(frontier) = rejected_frontier else {
+        return;
+    };
+    let folded = (frontier, u64::MAX);
+    if resume_cursor.is_none_or(|cursor| cursor < folded) {
+        *resume_cursor = Some(folded);
     }
 }
 
@@ -655,5 +688,28 @@ mod tests {
             peak <= MAX_GREP_READ_IO,
             "the probe's fan-out must respect the grep read cap, got {peak}"
         );
+    }
+
+    /// Budget exits fold the highest rejection into the cursor so a run of
+    /// rejections longer than a page budget still advances the page.
+    #[test]
+    fn rejected_frontier_folds_forward_only() {
+        let mut cursor = None;
+        fold_rejected_frontier(&mut cursor, None);
+        assert_eq!(cursor, None);
+
+        fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
+        assert_eq!(cursor, Some((InodeId(9), u64::MAX)));
+
+        // A frontier below the cursor never moves it backward.
+        cursor = Some((InodeId(12), 40));
+        fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
+        assert_eq!(cursor, Some((InodeId(12), 40)));
+
+        // A frontier past the cursor finishes that inode and moves past it.
+        fold_rejected_frontier(&mut cursor, Some(InodeId(12)));
+        assert_eq!(cursor, Some((InodeId(12), u64::MAX)));
+        fold_rejected_frontier(&mut cursor, Some(InodeId(30)));
+        assert_eq!(cursor, Some((InodeId(30), u64::MAX)));
     }
 }
