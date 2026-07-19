@@ -4,9 +4,6 @@
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{GramIndexBuildPolicy, MetadataTableCacheConfig, Result, RuntimeError};
 
-/// Default visible WAL-tail length, in segments, at which a maintenance tick
-/// publishes a checkpoint.
-pub(crate) const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
 /// Default maximum namespaces retained in runtime caches.
 pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
 /// Default maximum metadata rows retained across cached WAL-tail projections.

@@ -2,7 +2,6 @@
 //! plus the wire conversions the server and embedded hosts share so both
 //! transports report identical maintenance shapes.
 
-use crate::config::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig,
     GcReport, InodeId, ManifestId, NamespaceId, NamespaceStatusResponse,
@@ -12,6 +11,7 @@ use loonfs_api::v0::{
     MaintenanceTickOutcome as WireMaintenanceTickOutcome, MaintenanceTickRequest,
     MaintenanceTickResponse,
 };
+use loonfs_core::publish::WalTailPolicy;
 
 /// Options for one maintenance tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub struct MaintenanceTickOptions {
 impl Default for MaintenanceTickOptions {
     fn default() -> Self {
         Self {
-            max_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
+            max_wal_tail_segments: WalTailPolicy::DEFAULT.checkpoint_at_segments,
             gc: None,
         }
     }

@@ -1385,10 +1385,11 @@ Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. Two behaviors keep an un-administered
 deployment's read costs bounded regardless of scheduling: the reference
 implementation schedules a background maintenance tick after any runtime
-publish that observes the WAL tail at or past the WAL-flush threshold
-(32 segments at defaults), and every publish surface rejects with
-`maintenance_required` once the tail exceeds four times that threshold
-(128 at defaults). Reads never gate on tail length. Bounded reads are the
+publish that observes the WAL tail at or past the WAL-tail policy's
+checkpoint threshold (32 segments at defaults), and every publish surface
+rejects with `maintenance_required` once the tail exceeds the same policy's
+write-rejection threshold (128 at defaults). Reads never gate on tail
+length. Bounded reads are the
 automatic half only: the retention floor never advances on its own, so
 history retention — and the row reclamation that follows it — remains an
 explicit operator decision. An embedded engine where an operator

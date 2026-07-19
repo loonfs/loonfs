@@ -3341,6 +3341,34 @@ fn maintenance_tick_rejects_zero_threshold() {
 }
 
 #[test]
+fn maintenance_tick_rejects_thresholds_above_the_write_rejection_cap() {
+    // A threshold above the cap would make the tick report `not needed`
+    // while every publish is rejected with `maintenance_required`.
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "tick-config-test");
+    let namespace_id = namespace_id();
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let error = fs
+        .maintenance_tick_namespace_blocking(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_wal_tail_segments: 129,
+                gc: None,
+            },
+        )
+        .expect_err("over-cap threshold should fail");
+    match error {
+        RuntimeError::Config(message) => assert!(
+            message.contains("write-rejection threshold"),
+            "unexpected message: {message}"
+        ),
+        other => panic!("expected config error, got {other:?}"),
+    }
+}
+
+#[test]
 fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();

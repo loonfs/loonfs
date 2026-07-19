@@ -59,11 +59,44 @@ impl NamespaceMutationCandidate {
     }
 }
 
-/// Publishes stop being accepted once the WAL tail is far past the default
-/// maintenance checkpoint threshold (4x at defaults). Reads never gate; this
-/// only asks writers to wait for the maintenance a deployment failed to run
-/// (format spec, "Maintenance operations").
-pub(crate) const WAL_TAIL_BACKPRESSURE_SEGMENTS: u64 = 128;
+/// The WAL-tail maintenance policy: one authority for "when do we
+/// checkpoint?" and "when do we stop accepting writes?", so the two
+/// thresholds cannot drift apart.
+///
+/// Reads never gate on tail length; the rejection only asks writers to wait
+/// for the maintenance a deployment failed to run (format spec,
+/// "Maintenance operations").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalTailPolicy {
+    /// Visible WAL-tail length, in segments, at which a maintenance tick
+    /// publishes a checkpoint. The tick fires at or past this length.
+    pub checkpoint_at_segments: u64,
+    /// Visible WAL-tail length past which (strictly greater than) every
+    /// publish surface rejects with `maintenance_required`.
+    pub reject_writes_at_segments: u64,
+}
+
+impl WalTailPolicy {
+    /// The workspace policy: checkpoint at 32 segments, reject past 128.
+    pub const DEFAULT: Self = Self {
+        checkpoint_at_segments: 32,
+        reject_writes_at_segments: 128,
+    };
+}
+
+impl Default for WalTailPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+// The ordering invariant `0 < checkpoint < reject` holds by construction:
+// a tick must be able to relieve backpressure before writes stop.
+const _: () = assert!(
+    0 < WalTailPolicy::DEFAULT.checkpoint_at_segments
+        && WalTailPolicy::DEFAULT.checkpoint_at_segments
+            < WalTailPolicy::DEFAULT.reject_writes_at_segments,
+);
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
@@ -308,13 +341,14 @@ impl NamespaceCommitEngine {
             }
         };
 
-        if projection.wal_tail_segments > WAL_TAIL_BACKPRESSURE_SEGMENTS {
+        let reject_writes_at_segments = WalTailPolicy::DEFAULT.reject_writes_at_segments;
+        if projection.wal_tail_segments > reject_writes_at_segments {
             let wal_tail_segments = projection.wal_tail_segments;
             self.publish_tail_projection = Some(projection);
             let error = MetadataViewError::MaintenanceRequired {
                 namespace_id: self.namespace_id.clone(),
                 reason: format!(
-                    "wal tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {WAL_TAIL_BACKPRESSURE_SEGMENTS}"
+                    "wal tail has {wal_tail_segments} segments; publishes resume once maintenance brings it back under {reject_writes_at_segments}"
                 ),
             };
             return NamespaceCommitEnginePublishResult {
