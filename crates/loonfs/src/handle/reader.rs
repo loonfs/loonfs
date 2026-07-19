@@ -4,12 +4,13 @@ use super::HandleBuilderCore;
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
+use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, ChangesResponse,
     DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest, GrepResponse, InodeId,
     ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId,
-    ObjectStoreMetricsRecorder, PageRequest, Result, RevisionNo, RuntimeCacheConfig,
-    RuntimeCacheStats, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    PageRequest, Result, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
+    StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 

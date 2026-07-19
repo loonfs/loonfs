@@ -1,9 +1,9 @@
 //! Behavior tests for the runtime core.
 
 use crate::{
-    ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, DisplayName, InodeId,
-    NameKey, NamePolicy, RevisionNo,
+    ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, InodeId, NameKey, RevisionNo,
 };
+use loonfs_api::{DisplayName, NamePolicy};
 
 /// Runs build steps until the index reports up to date, so each call
 /// after one write lands that write's revisions as one delta run. Fails
