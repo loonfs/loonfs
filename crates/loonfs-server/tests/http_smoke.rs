@@ -205,7 +205,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
         let full_listing = harness
             .client
-            .list_path(&docs)
+            .list_path_all(&docs)
             .expect("full directory list");
         assert_eq!(entry_names(&full_listing), vec!["a.txt", "b.txt", "c.txt"]);
         assert_eq!(full_listing.next_cursor, None);
@@ -281,7 +281,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
                 .expect("write file");
         }
 
-        let listing = harness.client.list_path(&docs).expect("directory list");
+        let listing = harness.client.list_path_all(&docs).expect("directory list");
         assert_eq!(entry_names(&listing), vec!["a.txt", "B.txt", "c.txt"]);
     })
     .await
@@ -614,13 +614,16 @@ async fn http_namespace_fork_shares_content_and_diverges() {
             b"clone-after-fork\n"
         );
 
-        match harness.client.list_changes("clone", ChangeSeq(0)) {
+        match harness
+            .client
+            .list_changes_page("clone", ChangeSeq(0), None)
+        {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
         let clone_changes = harness
             .client
-            .list_changes("clone", ChangeSeq(1))
+            .list_changes_page("clone", ChangeSeq(1), None)
             .expect("clone changes");
         assert_eq!(clone_changes.changes.len(), 1);
         assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
@@ -736,7 +739,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let changes = harness
             .client
-            .list_changes(namespace, ChangeSeq(0))
+            .list_changes_page(namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.namespace_id.as_str(), namespace);
         assert_eq!(changes.after_seq, ChangeSeq(0));
@@ -761,7 +764,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let empty = harness
             .client
-            .list_changes(namespace, commit.committed_seq)
+            .list_changes_page(namespace, commit.committed_seq, None)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
     })
@@ -941,7 +944,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let changes = harness
             .client
-            .list_changes(namespace, ChangeSeq(0))
+            .list_changes_page(namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.changes.len(), 3);
         assert_eq!(
@@ -1035,7 +1038,7 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let entry = harness.client.stat_path(&target).expect("stat file");
         let revisions = harness
             .client
-            .list_file_revisions(&target)
+            .list_file_revisions_page(&target, None, None)
             .expect("path revisions");
         assert_eq!(revisions.inode_id, entry.inode_id);
         assert_eq!(revisions.revisions.len(), 2);
@@ -1058,12 +1061,12 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
             )
             .expect("move path");
         assert!(matches!(
-            harness.client.list_file_revisions(&target),
+            harness.client.list_file_revisions_page(&target, None, None),
             Err(ClientError::Api { code, .. }) if code == "path_not_found"
         ));
         let inode_revisions = harness
             .client
-            .list_file_revisions_for_inode(namespace, entry.inode_id)
+            .list_file_revisions_for_inode_page(namespace, entry.inode_id, None, None)
             .expect("inode revisions");
         assert_eq!(inode_revisions.revisions.len(), 2);
         assert_eq!(
@@ -1676,13 +1679,13 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         let bytes = client.read_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello admin\n");
 
-        match client.list_changes(namespace, ChangeSeq(0)) {
+        match client.list_changes_page(namespace, ChangeSeq(0), None) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
 
         let empty = client
-            .list_changes(namespace, ChangeSeq(1))
+            .list_changes_page(namespace, ChangeSeq(1), None)
             .expect("changes after floor");
         assert_eq!(empty.changes, Vec::new());
     })

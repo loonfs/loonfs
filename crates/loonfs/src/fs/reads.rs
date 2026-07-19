@@ -45,26 +45,12 @@ impl FsCore {
         Ok(entry)
     }
 
-    /// Lists the children of a directory path.
-    ///
-    /// Entries-only convenience over [`Self::list_path_entries`].
-    pub(crate) async fn list_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<Vec<AuthoritativePathEntry>> {
-        Ok(self
-            .list_path_entries(namespace_id, absolute_path)
-            .await?
-            .entries)
-    }
-
-    /// Lists a directory together with the head the listing was read from.
+    /// Lists a directory by aggregating every page into one response.
     ///
     /// The envelope and every entry come from one consistent head, so an
     /// empty directory still reports which state answered the question. Entries
     /// are returned in canonical name-key order, matching paged listings.
-    pub(crate) async fn list_path_entries(
+    pub(crate) async fn list_path_entries_all(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,

@@ -101,9 +101,10 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
             .expect("read through standalone reader");
         assert_eq!(read.bytes, b"hello");
         let entries = standalone
-            .list_path(&namespace_id, "/docs")
+            .list_path_entries_all(&namespace_id, "/docs")
             .await
-            .expect("list through standalone reader");
+            .expect("list through standalone reader")
+            .entries;
         assert_eq!(entries.len(), 1);
 
         // Admin inspects the same namespace through its own handle.

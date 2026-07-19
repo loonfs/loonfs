@@ -168,7 +168,7 @@ pub(crate) async fn run_admin_changes(
     let response = context
         .target
         .backend()
-        .list_changes(&context.namespace, after_seq, args.limit)
+        .list_changes_page(&context.namespace, after_seq, args.limit)
         .await
         .map_err(|error| context.fail(kind, error))?;
 

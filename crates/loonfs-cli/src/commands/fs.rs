@@ -73,7 +73,7 @@ pub(crate) async fn run_filesystem_ls(
     let entries = context
         .target
         .backend()
-        .list_path(&spec)
+        .list_path_all(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {
@@ -280,7 +280,7 @@ pub(crate) async fn run_filesystem_revisions(
     let response = context
         .target
         .backend()
-        .list_file_revisions(&spec, args.limit, args.cursor.as_deref())
+        .list_file_revisions_page(&spec, args.limit, args.cursor.as_deref())
         .await
         .map_err(|error| context.fail(kind, error))?;
 

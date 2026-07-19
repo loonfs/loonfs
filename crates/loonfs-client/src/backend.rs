@@ -159,7 +159,7 @@ pub trait Backend {
         namespace_id: &str,
     ) -> Result<NamespaceStatusResponse, BackendError>;
     /// Lists the entries of a directory.
-    async fn list_path(
+    async fn list_path_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError>;
@@ -191,7 +191,7 @@ pub trait Backend {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError>;
     /// Lists one page of a file's retained revisions.
-    async fn list_file_revisions(
+    async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -299,7 +299,7 @@ pub trait Backend {
         request: GcRequest,
     ) -> Result<GcResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
-    async fn list_changes(
+    async fn list_changes_page(
         &self,
         namespace_id: &str,
         after_seq: ChangeSeq,
@@ -383,13 +383,13 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn list_path(
+    async fn list_path_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
         let spec = spec.clone();
         Ok(self
-            .wire(move |client| client.list_path(&spec))
+            .wire(move |client| client.list_path_all(&spec))
             .await?
             .entries)
     }
@@ -446,7 +446,7 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn list_file_revisions(
+    async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -608,7 +608,7 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn list_changes(
+    async fn list_changes_page(
         &self,
         namespace_id: &str,
         after_seq: ChangeSeq,

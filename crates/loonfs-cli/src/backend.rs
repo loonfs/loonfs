@@ -166,15 +166,17 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_path(
+    async fn list_path_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.reader
-            .list_path(&namespace_id, &spec.absolute_path)
+        Ok(self
+            .reader
+            .list_path_entries_all(&namespace_id, &spec.absolute_path)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?
+            .entries)
     }
 
     async fn stat_path(
@@ -246,7 +248,7 @@ impl Backend for EmbeddedBackend {
         Ok(result.bytes)
     }
 
-    async fn list_file_revisions(
+    async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -495,7 +497,7 @@ impl Backend for EmbeddedBackend {
             .map_err(map_runtime_error)
     }
 
-    async fn list_changes(
+    async fn list_changes_page(
         &self,
         namespace_id: &str,
         after_seq: ChangeSeq,
@@ -796,7 +798,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes("demo", ChangeSeq(0), None)
+            .list_changes_page("demo", ChangeSeq(0), None)
             .await
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
@@ -829,7 +831,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes("missing", ChangeSeq(0), None)
+            .list_changes_page("missing", ChangeSeq(0), None)
             .await
             .expect_err("changes on missing namespace");
         assert_eq!(changes.code, ErrorCode::NamespaceNotFound.as_str());
