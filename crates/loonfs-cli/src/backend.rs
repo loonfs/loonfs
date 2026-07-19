@@ -83,7 +83,7 @@ impl EmbeddedBackend {
     /// cannot double-apply.
     async fn publish_with_maintenance_recovery<T, F, Fut>(
         &self,
-        namespace: &str,
+        namespace_id: &NamespaceId,
         attempt: F,
     ) -> Result<T, BackendError>
     where
@@ -106,18 +106,21 @@ impl EmbeddedBackend {
                 .map_err(map_runtime_error)?;
             result = attempt().await;
         }
-        let result = result.map_err(|error| map_namespace_scoped_runtime_error(namespace, error));
+        let result =
+            result.map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error));
         self.settle_background_work_after(result).await
     }
 }
 
 #[async_trait]
 impl Backend for EmbeddedBackend {
-    async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
-        let namespace_id = parse_namespace_id(namespace_id)?;
+    async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceSummary, BackendError> {
         let result = self
             .writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
             .map_err(map_runtime_error);
         self.settle_background_work_after(result).await
@@ -125,16 +128,15 @@ impl Backend for EmbeddedBackend {
 
     async fn delete_namespace(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         expected_head_seq: Option<u64>,
     ) -> Result<DeleteNamespaceResponse, BackendError> {
-        let namespace_id = parse_namespace_id(namespace_id)?;
         let options = DeleteNamespaceOptions {
             expected_head_seq: expected_head_seq.map(ChangeSeq),
         };
         let result = self
             .writer
-            .delete_namespace(&namespace_id, options)
+            .delete_namespace(namespace_id, options)
             .await
             .map_err(map_runtime_error);
         self.settle_background_work_after(result).await
@@ -142,14 +144,12 @@ impl Backend for EmbeddedBackend {
 
     async fn fork_namespace(
         &self,
-        source: &str,
-        new_namespace_id: &str,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, BackendError> {
-        let source_namespace_id = parse_namespace_id(source)?;
-        let new_namespace_id = parse_namespace_id(new_namespace_id)?;
         let result = self
             .writer
-            .fork_namespace(&source_namespace_id, &new_namespace_id)
+            .fork_namespace(source_namespace_id, new_namespace_id)
             .await
             .map_err(map_runtime_error);
         self.settle_background_work_after(result).await
@@ -157,11 +157,10 @@ impl Backend for EmbeddedBackend {
 
     async fn namespace_status(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         self.admin
-            .namespace_status(&parsed)
+            .namespace_status(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
@@ -170,12 +169,11 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
         Ok(self
             .reader
-            .list_path_entries_all(&namespace_id, &spec.absolute_path)
+            .list_path_entries_all(spec.namespace(), spec.absolute_path().as_str())
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?
             .entries)
     }
 
@@ -183,53 +181,48 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
     ) -> Result<AuthoritativePathEntry, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
         self.reader
-            .stat_path(&namespace_id, &spec.absolute_path)
+            .stat_path(spec.namespace(), spec.absolute_path().as_str())
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
     async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let result = self
             .reader
-            .read_file_bytes(&namespace_id, &spec.absolute_path)
+            .read_file_bytes(spec.namespace(), spec.absolute_path().as_str())
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
         Ok(result.bytes)
     }
 
     async fn grep(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         self.reader
-            .grep(&parsed, request)
+            .grep(namespace_id, request)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn enable_grams_index(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<EnableGramsIndexResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         self.admin
-            .enable_grams_index(&parsed)
+            .enable_grams_index(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn disable_grams_index(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<DisableGramsIndexResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         self.admin
-            .disable_grams_index(&parsed)
+            .disable_grams_index(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
@@ -239,12 +232,11 @@ impl Backend for EmbeddedBackend {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let result = self
             .reader
-            .read_file_revision_bytes(&namespace_id, &spec.absolute_path, revision_no)
+            .read_file_revision_bytes(spec.namespace(), spec.absolute_path().as_str(), revision_no)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
         Ok(result.bytes)
     }
 
@@ -254,7 +246,6 @@ impl Backend for EmbeddedBackend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
         let request = loonfs_api::PageRequest {
             limit: resolve_cli_page_limit(limit)?,
             cursor: cursor
@@ -265,9 +256,9 @@ impl Backend for EmbeddedBackend {
                 })?,
         };
         self.reader
-            .list_file_revisions_page(&namespace_id, &spec.absolute_path, request)
+            .list_file_revisions_page(spec.namespace(), spec.absolute_path().as_str(), request)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
     async fn put_file_bytes(
@@ -277,11 +268,10 @@ impl Backend for EmbeddedBackend {
         behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.publish_with_maintenance_recovery(&spec.namespace, || {
+        self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.put_file_bytes(
-                &namespace_id,
-                &spec.absolute_path,
+                spec.namespace(),
+                spec.absolute_path().as_str(),
                 bytes,
                 PutFileOptions {
                     behavior,
@@ -298,11 +288,10 @@ impl Backend for EmbeddedBackend {
         expected_inode_id: Option<InodeId>,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.publish_with_maintenance_recovery(&spec.namespace, || {
+        self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.delete_path(
-                &namespace_id,
-                &spec.absolute_path,
+                spec.namespace(),
+                spec.absolute_path().as_str(),
                 DeleteOptions {
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     commit_id: commit_id.clone(),
@@ -319,11 +308,10 @@ impl Backend for EmbeddedBackend {
         parents: bool,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.publish_with_maintenance_recovery(&spec.namespace, || {
+        self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.create_directory(
-                &namespace_id,
-                &spec.absolute_path,
+                spec.namespace(),
+                spec.absolute_path().as_str(),
                 CreateDirectoryOptions {
                     commit_id: commit_id.clone(),
                     parents,
@@ -340,12 +328,11 @@ impl Backend for EmbeddedBackend {
         behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&from.namespace)?;
-        self.publish_with_maintenance_recovery(&from.namespace, || {
+        self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.move_path(
-                &namespace_id,
-                &from.absolute_path,
-                &to.absolute_path,
+                from.namespace(),
+                from.absolute_path().as_str(),
+                to.absolute_path().as_str(),
                 MoveOptions {
                     behavior,
                     commit_id: commit_id.clone(),
@@ -362,12 +349,11 @@ impl Backend for EmbeddedBackend {
         behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&from.namespace)?;
-        self.publish_with_maintenance_recovery(&from.namespace, || {
+        self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.copy_path(
-                &namespace_id,
-                &from.absolute_path,
-                &to.absolute_path,
+                from.namespace(),
+                from.absolute_path().as_str(),
+                to.absolute_path().as_str(),
                 CopyOptions {
                     behavior,
                     commit_id: commit_id.clone(),
@@ -383,11 +369,10 @@ impl Backend for EmbeddedBackend {
         source_revision_no: RevisionNo,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.publish_with_maintenance_recovery(&spec.namespace, || {
+        self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.restore_file_revision(
-                &namespace_id,
-                &spec.absolute_path,
+                spec.namespace(),
+                spec.absolute_path().as_str(),
                 source_revision_no,
                 RestoreRevisionOptions {
                     commit_id: commit_id.clone(),
@@ -404,13 +389,12 @@ impl Backend for EmbeddedBackend {
         deleted_at_seq: ChangeSeq,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let namespace_id = parse_namespace_id(&spec.namespace)?;
-        self.publish_with_maintenance_recovery(&spec.namespace, || {
+        self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.undelete(
-                &namespace_id,
+                spec.namespace(),
                 inode_id,
                 deleted_at_seq,
-                &spec.absolute_path,
+                spec.absolute_path().as_str(),
                 UndeleteOptions {
                     commit_id: commit_id.clone(),
                 },
@@ -425,59 +409,57 @@ impl Backend for EmbeddedBackend {
 
     async fn create_checkpoint(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         self.admin
-            .create_checkpoint(&parsed, CreateCheckpointOptions::from_request(request))
+            .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
             .map_err(map_runtime_error)
     }
 
     async fn release_checkpoint(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         checkpoint_id: &str,
     ) -> Result<ReleaseCheckpointResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         let checkpoint_id = CheckpointId::parse(checkpoint_id).map_err(|error| {
             BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
         })?;
         self.admin
-            .release_checkpoint(&parsed, &checkpoint_id)
+            .release_checkpoint(namespace_id, &checkpoint_id)
             .await
             .map_err(map_runtime_error)
     }
 
-    async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
+    async fn flush_wal(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<FlushWalResponse, BackendError> {
         self.admin
-            .flush_wal(&parsed)
+            .flush_wal(namespace_id)
             .await
             .map_err(map_runtime_error)
     }
 
     async fn advance_retention(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         self.admin
-            .advance_retention_floor(&parsed)
+            .advance_retention_floor(namespace_id)
             .await
             .map_err(map_runtime_error)
     }
 
     async fn maintenance_tick(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: MaintenanceTickRequest,
     ) -> Result<MaintenanceTickResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         let options = MaintenanceTickOptions::from_request(request);
         self.admin
-            .maintenance_tick_namespace(&parsed, options)
+            .maintenance_tick_namespace(namespace_id, options)
             .await
             .map(MaintenanceTickResult::into_response)
             .map_err(map_runtime_error)
@@ -485,40 +467,33 @@ impl Backend for EmbeddedBackend {
 
     async fn gc_namespace(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: GcRequest,
     ) -> Result<GcResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         let config = gc_config_from_request(request);
         self.admin
-            .gc_namespace(&parsed, &config)
+            .gc_namespace(namespace_id, &config)
             .await
-            .map(|report| gc_response_from_report(parsed, report))
+            .map(|report| gc_response_from_report(namespace_id.clone(), report))
             .map_err(map_runtime_error)
     }
 
     async fn list_changes_page(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError> {
-        let parsed = parse_namespace_id(namespace_id)?;
         let limit = resolve_cli_page_limit(limit)?;
         self.reader
             .list_changes_after(
-                &parsed,
+                namespace_id,
                 after_seq,
                 ListChangesOptions { limit: Some(limit) },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
-}
-
-fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, BackendError> {
-    NamespaceId::parse(namespace)
-        .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
 }
 
 fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendError> {
@@ -539,9 +514,12 @@ fn map_runtime_error(error: RuntimeError) -> BackendError {
     }
 }
 
-fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> BackendError {
+fn map_namespace_scoped_runtime_error(
+    namespace_id: &NamespaceId,
+    error: RuntimeError,
+) -> BackendError {
     match error {
-        RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace, error),
+        RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace_id, error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
         RuntimeError::Config(message) => BackendError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
@@ -557,11 +535,11 @@ fn map_core_error(error: CoreError) -> BackendError {
     BackendError::new(error.code().as_str(), error.to_string())
 }
 
-fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> BackendError {
+fn map_namespace_scoped_core_error(namespace_id: &NamespaceId, error: CoreError) -> BackendError {
     if matches!(error.code(), ErrorCode::NamespaceNotFound) {
         return BackendError::new(
             ErrorCode::NamespaceNotFound.as_str(),
-            format!("namespace `{namespace}` does not exist"),
+            format!("namespace `{namespace_id}` does not exist"),
         );
     }
 
@@ -726,6 +704,10 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    fn namespace_id(value: &str) -> NamespaceId {
+        NamespaceId::parse(value).expect("valid namespace id")
+    }
+
     #[test]
     fn map_core_error_surfaces_registry_codes_verbatim() {
         let error = map_core_error(CoreError::RevisionNotFound {
@@ -777,17 +759,14 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .await
             .expect("create namespace");
 
         let response = target
             .backend
             .put_file_bytes(
-                &NamespacePath {
-                    namespace: "demo".to_owned(),
-                    absolute_path: "/file.txt".to_owned(),
-                },
+                &NamespacePath::parse("demo", "/file.txt").expect("namespace path"),
                 b"hello",
                 DestinationBehavior::NoReplace,
                 None,
@@ -798,7 +777,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes_page("demo", ChangeSeq(0), None)
+            .list_changes_page(&namespace_id("demo"), ChangeSeq(0), None)
             .await
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
@@ -819,7 +798,7 @@ mod tests {
         let checkpoint = target
             .backend
             .create_checkpoint(
-                "missing",
+                &namespace_id("missing"),
                 CreateCheckpointRequest {
                     name: "nightly".to_owned(),
                     ttl_ms: None,
@@ -831,7 +810,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes_page("missing", ChangeSeq(0), None)
+            .list_changes_page(&namespace_id("missing"), ChangeSeq(0), None)
             .await
             .expect_err("changes on missing namespace");
         assert_eq!(changes.code, ErrorCode::NamespaceNotFound.as_str());
@@ -850,7 +829,7 @@ mod tests {
             .expect("build embedded target");
         target
             .backend
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .await
             .expect("create namespace");
 
@@ -862,10 +841,8 @@ mod tests {
             target
                 .backend
                 .put_file_bytes(
-                    &NamespacePath {
-                        namespace: "demo".to_owned(),
-                        absolute_path: format!("/files/f{index}.txt"),
-                    },
+                    &NamespacePath::parse("demo", &format!("/files/f{index}.txt"))
+                        .expect("namespace path"),
                     b"payload",
                     DestinationBehavior::NoReplace,
                     None,
@@ -940,10 +917,7 @@ mod tests {
         target
             .backend
             .put_file_bytes(
-                &NamespacePath {
-                    namespace: "demo".to_owned(),
-                    absolute_path: "/recovered.txt".to_owned(),
-                },
+                &NamespacePath::parse("demo", "/recovered.txt").expect("namespace path"),
                 b"payload",
                 DestinationBehavior::NoReplace,
                 None,

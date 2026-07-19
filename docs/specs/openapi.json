@@ -3632,7 +3632,7 @@
         ],
         "properties": {
           "namespace_id": {
-            "type": "string",
+            "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id to create."
           }
         }
@@ -4156,7 +4156,7 @@
         ],
         "properties": {
           "new_namespace_id": {
-            "type": "string",
+            "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id for the fork target."
           }
         }

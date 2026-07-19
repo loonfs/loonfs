@@ -200,7 +200,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     });
     tokio::task::spawn_blocking(move || {
         client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace over http");
     })
     .await
@@ -242,7 +242,7 @@ async fn runtime_created_state_is_readable_through_http() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo:/notes/hello.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
         let stat = harness.client.stat_path(&target).expect("stat file");
         assert_eq!(stat.absolute_path, "/notes/hello.txt");
         assert_eq!(stat.size_bytes, Some(18));
@@ -265,9 +265,9 @@ async fn http_created_state_is_readable_through_runtime() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace through http");
-        let target = NamespacePath::parse("demo:/notes/from-http.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
         harness
             .client
             .write_file_bytes(&target, b"hello from http", &MutationOptions::default())
@@ -296,7 +296,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("missing:/notes/hello.txt").expect("target");
+        let target = NamespacePath::parse("missing", "/notes/hello.txt").expect("target");
         assert_api_error(
             harness
                 .client
@@ -313,7 +313,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
         );
-        let destination = NamespacePath::parse("missing:/notes/renamed.txt").expect("target");
+        let destination = NamespacePath::parse("missing", "/notes/renamed.txt").expect("target");
         assert_api_error(
             harness.client.move_path(
                 &target,
@@ -339,7 +339,7 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("missing:/").expect("target");
+        let target = NamespacePath::parse("missing", "/").expect("target");
         assert_api_error(
             harness.client.list_path_all(&target),
             404,
@@ -361,7 +361,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo:/missing.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/missing.txt").expect("target");
         assert_api_error(
             harness
                 .client
@@ -409,7 +409,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     tokio::task::spawn_blocking(move || {
-        let dir_target = NamespacePath::parse("demo:/docs").expect("dir target");
+        let dir_target = NamespacePath::parse("demo", "/docs").expect("dir target");
         assert_api_error(
             harness.client.write_file_bytes(
                 &dir_target,
@@ -421,8 +421,8 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
             None,
         );
 
-        let from = NamespacePath::parse("demo:/tmp/a.txt").expect("from");
-        let to = NamespacePath::parse("demo:/docs/a.txt").expect("to");
+        let from = NamespacePath::parse("demo", "/tmp/a.txt").expect("from");
+        let to = NamespacePath::parse("demo", "/docs/a.txt").expect("to");
         assert_api_error(
             harness.client.move_path(
                 &from,
@@ -468,12 +468,12 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
     tokio::task::spawn_blocking(move || {
         // The deleted name is invisible and immediately reusable; the
         // dead subtree's children stay dead.
-        let put_target = NamespacePath::parse("demo:/docs/new.txt").expect("put target");
+        let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
         harness
             .client
             .write_file_bytes(&put_target, b"new", &MutationOptions::default())
             .expect("put recreates the subtree");
-        let old_child = NamespacePath::parse("demo:/docs/old.txt").expect("old child");
+        let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
         assert_api_error(
             harness.client.stat_path(&old_child),
             404,
@@ -481,8 +481,8 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             None,
         );
 
-        let from = NamespacePath::parse("demo:/tmp/source.txt").expect("from");
-        let to = NamespacePath::parse("demo:/docs/source.txt").expect("to");
+        let from = NamespacePath::parse("demo", "/tmp/source.txt").expect("from");
+        let to = NamespacePath::parse("demo", "/docs/source.txt").expect("to");
         harness
             .client
             .move_path(
@@ -507,7 +507,7 @@ async fn http_path_mutation_retries_transient_stale_head_cas() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo:/notes/race.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
         let result = harness
             .client
             .write_file_bytes(&target, b"race", &MutationOptions::default())
@@ -531,7 +531,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo:/notes/taken-over.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
         let result = harness
             .client
             .write_file_bytes(&target, b"taken over", &MutationOptions::default())
@@ -584,7 +584,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
                 disable_transient_retry: false,
             });
             assert_api_error(
-                client.namespace_status("demo"),
+                client.namespace_status(&namespace_id("demo")),
                 401,
                 "unauthorized",
                 Some("missing or invalid bearer token"),
@@ -693,7 +693,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
             request_timeout_ms: None,
             disable_transient_retry: false,
         });
-        let target = NamespacePath::parse("demo:/big.bin").expect("target");
+        let target = NamespacePath::parse("demo", "/big.bin").expect("target");
         assert_api_error(
             client.write_file_bytes(&target, &[0u8; 4096], &MutationOptions::default()),
             413,
@@ -991,7 +991,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
         let client = Client::new(config_for_busy);
-        let target = NamespacePath::parse("demo:/one.bin").expect("target");
+        let target = NamespacePath::parse("demo", "/one.bin").expect("target");
         assert_api_error(
             client.write_file_bytes(&target, &[0u8; 64], &MutationOptions::default()),
             503,
@@ -1005,7 +1005,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     drop(held);
     tokio::task::spawn_blocking(move || {
         let client = Client::new(client_config);
-        let target = NamespacePath::parse("demo:/one.bin").expect("target");
+        let target = NamespacePath::parse("demo", "/one.bin").expect("target");
         client
             .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
             .expect("a freed slot admits the upload");
@@ -1055,7 +1055,7 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
             request_timeout_ms: None,
             disable_transient_retry: false,
         });
-        let target = NamespacePath::parse("demo:/retried.bin").expect("target");
+        let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
         client
             .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
             .expect("transient retry rides out the briefly full slot");
@@ -1109,7 +1109,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
         let client = Client::new(config_for_busy);
-        let target = NamespacePath::parse("demo:/note.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/note.txt").expect("target");
         assert_api_error(
             client.read_file_bytes(&target),
             503,
@@ -1123,7 +1123,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     drop(held);
     tokio::task::spawn_blocking(move || {
         let client = Client::new(client_config);
-        let target = NamespacePath::parse("demo:/note.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/note.txt").expect("target");
         let bytes = client
             .read_file_bytes(&target)
             .expect("a freed slot admits the read");
@@ -1175,14 +1175,14 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
             disable_transient_retry: false,
         });
         assert_api_error(
-            client.read_file_bytes(&NamespacePath::parse("demo:/big.bin").expect("target")),
+            client.read_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target")),
             413,
             "content_too_large",
             None,
         );
         // Content inside the limit still reads through the same route.
         let bytes = client
-            .read_file_bytes(&NamespacePath::parse("demo:/small.bin").expect("target"))
+            .read_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
             .expect("small content fits under the limit");
         assert_eq!(bytes.len(), 8);
     })

@@ -38,11 +38,12 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
     .await;
 
     tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("doomed");
         harness
             .client
-            .create_namespace("doomed")
+            .create_namespace(&namespace)
             .expect("create namespace");
-        let target = NamespacePath::parse("doomed:/note.txt").expect("parse path");
+        let target = NamespacePath::parse("doomed", "/note.txt").expect("parse path");
         harness
             .client
             .write_file_bytes(&target, b"last words", &MutationOptions::default())
@@ -51,7 +52,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         // A stale precondition refuses the delete and deletes nothing.
         let stale = harness
             .client
-            .delete_namespace("doomed", Some(ChangeSeq(0)))
+            .delete_namespace(&namespace, Some(ChangeSeq(0)))
             .expect_err("stale precondition");
         match stale {
             ClientError::Api { status, code, .. } => {
@@ -62,12 +63,12 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         }
         harness
             .client
-            .namespace_status("doomed")
+            .namespace_status(&namespace)
             .expect("still alive after failed precondition");
 
         let response = harness
             .client
-            .delete_namespace("doomed", None)
+            .delete_namespace(&namespace, None)
             .expect("delete namespace");
         assert_eq!(response.namespace_id.as_str(), "doomed");
         assert_eq!(response.head_seq, ChangeSeq(1));
@@ -76,7 +77,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         // deleted, and the id is retired.
         let status = harness
             .client
-            .namespace_status("doomed")
+            .namespace_status(&namespace)
             .expect_err("deleted namespace has no status");
         match status {
             ClientError::Api { status, code, .. } => {
@@ -95,7 +96,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         }
         let again = harness
             .client
-            .delete_namespace("doomed", None)
+            .delete_namespace(&namespace, None)
             .expect_err("repeat delete");
         match again {
             ClientError::Api { status, code, .. } => {
@@ -106,7 +107,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         }
         let recreate = harness
             .client
-            .create_namespace("doomed")
+            .create_namespace(&namespace)
             .expect_err("the id is retired");
         match recreate {
             ClientError::Api { status, code, .. } => {
@@ -169,10 +170,10 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let docs = NamespacePath::parse("demo:/docs").expect("docs path");
-        let other = NamespacePath::parse("demo:/other").expect("other path");
+        let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
+        let other = NamespacePath::parse("demo", "/other").expect("other path");
         harness
             .client
             .create_directory(&docs, false, &MutationOptions::default())
@@ -182,7 +183,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
             .create_directory(&other, false, &MutationOptions::default())
             .expect("create other dir");
         for name in ["a.txt", "b.txt", "c.txt"] {
-            let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
+            let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
             harness
                 .client
                 .write_file_bytes(&path, name.as_bytes(), &MutationOptions::default())
@@ -266,15 +267,15 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let docs = NamespacePath::parse("demo:/docs").expect("docs path");
+        let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
         harness
             .client
             .create_directory(&docs, false, &MutationOptions::default())
             .expect("create docs dir");
         for name in ["B.txt", "a.txt", "c.txt"] {
-            let path = NamespacePath::parse(&format!("demo:/docs/{name}")).expect("file path");
+            let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
             harness
                 .client
                 .write_file_bytes(&path, name.as_bytes(), &MutationOptions::default())
@@ -303,9 +304,9 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let directory = NamespacePath::parse("demo:/notes").expect("parse directory path");
+        let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
         harness
             .client
             .create_directory(&directory, false, &MutationOptions::default())
@@ -316,13 +317,16 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             .expect("stat directory");
         assert_eq!(directory_entry.inode_kind, InodeKind::Directory);
 
-        let target = NamespacePath::parse("demo:/notes/hello.txt").expect("parse namespace path");
+        let target =
+            NamespacePath::parse("demo", "/notes/hello.txt").expect("parse namespace path");
         let written = harness
             .client
             .write_file_bytes(
                 &target,
                 b"hello over http\n",
-                &MutationOptions::with_commit_id("smoke-write-1"),
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("smoke-write-1").expect("valid commit id"),
+                ),
             )
             .expect("write bytes");
         // Path operations echo the commit id they committed under.
@@ -337,14 +341,14 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 
         let status = harness
             .client
-            .namespace_status("demo")
+            .namespace_status(&namespace_id("demo"))
             .expect("namespace status");
         assert_eq!(status.namespace_id.as_str(), "demo");
         assert_eq!(status.head_seq, ChangeSeq(2));
 
         let missing = harness
             .client
-            .namespace_status("absent")
+            .namespace_status(&namespace_id("absent"))
             .expect_err("missing namespace status");
         match missing {
             ClientError::Api { status, code, .. } => {
@@ -373,7 +377,7 @@ async fn http_namespace_listing_route_is_not_exposed() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create demo");
 
         let response = ureq::get(&format!("{}/v0/namespaces", harness.server_url))
@@ -441,13 +445,13 @@ async fn http_upload_content_rejects_invalid_upload_id() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
 
         let invalid_upload_id = ["upl", "123"].join("-");
         match harness
             .client
-            .upload_content("demo", &invalid_upload_id, b"hello")
+            .upload_content(&namespace_id("demo"), &invalid_upload_id, b"hello")
         {
             Err(ClientError::Api { status, code, .. }) => {
                 assert_eq!(status, 400);
@@ -475,9 +479,9 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let source = NamespacePath::parse("demo:/docs/hello.txt").expect("source");
+        let source = NamespacePath::parse("demo", "/docs/hello.txt").expect("source");
         harness
             .client
             .put_file_bytes(
@@ -508,7 +512,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             )
             .expect("forced overwrite");
 
-        let destination = NamespacePath::parse("demo:/docs/copy.txt").expect("destination");
+        let destination = NamespacePath::parse("demo", "/docs/copy.txt").expect("destination");
         harness
             .client
             .copy_path(
@@ -548,10 +552,10 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let source_path = NamespacePath::parse("demo:/docs/shared.txt").expect("source path");
-        let clone_path = NamespacePath::parse("clone:/docs/shared.txt").expect("clone path");
+        let source_path = NamespacePath::parse("demo", "/docs/shared.txt").expect("source path");
+        let clone_path = NamespacePath::parse("clone", "/docs/shared.txt").expect("clone path");
         harness
             .client
             .write_file_bytes(&source_path, b"base\n", &MutationOptions::default())
@@ -559,7 +563,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         let forked = harness
             .client
-            .fork_namespace("demo", "clone")
+            .fork_namespace(&namespace_id("demo"), &namespace_id("clone"))
             .expect("fork namespace");
         assert_eq!(forked.namespace_id.as_str(), "clone");
 
@@ -616,14 +620,14 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         match harness
             .client
-            .list_changes_page("clone", ChangeSeq(0), None)
+            .list_changes_page(&namespace_id("clone"), ChangeSeq(0), None)
         {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
         let clone_changes = harness
             .client
-            .list_changes_page("clone", ChangeSeq(1), None)
+            .list_changes_page(&namespace_id("clone"), ChangeSeq(1), None)
             .expect("clone changes");
         assert_eq!(clone_changes.changes.len(), 1);
         assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
@@ -645,49 +649,50 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         let file_bytes = b"phase-2a over http\n";
-        let target = NamespacePath::parse("demo:/uploaded.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/uploaded.txt").expect("target");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
 
         let begin = harness
             .client
-            .begin_upload(namespace, &BeginUploadRequest::default())
+            .begin_upload(&namespace, &BeginUploadRequest::default())
             .expect("begin upload");
         let first_content = harness
             .client
-            .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
+            .upload_content(&namespace, begin.upload_id.as_str(), file_bytes)
             .expect("upload content");
         let repeated_content = harness
             .client
-            .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
+            .upload_content(&namespace, begin.upload_id.as_str(), file_bytes)
             .expect("repeat upload content");
         assert_eq!(first_content, repeated_content);
-        match harness
-            .client
-            .upload_content(namespace, begin.upload_id.as_str(), b"different bytes")
-        {
+        match harness.client.upload_content(
+            &namespace,
+            begin.upload_id.as_str(),
+            b"different bytes",
+        ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
             other => unreachable!("expected upload_content_conflict, got {other:?}"),
         }
 
         let mismatch_upload = harness
             .client
-            .begin_upload(namespace, &BeginUploadRequest::default())
+            .begin_upload(&namespace, &BeginUploadRequest::default())
             .expect("begin mismatch upload");
         let staged = harness
             .client
-            .upload_content(namespace, mismatch_upload.upload_id.as_str(), file_bytes)
+            .upload_content(&namespace, mismatch_upload.upload_id.as_str(), file_bytes)
             .expect("stage mismatch upload content");
         assert_ne!(
             staged.content_ref,
             ContentRef::whole_file_v0(b"other bytes")
         );
         match harness.client.complete_upload(
-            namespace,
+            &namespace,
             mismatch_upload.upload_id.as_str(),
             &CompleteUploadRequest {
                 content_ref: ContentRef::whole_file_v0(b"other bytes"),
@@ -697,7 +702,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             other => unreachable!("expected upload content rejection, got {other:?}"),
         }
 
-        let content_ref = stage_uploaded_content_ref(&harness.client, namespace, file_bytes);
+        let content_ref = stage_uploaded_content_ref(&harness.client, &namespace, file_bytes);
 
         let commit_request = ApiCommitRequest {
             commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
@@ -711,7 +716,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         };
         let commit = harness
             .client
-            .commit_operations(namespace, &commit_request)
+            .commit_operations(&namespace, &commit_request)
             .expect("commit uploaded file");
         assert_eq!(
             commit.commit_id,
@@ -721,7 +726,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let repeated_commit = harness
             .client
-            .commit_operations(namespace, &commit_request)
+            .commit_operations(&namespace, &commit_request)
             .expect("repeat commit");
         assert_eq!(repeated_commit, commit);
 
@@ -739,9 +744,9 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let changes = harness
             .client
-            .list_changes_page(namespace, ChangeSeq(0), None)
+            .list_changes_page(&namespace, ChangeSeq(0), None)
             .expect("list changes");
-        assert_eq!(changes.namespace_id.as_str(), namespace);
+        assert_eq!(changes.namespace_id, namespace);
         assert_eq!(changes.after_seq, ChangeSeq(0));
         assert_eq!(changes.through_seq, commit.committed_seq);
         assert_eq!(changes.changes.len(), 1);
@@ -764,7 +769,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let empty = harness
             .client
-            .list_changes_page(namespace, commit.committed_seq, None)
+            .list_changes_page(&namespace, commit.committed_seq, None)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
     })
@@ -785,23 +790,23 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
         let begin = harness
             .client
-            .begin_upload(namespace, &BeginUploadRequest::default())
+            .begin_upload(&namespace, &BeginUploadRequest::default())
             .expect("begin upload");
         let staged = harness
             .client
-            .upload_content(namespace, begin.upload_id.as_str(), b"token fallback")
+            .upload_content(&namespace, begin.upload_id.as_str(), b"token fallback")
             .expect("upload content");
         let completed = harness
             .client
             .complete_upload(
-                namespace,
+                &namespace,
                 begin.upload_id.as_str(),
                 &CompleteUploadRequest {
                     content_ref: staged.content_ref,
@@ -838,7 +843,7 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
             serde_json::from_reader(response.into_reader()).expect("decode operation response");
         assert_eq!(response.committed_seq, ChangeSeq(1));
 
-        let target = NamespacePath::parse("demo:/bad-token.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/bad-token.txt").expect("target");
         assert_eq!(
             harness.client.read_file_bytes(&target).expect("read file"),
             b"token fallback"
@@ -861,19 +866,19 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
-        let target = NamespacePath::parse("demo:/restore.txt").expect("target");
+        let namespace = namespace_id("demo");
+        let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
 
         let first_content_ref =
-            stage_uploaded_content_ref(&harness.client, namespace, b"first bytes\n");
+            stage_uploaded_content_ref(&harness.client, &namespace, b"first bytes\n");
         harness
             .client
             .commit_operations(
-                namespace,
+                &namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::parse("req-restore-create").expect("valid commit id"),
                     preconditions: Vec::new(),
@@ -893,11 +898,11 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .inode_id;
 
         let second_content_ref =
-            stage_uploaded_content_ref(&harness.client, namespace, b"second bytes\n");
+            stage_uploaded_content_ref(&harness.client, &namespace, b"second bytes\n");
         let replace = harness
             .client
             .commit_operations(
-                namespace,
+                &namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::parse("req-restore-replace").expect("valid commit id"),
                     preconditions: Vec::new(),
@@ -915,7 +920,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         let restore = harness
             .client
             .commit_operations(
-                namespace,
+                &namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::parse("req-restore-restore").expect("valid commit id"),
                     preconditions: Vec::new(),
@@ -944,7 +949,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let changes = harness
             .client
-            .list_changes_page(namespace, ChangeSeq(0), None)
+            .list_changes_page(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.changes.len(), 3);
         assert_eq!(
@@ -966,7 +971,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let first_page = harness
             .client
-            .list_changes_page(namespace, ChangeSeq(0), Some(2))
+            .list_changes_page(&namespace, ChangeSeq(0), Some(2))
             .expect("list first changes page");
         assert_eq!(first_page.after_seq, ChangeSeq(0));
         assert_eq!(first_page.through_seq, ChangeSeq(2));
@@ -976,7 +981,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         let second_page = harness
             .client
             .list_changes_page(
-                namespace,
+                &namespace,
                 first_page.next_after_seq.expect("next page"),
                 Some(2),
             )
@@ -1010,12 +1015,12 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
-        let target = NamespacePath::parse("demo:/docs/rev.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/docs/rev.txt").expect("target");
         harness
             .client
             .put_file_bytes(
@@ -1050,7 +1055,7 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
             b"one"
         );
 
-        let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
+        let moved = NamespacePath::parse("demo", "/docs/moved.txt").expect("moved");
         harness
             .client
             .move_path(
@@ -1066,13 +1071,13 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         ));
         let inode_revisions = harness
             .client
-            .list_file_revisions_for_inode_page(namespace, entry.inode_id, None, None)
+            .list_file_revisions_for_inode_page(&namespace, entry.inode_id, None, None)
             .expect("inode revisions");
         assert_eq!(inode_revisions.revisions.len(), 2);
         assert_eq!(
             harness
                 .client
-                .read_file_revision_bytes_for_inode(namespace, entry.inode_id, RevisionNo(2))
+                .read_file_revision_bytes_for_inode(&namespace, entry.inode_id, RevisionNo(2))
                 .expect("read inode revision"),
             b"two"
         );
@@ -1091,11 +1096,11 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         harness
             .client
             .restore_file_revision_for_inode(
-                namespace,
+                &namespace,
                 entry.inode_id,
                 RevisionNo(2),
                 RevisionNo(3),
-                "c_restore_inode_revision_0001",
+                &CommitId::parse("c_restore_inode_revision_0001").expect("valid commit id"),
             )
             .expect("inode restore");
         assert_eq!(
@@ -1123,19 +1128,19 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
-        let target = NamespacePath::parse("demo:/restore.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
 
         let first_content_ref =
-            stage_uploaded_content_ref(&harness.client, namespace, b"first bytes\n");
+            stage_uploaded_content_ref(&harness.client, &namespace, b"first bytes\n");
         harness
             .client
             .commit_operations(
-                namespace,
+                &namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::parse("req-restore-missing-source-create")
                         .expect("valid commit id"),
@@ -1156,7 +1161,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .inode_id;
 
         match harness.client.commit_operations(
-            namespace,
+            &namespace,
             &ApiCommitRequest {
                 commit_id: CommitId::parse("req-restore-missing-source-restore")
                     .expect("valid commit id"),
@@ -1193,14 +1198,14 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
 
         let first_content_ref =
-            stage_uploaded_content_ref(&harness.client, namespace, b"first payload\n");
+            stage_uploaded_content_ref(&harness.client, &namespace, b"first payload\n");
         let first_request = ApiCommitRequest {
             commit_id: CommitId::parse("req-phase-2a-conflict").expect("valid commit id"),
             preconditions: Vec::new(),
@@ -1213,11 +1218,11 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
         };
         harness
             .client
-            .commit_operations(namespace, &first_request)
+            .commit_operations(&namespace, &first_request)
             .expect("first commit");
 
         let second_content_ref =
-            stage_uploaded_content_ref(&harness.client, namespace, b"second payload\n");
+            stage_uploaded_content_ref(&harness.client, &namespace, b"second payload\n");
         let conflicting_request = ApiCommitRequest {
             commit_id: first_request.commit_id.clone(),
             preconditions: first_request.preconditions.clone(),
@@ -1231,7 +1236,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
 
         match harness
             .client
-            .commit_operations(namespace, &conflicting_request)
+            .commit_operations(&namespace, &conflicting_request)
         {
             Err(ClientError::Api {
                 code,
@@ -1268,17 +1273,17 @@ async fn http_commit_name_collision_reports_readable_error_message() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
 
-        let content_ref = stage_uploaded_content_ref(&harness.client, namespace, b"taken bytes\n");
+        let content_ref = stage_uploaded_content_ref(&harness.client, &namespace, b"taken bytes\n");
         harness
             .client
             .commit_operations(
-                namespace,
+                &namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::parse("req-collision-create").expect("valid commit id"),
                     preconditions: Vec::new(),
@@ -1293,7 +1298,7 @@ async fn http_commit_name_collision_reports_readable_error_message() {
             .expect("create file");
 
         match harness.client.commit_operations(
-            namespace,
+            &namespace,
             &ApiCommitRequest {
                 commit_id: CommitId::parse("req-collision-repeat").expect("valid commit id"),
                 preconditions: Vec::new(),
@@ -1346,10 +1351,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let target = NamespacePath::parse("demo:/docs/retry.txt").expect("target");
-        let commit_id = "req-v1-put";
+        let target = NamespacePath::parse("demo", "/docs/retry.txt").expect("target");
+        let commit_id = CommitId::parse("req-v1-put").expect("valid commit id");
 
         let first = harness
             .client
@@ -1357,7 +1362,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                 &target,
                 b"stable bytes\n",
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(commit_id),
+                &MutationOptions::with_commit_id(commit_id.clone()),
             )
             .expect("first put");
         assert!(first.committed_seq.0 >= 1);
@@ -1368,7 +1373,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                 &target,
                 b"stable bytes\n",
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(commit_id),
+                &MutationOptions::with_commit_id(commit_id.clone()),
             )
             .expect("repeat put");
         assert_eq!(repeated, first);
@@ -1409,22 +1414,24 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
+        let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
         harness
             .client
             .write_file_bytes(&source, b"source bytes\n", &MutationOptions::default())
             .expect("seed source");
 
-        let copied = NamespacePath::parse("demo:/docs/copied.txt").expect("copied");
+        let copied = NamespacePath::parse("demo", "/docs/copied.txt").expect("copied");
         let copy_first = harness
             .client
             .copy_path(
                 &source,
                 &copied,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id("req-v1-copy"),
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("req-v1-copy").expect("valid commit id"),
+                ),
             )
             .expect("copy first");
         let copy_repeated = harness
@@ -1433,7 +1440,9 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                 &source,
                 &copied,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id("req-v1-copy"),
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("req-v1-copy").expect("valid commit id"),
+                ),
             )
             .expect("copy repeat");
         assert_eq!(copy_repeated, copy_first);
@@ -1442,14 +1451,16 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         assert_ne!(source_entry.inode_id, copied_entry.inode_id);
         assert_eq!(source_entry.content_ref, copied_entry.content_ref);
 
-        let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
+        let moved = NamespacePath::parse("demo", "/docs/moved.txt").expect("moved");
         let move_first = harness
             .client
             .move_path(
                 &copied,
                 &moved,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id("req-v1-move"),
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("req-v1-move").expect("valid commit id"),
+                ),
             )
             .expect("move first");
         let move_repeated = harness
@@ -1458,7 +1469,9 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                 &copied,
                 &moved,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id("req-v1-move"),
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("req-v1-move").expect("valid commit id"),
+                ),
             )
             .expect("move repeat");
         assert_eq!(move_repeated, move_first);
@@ -1471,11 +1484,21 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 
         let delete_first = harness
             .client
-            .delete_path(&moved, &MutationOptions::with_commit_id("req-v1-delete"))
+            .delete_path(
+                &moved,
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("req-v1-delete").expect("valid commit id"),
+                ),
+            )
             .expect("delete first");
         let delete_repeated = harness
             .client
-            .delete_path(&moved, &MutationOptions::with_commit_id("req-v1-delete"))
+            .delete_path(
+                &moved,
+                &MutationOptions::with_commit_id(
+                    CommitId::parse("req-v1-delete").expect("valid commit id"),
+                ),
+            )
             .expect("delete repeat");
         assert_eq!(delete_repeated, delete_first);
         match harness.client.stat_path(&moved) {
@@ -1502,15 +1525,15 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let child = NamespacePath::parse("demo:/docs/child.txt").expect("child path");
+        let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
         harness
             .client
             .write_file_bytes(&child, b"child", &MutationOptions::default())
             .expect("write child");
 
-        let dir = NamespacePath::parse("demo:/docs").expect("dir path");
+        let dir = NamespacePath::parse("demo", "/docs").expect("dir path");
         let non_recursive = harness
             .client
             .delete_path(&dir, &MutationOptions::default())
@@ -1551,9 +1574,9 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     tokio::task::spawn_blocking(move || {
         harness
             .client
-            .create_namespace("demo")
+            .create_namespace(&namespace_id("demo"))
             .expect("create namespace");
-        let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
+        let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
         harness
             .client
             .write_file_bytes(&source, b"source", &MutationOptions::default())
@@ -1626,36 +1649,43 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     let server_url = harness.server_url.clone();
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
-        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        let namespace = namespace_id("demo");
+        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
         client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
         client
             .write_file_bytes(&target, b"hello admin\n", &MutationOptions::default())
             .expect("write file");
 
-        let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
+        let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
         assert!(CheckpointId::parse(first.checkpoint_id.as_str()).is_ok());
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
         assert_eq!(first.manifest_id, ManifestId(1));
         assert_eq!(first.current_manifest_id, Some(first.manifest_id));
 
-        let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
+        let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
         assert_eq!(repeated, first);
 
         // Release is idempotent the same way: the first call flips the
         // record, the repeat observes the settled end state.
-        let released =
-            post_checkpoint_release(&server_url, namespace, first.checkpoint_id.as_str())
-                .expect("release checkpoint");
+        let released = post_checkpoint_release(
+            &server_url,
+            namespace.as_str(),
+            first.checkpoint_id.as_str(),
+        )
+        .expect("release checkpoint");
         assert!(released.was_active);
-        let released_again =
-            post_checkpoint_release(&server_url, namespace, first.checkpoint_id.as_str())
-                .expect("repeat release");
+        let released_again = post_checkpoint_release(
+            &server_url,
+            namespace.as_str(),
+            first.checkpoint_id.as_str(),
+        )
+        .expect("repeat release");
         assert!(!released_again.was_active);
-        let bogus_release = post_checkpoint_release(&server_url, namespace, "not-a-checkpoint-id")
-            .expect_err("malformed checkpoint id");
+        let bogus_release =
+            post_checkpoint_release(&server_url, namespace.as_str(), "not-a-checkpoint-id")
+                .expect_err("malformed checkpoint id");
         assert_eq!(bogus_release.code, "invalid_request");
 
         // The GC grace window's derived safety floor is enforced at the API:
@@ -1669,23 +1699,24 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         assert_eq!(unsafe_gc.code, "invalid_request");
         assert!(unsafe_gc.message.contains("derived safety minimum"));
 
-        let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
+        let advanced =
+            post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
         assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 
         let repeated_advance =
-            post_retention_advance(&server_url, namespace).expect("repeat retention");
+            post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
         assert_eq!(repeated_advance, advanced);
 
         let bytes = client.read_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello admin\n");
 
-        match client.list_changes_page(namespace, ChangeSeq(0), None) {
+        match client.list_changes_page(&namespace, ChangeSeq(0), None) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
 
         let empty = client
-            .list_changes_page(namespace, ChangeSeq(1), None)
+            .list_changes_page(&namespace, ChangeSeq(1), None)
             .expect("changes after floor");
         assert_eq!(empty.changes, Vec::new());
     })
@@ -1708,19 +1739,19 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     let server_url = harness.server_url.clone();
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
-        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
         client
             .write_file_bytes(&target, b"hello gc\n", &MutationOptions::default())
             .expect("write file");
-        post_checkpoint(&server_url, namespace).expect("checkpoint");
+        post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
         // A freshly written namespace sits entirely inside the grace
         // window: the pass runs, deletes nothing, and reads keep working.
-        let report = post_gc(&server_url, namespace).expect("gc pass");
+        let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
         assert_eq!(report.deleted_wal_segments, 0);
         assert_eq!(report.deleted_metadata_tables, 0);
         assert_eq!(report.deleted_manifests, 0);
@@ -1749,18 +1780,18 @@ async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
     let server_url = harness.server_url.clone();
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
-        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
         client
             .write_file_bytes(&target, b"hello tick\n", &MutationOptions::default())
             .expect("write file");
 
         // One WAL segment sits far below the default threshold.
-        let idle = post_maintenance_tick(&server_url, namespace).expect("idle tick");
-        assert_eq!(idle.namespace_id.as_str(), namespace);
+        let idle = post_maintenance_tick(&server_url, namespace.as_str()).expect("idle tick");
+        assert_eq!(idle.namespace_id, namespace);
         assert_eq!(idle.status_before.wal_tail_segments, 1);
         assert_eq!(idle.outcome, loonfs_api::MaintenanceTickOutcome::NotNeeded);
         assert!(idle.gc.is_none());
@@ -1769,7 +1800,7 @@ async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
         // and runs the opted-in GC pass.
         let forced: loonfs_api::MaintenanceTickResponse = client
             .maintenance_tick(
-                namespace,
+                &namespace,
                 &loonfs_api::MaintenanceTickRequest {
                     max_wal_tail_segments: Some(1),
                     gc: Some(loonfs_api::GcRequest::default()),
@@ -1808,12 +1839,13 @@ async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
     let server_url = harness.server_url.clone();
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace = namespace_id("demo");
         client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
 
-        let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
+        let advanced =
+            post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
         assert_eq!(advanced.retention_floor_seq, ChangeSeq(0));
     })
     .await
@@ -1849,26 +1881,24 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     let store_key_prefix = harness.store_key_prefix.clone();
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
-        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        let namespace = namespace_id("demo");
+        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
         client
-            .create_namespace(namespace)
+            .create_namespace(&namespace)
             .expect("create namespace");
         client
             .write_file_bytes(&target, b"hello\n", &MutationOptions::default())
             .expect("write file");
-        post_checkpoint(&server_url, namespace).expect("checkpoint");
+        post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
-        let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
         let root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
-            &store,
-            &namespace_id,
+            &store, &namespace,
         ))
         .expect("metadata root");
         block_on(store.put_overwrite(
-            &metadata_manifest_object(namespace, &root.state.manifest_object_id),
+            &metadata_manifest_object(namespace.as_str(), &root.state.manifest_object_id),
             Bytes::from_static(br#"{"bad":"json"}"#),
         ))
         .expect("corrupt manifest");
@@ -1910,15 +1940,19 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     let client_b = server_b.client.clone();
 
     tokio::task::spawn_blocking(move || {
-        client_a.create_namespace("demo").expect("create namespace");
-        let host_a_target = NamespacePath::parse("demo:/docs/host-a.txt").expect("host a target");
+        client_a
+            .create_namespace(&namespace_id("demo"))
+            .expect("create namespace");
+        let host_a_target =
+            NamespacePath::parse("demo", "/docs/host-a.txt").expect("host a target");
         client_a
             .write_file_bytes(&host_a_target, b"host a\n", &MutationOptions::default())
             .expect("host a write");
 
         // Server B's first semantic write acquires the epoch immediately:
         // there is no lease to wait out, only last-writer-wins fencing.
-        let host_b_target = NamespacePath::parse("demo:/docs/host-b.txt").expect("host b target");
+        let host_b_target =
+            NamespacePath::parse("demo", "/docs/host-b.txt").expect("host b target");
         let moved = client_b
             .move_path(
                 &host_a_target,
@@ -1935,7 +1969,8 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
 
         // Server A's session is fenced terminally: its writes fail with
         // `writer_fenced` and keep failing, with no silent reacquisition.
-        let host_c_target = NamespacePath::parse("demo:/docs/host-c.txt").expect("host c target");
+        let host_c_target =
+            NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
         for attempt in 0..2 {
             match client_a.write_file_bytes(
                 &host_c_target,
@@ -2179,21 +2214,29 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
     }
 }
 
-fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {
+fn namespace_id(value: &str) -> NamespaceId {
+    NamespaceId::parse(value).expect("valid namespace id")
+}
+
+fn stage_uploaded_content_ref(
+    client: &Client,
+    namespace_id: &NamespaceId,
+    file_bytes: &[u8],
+) -> ContentRef {
     let begin = client
-        .begin_upload(namespace, &BeginUploadRequest::default())
+        .begin_upload(namespace_id, &BeginUploadRequest::default())
         .expect("begin upload");
     let staged = client
-        .upload_content(namespace, begin.upload_id.as_str(), file_bytes)
+        .upload_content(namespace_id, begin.upload_id.as_str(), file_bytes)
         .expect("upload content");
     let complete_request = CompleteUploadRequest {
         content_ref: staged.content_ref,
     };
     let complete = client
-        .complete_upload(namespace, begin.upload_id.as_str(), &complete_request)
+        .complete_upload(namespace_id, begin.upload_id.as_str(), &complete_request)
         .expect("complete upload");
     let repeated = client
-        .complete_upload(namespace, begin.upload_id.as_str(), &complete_request)
+        .complete_upload(namespace_id, begin.upload_id.as_str(), &complete_request)
         .expect("repeat complete upload");
     assert_eq!(repeated.namespace_id, complete.namespace_id);
     assert_eq!(repeated.upload_id, complete.upload_id);
