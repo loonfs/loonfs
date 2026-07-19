@@ -187,11 +187,19 @@ impl Client {
         )
     }
 
-    pub fn list_path(&self, spec: &NamespacePath) -> Result<ListPathEntriesResponse, ClientError> {
-        // A commit landing between pages retires the cursor with
-        // `rebootstrap_required`; aggregation restarts from a fresh first
-        // page instead of surfacing the mid-listing race. Bounded so a
-        // write-hot namespace cannot pin this loop forever.
+    /// Lists a directory by aggregating every page into one response.
+    ///
+    /// A commit landing mid-listing retires the cursor with
+    /// `rebootstrap_required` (API spec: restart the listing from a fresh
+    /// first page). This helper performs that restart itself, discarding
+    /// the partial aggregation, up to three times before surfacing the
+    /// error. Use [`Self::list_path_page`] for page-level control and
+    /// cursor errors surfaced as-is.
+    pub fn list_path_all(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<ListPathEntriesResponse, ClientError> {
+        // Bounded so a write-hot namespace cannot pin this loop forever.
         const MAX_LISTING_RESTARTS: u32 = 3;
         let mut restarts = 0;
         'restart: loop {
@@ -285,13 +293,6 @@ impl Client {
         self.request_bytes(&url)
     }
 
-    pub fn list_file_revisions(
-        &self,
-        spec: &NamespacePath,
-    ) -> Result<ListFileRevisionsResponse, ClientError> {
-        self.list_file_revisions_page(spec, None, None)
-    }
-
     pub fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
@@ -307,14 +308,6 @@ impl Client {
         );
         append_optional_pagination_query(&mut url, true, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
-    }
-
-    pub fn list_file_revisions_for_inode(
-        &self,
-        namespace: &str,
-        inode_id: InodeId,
-    ) -> Result<ListFileRevisionsResponse, ClientError> {
-        self.list_file_revisions_for_inode_page(namespace, inode_id, None, None)
     }
 
     pub fn list_file_revisions_for_inode_page(
@@ -449,14 +442,6 @@ impl Client {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/namespaces/{namespace}/commits", self.base_url);
         self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
-    }
-
-    pub fn list_changes(
-        &self,
-        namespace: &str,
-        after_seq: ChangeSeq,
-    ) -> Result<ChangesResponse, ClientError> {
-        self.list_changes_page(namespace, after_seq, None)
     }
 
     pub fn list_changes_page(

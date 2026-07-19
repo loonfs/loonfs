@@ -364,7 +364,8 @@ pub(crate) struct FilesystemGrepArgs {
     pub path_prefix: Option<String>,
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
-    /// Matches per page; the command follows cursors to completion.
+    /// Matches fetched per page, not a cap on total results; the command
+    /// follows cursors to completion and prints every match.
     #[arg(long)]
     pub limit: Option<u32>,
     /// Permit a capped exhaustive scan for patterns with no literal bytes.

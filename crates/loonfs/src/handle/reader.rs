@@ -72,30 +72,20 @@ impl FsReader {
         self.core.stat_path(namespace_id, absolute_path).await
     }
 
-    /// Lists the children of a directory path.
-    ///
-    /// Entries-only convenience over [`Self::list_path_entries`].
-    pub async fn list_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<Vec<AuthoritativePathEntry>> {
-        self.core.list_path(namespace_id, absolute_path).await
-    }
-
-    /// Lists a directory together with the head the listing was read from.
+    /// Lists a directory by aggregating every page into one response.
     ///
     /// The envelope and every entry come from one consistent head, so an
     /// empty directory still reports which state answered the question.
     /// Entries are returned in canonical name-key order, matching paged
-    /// listings.
-    pub async fn list_path_entries(
+    /// listings. Use [`Self::list_path_entries_page`] for page-level
+    /// control.
+    pub async fn list_path_entries_all(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<ListPathEntriesResponse> {
         self.core
-            .list_path_entries(namespace_id, absolute_path)
+            .list_path_entries_all(namespace_id, absolute_path)
             .await
     }
 

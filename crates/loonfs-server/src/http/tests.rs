@@ -341,7 +341,7 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     tokio::task::spawn_blocking(move || {
         let target = NamespacePath::parse("missing:/").expect("target");
         assert_api_error(
-            harness.client.list_path(&target),
+            harness.client.list_path_all(&target),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),

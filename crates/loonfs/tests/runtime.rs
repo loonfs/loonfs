@@ -133,7 +133,11 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
-        self.reader.list_path(namespace_id, absolute_path).await
+        Ok(self
+            .reader
+            .list_path_entries_all(namespace_id, absolute_path)
+            .await?
+            .entries)
     }
 
     async fn list_path_entries(
@@ -142,7 +146,7 @@ impl TestRuntime {
         absolute_path: &str,
     ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
         self.reader
-            .list_path_entries(namespace_id, absolute_path)
+            .list_path_entries_all(namespace_id, absolute_path)
             .await
     }
 
@@ -410,7 +414,11 @@ impl FsTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
-        block_on(self.reader.list_path(namespace_id, absolute_path))
+        block_on(
+            self.reader
+                .list_path_entries_all(namespace_id, absolute_path),
+        )
+        .map(|response| response.entries)
     }
 
     fn read_file_bytes_blocking(
@@ -2268,7 +2276,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
 
     let (stat, list) = tokio::join!(
         fs.stat_path(&namespace_id, "/docs/file.txt"),
-        fs.list_path(&namespace_id, "/docs")
+        fs.list_path(&namespace_id, "/docs"),
     );
     let stat = stat.expect("stat file");
     let list = list.expect("list docs");
