@@ -4603,7 +4603,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Flush the visible WAL tail into metadata tables when it reaches this\nmany segments.",
+            "description": "Flush the visible WAL tail into metadata tables when it reaches this\nmany segments. Values above the write-rejection threshold are\nrejected as `invalid_request`.",
             "minimum": 0
           }
         }

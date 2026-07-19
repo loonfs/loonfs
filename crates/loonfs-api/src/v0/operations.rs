@@ -436,7 +436,8 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceTickRequest {
     /// Flush the visible WAL tail into metadata tables when it reaches this
-    /// many segments.
+    /// many segments. Values above the write-rejection threshold are
+    /// rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wal_tail_segments: Option<u64>,
     /// Run the mark-and-sweep garbage collector after the tick's
