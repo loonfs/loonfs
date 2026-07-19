@@ -1429,7 +1429,7 @@ mod tests {
     }
 
     async fn test_writer(store: SharedStore) -> crate::FsWriter {
-        test_writer_with_interval(store, crate::DEFAULT_MIN_PUBLISH_INTERVAL_MS).await
+        test_writer_with_interval(store, crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS).await
     }
 
     async fn test_writer_with_interval(

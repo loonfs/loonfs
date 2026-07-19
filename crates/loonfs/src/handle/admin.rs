@@ -4,13 +4,13 @@ use super::HandleBuilderCore;
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
+use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, FlushWalResponse, GcConfig, GcReport,
     GramIndexBuildPolicy, MaintenanceTickOptions, MaintenanceTickResult, NamespaceId,
-    NamespaceStatusResponse, ObjectStoreMetricsRecorder, ReleaseCheckpointResponse, Result,
-    RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind,
+    NamespaceStatusResponse, ReleaseCheckpointResponse, Result, RuntimeCacheConfig,
+    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
