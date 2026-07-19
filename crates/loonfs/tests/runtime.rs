@@ -602,12 +602,25 @@ fn open_validates_runtime_config() {
     );
     assert_config_error(
         block_on(
-            FsWriter::builder_with_store(object_store)
+            FsWriter::builder_with_store(object_store.clone())
                 .writer_id("runtime-test")
                 .writer_version("   ")
                 .build(),
         ),
         "writer_version",
+    );
+    let zero_budget = loonfs::GramIndexBuildPolicy {
+        max_files_per_step: 0,
+        ..loonfs::GramIndexBuildPolicy::default()
+    };
+    assert_config_error(
+        block_on(
+            FsWriter::builder_with_store(object_store)
+                .writer_id("runtime-test")
+                .gram_index_build(zero_budget)
+                .build(),
+        ),
+        "max_files_per_step",
     );
 }
 

@@ -31,7 +31,7 @@ use thiserror::Error;
 
 // Descriptor and Head both wrap ControlObjectLoadError; conversion stays
 // explicit so `?` cannot pick a variant silently.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum BootstrapNamespaceError {
     #[error(transparent)]
     InvalidNamespaceId(#[from] NamespaceIdValidationError),
@@ -59,6 +59,10 @@ pub enum BootstrapNamespaceError {
     ManifestWrite(String),
     #[error("failed to clean pre-head debris: {0}")]
     DebrisCleanup(String),
+    /// An engine failure outside the bootstrap protocol itself, such as
+    /// assembling the mutation context.
+    #[error(transparent)]
+    Core(#[from] crate::error::CoreError),
 }
 
 impl BootstrapNamespaceError {
@@ -84,6 +88,7 @@ impl BootstrapNamespaceError {
             | BootstrapNamespaceError::HeadWrite(_)
             | BootstrapNamespaceError::ManifestWrite(_)
             | BootstrapNamespaceError::DebrisCleanup(_) => ErrorCode::ServerError,
+            BootstrapNamespaceError::Core(error) => error.code(),
         }
     }
 }

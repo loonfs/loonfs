@@ -43,8 +43,7 @@ pub struct ServerConfig {
     /// server's maintenance (background catch-up after writes and explicit
     /// ticks). Omitted fields keep the runtime defaults; bulk backfills
     /// typically raise the per-step budgets so each tick indexes more
-    /// files per manifest publish. Zero values are normalized up to one
-    /// unit by the runtime.
+    /// files per manifest publish. Zero budgets are rejected at startup.
     #[serde(default)]
     pub gram_index_build: GramIndexBuildPolicyOverrides,
     /// Whether the server writer schedules maintenance (checkpoints and
@@ -243,9 +242,7 @@ impl ServerConfig {
         if let Some(value) = self.gram_index_build.max_fold_rows_per_step {
             policy.max_fold_rows_per_step = value;
         }
-        // Every budget runs normalized (at least one unit), so the policy
-        // handed to the runtime is the one maintenance will execute.
-        policy.normalized()
+        policy
     }
 
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
@@ -316,6 +313,12 @@ impl ServerConfig {
                 reason: "must be greater than zero; \
                          set `background_maintenance = false` to disable scheduling"
                     .to_owned(),
+            });
+        }
+        if let Some(budget) = self.gram_index_build_policy().zero_budget_field() {
+            return Err(ServerConfigError::InvalidField {
+                field: "gram_index_build",
+                reason: format!("`{budget}` must be greater than zero"),
             });
         }
         require_non_empty("content_token_secret", self.content_token_secret.expose())?;
@@ -811,6 +814,24 @@ root = "/tmp/loonfs-server"
             let error = load_server_config(&path).expect_err("zero bound must be rejected");
             assert_invalid_field(error, field);
         }
+
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[gram_index_build]
+max_fold_rows_per_step = 0
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let error = load_server_config(&path).expect_err("zero gram budget must be rejected");
+        assert_invalid_field(error, "gram_index_build");
     }
 
     #[test]
@@ -1137,10 +1158,9 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn gram_index_build_overrides_normalize_zero_budgets() {
-        // Zero budgets would let a step report progress without doing
-        // work; the conversion hands the runtime the normalized policy it
-        // will actually run.
+    fn gram_index_build_overrides_apply_verbatim() {
+        // The policy handed to the runtime is exactly the configured one:
+        // zero budgets are rejected by validation, never rewritten.
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1149,8 +1169,8 @@ writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
 
 [gram_index_build]
-max_files_per_step = 0
-max_l0_runs = 0
+max_files_per_step = 1024
+max_l0_runs = 3
 
 [store]
 kind = "local-fs"
@@ -1161,8 +1181,8 @@ root = "/tmp/loonfs-server"
         let policy = load_server_config(&path)
             .expect("load config")
             .gram_index_build_policy();
-        assert_eq!(policy.max_files_per_step, 1);
-        assert_eq!(policy.max_l0_runs, 1);
+        assert_eq!(policy.max_files_per_step, 1024);
+        assert_eq!(policy.max_l0_runs, 3);
         assert_eq!(
             policy.max_mid_runs,
             loonfs::GramIndexBuildPolicy::default().max_mid_runs,

@@ -89,13 +89,6 @@ impl FsCore {
         shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     ) -> Result<Self> {
         validate_config(&config)?;
-        // Store the policy normalized so the config always reads as the
-        // budgets maintenance will actually run (the core normalizes again
-        // at each step; this keeps the two views identical).
-        let config = FsConfig {
-            gram_index_build: config.gram_index_build.normalized(),
-            ..config
-        };
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
             Arc::new(MetadataTableCache::new(
                 config.runtime_cache.metadata_table_cache.clone(),
@@ -234,13 +227,13 @@ impl FsCore {
             .expect("validated runtime config should build namespace engine")
     }
 
-    pub(crate) fn mutation_context(&self) -> MutationContext {
-        MutationContext {
+    pub(crate) fn mutation_context(&self) -> Result<MutationContext> {
+        Ok(MutationContext {
             writer_id: self.inner.config.writer_id.clone(),
             writer_session_id: self.inner.writer_session_id.clone(),
             writer_version: self.inner.config.writer_version.clone(),
-            now_ms: current_time_ms(),
-        }
+            now_ms: current_time_ms()?,
+        })
     }
 }
 

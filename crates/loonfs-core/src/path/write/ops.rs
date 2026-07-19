@@ -30,9 +30,15 @@ async fn submit_path_intent<S: ObjectStore + ?Sized>(
         context,
     )
     .await;
+    if results.len() != 1 {
+        return Err(CoreError::Internal(format!(
+            "path mutation batch returned {count} results for one candidate",
+            count = results.len(),
+        )));
+    }
     results
         .pop()
-        .unwrap_or_else(|| Err(CoreError::Internal("empty path mutation batch".to_owned())))
+        .expect("single-candidate batch should hold exactly one result")
 }
 
 pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(

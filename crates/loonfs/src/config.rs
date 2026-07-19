@@ -48,8 +48,8 @@ pub(crate) struct FsConfig {
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
     /// Budgets for the gram index build and fold steps this runtime's
-    /// maintenance ticks run. Stored normalized (every budget at least one
-    /// unit), so the config reads as the policy that will run.
+    /// maintenance ticks run. Every budget must be at least one unit; zero
+    /// budgets are rejected when the handle opens.
     pub gram_index_build: GramIndexBuildPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
@@ -116,6 +116,11 @@ pub(crate) fn validate_config(config: &FsConfig) -> Result<()> {
         return Err(RuntimeError::Config(
             "writer_version must not be empty".to_owned(),
         ));
+    }
+    if let Some(budget) = config.gram_index_build.zero_budget_field() {
+        return Err(RuntimeError::Config(format!(
+            "gram index build budget `{budget}` must be greater than zero"
+        )));
     }
     Ok(())
 }
