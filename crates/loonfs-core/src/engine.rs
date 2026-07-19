@@ -134,7 +134,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
             options.allow_existing,
         )
         .await
@@ -148,7 +148,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             target,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -164,7 +164,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             options,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -375,11 +375,15 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<CoreResult<CommitResponse>> {
+        let context = match self.mutation_context() {
+            Ok(context) => context,
+            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
+        };
         crate::commit_engine::publish_namespace_mutations_batch(
             &self.store,
             &self.namespace_id,
             candidates,
-            &self.mutation_context(),
+            &context,
         )
         .await
     }
@@ -402,7 +406,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             request,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -416,7 +420,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             content_ref,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -432,7 +436,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             upload_id,
             bytes,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -448,7 +452,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             upload_id,
             request,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -466,7 +470,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         name: String,
         ttl_ms: Option<u64>,
     ) -> CoreResult<CreateCheckpointResponse> {
-        let context = self.mutation_context();
+        let context = self.mutation_context()?;
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::checkpoint::create_checkpoint(
             &self.store,
@@ -491,7 +495,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             &self.namespace_id,
             checkpoint_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -504,7 +508,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// checkpoint record. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
     pub async fn flush_wal(&self) -> CoreResult<FlushWalResponse> {
-        crate::checkpoint::flush_wal(&self.store, &self.namespace_id, &self.mutation_context())
+        crate::checkpoint::flush_wal(&self.store, &self.namespace_id, &self.mutation_context()?)
             .await
     }
 
@@ -517,7 +521,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::checkpoint::enable_grams_index(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -530,7 +534,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::checkpoint::disable_grams_index(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
@@ -553,7 +557,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             table_cache,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
             policy,
         )
         .await
@@ -577,7 +581,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.store,
             table_cache,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
             policy,
         )
         .await
@@ -595,7 +599,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
             crate::checkpoint::MetadataLsmPolicy::default(),
         )
         .await
@@ -606,18 +610,18 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         crate::checkpoint::advance_retention_floor(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context(),
+            &self.mutation_context()?,
         )
         .await
     }
 
-    fn mutation_context(&self) -> MutationContext {
-        MutationContext {
+    fn mutation_context(&self) -> CoreResult<MutationContext> {
+        Ok(MutationContext {
             writer_id: self.writer_id.clone(),
             writer_session_id: self.writer_session_id.clone(),
             writer_version: self.writer_version.clone(),
-            now_ms: current_time_ms(),
-        }
+            now_ms: current_time_ms()?,
+        })
     }
 }
 
@@ -709,12 +713,14 @@ fn default_writer_version() -> String {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn current_time_ms() -> u64 {
+fn current_time_ms() -> CoreResult<u64> {
     // Engine wrappers set request timestamps at this API boundary; core replay remains deterministic.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .map_err(|_| {
+            crate::error::CoreError::Internal("system time is before unix epoch".to_owned())
+        })
 }
 
 #[cfg(test)]

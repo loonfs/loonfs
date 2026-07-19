@@ -378,10 +378,14 @@ impl FsCore {
         namespace_id: &NamespaceId,
         config: &crate::GcConfig,
     ) -> Result<crate::GcReport> {
-        let report =
-            loonfs_core::gc_namespace(self.store(), namespace_id, config, &self.mutation_context())
-                .await
-                .map_err(RuntimeError::Core)?;
+        let report = loonfs_core::gc_namespace(
+            self.store(),
+            namespace_id,
+            config,
+            &self.mutation_context()?,
+        )
+        .await
+        .map_err(RuntimeError::Core)?;
         // Sweeping can remove objects cached views still reference; drop the
         // namespace caches rather than trusting them across a collection.
         self.invalidate_namespace_read_cache(namespace_id);

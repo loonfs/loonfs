@@ -123,12 +123,30 @@ pub struct GramIndexBuildPolicy {
 }
 
 impl GramIndexBuildPolicy {
-    /// Zero-valued budgets would report progress without doing work (a
-    /// zero file budget consumes no commit yet returns up to date); every
-    /// step normalizes to at least one unit of each budget. Build and fold
-    /// steps normalize their argument themselves; runtimes converting
-    /// external configuration into a policy should still normalize at that
-    /// boundary so the stored policy reads as the one that will run.
+    /// Names the first zero budget, so configuration boundaries reject a
+    /// policy that would report progress without doing work (a zero file
+    /// budget consumes no commit yet returns up to date).
+    pub fn zero_budget_field(&self) -> Option<&'static str> {
+        [
+            ("max_files_per_step", self.max_files_per_step == 0),
+            (
+                "max_content_bytes_per_step",
+                self.max_content_bytes_per_step == 0,
+            ),
+            ("max_rows_per_segment", self.max_rows_per_segment == 0),
+            ("max_l0_runs", self.max_l0_runs == 0),
+            ("max_mid_runs", self.max_mid_runs == 0),
+            ("max_fold_rows_per_step", self.max_fold_rows_per_step == 0),
+        ]
+        .into_iter()
+        .find_map(|(field, is_zero)| is_zero.then_some(field))
+    }
+
+    /// Defense for policies handed directly to core entry points: build and
+    /// fold steps run every budget at a minimum of one unit. Configuration
+    /// boundaries reject zero budgets outright ([`Self::zero_budget_field`]),
+    /// so a normalized policy differs from the supplied one only when a
+    /// caller bypassed that validation.
     pub fn normalized(self) -> Self {
         Self {
             max_files_per_step: self.max_files_per_step.max(1),
@@ -1552,6 +1570,16 @@ async fn write_successor_manifest_from_payload<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_budget_field_names_the_offending_budget() {
+        assert_eq!(GramIndexBuildPolicy::default().zero_budget_field(), None);
+        let policy = GramIndexBuildPolicy {
+            max_l0_runs: 0,
+            ..GramIndexBuildPolicy::default()
+        };
+        assert_eq!(policy.zero_budget_field(), Some("max_l0_runs"));
+    }
 
     #[test]
     fn fold_levels_are_distinct() {

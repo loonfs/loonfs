@@ -835,13 +835,24 @@ impl NamespacePublisher {
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
+            // Positional pairing is meaningless once lengths differ, so a
+            // count mismatch fails every candidate instead of delivering
+            // misaligned results to the earlier ones.
+            let count_mismatch = (results.len() != candidates.len()).then(|| {
+                CoreError::Internal(format!(
+                    "publisher batch returned {got} results for {want} candidates",
+                    got = results.len(),
+                    want = candidates.len(),
+                ))
+            });
             let mut results = results.into_iter();
             for candidate in candidates {
-                let result = results.next().unwrap_or_else(|| {
-                    Err(CoreError::Internal(
-                        "publisher returned too few batch results".to_owned(),
-                    ))
-                });
+                let result = match &count_mismatch {
+                    Some(error) => Err(error.clone()),
+                    None => results
+                        .next()
+                        .expect("equal-length batch should hold one result per candidate"),
+                };
                 wait_traces.push((
                     candidate.operation_class,
                     result_label(&result),

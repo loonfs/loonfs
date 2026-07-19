@@ -71,7 +71,7 @@ impl FsCore {
         let content_admission = ContentAdmission::for_durable_content_write(
             namespace_id.clone(),
             stored.content_ref.clone(),
-            current_time_ms(),
+            current_time_ms()?,
         );
         self.publish_candidate(
             namespace_id,
@@ -378,6 +378,10 @@ impl FsCore {
     ) -> Vec<Result<CommitResponse>> {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
         let store = self.store();
+        let context = match self.mutation_context() {
+            Ok(context) => context,
+            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
+        };
         if self.commit_engine_cache_enabled() {
             // Warm the immutable catalog through the control cache so a
             // recreated engine starts seeded; a load failure here surfaces
@@ -385,7 +389,6 @@ impl FsCore {
             self.load_namespace_catalog_cached(namespace_id).await.ok();
             let engine = self.commit_engine(namespace_id);
             let mut publish = {
-                let context = self.mutation_context();
                 let cache_config = &self.inner.config.runtime_cache;
                 // Boxing erases the engine's deeply nested publish future;
                 // without it, callers awaiting a put or commit (CLI, server,
@@ -446,7 +449,6 @@ impl FsCore {
         // no cache configuration disables session state.
         let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
             .writer_session(self.inner.writer_sessions.state(namespace_id));
-        let context = self.mutation_context();
         // Boxed for the same type-recursion reason as the cached-engine path.
         let results: Vec<_> = Box::pin(engine.publish_batch(&store, candidates, &context))
             .await

@@ -156,7 +156,19 @@ pub(super) fn content_admissions_for_put(
         .iter()
         .filter(|token| token.content_ref == *content_ref)
         .filter_map(|token| {
-            verify_content_token(config.content_token_secret(), namespace_id, token, now_ms).ok()
+            match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
+                Ok(admission) => Some(admission),
+                Err(error) => {
+                    // A rejected token only loses its fast path: admission
+                    // falls back to durable content validation.
+                    tracing::debug!(
+                        namespace_id = %namespace_id,
+                        error = %error,
+                        "content token rejected; falling back to durable validation"
+                    );
+                    None
+                }
+            }
         })
         .collect()
 }

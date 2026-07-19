@@ -115,7 +115,7 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 pub use self::RuntimeError as Error;
 
 /// The embedded runtime's error type, also exported as [`Error`].
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
     /// An error surfaced by the underlying `loonfs-core` engine.
