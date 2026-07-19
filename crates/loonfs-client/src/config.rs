@@ -52,7 +52,10 @@ impl ClientConfig {
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), ClientError> {
+    /// Validates field invariants. [`Self::load`] and
+    /// [`Client::new`](crate::Client::new) both run this, so a file-loaded
+    /// config and a directly built one cannot diverge in what they accept.
+    pub fn validate(&self) -> Result<(), ClientError> {
         validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {

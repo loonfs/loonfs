@@ -178,6 +178,20 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     assert!(!jsonl.contains("namespaces/metrics"));
 }
 
+#[tokio::test]
+async fn app_validates_directly_built_configs() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config(temp_dir.path(), "app-validate-writer");
+    config.max_concurrent_uploads = 0;
+    match super::app(config).await {
+        Err(crate::config::ServerConfigError::InvalidField { field, .. }) => {
+            assert_eq!(field, "max_concurrent_uploads");
+        }
+        Err(other) => panic!("expected invalid field error, got {other:?}"),
+        Ok(_) => panic!("app must reject a zero upload bound"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     let temp_dir = tempdir().expect("tempdir");
@@ -197,7 +211,8 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
         disable_transient_retry: false,
-    });
+    })
+    .expect("valid client config");
     tokio::task::spawn_blocking(move || {
         client
             .create_namespace(&namespace_id("demo"))
@@ -582,7 +597,8 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
                 auth_token,
                 request_timeout_ms: None,
                 disable_transient_retry: false,
-            });
+            })
+            .expect("valid client config");
             assert_api_error(
                 client.namespace_status(&namespace_id("demo")),
                 401,
@@ -692,7 +708,8 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
-        });
+        })
+        .expect("valid client config");
         let target = NamespacePath::parse("demo", "/big.bin").expect("target");
         assert_api_error(
             client.write_file_bytes(&target, &[0u8; 4096], &MutationOptions::default()),
@@ -990,7 +1007,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     };
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
-        let client = Client::new(config_for_busy);
+        let client = Client::new(config_for_busy).expect("valid client config");
         let target = NamespacePath::parse("demo", "/one.bin").expect("target");
         assert_api_error(
             client.write_file_bytes(&target, &[0u8; 64], &MutationOptions::default()),
@@ -1004,7 +1021,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
 
     drop(held);
     tokio::task::spawn_blocking(move || {
-        let client = Client::new(client_config);
+        let client = Client::new(client_config).expect("valid client config");
         let target = NamespacePath::parse("demo", "/one.bin").expect("target");
         client
             .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
@@ -1054,7 +1071,8 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
-        });
+        })
+        .expect("valid client config");
         let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
         client
             .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
@@ -1108,7 +1126,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     };
     let config_for_busy = client_config.clone();
     tokio::task::spawn_blocking(move || {
-        let client = Client::new(config_for_busy);
+        let client = Client::new(config_for_busy).expect("valid client config");
         let target = NamespacePath::parse("demo", "/note.txt").expect("target");
         assert_api_error(
             client.read_file_bytes(&target),
@@ -1122,7 +1140,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
 
     drop(held);
     tokio::task::spawn_blocking(move || {
-        let client = Client::new(client_config);
+        let client = Client::new(client_config).expect("valid client config");
         let target = NamespacePath::parse("demo", "/note.txt").expect("target");
         let bytes = client
             .read_file_bytes(&target)
@@ -1173,7 +1191,8 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
-        });
+        })
+        .expect("valid client config");
         assert_api_error(
             client.read_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target")),
             413,
@@ -1370,7 +1389,8 @@ async fn start_server(store: SharedObjectStore, root: &Path, writer_id: &str) ->
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
-        }),
+        })
+        .expect("valid client config"),
         server,
     }
 }

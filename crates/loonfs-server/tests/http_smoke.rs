@@ -2031,7 +2031,8 @@ async fn start_server(config: ServerConfig) -> TestServer {
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
-        }),
+        })
+        .expect("valid client config"),
         server_url: format!("http://{}", addr),
         store_root,
         store_key_prefix,
